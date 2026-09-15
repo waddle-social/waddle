@@ -201,6 +201,7 @@ impl IngressFixture {
             digest_input,
             plan: IngressPlan {
                 failure: None,
+                room_canonical_message: None,
                 sanitized_message: message,
                 intents,
                 plan: Vec::new(),

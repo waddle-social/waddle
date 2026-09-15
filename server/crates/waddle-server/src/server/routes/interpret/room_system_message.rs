@@ -209,6 +209,20 @@ pub(super) async fn broadcast_room_system_message_event(
         }
     }
 
+    // Match `serialize_groupchat_stanza_xml`: the archive freezes a source
+    // without a destination, then each live/rebuilt occupant copy sets its own.
+    let mut frozen_message = (*message).clone();
+    frozen_message.to = None;
+    let system_message = match waddle_xmpp::ingress::StoredMessagePayload::new(frozen_message) {
+        Ok(payload) => payload,
+        Err(error) => {
+            warn!(room = %room, ?error, "could not freeze room system message");
+            deps.effects
+                .fail_plan(effects::PlanFailure::InvalidSystemMessage);
+            return None;
+        }
+    };
+
     // Fan out to every joined occupant. One `RouteToConnection`
     // per occupant full JID with the message's `to` set to that
     // occupant's full JID, matching `ReflectorHandler`'s
@@ -243,6 +257,7 @@ pub(super) async fn broadcast_room_system_message_event(
                     .map(|occupant| occupant.full_jid.clone())
                     .collect(),
                 room_generation,
+                system_message: Some(system_message),
                 route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(StanzaId::new(
                     stanza_id.clone(),
                     Jid::from(room.clone()),

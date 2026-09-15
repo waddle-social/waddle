@@ -70,6 +70,7 @@ pub(super) fn finish_plan(
     incoming: Message,
     ingress_sender: Option<jid::FullJid>,
 ) -> IngressPlan {
+    let room_canonical_message = sink.room_canonical_message();
     let (plan, room_execution) = sink.take();
     let error_reply = plan.iter().find_map(|effect| {
         let stanza = match &effect.effect {
@@ -113,6 +114,7 @@ pub(super) fn finish_plan(
         rejection: sink.rejection(),
         plan,
         intents: snapshot.intents,
+        room_canonical_message,
         sanitized_message,
         error_reply,
         room_execution,
@@ -130,6 +132,7 @@ pub(crate) fn reject_malformed_message(mut message: Message, sender: &jid::FullJ
             rejection: None,
             plan: vec![],
             intents: vec![],
+            room_canonical_message: None,
             sanitized_message: message,
             error_reply: None,
             room_execution: super::effects::RoomExecutionPath::None,
@@ -157,6 +160,7 @@ pub(crate) fn reject_malformed_message(mut message: Message, sender: &jid::FullJ
             error: waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
                 .expect("server error is typed"),
         }],
+        room_canonical_message: None,
         sanitized_message: message,
         error_reply: Some(reply),
         room_execution: super::effects::RoomExecutionPath::None,
@@ -194,6 +198,7 @@ fn reject_capture_overflow(message: Message, sender: Option<jid::FullJid>) -> In
             ExternalEffect::Frame(Box::new(reply.clone())),
         ))],
         intents,
+        room_canonical_message: None,
         sanitized_message: message,
         error_reply: Some(reply),
         room_execution: super::effects::RoomExecutionPath::None,

@@ -52,6 +52,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         Arc::new(FailingBlockingStorage);
     let dispatcher = pipelined_dispatcher();
     let deps = Deps {
+        delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         connection_registry: &registry,
         user_registry: Some(&user_registry),
         sm_session_registry: None,

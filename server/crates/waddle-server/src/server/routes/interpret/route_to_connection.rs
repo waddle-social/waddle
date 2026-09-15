@@ -9,6 +9,18 @@ use xmpp_parsers::iq::Iq;
 type OrderedRelayDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
 
+#[cfg(all(test, feature = "clustering"))]
+#[derive(Clone)]
+pub(crate) enum ControlledMucRelay {
+    Outcome(Option<FullJidDeliveryOutcome>),
+    OwnerRefresh(std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>),
+}
+
+#[cfg(all(test, feature = "clustering"))]
+tokio::task_local! {
+    pub(crate) static CONTROLLED_MUC_RELAY: (ControlledMucRelay, std::sync::Arc<std::sync::Mutex<Vec<jid::FullJid>>>);
+}
+
 /// RFC 6121 §8.5.2.1.1 bare-JID destination selection: the candidate set and
 /// priority ranking come from the actor-authoritative `UserActor` alone
 /// (ADR-0017 Phase 3 Slice 9 retires the transitional Slice-1 DashMap
@@ -1014,7 +1026,7 @@ fn bounce_for_nonexistent_account(
 /// see [`RouteBridge::try_deliver_full_jid_remote`]'s deferred
 /// handoff. On `None` the ticket is untouched and the caller closes
 /// it from the local delivery outcome.
-pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
+pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
     deps: &'a Deps<'_>,
     target: &'a jid::FullJid,
     stanza: &'a Stanza,
@@ -1037,6 +1049,23 @@ pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
             }
             return None;
         }
+        #[cfg(all(test, feature = "clustering"))]
+        if let Ok(controlled) = CONTROLLED_MUC_RELAY.try_with(|(outcome, targets)| {
+            targets
+                .lock()
+                .expect("controlled relay targets")
+                .push(target.clone());
+            outcome.clone()
+        }) {
+            return match controlled {
+                ControlledMucRelay::Outcome(outcome) => outcome,
+                ControlledMucRelay::OwnerRefresh(sm) => Some(
+                    crate::clustering::route_bridge::tests::muc_refresh::deliver_after_owner_refresh(
+                        target, stanza, deps.ingress_append_context.clone(), sm,
+                    ).await,
+                ),
+            };
+        }
         #[cfg(feature = "clustering")]
         {
             let origin = deps.ordered_relay_origin.as_ref()?;
@@ -1048,7 +1077,17 @@ pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(target, stanza, origin, call_setup)
+                .try_deliver_full_jid_remote(
+                    target,
+                    stanza,
+                    origin,
+                    call_setup,
+                    deps.ingress_append_context.clone().filter(|context| {
+                        context.receipt.kind.to_storage()
+                            == waddle_xmpp::ingress::IngressEffectKind::RouteMucGroupchat
+                                .storage_tag()
+                    }),
+                )
                 .await
         }
         #[cfg(not(feature = "clustering"))]
@@ -1135,6 +1174,32 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     .await
 }
 
+pub(crate) fn deliver_direct_to_full_locally(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    match deps
+        .connection_registry
+        .try_send_to_locally_hosted(target, stanza.clone())
+    {
+        waddle_xmpp::registry::BroadcastOutcome::Delivered => FullJidDeliveryOutcome::Delivered,
+        waddle_xmpp::registry::BroadcastOutcome::DroppedFull => FullJidDeliveryOutcome::Dropped,
+        waddle_xmpp::registry::BroadcastOutcome::NotConnected
+        | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {
+            FullJidDeliveryOutcome::Unavailable
+        }
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+tokio::task_local! {
+    pub(crate) static CONTROLLED_REGISTERED_REMOTE_DELIVERY: (
+        FullJidDeliveryOutcome,
+        std::sync::Arc<std::sync::Mutex<Vec<jid::FullJid>>>,
+    );
+}
+
 async fn deliver_registered_remote_resource(
     deps: &Deps<'_>,
     target: &jid::FullJid,
@@ -1145,6 +1210,16 @@ async fn deliver_registered_remote_resource(
         // A same-owner registered resource remains a peer-delivery obligation;
         // its eventual executor resolves the remote socket registration.
         return None;
+    }
+    #[cfg(all(test, feature = "clustering"))]
+    if let Ok(outcome) = CONTROLLED_REGISTERED_REMOTE_DELIVERY.try_with(|(outcome, targets)| {
+        targets
+            .lock()
+            .expect("controlled registered-remote targets")
+            .push(target.clone());
+        *outcome
+    }) {
+        return Some(outcome);
     }
     #[cfg(feature = "clustering")]
     {

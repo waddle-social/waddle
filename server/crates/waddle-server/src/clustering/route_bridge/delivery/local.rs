@@ -43,6 +43,7 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
     target: &jid::Jid,
     stanza: &Stanza,
     payload: &OrderedRelayPayload,
+    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
 ) -> RemoteDeliveryOutcome {
     match payload {
         OrderedRelayPayload::MucProxy {
@@ -79,7 +80,8 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
         OrderedRelayPayload::Message { .. }
         | OrderedRelayPayload::Iq { .. }
         | OrderedRelayPayload::Presence { .. } => no_client_reply_outcome(
-            deliver_local_after_target_refresh(services, target, stanza).await,
+            deliver_local_after_target_refresh(services, target, stanza, ingress_append_context)
+                .await,
         ),
     }
 }
@@ -87,9 +89,18 @@ pub(in super::super) async fn deliver_local_after_target_refresh(
     services: &OrderedRelayDeliveryServices,
     target: &jid::Jid,
     stanza: &Stanza,
+    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
     match target.clone().try_into_full() {
-        Ok(full) => deliver_local_full_jid_after_target_refresh(services, &full, stanza).await,
+        Ok(full) => {
+            deliver_local_full_jid_after_target_refresh(
+                services,
+                &full,
+                stanza,
+                ingress_append_context,
+            )
+            .await
+        }
         Err(bare) => match route_local_bare_jid_with_timeout(services, &bare, stanza, None).await {
             Ok(replies) if !replies.is_empty() => FullJidDeliveryOutcome::Unavailable,
             Ok(_) => FullJidDeliveryOutcome::Delivered,
@@ -110,6 +121,7 @@ pub(in super::super) async fn deliver_local_full_jid_after_target_refresh(
     services: &OrderedRelayDeliveryServices,
     target: &jid::FullJid,
     stanza: &Stanza,
+    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
     if matches!(stanza, Stanza::Iq(_)) {
         return match deliver_reserved_full_jid_peer_live_only(services, target, stanza).await {
@@ -123,7 +135,7 @@ pub(in super::super) async fn deliver_local_full_jid_after_target_refresh(
         Some(&services.sm_session_registry),
         target,
         stanza,
-        None,
+        ingress_append_context,
     )
     .await
 }

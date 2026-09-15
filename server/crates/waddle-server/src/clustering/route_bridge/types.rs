@@ -417,6 +417,8 @@ impl RelayOriginSigner {
 }
 
 pub(super) struct PreparedRemoteDelivery {
+    pub(super) ingress_append_context:
+        Option<crate::server::routes::interpret::SmIngressAppendContext>,
     pub(super) services: Arc<OrderedRelayDeliveryServices>,
     pub(super) target_entity: Entity,
     pub(super) previous_owner: NodeIdentity,
@@ -451,6 +453,8 @@ pub(super) fn caller_delivery_outcome(outcome: RemoteDeliveryOutcome) -> FullJid
 }
 
 pub(super) struct RemoteDeliverySeed {
+    pub(super) ingress_append_context:
+        Option<crate::server::routes::interpret::SmIngressAppendContext>,
     pub(super) services: Arc<OrderedRelayDeliveryServices>,
     pub(super) target_entity: Entity,
     pub(super) previous_owner: NodeIdentity,

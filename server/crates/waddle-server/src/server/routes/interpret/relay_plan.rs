@@ -47,9 +47,15 @@ fn return_sender_reflection(plan: &mut IngressPlan, sender: &FullJid) {
             ExternalDeliveryEffect::RelayFullJid { target, stanza, .. } if target == sender => {
                 stanza
             }
+            ExternalDeliveryEffect::QueueDetached {
+                resources, stanza, ..
+            } if resources.as_slice() == std::slice::from_ref(sender) => stanza,
             _ => continue,
         };
         if matches!(stanza.as_ref(), Stanza::Message(_)) {
+            // Keep the exact Phase-A ownership/live/detached resolution for a
+            // possible historical sibling repair after reconciliation.
+            planned.reflection_delivery = Some(Box::new(delivery.clone()));
             planned.effect = Effect::External(ExternalEffect::Frame(stanza.clone()));
         }
     }
@@ -105,11 +111,16 @@ mod tests {
                     ordinal: None,
                 },
             ],
+            room_canonical_message: None,
             sanitized_message: reflected.clone(),
             error_reply: None,
             room_execution: RoomExecutionPath::None,
         };
         return_sender_reflection(&mut plan, &sender);
+        assert!(
+            matches!(plan.plan[0].reflection_delivery.as_deref(), Some(ExternalDeliveryEffect::RelayFullJid { target, .. }) if target == &sender)
+        );
+        assert!(plan.plan[1].reflection_delivery.is_none());
         let trusted =
             waddle_xmpp_core::xep0359::StanzaId::new("recorded-room-id", room.clone().into());
         let plan = crate::ingress::restamp::restamp_plan(
@@ -128,5 +139,55 @@ mod tests {
         assert_eq!(stanza.to_element(), Stanza::Message(reflected).to_element());
         assert!(matches!(&plan.plan[1].effect,
             Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. })) if target == &peer));
+    }
+
+    #[test]
+    fn local_reflections_preserve_their_delivery_resolution() {
+        use super::super::effects::delivery::PeerDeliveryKind;
+        let sender: FullJid = "sender@example.test/mobile".parse().expect("sender");
+        let stanza = Box::new(Stanza::Message(Message::new(Some(sender.clone().into()))));
+        for delivery in [
+            ExternalDeliveryEffect::RouteToPeer {
+                route_identity: None,
+                jid: sender.clone(),
+                stanza: stanza.clone(),
+                kind: PeerDeliveryKind::PeerStanza,
+                call_setup: None,
+            },
+            ExternalDeliveryEffect::QueueDetached {
+                route_identity: None,
+                bare: sender.to_bare(),
+                resources: vec![sender.clone()],
+                stanza: stanza.clone(),
+                call_setup: None,
+            },
+        ] {
+            let expected_variant = std::mem::discriminant(&delivery);
+            let mut plan = IngressPlan {
+                failure: None,
+                rejection: None,
+                plan: vec![PlannedEffect::new(Effect::External(
+                    ExternalEffect::Delivery(delivery),
+                ))],
+                intents: Vec::new(),
+                sanitized_message: Message::new(None),
+                room_canonical_message: None,
+                error_reply: None,
+                room_execution: RoomExecutionPath::None,
+            };
+            return_sender_reflection(&mut plan, &sender);
+            assert!(
+                matches!(&plan.plan[0].effect, Effect::External(ExternalEffect::Frame(copy)) if copy.to_element() == stanza.to_element())
+            );
+            assert_eq!(
+                std::mem::discriminant(
+                    plan.plan[0]
+                        .reflection_delivery
+                        .as_deref()
+                        .expect("preserved delivery")
+                ),
+                expected_variant
+            );
+        }
     }
 }

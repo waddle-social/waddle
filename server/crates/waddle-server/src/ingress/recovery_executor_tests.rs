@@ -454,6 +454,49 @@ async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, head
     }
     f.close().await;
 }
+
+#[cfg(feature = "clustering")]
+async fn registered_remote_direct_route_stays_pending(f: IngressFixture) {
+    let sm = persistent_sm(&f).await;
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    let state = state_for(&f, sm).await;
+    let mut submission = direct_submission(
+        &f,
+        "registered-remote-direct-recovery",
+        std::slice::from_ref(&resource),
+    );
+    retarget(
+        &mut submission,
+        NormalizedTarget::Bare(resource.to_bare()),
+        xmpp_parsers::message::MessageType::Chat,
+    );
+    let decision = commit_submission(&f.uow, &submission, 5)
+        .await
+        .expect("Phase B");
+    let key = decision.message_key.expect("key");
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
+    let registered_remote_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let outcome = crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                Arc::clone(&registered_remote_targets),
+            ),
+            pass(&f, &env, &MaintenanceCursor::default()),
+        )
+        .await;
+    assert_eq!(outcome, MaintenanceOutcome::Complete);
+    assert!(
+        registered_remote_targets
+            .lock()
+            .expect("registered-remote targets")
+            .is_empty(),
+        "direct maintenance must not attempt registered-remote delivery"
+    );
+    assert_pending(&f, key).await;
+    assert_eq!(f.count("ingress_delivery_receipts").await, 0);
+    f.close().await;
+}
 mod family_tests {
     use crate::{
         ingress::{
@@ -676,6 +719,8 @@ mod family_tests {
         let mut submission =
             fixture.submission(Some("observer-lost-phase-c"), "frozen observer body");
         let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let observer_message = Box::new(submission.plan.sanitized_message.clone());
+        submission.plan.room_canonical_message = Some(observer_message.clone());
         submission
             .plan
             .intents
@@ -702,15 +747,15 @@ mod family_tests {
                         plugin: sibling_id,
                         requester: submission.sender.to_bare(),
                         sender: submission.sender.clone(),
-                        message: Box::new(submission.plan.sanitized_message.clone()),
+                        message: observer_message.clone(),
                         error_request: Box::new(submission.plan.sanitized_message.clone()),
                     },
                 )))
                 .with_suppression(PlanSuppressionPolicy::Always),
             );
-            // A production groupchat row also carries the occupant fan-out,
-            // which recovery cannot rebuild. The warning-only observer must
-            // still be cached alongside that permanently pending sibling.
+            // This synthetic legacy MUC sibling uses CaptureOrdinal rather than
+            // a room stanza ID, so it lacks recoverable canonical provenance.
+            // The warning-only observer must still be cached alongside it.
             submission
                 .plan
                 .intents
@@ -729,7 +774,7 @@ mod family_tests {
                     plugin: plugin_id,
                     requester: submission.sender.to_bare(),
                     sender: submission.sender.clone(),
-                    message: Box::new(submission.plan.sanitized_message.clone()),
+                    message: observer_message,
                     error_request: Box::new(submission.plan.sanitized_message.clone()),
                 },
             )))
@@ -868,6 +913,8 @@ mod family_tests {
                 _ => None,
             })
             .expect("recovery plan names its room");
+        let observer_message = Box::new(submission.plan.sanitized_message.clone());
+        submission.plan.room_canonical_message = Some(observer_message.clone());
         submission
             .plan
             .intents
@@ -884,7 +931,7 @@ mod family_tests {
                     plugin: plugin_id,
                     requester: submission.sender.to_bare(),
                     sender: submission.sender.clone(),
-                    message: Box::new(submission.plan.sanitized_message.clone()),
+                    message: observer_message,
                     error_request: Box::new(submission.plan.sanitized_message.clone()),
                 },
             )))
@@ -1651,6 +1698,21 @@ async fn postgres_bare_target_live_route_recovers_once() {
     }
 }
 
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn sqlite_registered_remote_direct_route_stays_pending_without_relay() {
+    registered_remote_direct_route_stays_pending(IngressFixture::sqlite().await).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_registered_remote_direct_route_stays_pending_without_relay() {
+    if let Some(fixture) = IngressFixture::postgres("registered_remote_direct_route_pending").await
+    {
+        registered_remote_direct_route_stays_pending(fixture).await;
+    }
+}
+
 #[tokio::test]
 async fn sqlite_detached_no_store_full_target_route_is_deferred() {
     let fixture = IngressFixture::sqlite().await;
@@ -2104,6 +2166,7 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
         &deps,
     )
     .await;
+    submission.plan.room_canonical_message = sink.room_canonical_message();
     let (plan, execution) = sink.take();
     submission.plan.plan = plan;
     submission.plan.room_execution = execution;
@@ -2151,16 +2214,63 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
         )
         .unwrap_or(0);
     let blocklist_reads = blocking.0.load(Ordering::SeqCst);
-    for _ in 0..2 {
+    let mut tx = fixture.uow.begin().await.expect("frozen MUC source");
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("envelope")
+        .expect("source");
+    tx.commit().await.expect("read source");
+    for iteration in 0..2 {
         assert_eq!(
             pass(&fixture, &env, &cursor).await,
             MaintenanceOutcome::Complete
         );
         assert_pending(&fixture, key).await;
+        if iteration == 0 {
+            let Stanza::Message(copy) = rx.try_recv().expect("remaining MUC occupant copy").stanza
+            else {
+                panic!("MUC message")
+            };
+            assert_eq!(copy.type_, xmpp_parsers::message::MessageType::Groupchat);
+            assert_eq!(copy.from, envelope.message().from);
+            assert_eq!(copy.to, Some(resource.clone().into()));
+            assert_eq!(copy.bodies, envelope.message().bodies);
+            assert_eq!(
+                waddle_xmpp::xep::extract_stanza_ids(&copy),
+                waddle_xmpp::xep::extract_stanza_ids(envelope.message())
+            );
+        }
+        assert!(rx.try_recv().is_err(), "no inbox push or repeated MUC copy");
+        let mut tx = fixture.uow.begin().await.expect("pending inbox");
+        let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+            .await
+            .expect("intents");
+        let receipted = EffectReceiptRepository::keys(&mut tx, key)
+            .await
+            .expect("receipts");
+        let pending: Vec<_> = recorded
+            .iter()
+            .filter(|intent| {
+                !receipted.contains(&crate::ingress::receipt_key(intent).expect("receipt"))
+            })
+            .collect();
         assert!(
-            rx.try_recv().is_err(),
-            "never replay canonical groupchat as inbox push"
+            pending.iter().any(|intent| {
+                matches!(intent, IngressEffectIntent::RouteDirect { .. })
+                    && decision.external_receipts[push_index]
+                        .contains(&crate::ingress::receipt_key(intent).expect("inbox receipt"))
+            }),
+            "exact inbox route remains pending: {pending:?}"
         );
+        assert!(
+            !pending.iter().any(|intent| matches!(
+                intent,
+                IngressEffectIntent::RouteMucGroupchat { .. }
+                    | IngressEffectIntent::RouteMucSystemBroadcast { .. }
+            )),
+            "MUC fanout is receipted independently of unrelated siblings"
+        );
+        tx.commit().await.expect("read inbox");
         assert!(sender_rx.try_recv().is_err());
     }
     assert_eq!(
@@ -2332,3 +2442,6 @@ async fn postgres_bulk_delivery_progress_matches_per_receipt_reads() {
 
 #[path = "xep0045_decline_recovery_tests.rs"]
 mod xep0045_decline_recovery;
+
+#[path = "recovery_muc_tests.rs"]
+mod muc;

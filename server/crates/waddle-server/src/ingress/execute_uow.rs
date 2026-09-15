@@ -25,6 +25,9 @@ mod recovery;
 #[cfg(test)]
 pub(crate) use recovery::fail_after_recovery_update;
 
+#[path = "execute_relay_copy.rs"]
+mod relay_copy;
+
 #[path = "execute_detached.rs"]
 mod detached;
 #[cfg(test)]
@@ -37,20 +40,20 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
             ExternalRoomEffect::ArchiveAfterPin { .. }
             | ExternalRoomEffect::NotificationCandidate { .. },
         ) => true,
-        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
-            bare,
-            route_identity,
-            ..
-        }) => route_progress.iter().any(|progress| {
-            &progress.recipient == bare && Some(&progress.route_identity) == route_identity.as_ref()
-        }),
-        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
-            jid,
-            route_identity,
-            ..
-        }) => route_progress.iter().any(|progress| {
-            progress.recipient == jid.to_bare()
-                && Some(&progress.route_identity) == route_identity.as_ref()
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { .. }) => {
+            route_progress.iter().any(|progress| {
+                !progress.is_direct()
+                    && progress.matches(effect)
+                    && !progress.remaining(effect).is_empty()
+            })
+        }
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::HostOwnedCopy { .. }
+            | ExternalDeliveryEffect::QueueDetached { .. }
+            | ExternalDeliveryEffect::RouteToPeer { .. },
+        ) => route_progress.iter().any(|progress| {
+            progress.matches(effect)
+                && (progress.is_direct() || !progress.remaining(effect).is_empty())
         }),
         _ => false,
     }
@@ -78,8 +81,10 @@ pub(super) async fn execute_with_uow(
             Some(recovery::execute(uow, decision, index, room).await)
         }
         ExternalEffect::Delivery(
-            delivery @ (ExternalDeliveryEffect::QueueDetached { .. }
-            | ExternalDeliveryEffect::RouteToPeer { .. }),
+            delivery @ (ExternalDeliveryEffect::HostOwnedCopy { .. }
+            | ExternalDeliveryEffect::QueueDetached { .. }
+            | ExternalDeliveryEffect::RouteToPeer { .. }
+            | ExternalDeliveryEffect::RelayFullJid { .. }),
         ) if owns(effect, &decision.route_progress) => {
             Some(detached::execute(uow, decision, index, delivery, deps).await)
         }

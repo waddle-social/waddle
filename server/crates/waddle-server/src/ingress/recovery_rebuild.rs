@@ -26,8 +26,9 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::message::MessageType;
 
-pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 7] = [
+pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 8] = [
     IngressEffectKind::RouteDirect,
+    IngressEffectKind::RouteMucGroupchat,
     IngressEffectKind::NotificationActivityPreview,
     IngressEffectKind::DmPinMutation,
     IngressEffectKind::MucInviteLedger,
@@ -43,6 +44,7 @@ pub(super) struct RecoveryInput<'a> {
     pub recorded: &'a [IngressEffectIntent],
     pub unreceipted: &'a [IngressEffectIntent],
     pub route_progress: Vec<RouteProgress>,
+    pub host_owned_resources: Vec<jid::FullJid>,
     pub blocked_recipients: &'a [jid::BareJid],
 }
 pub(super) struct RebuiltRecovery {
@@ -61,6 +63,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         rejection: None,
         plan: vec![],
         intents: input.recorded.to_vec(),
+        room_canonical_message: None,
         sanitized_message: input.envelope.message().clone(),
         error_reply: None,
         room_execution: RoomExecutionPath::None,
@@ -116,9 +119,11 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         }
     }
     let discarded_receipts = restore_direct_routes(&mut plan, &input)?;
+    muc::restore_muc_routes(&mut plan, &input)?;
     let delegated = delegated_recoveries(&input);
     let mut external = super::suppression::filter_external_effects(
         &plan,
+        None,
         &ReconcileVerdict::Consistent,
         &[],
         input.unreceipted,
@@ -126,6 +131,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
     );
     let external_dependencies = super::suppression::external_effect_indices(
         &plan,
+        None,
         &ReconcileVerdict::Consistent,
         &[],
         input.unreceipted,
@@ -441,3 +447,6 @@ fn is_delegated(intent: &IngressEffectIntent, delegated: &[GroupchatNotification
 #[cfg(test)]
 #[path = "recovery_rebuild_tests.rs"]
 mod tests;
+
+#[path = "recovery_muc.rs"]
+mod muc;

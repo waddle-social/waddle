@@ -8,8 +8,8 @@ use crate::{
         IngressUowError,
     },
     server::routes::interpret::{
-        close_call_setup_from_outcome, deliver_direct_to_full_with_registered_remote,
-        deliver_peer_to_full_with_registered_remote,
+        close_call_setup_from_outcome, deliver_direct_to_full_locally,
+        deliver_direct_to_full_with_registered_remote, deliver_peer_to_full_with_registered_remote,
         effects::{
             delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
             EffectOutcome, ImmediateSink, SettledCompletion, SettledOutcome,
@@ -33,25 +33,31 @@ pub(super) async fn execute(
     effect: &ExternalDeliveryEffect,
     deps: &Deps<'_>,
 ) -> EffectOutcome {
-    let (recipient, identity, resources, call_setup) = match effect {
+    let no_call_setup = None;
+    let (resources, call_setup) = match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { target, .. } => {
+            (vec![target.clone()], &no_call_setup)
+        }
         ExternalDeliveryEffect::QueueDetached {
-            bare,
-            route_identity,
             resources,
             call_setup,
             ..
-        } => (bare.clone(), route_identity, resources.clone(), call_setup),
+        } => (resources.clone(), call_setup),
         ExternalDeliveryEffect::RouteToPeer {
-            jid,
-            route_identity,
+            jid, call_setup, ..
+        }
+        | ExternalDeliveryEffect::RelayFullJid {
+            target: jid,
             call_setup,
             ..
-        } => (jid.to_bare(), route_identity, vec![jid.clone()], call_setup),
+        } => (vec![jid.clone()], call_setup),
         _ => return EffectOutcome::Unavailable,
     };
+    let external =
+        crate::server::routes::interpret::effects::ExternalEffect::Delivery(effect.clone());
     let Some(progress) = decision.route_progress.iter().find(|progress| {
-        progress.recipient == recipient
-            && Some(&progress.route_identity) == identity.as_ref()
+        (!matches!(effect, ExternalDeliveryEffect::RelayFullJid { .. }) || !progress.is_direct())
+            && progress.matches(&external)
             && decision.external_receipts[index].contains(&progress.receipt)
     }) else {
         return EffectOutcome::Unavailable;
@@ -135,6 +141,9 @@ async fn append_resource(
     resource: &FullJid,
 ) -> FullJidDeliveryOutcome {
     match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { target, .. } if target == resource => {
+            FullJidDeliveryOutcome::Delivered
+        }
         ExternalDeliveryEffect::QueueDetached { stanza, .. } => {
             let (queued, _) = queue_processed_for_detached(
                 deps,
@@ -145,6 +154,10 @@ async fn append_resource(
             .await;
             if queued.contains(resource) {
                 FullJidDeliveryOutcome::QueuedDetached
+            } else if deps.delivery_execution_context
+                == crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery
+            {
+                deliver_direct_to_full_locally(deps, resource, stanza)
             } else {
                 deliver_direct_to_full_with_registered_remote(deps, resource, stanza).await
             }
@@ -168,6 +181,9 @@ async fn append_resource(
                 deliver_direct_to_full_with_registered_remote(deps, resource, stanza).await
             }
         },
+        ExternalDeliveryEffect::RelayFullJid { .. } => {
+            super::relay_copy::append(deps, effect).await
+        }
         _ => FullJidDeliveryOutcome::Unavailable,
     }
 }
@@ -207,16 +223,7 @@ async fn record_resource(
         .iter()
         .all(|target| completed.contains(target))
     {
-        settle_recorded(
-            &mut tx,
-            key,
-            &[IngressEffectIntent::RouteDirect {
-                recipient: progress.recipient.clone(),
-                fanout: progress.fanout.clone(),
-                route_identity: progress.route_identity.clone(),
-            }],
-        )
-        .await?
+        settle_recorded(&mut tx, key, &[progress.settle_evidence()]).await?
     } else {
         Vec::new()
     };

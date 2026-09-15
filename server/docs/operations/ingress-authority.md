@@ -114,10 +114,11 @@ obligations settle without a pending row or candidate insert.
 
 Bot occupants on the configured extensions domain observe messages through
 observer hooks. Their non-sender occupant copies are `HostOwnedCopy` effects:
-the generic executor completes them without socket I/O and writes the ordinary
-route receipt, including when a real user sends the groupchat message. A room
-containing only a sender and a bot can therefore terminalize normally. Duplicate
-admission suppresses already-settled non-sender copies.
+the progress executor completes them without socket I/O, records the bot's
+per-occupant progress, and settles the aggregate route receipt once the frozen
+fan-out is covered. This also applies when a real user sends the groupchat
+message, so a room containing only a sender and a bot can terminalize normally.
+Duplicate admission suppresses already-settled non-sender copies.
 
 The adapter waits up to two seconds for settlement after commit. Expiry or a
 settlement persistence failure without a known rejection returns acceptance; an enclosing caller timeout
@@ -196,6 +197,17 @@ missing receipts or failing maintenance. Check
 `ingress.maintenance.runs{outcome!="complete"}` (Prometheus:
 `ingress_maintenance_runs_total{outcome!="complete"}`) and the pending pairs
 below. GC cannot reclaim these rows. Both CNPG queries run only on the primary.
+
+A pending `route_muc` can represent recoverable unfinished occupant copies or
+an explicit limit: a remote owner returns typed `Unavailable`; missing frozen
+system payload is `missing_payload`; a noncanonical groupchat source is
+`missing_canonical_provenance`; unreceipted/missing subject, pin or exact system
+archive proof is `prerequisite_pending`. These source/prerequisite reasons are
+emitted in recovery debug logs, not metric labels. Unsupported groupchat inbox
+`RouteDirect` siblings also remain pending (the canonical groupchat envelope
+cannot prove their distinct payload). A completed MUC aggregate does not settle
+those siblings. Consult "What recovery handles" before diagnosing the backlog
+as failed maintenance.
 
 The dedicated ingress authority pool defaults to 4 connections per pod;
 `WADDLE_INGRESS_DB_POOL_SIZE` overrides it. Transactions and retries are
@@ -482,8 +494,9 @@ proves nothing. A message may stay non-terminal because a *different* unresolved
 intent holds it open while this resource was delivered normally, so the
 `ingress_delivery_receipts` join is what separates an undelivered resource from a
 healthy one. Not every settled append reaches that table, though: a recorded
-`RelayFullJid` that falls back to a local detached session writes a ledger row but
-settles generically through `ingress_effect_receipts`, so `e` excludes those too.
+direct `RelayFullJid` can settle generically through `ingress_effect_receipts`,
+so `e` excludes any matching append proof too. MUC progress-owned relay fallbacks
+now write per-occupant `ingress_delivery_receipts` as well.
 Both `receipt_kind` and `semantic_identity_hash` are selected because one
 canonical message can hold several routes to the same resource; without them a
 candidate cannot be tied back to a specific obligation, its recorded intent or its
@@ -766,7 +779,7 @@ fail-closed before rebuilding routes.
 
 | `kind_family` | Automatic recovery or reason it stays pending |
 | --- | --- |
-| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
+| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Maintenance delivers only to locally hosted live sockets or locally detached SM sessions; remote-hosted resources stay pending. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
 | `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
 | `room_observer` | Rebuilt per recorded plugin when an observer envelope exists; missing observer envelopes are unrecoverable. Invocations are keyless and at-least-once. A plugin whose only outcome is a warning reply to the original sender cannot complete during recovery (that sender's connection is gone); the row is evaluated once and cached as unsupported until its evidence changes. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
@@ -775,7 +788,8 @@ fail-closed before rebuilding routes.
 | `route_direct` | Delegated live full-JID routes are deferred: full target, recipient differs from sender, no recorded recipient archive, singleton full-target fanout and `CaptureOrdinal` identity. Recipient preparation belongs to the destination pipeline. This also conservatively defers detached full-target `<no-store/>` routes without archive evidence. Headline routes are deferred because they require peer delivery with recipient archival for `<store/>`. Groupchat inbox pushes and routes to other recipients are unrecoverable because the canonical message does not prove their payload. |
 | `carbons`, `dm_call_thread_state` | Deliberately deferred despite being rebuildable: their sinks have no idempotency key. |
 | `pin` | Room pin chains are unrecoverable: the pinner nick was not recorded. |
-| `relay_carbons`, `route_muc`, `route_occupant_pm`, `dispatch_to_room_remote`, `group_dm_membership_grant`, `group_dm_invite_ledger`, `muc_invite_membership_grant`, `room_subject_mutation`, `link_preview_media_ref`, `call_signal`, `extension`, `tombstone_replay_deletion`, `error_reply` | Unrecoverable from the recorded envelope and intents alone: these need actor handles, reflected payloads or a sender socket. `route_muc` includes system broadcasts. |
+| `route_muc` | Kind 2 covers `RouteMucGroupchat` and `RouteMucSystemBroadcast`. Rebuilds only unfinished frozen occupant copies; groupchat excludes sender reflection. Requires a room-canonical envelope (room/nick, exact room stanza-id, occupant-id) or the intent's typed `system_message`. Subject mutation and system broadcast pin/exact `SystemMessageArchive` prerequisites must already be receipted. Missing evidence stays pending: `missing_canonical_provenance`, `missing_payload`, or `prerequisite_pending`. Maintenance never relays remote-owned occupants (`Unavailable`) and never reruns room MAM/inbox projections. |
+| `relay_carbons`, `route_occupant_pm`, `dispatch_to_room_remote`, `group_dm_membership_grant`, `group_dm_invite_ledger`, `muc_invite_membership_grant`, `room_subject_mutation`, `link_preview_media_ref`, `call_signal`, `extension`, `tombstone_replay_deletion`, `error_reply` | Unrecoverable from the recorded envelope and intents alone: these need actor handles, reflected payloads or a sender socket. |
 | `archive`, `inbox_project`, `retraction_tombstone` | Phase B obligations should already be receipted; missing receipts indicate a contradiction and are never re-applied. `archive` also includes `SystemMessageArchive`, which recovery cannot rebuild. |
 
 Recovered direct notification candidates retain canonical receipt time and delegated groupchat candidates retain their frozen creation time, preserving outbox ordering relative to newer candidates.
@@ -783,9 +797,9 @@ Recovered direct notification candidates retain canonical receipt time and deleg
 Recovered detached SM appends retain the canonical receipt time, preserving
 XEP-0203 delay stamps across the recovery grace interval.
 
-Remote-owner-only resources reachable through `RelayFullJid` owner routing stay
-pending: recovery covers registered remote sockets and local registries, but
-an append requiring that owner route returns `Unavailable`.
+Remote-hosted resources stay pending: maintenance only uses locally hosted live
+sockets and locally detached SM sessions. It never sends a registered-remote
+relay frame; those attempts return `Unavailable` without writing progress.
 
 Receipts are exactly-once: arms re-lock the canonical row and re-check receipts
 before settlement; generic receipt inserts are idempotent. Side effects are
@@ -1030,12 +1044,15 @@ allocate the same obligation again. `acknowledged_allocation_is_never_voided_by_
 establishes such a proof is valid; the two voiding rules disagree about it. The
 divergence is the enumeration problem #1760 exists to remove.
 
-**The guarantee covers keyed appends only.** In a clustered route whose
+**The guarantee covers keyed appends only.** In a clustered *direct* route whose
 remote-resource owner refresh resolves locally against a detached recipient,
 `deliver_local_full_jid_after_target_refresh` passes no append context
-(`clustering/route_bridge/delivery/local.rs:109-127`), so that append is unkeyed
-and a failed effect-receipt write can let recovery append the same resource
-again. That residue is tracked by #1778 (carved out of #1760).
+(`clustering/route_bridge/delivery/local.rs`), so that append is unkeyed and a
+failed effect-receipt write can let recovery append the same resource again.
+That residue is tracked by #1778 (carved out of #1760). MUC progress-owned
+occupant copies (#1757) now supply their append context through the same
+fallback, so only direct routes remain unkeyed there; receiver-side cross-node
+appends remain unkeyed (#1778).
 
 Earlier committed progress survives restart and is excluded from later
 decisions. Progress writes and the final aggregate receipt share one
@@ -1046,7 +1063,53 @@ When investigating a pending direct route, compare its recorded fanout with
 its resource progress rows using the full effect receipt key. A missing
 resource is outstanding delivery work, not evidence that the aggregate can be
 settled. Do not synthesize a receipt from today's smaller registry audience.
-MUC groupchat occupant fanout does not use these progress rows.
+
+MUC occupant fanout uses the same progress rows under the kind-2 MUC receipt
+key, not an inbox `RouteDirect` key. `ProgressObligation` retains the exact
+recorded evidence; `RouteProgress::settle_evidence` settles the aggregate only
+when all frozen non-sender groupchat occupants (all system broadcast occupants)
+are complete. Empty fanout settles in the acceptance/recovery transaction.
+Reflection is excluded: it is resent on duplicates, carries no aggregate
+receipt, and remains governed by the sender's XEP-0198 stream. Other pending
+obligations, including unsupported inbox pushes, still prevent terminality.
+
+Local MUC detached copies use the MUC receipt key plus occupant resource as
+the append key. The MUC-only relay executor records definite `Delivered` ACKs
+as per-occupant progress, and retains that append context on ownership-refresh
+fallback to local delivery. Declined/uncertain outcomes remain pending.
+Remote receiver appends are still outside this guarantee (#1778); the wire
+version remains `deliver_ordered.v10`.
+
+The room-canonical envelope is frozen independently of observer plugins;
+retries preserve `room/nick`, content, room stanza-id and occupant-id. System
+broadcasts use the intent's `StoredMessagePayload` instead of the triggering
+command. Missing canonical provenance or payload prevents rebuilding. Ordinary
+retries intersect the fresh audience with frozen unfinished occupants; a new
+occupant never expands historical proof. Subject rebroadcast is separate:
+completed/new occupants receive state reapplication without the MUC append key,
+while unfinished recorded copies discharge progress. Recovery requires the
+subject/pin/exact system archive receipts and never relays remote-owned copies.
+See RFC 0018 §3.3e for the full settlement contract.
+
+After relay reachability returns, a client retransmission with the same
+origin-id can complete the unfinished remote copy, record its progress, settle
+the aggregate receipt and terminalize the row once all obligations are complete.
+The two-process regression checks this recovery without assuming that the
+failed attempt diverted the occupant-copy channel: a timeout of the fault-control
+ask alone does not establish that the separate delivery ask timed out.
+
+An actual diversion has no time-based expiry. A changed room-origin or
+target-user ownership epoch selects a fresh channel. Owner refresh during an
+in-flight send explicitly forgets the old channel when the target becomes local
+or its target epoch changes; it cannot rescue an already-diverted unchanged
+channel, which is rejected before sending. A relay lookup miss (`NotFound`)
+instead rolls back the sequence without diverting and permits delivery fallback.
+Successful ping or resource re-registration alone does not clear a diversion.
+The regression's recovered socket delivery and receipts do not identify which
+of these paths occurred; they do not prove a same-channel diversion reset.
+Maintenance never relays. Ownership is relative to the recovering node: the
+destination node's own maintenance can still deliver the globally recorded copy
+through its local registry and settle its progress.
 
 ### Pending delivery and SM database placement
 

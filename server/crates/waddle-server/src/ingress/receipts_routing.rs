@@ -68,23 +68,6 @@ pub(super) fn route_receipts(
         } else {
             cover_recipients(external, fanout, route_identity)
         }),
-        IngressEffectIntent::RouteMucGroupchat {
-            occupants,
-            reflection,
-            route_identity,
-            ..
-        } => {
-            let mut recipients = occupants.clone();
-            if !recipients.contains(reflection) {
-                recipients.push(reflection.clone());
-            }
-            Some(cover_recipients(external, &recipients, route_identity))
-        }
-        IngressEffectIntent::RouteMucSystemBroadcast {
-            occupants,
-            route_identity,
-            ..
-        } => Some(cover_recipients(external, occupants, route_identity)),
         IngressEffectIntent::RouteOccupantPm { recipient, sender } => Some(
             external
                 .iter()
@@ -243,7 +226,10 @@ fn message(stanza: &Stanza) -> Option<&Message> {
     }
 }
 
-fn full_delivery<'a>(effect: &'a ExternalEffect, recipient: &FullJid) -> Option<&'a Message> {
+pub(crate) fn full_delivery<'a>(
+    effect: &'a ExternalEffect,
+    recipient: &FullJid,
+) -> Option<&'a Message> {
     match effect {
         ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)
             if route.recipient == recipient.to_bare() && route.resources.contains(recipient) =>
@@ -297,7 +283,7 @@ fn bare_delivery(
     }
 }
 
-fn message_identity(message: &Message, identity: &EffectMessageIdentity) -> bool {
+pub(crate) fn message_identity(message: &Message, identity: &EffectMessageIdentity) -> bool {
     match identity {
         EffectMessageIdentity::StanzaId(id) => {
             waddle_xmpp::xep::extract_stanza_ids(message).contains(id)
@@ -387,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn groupchat_receipt_requires_every_occupants_exact_room_stamp() {
+    fn groupchat_uses_exact_progress_instead_of_generic_receipts() {
         let room: BareJid = "room@muc.example.com".parse().expect("room");
         let sender: FullJid = "sender@example.com/phone".parse().expect("sender");
         let peer: FullJid = "peer@example.com/phone".parse().expect("peer");
@@ -411,26 +397,24 @@ mod tests {
                 call_setup: None,
             })
         };
+        let progress = crate::ingress::RouteProgress::from_intent(&intent, None, vec![])
+            .expect("receipt")
+            .expect("MUC progress");
         let wrong_authority = StanzaId::new("accepted", peer.to_bare().into());
-        assert_eq!(
-            route_receipts(
-                &[delivery(&sender, &stamp), delivery(&peer, &wrong_authority)],
-                &intent
-            ),
-            Some(vec![]),
-            "matching id text under another assigning authority is not the room delivery"
+        assert!(!progress.matches(&delivery(&peer, &wrong_authority)));
+        assert!(
+            !progress.matches(&delivery(&sender, &stamp)),
+            "reflection is not progress-owned"
         );
-        assert_eq!(
-            route_receipts(&[delivery(&sender, &stamp)], &intent),
-            Some(vec![]),
-            "sender reflection cannot confirm a suppressed occupant"
-        );
+        assert!(progress.matches(&delivery(&peer, &stamp)));
+        assert_eq!(progress.settle_evidence(), intent);
         assert_eq!(
             route_receipts(
                 &[delivery(&sender, &stamp), delivery(&peer, &stamp)],
                 &intent
             ),
-            Some(vec![0, 1])
+            None,
+            "generic delivery never settles MUC"
         );
     }
 }

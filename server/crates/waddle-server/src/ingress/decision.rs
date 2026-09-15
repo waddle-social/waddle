@@ -66,7 +66,11 @@ pub(super) fn assemble_receipts(
     // Generic receipt mapping deliberately requires full coverage; add only
     // the exact route receipt whose aggregate this arm settles transactionally.
     for (index, effect) in external.iter().enumerate() {
-        if super::execute_uow::owns(effect, route_progress) {
+        if super::execute_uow::owns(effect, route_progress)
+            || route_progress
+                .iter()
+                .any(|p| !p.is_direct() && p.matches(effect) && !p.remaining(effect).is_empty())
+        {
             for progress in route_progress
                 .iter()
                 .filter(|progress| progress.matches(effect))
@@ -77,7 +81,11 @@ pub(super) fn assemble_receipts(
             }
         }
     }
-    let mut arm_owned_receipts = Vec::new();
+    let mut arm_owned_receipts: Vec<_> = route_progress
+        .iter()
+        .filter(|p| !p.is_direct())
+        .map(|p| p.receipt.clone())
+        .collect();
     for (index, effect) in external.iter().enumerate() {
         if super::execute_uow::owns(effect, route_progress) {
             for receipt in &external_receipts[index] {

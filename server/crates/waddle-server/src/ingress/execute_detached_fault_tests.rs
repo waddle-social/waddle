@@ -284,16 +284,22 @@ async fn postgres_detached_progress_timeout_preserves_completed_resource() {
     }
 }
 
-async fn detached_muc_keeps_generic_settlement(fixture: IngressFixture) {
-    let sm = Arc::new(InMemorySmSessionRegistry::new());
+async fn detached_muc_records_occupant_progress(fixture: IngressFixture) {
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .expect("SM persistence"),
+    );
+    let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
     deps.sm_session_registry = Some(&sm);
     let mut submission = fixture.submission(Some("detached-muc"), "room message");
-    let target = submission.sender.clone();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("occupant");
     store_detached(&sm, &target).await;
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
-    let identity = EffectMessageIdentity::capture_ordinal(1);
+    let stamp = waddle_xmpp_core::xep0359::StanzaId::new("room-accepted", room.clone().into());
+    let identity = EffectMessageIdentity::stanza(stamp.clone());
     let mut message = submission.plan.sanitized_message.clone();
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
     message.to = Some(room.clone().into());
@@ -310,16 +316,18 @@ async fn detached_muc_keeps_generic_settlement(fixture: IngressFixture) {
     submission.plan.sanitized_message = message.clone();
     message.from = Some(room.with_resource_str("romeo").expect("room nick").into());
     message.to = Some(target.clone().into());
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
+    crate::ingress::test_support::capture_room_message(&mut submission.plan, &message);
     submission.plan.intents = vec![IngressEffectIntent::RouteMucGroupchat {
         room,
         occupants: vec![target.clone()],
-        reflection: target.clone(),
+        reflection: submission.sender.clone(),
         room_generation: waddle_xmpp::ingress::EntityGeneration::INITIAL,
         route_identity: identity.clone(),
     }];
     submission.plan.plan = vec![PlannedEffect::new(Effect::External(
         ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
-            route_identity: Some(identity),
+            route_identity: None,
             call_setup: None,
             bare: target.to_bare(),
             resources: vec![target.clone()],
@@ -329,10 +337,10 @@ async fn detached_muc_keeps_generic_settlement(fixture: IngressFixture) {
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("MUC commit");
-    assert!(decision.route_progress.is_empty());
+    assert_eq!(decision.route_progress.len(), 1);
     assert!(
-        decision.arm_owned_receipts.is_empty(),
-        "MUC remains a generic delivery obligation"
+        !decision.arm_owned_receipts.is_empty(),
+        "MUC occupant delivery owns its aggregate progress"
     );
     assert_eq!(decision.external_receipts[0].len(), 1);
     let report = execute_effects(
@@ -355,13 +363,13 @@ async fn detached_muc_keeps_generic_settlement(fixture: IngressFixture) {
 }
 
 #[tokio::test]
-async fn sqlite_detached_muc_without_direct_progress_keeps_generic_receipt() {
-    detached_muc_keeps_generic_settlement(IngressFixture::sqlite().await).await;
+async fn sqlite_detached_muc_records_occupant_progress() {
+    detached_muc_records_occupant_progress(IngressFixture::sqlite().await).await;
 }
 #[tokio::test]
-async fn postgres_detached_muc_without_direct_progress_keeps_generic_receipt() {
+async fn postgres_detached_muc_records_occupant_progress() {
     if let Some(fixture) = IngressFixture::postgres("detached_muc_generic").await {
-        detached_muc_keeps_generic_settlement(fixture).await;
+        detached_muc_records_occupant_progress(fixture).await;
     }
 }
 
@@ -404,19 +412,26 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
     store_detached(&sm, &target).await;
     submission.plan.intents.clear();
     submission.plan.plan.clear();
-    // Direct obligations surround the generic MUC delivery and share its
-    // resource. A leaked direct context would suppress or ledger the MUC copy.
+    // Direct obligations surround a room-stamped non-reflection MUC copy.
+    // Every append must retain its distinct receipt identity.
     for ordinal in 1..=3 {
-        let identity = EffectMessageIdentity::capture_ordinal(ordinal);
+        let stamp = waddle_xmpp_core::xep0359::StanzaId::new("mixed-room", room.clone().into());
+        let identity = if ordinal == 2 {
+            EffectMessageIdentity::stanza(stamp.clone())
+        } else {
+            EffectMessageIdentity::capture_ordinal(ordinal)
+        };
         let mut message = submission.plan.sanitized_message.clone();
         let intent = if ordinal == 2 {
             message.type_ = xmpp_parsers::message::MessageType::Groupchat;
             message.from = Some(room.with_resource_str("romeo").expect("room nick").into());
             message.to = Some(target.clone().into());
+            waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
+            crate::ingress::test_support::capture_room_message(&mut submission.plan, &message);
             IngressEffectIntent::RouteMucGroupchat {
                 room: room.clone(),
                 occupants: vec![target.clone()],
-                reflection: target.clone(),
+                reflection: submission.sender.clone(),
                 room_generation: waddle_xmpp::ingress::EntityGeneration::INITIAL,
                 route_identity: identity.clone(),
             }
@@ -444,8 +459,8 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("mixed commit");
-    assert_eq!(decision.route_progress.len(), 2);
-    assert_eq!(decision.arm_owned_receipts.len(), 2);
+    assert_eq!(decision.route_progress.len(), 3);
+    assert_eq!(decision.arm_owned_receipts.len(), 3);
     assert_eq!(decision.external_receipts.len(), 3);
     let execute = || {
         execute_effects(
@@ -457,16 +472,15 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
             Duration::from_secs(5),
         )
     };
-    // Both direct appends survive failed progress transactions. MUC settles
-    // generically and must not inherit either direct append identity.
+    // All appends survive failed progress transactions under distinct keys.
     let report = FAIL_DELIVERY_PROGRESS_TX.scope(true, execute()).await;
     assert!(report.receipt_failures.is_empty(), "{report:?}");
     assert_eq!(append_count(&sm, &target).await, 3);
-    assert_eq!(fixture.count("sm_ingress_appends").await, 2);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 3);
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     // Re-execute the frozen decision to exercise all three routes again.
-    // Only the generic MUC effect may append again; direct ledger hits settle.
+    // Every keyed ledger hit settles without allocating another queue entry.
     let report = execute().await;
     assert!(report.receipt_failures.is_empty(), "{report:?}");
     assert!(
@@ -476,9 +490,9 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
             .all(|(_, outcome)| *outcome == ExternalOutcome::Done),
         "{report:?}"
     );
-    assert_eq!(append_count(&sm, &target).await, 4);
-    assert_eq!(fixture.count("sm_ingress_appends").await, 2);
-    assert_eq!(fixture.count("ingress_delivery_receipts").await, 2);
+    assert_eq!(append_count(&sm, &target).await, 3);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 3);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 3);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
     assert!(
         terminalize_if_complete(&fixture.uow, decision.message_key.expect("key"))

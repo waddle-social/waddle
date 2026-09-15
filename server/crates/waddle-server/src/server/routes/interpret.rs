@@ -169,6 +169,8 @@ mod room_system_message;
 mod route_to_connection;
 mod routing;
 
+pub(crate) use deps::DeliveryExecutionContext;
+
 use archive_groupchat_event::{archive_groupchat_event, ArchiveGroupchatEventOutcome};
 use archive_lookup::{
     build_carbon_envelope, lookup_archived_message, waddle_id_for_room_jid, ToElementString,
@@ -216,8 +218,11 @@ use room_pin::apply_pin_change_event;
 use room_subject::{
     persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
 };
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use route_to_connection::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
 pub(crate) use route_to_connection::{
-    bounce_undeliverable_iq, deliver_direct_to_full_with_registered_remote,
+    bounce_undeliverable_iq, deliver_direct_to_full_locally,
+    deliver_direct_to_full_with_registered_remote, deliver_full_jid_via_ordered_relay,
     deliver_peer_to_full_with_registered_remote, queue_processed_for_detached, route_to_connection,
     undeliverable_iq_reply,
 };
@@ -983,3 +988,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod retraction_ingress_tests;
+
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use route_to_connection::{ControlledMucRelay, CONTROLLED_MUC_RELAY};

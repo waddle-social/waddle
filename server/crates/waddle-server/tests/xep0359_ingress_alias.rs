@@ -856,3 +856,22 @@ backend_tests!(
     recovery_groupchat_inbox_push_deferred_postgres,
     recovery_does_not_rebuild_groupchat_inbox_push
 );
+
+// Rebuilt MUC copies preserve the room's XEP-0359 identity and XEP-0421 occupant id.
+#[path = "ingress_cases/muc_progress_support.rs"]
+pub mod muc_progress_support;
+
+#[tokio::test]
+async fn xep0359_ingress_alias_muc_rebuilt_stamps_sqlite() {
+    muc_progress_support::replay(IngressFixture::sqlite().await, false, false, false).await;
+    muc_progress_support::maintenance(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn xep0359_ingress_alias_muc_rebuilt_stamps_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("xep0359_muc_replay_stamps").await {
+        muc_progress_support::replay(fixture, false, false, false).await;
+    }
+    if let Some(fixture) = IngressFixture::postgres("xep0359_muc_recovery_stamps").await {
+        muc_progress_support::maintenance(fixture).await;
+    }
+}

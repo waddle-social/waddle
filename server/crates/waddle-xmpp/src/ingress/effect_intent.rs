@@ -19,7 +19,7 @@ use xmpp_parsers::{
 use crate::{
     error::StanzaErrorCondition,
     inbox::InboxEntry,
-    ingress::EntityGeneration,
+    ingress::{EntityGeneration, StoredMessagePayload},
     muc::{pin::PinnedEntry, SubjectState},
     pending_delivery::{PendingRowId, SmSessionId},
     protocol::CarbonKind,
@@ -1123,6 +1123,7 @@ pub enum IngressEffectIntent {
         occupants: Vec<FullJid>,
         room_generation: EntityGeneration,
         route_identity: EffectMessageIdentity,
+        system_message: Option<StoredMessagePayload>,
     },
     RouteOccupantPm {
         recipient: FullJid,
@@ -3118,6 +3119,8 @@ enum StoredEffectIntent {
         occupants: Vec<FullJid>,
         room_generation: u64,
         route_identity: StoredEffectMessageIdentity,
+        #[serde(default)]
+        system_message: Option<StoredMessagePayload>,
     },
     RouteOccupantPm {
         recipient: FullJid,
@@ -3344,6 +3347,7 @@ impl StoredEffectIntent {
                 mut occupants,
                 room_generation,
                 route_identity,
+                system_message,
             } => {
                 canonicalize(&mut occupants);
                 Self::RouteMucSystemBroadcast {
@@ -3351,6 +3355,7 @@ impl StoredEffectIntent {
                     occupants,
                     room_generation: room_generation.to_storage(),
                     route_identity: route_identity.into(),
+                    system_message,
                 }
             }
             IngressEffectIntent::RouteOccupantPm { recipient, sender } => {
@@ -3550,11 +3555,13 @@ impl StoredEffectIntent {
                 occupants,
                 room_generation,
                 route_identity,
+                system_message,
             } => IngressEffectIntent::RouteMucSystemBroadcast {
                 room,
                 occupants,
                 room_generation: EntityGeneration::from_storage(room_generation),
                 route_identity: route_identity.into_domain(),
+                system_message,
             },
             Self::RouteOccupantPm { recipient, sender } => {
                 IngressEffectIntent::RouteOccupantPm { recipient, sender }
@@ -4423,6 +4430,84 @@ mod tests {
         }
     }
 
+    fn stored_system_broadcast(payload: &str) -> serde_json::Value {
+        let mut message = xmpp_parsers::message::Message::groupchat(None)
+            .with_body(Lang::default(), payload.to_owned());
+        message.from = Some(bare("room@conference.example.test").into());
+        serde_json::json!({
+            "version": 1,
+            "intent": {
+                "type": "route_muc_system_broadcast",
+                "room": "room@conference.example.test",
+                "occupants": ["juliet@example.test/laptop"],
+                "room_generation": 7,
+                "route_identity": {"type": "stanza_id", "stanza_id": {
+                    "id": "system-1", "by": "room@conference.example.test"
+                }},
+                "system_message": crate::parser::message_to_string(&message)
+                    .expect("serialize system message")
+            }
+        })
+    }
+
+    #[test]
+    fn system_broadcast_payload_round_trip_preserves_exact_evidence() {
+        for body in ["first pin", "second pin"] {
+            let stored = stored_system_broadcast(body);
+            let bytes = serde_json::to_vec(&stored).expect("encode stored intent");
+            let decoded = IngressEffectIntent::decode_v1(2, &bytes).expect("decode intent");
+            let encoded = decoded.encode_v1().expect("reencode intent");
+            let round_trip: serde_json::Value =
+                serde_json::from_slice(encoded.payload()).expect("decode round trip");
+            assert_eq!(
+                round_trip["intent"]["system_message"],
+                stored["intent"]["system_message"]
+            );
+        }
+    }
+
+    #[test]
+    fn system_broadcast_payload_participates_in_settlement_evidence() {
+        let decode = |body| {
+            let bytes = serde_json::to_vec(&stored_system_broadcast(body)).expect("encode");
+            IngressEffectIntent::decode_v1(2, &bytes).expect("decode")
+        };
+        assert_ne!(decode("first pin"), decode("second pin"));
+    }
+
+    #[test]
+    fn system_broadcast_payload_absent_in_old_rows_is_explicitly_missing() {
+        let mut stored = stored_system_broadcast("old pin");
+        stored["intent"]
+            .as_object_mut()
+            .expect("intent object")
+            .remove("system_message");
+        let bytes = serde_json::to_vec(&stored).expect("encode old row");
+        assert!(matches!(
+            IngressEffectIntent::decode_v1(2, &bytes).expect("decode old row"),
+            IngressEffectIntent::RouteMucSystemBroadcast {
+                system_message: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn system_broadcast_payload_rejects_non_message_xml() {
+        let mut stored = stored_system_broadcast("invalid pin");
+        stored["intent"]["system_message"] = serde_json::Value::String(
+            crate::parser::element_to_string(
+                &Element::builder("presence", crate::parser::ns::JABBER_CLIENT).build(),
+            )
+            .expect("serialize presence"),
+        );
+        let bytes = serde_json::to_vec(&stored).expect("encode invalid row");
+        assert_eq!(
+            IngressEffectIntent::decode_v1(2, &bytes),
+            Err(EffectIntentCodecError::MalformedPayload)
+        );
+    }
+
     #[test]
     fn every_sample_kind_matches_its_storage_tag() {
         let mut intents = IngressEffectIntent::storage_round_trip_samples();
@@ -4440,6 +4525,7 @@ mod tests {
                 occupants: vec![full("juliet@example.test/laptop")],
                 room_generation: EntityGeneration::from_storage(7),
                 route_identity: EffectMessageIdentity::stanza(stanza_id()),
+                system_message: None,
             },
         ]);
         for intent in intents {

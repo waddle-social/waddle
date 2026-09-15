@@ -298,14 +298,15 @@ impl OrderedRelayDeliveryBridge {
         match target {
             RemoteResourceRouteTarget::FullJid { target, stanza } => {
                 if let Some(remote) = self
-                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin, None)
+                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin, None, None)
                     .await
                 {
                     Some(remote)
                 } else {
-                    let outcome =
-                        deliver_local_full_jid_after_target_refresh(&services, &target, &stanza.0)
-                            .await;
+                    let outcome = deliver_local_full_jid_after_target_refresh(
+                        &services, &target, &stanza.0, None,
+                    )
+                    .await;
                     Some(outcome)
                 }
             }

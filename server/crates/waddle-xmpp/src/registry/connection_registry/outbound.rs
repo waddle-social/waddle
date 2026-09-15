@@ -251,6 +251,7 @@ pub enum ForceDetachOutcome {
 /// by the registry (like carbons_enabled status for XEP-0280).
 #[derive(Debug, Clone)]
 pub struct ConnectionEntry {
+    hosting: ConnectionHosting,
     /// Channel to send stanzas to this connection
     pub sender: mpsc::Sender<OutboundStanza>,
     /// Whether XEP-0280 Message Carbons is enabled for this connection
@@ -335,6 +336,7 @@ impl ConnectionEntry {
     pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
+            hosting: ConnectionHosting::Local,
             sender,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
             presence_available: Arc::new(AtomicBool::new(false)),
@@ -348,6 +350,16 @@ impl ConnectionEntry {
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
         }
+    }
+
+    pub fn remote_hosted(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        let mut entry = Self::new(sender);
+        entry.hosting = ConnectionHosting::Remote;
+        entry
+    }
+
+    pub(crate) fn is_locally_hosted(&self) -> bool {
+        self.hosting == ConnectionHosting::Local
     }
 
     /// Clone of this entry's force-detach sender, for a caller (the
@@ -452,6 +464,12 @@ impl ConnectionEntry {
             .ok()
             .and_then(|g| g.as_ref().cloned())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionHosting {
+    Local,
+    Remote,
 }
 
 /// Result of attempting to send a message to a connection.

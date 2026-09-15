@@ -133,6 +133,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
         failure: None,
         plan: effects,
         intents: capture.snapshot().intents,
+        room_canonical_message: None,
         sanitized_message: message,
         error_reply: None,
         rejection: None,

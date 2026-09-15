@@ -88,6 +88,7 @@ fn plan() -> IngressPlan {
         rejection: None,
         plan: vec![],
         intents: vec![],
+        room_canonical_message: None,
         sanitized_message: canonical().message().clone(),
         error_reply: None,
         room_execution: RoomExecutionPath::None,
@@ -300,6 +301,7 @@ fn ordinary_duplicate_admission_uses_pending_or_correlated_notification_without_
         assert_eq!(
             external_effect_indices(
                 &plan,
+                None,
                 &ReconcileVerdict::Consistent,
                 &[],
                 &[obligation],
@@ -309,7 +311,8 @@ fn ordinary_duplicate_admission_uses_pending_or_correlated_notification_without_
         );
     }
     assert!(
-        external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &[]).is_empty()
+        external_effect_indices(&plan, None, &ReconcileVerdict::Consistent, &[], &[], &[])
+            .is_empty()
     );
     let mut unrelated = row.clone();
     unrelated.id = PendingRowId::fresh();
@@ -324,6 +327,7 @@ fn ordinary_duplicate_admission_uses_pending_or_correlated_notification_without_
     ] {
         assert!(external_effect_indices(
             &plan,
+            None,
             &ReconcileVerdict::Consistent,
             &[],
             &[obligation],
@@ -355,7 +359,14 @@ fn marker_only_repair_does_not_recreate_an_already_receipted_candidate() {
         ))
     ));
     assert_eq!(
-        external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[marker], &[]),
+        external_effect_indices(
+            &plan,
+            None,
+            &ReconcileVerdict::Consistent,
+            &[],
+            &[marker],
+            &[]
+        ),
         vec![0]
     );
 }

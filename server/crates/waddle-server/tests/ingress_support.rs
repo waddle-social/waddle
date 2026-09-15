@@ -150,6 +150,7 @@ impl IngressFixture {
                 failure: None,
                 plan: Vec::new(),
                 intents: Vec::new(),
+                room_canonical_message: None,
                 sanitized_message: message,
                 error_reply: None,
                 rejection: None,

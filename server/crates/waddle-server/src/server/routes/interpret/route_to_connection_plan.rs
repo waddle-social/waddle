@@ -177,14 +177,7 @@ pub(super) async fn deliver_full(
             ));
         return FullJidDeliveryOutcome::Delivered;
     }
-    if deps
-        .host_sender
-        .as_ref()
-        .is_some_and(|host| host.owns(target))
-        || deps
-            .web_socket_state
-            .is_some_and(|state| super::HostOwnedResources::owns_configured_bot(target, state))
-    {
+    if deps.owns_host_resource(target) {
         record(
             deps,
             ExternalDeliveryEffect::HostOwnedCopy {

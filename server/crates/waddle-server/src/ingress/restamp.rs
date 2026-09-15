@@ -30,6 +30,9 @@ pub fn restamp_plan(
     let ids = Replacements::new(plan, recorded_archive_ids);
     let mut stamped = plan.clone();
     ids.message(&mut stamped.sanitized_message);
+    if let Some(message) = &mut stamped.room_canonical_message {
+        ids.message(message);
+    }
     if let Some(stanza) = &mut stamped.error_reply {
         ids.stanza(stanza);
     }
@@ -49,6 +52,57 @@ pub fn restamp_plan(
         ids.intent(intent);
     }
     stamped
+}
+
+/// Archive-free groupchat has no MAM stamp to restore. Only a unique recorded
+/// groupchat obligation in the same authority slot can supply its frozen ID;
+/// system broadcasts continue to correlate through their archive sequence.
+pub(super) fn restore_muc_route_identity(plan: &mut IngressPlan, recorded: &[IngressEffectIntent]) {
+    use waddle_xmpp::ingress::EffectMessageIdentity;
+    let mut replacements = Vec::new();
+    for planned in &plan.intents {
+        let IngressEffectIntent::RouteMucGroupchat {
+            route_identity: EffectMessageIdentity::StanzaId(minted),
+            ..
+        } = planned
+        else {
+            continue;
+        };
+        let mut candidates = recorded.iter().filter(|saved| {
+            matches!(saved, IngressEffectIntent::RouteMucGroupchat { .. })
+                && saved.authority_key() == planned.authority_key()
+        });
+        let Some(IngressEffectIntent::RouteMucGroupchat {
+            route_identity: EffectMessageIdentity::StanzaId(frozen),
+            ..
+        }) = candidates.next()
+        else {
+            continue;
+        };
+        if candidates.next().is_none() && minted.by == frozen.by {
+            replacements.push((minted.clone(), frozen.clone()));
+        }
+    }
+    let ids = Replacements(replacements);
+    ids.message(&mut plan.sanitized_message);
+    if let Some(message) = &mut plan.room_canonical_message {
+        ids.message(message);
+    }
+    for planned in &mut plan.plan {
+        for dependency in &mut planned.dependencies {
+            if let PlanEffectDependency::AfterArchive { minted, .. } = dependency {
+                ids.id(minted);
+            }
+        }
+        match &mut planned.effect {
+            Effect::Durable(effect) => ids.durable(effect),
+            Effect::External(effect) => ids.external(effect),
+            Effect::Immediate(_) => {}
+        }
+    }
+    for intent in &mut plan.intents {
+        ids.intent(intent);
+    }
 }
 
 struct Replacements(Vec<(StanzaId, StanzaId)>);

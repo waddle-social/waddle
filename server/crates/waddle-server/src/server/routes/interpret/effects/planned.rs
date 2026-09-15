@@ -58,6 +58,10 @@ pub enum Effect {
 #[derive(Clone, Debug)]
 pub struct PlannedEffect {
     pub effect: Effect,
+    /// Delivery selected before a relayed reflection becomes a reply frame.
+    /// Replay may use this route for a separate frozen occupant repair; the
+    /// frame itself never owns that delivery's progress.
+    pub reflection_delivery: Option<Box<ExternalDeliveryEffect>>,
     pub dependencies: Vec<PlanEffectDependency>,
     /// Duplicate policy. A sender reply can survive a duplicate and still be
     /// swallowed by a request tombstone, so these policies are independent.
@@ -69,6 +73,7 @@ impl PlannedEffect {
     pub fn new(effect: Effect) -> Self {
         Self {
             effect,
+            reflection_delivery: None,
             dependencies: Vec::new(),
             suppression: PlanSuppressionPolicy::Always,
             tombstone_suppression: PlanSuppressionPolicy::TombstoneSwallowed,
@@ -117,6 +122,8 @@ pub enum PlanFailure {
     RichTargetLookup,
     #[error("room snapshot is unavailable")]
     RoomSnapshotUnavailable,
+    #[error("room system message cannot be frozen")]
+    InvalidSystemMessage,
     #[error("displayed-marker inbox snapshot could not be read")]
     InboxSnapshotRead,
     #[error("retraction target could not be read")]
@@ -140,6 +147,8 @@ pub struct IngressPlan {
     pub plan: Vec<PlannedEffect>,
     pub intents: Vec<IngressEffectIntent>,
     pub sanitized_message: Message,
+    /// Exact room dispatcher prototype, independent of deliverable copies or observers.
+    pub room_canonical_message: Option<Box<Message>>,
     pub error_reply: Option<Stanza>,
     pub room_execution: RoomExecutionPath,
 }

@@ -55,6 +55,22 @@ fn test_register_connection() {
     assert_eq!(registry.connection_count(), 1);
 }
 
+#[test]
+fn locally_hosted_send_excludes_remote_owner_mirror() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("remote");
+    let (tx, mut rx) = mpsc::channel(1);
+    registry.register_entry(jid.clone(), ConnectionEntry::remote_hosted(tx));
+
+    let outcome = registry.try_send_to_locally_hosted(
+        &jid,
+        Stanza::Message(make_test_message("remote@example.com")),
+    );
+
+    assert_eq!(outcome, BroadcastOutcome::NotConnected);
+    assert!(rx.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn register_and_unregister_publish_connection_gauge() {
     let guard = crate::telemetry::test_support::acquire().await;

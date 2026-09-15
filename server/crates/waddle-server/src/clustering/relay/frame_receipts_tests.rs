@@ -236,11 +236,19 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
         .await
         .expect("commit reflection");
     let key = decision.message_key.expect("owner key");
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1,
+        "empty non-sender fanout is terminal in the commit transaction"
+    );
     let registry = ConnectionRegistry::new();
     let report = authority
         .execute(&decision, &ImmediateSink, &Deps::registry_only(&registry))
         .await;
-    assert_eq!(report.frame_receipts().len(), 1);
+    assert!(report.frame_receipts().is_empty());
     let frames = report
         .frame_obligations
         .iter()
@@ -277,15 +285,17 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
     origin.retain_relay_frame_completion(completion.expect("owner completion"));
     let retained = origin.frame_receipts();
     assert_eq!(retained, owner_receipts);
-    assert!(!terminalize_if_complete(&fixture.uow, key)
+    assert!(terminalize_if_complete(&fixture.uow, key)
         .await
-        .expect("owner pending"));
+        .expect("owner already terminal"));
     // Disconnect before writing. Neither the origin report nor the owner's
     // expiring token table survives the reconnect.
     drop(origin);
     drop(pending);
     drop(receiver);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert!(retained.is_empty(), "reflection retains no kind-2 proof");
+    assert!(crate::ingress::ExecutionReport::replay_frame_completions(&retained).is_empty());
     for frame in frames {
         let Stanza::Message(message) = frame else {
             panic!("reflection")

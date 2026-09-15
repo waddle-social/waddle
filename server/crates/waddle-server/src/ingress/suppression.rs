@@ -12,36 +12,45 @@ use crate::{
 
 pub fn filter_external_effects(
     plan: &IngressPlan,
+    attempt_sender: Option<&jid::FullJid>,
     verdict: &ReconcileVerdict,
     archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
     unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
     route_progress: &[super::recorded::RouteProgress],
 ) -> Vec<ExternalEffect> {
-    external_effect_indices(plan, verdict, archive_outcomes, unreceipted, route_progress)
-        .into_iter()
-        .filter_map(|index| match &plan.plan[index].effect {
-            Effect::External(effect) => {
-                let mut effect = effect.clone();
-                if let RouteProgressFilter::Keep { remaining } =
-                    route_progress_filter(&effect, route_progress)
+    external_effect_indices(
+        plan,
+        attempt_sender,
+        verdict,
+        archive_outcomes,
+        unreceipted,
+        route_progress,
+    )
+    .into_iter()
+    .filter_map(|index| match &plan.plan[index].effect {
+        Effect::External(effect) => {
+            let mut effect = effect.clone();
+            if let RouteProgressFilter::Keep { remaining } =
+                route_progress_filter(&effect, route_progress)
+            {
+                if let ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+                    resources,
+                    ..
+                }) = &mut effect
                 {
-                    if let ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
-                        resources,
-                        ..
-                    }) = &mut effect
-                    {
-                        *resources = remaining;
-                    }
+                    *resources = remaining;
                 }
-                Some(effect)
             }
-            _ => None,
-        })
-        .collect()
+            Some(effect)
+        }
+        _ => None,
+    })
+    .collect()
 }
 
 pub(crate) fn external_effect_indices(
     plan: &IngressPlan,
+    attempt_sender: Option<&jid::FullJid>,
     verdict: &ReconcileVerdict,
     archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
     unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
@@ -69,7 +78,7 @@ pub(crate) fn external_effect_indices(
             }
             if duplicate
                 && duplicate_policy(planned) == PlanSuppressionPolicy::SenderOnly
-                && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
+                && !sender_delivery(effect, plan.sanitized_message.from.as_ref(), attempt_sender)
                 && !subject_rebroadcast(effect)
                 && !matches!(progress, RouteProgressFilter::Keep { .. })
                 && !unreceipted_repair(effect, unreceipted)
@@ -110,7 +119,11 @@ fn relay_carbons_recorded(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
 /// indices, so trimming cannot detach an effect from its planned prerequisites.
 enum RouteProgressFilter {
     Untracked,
-    Keep { remaining: Vec<jid::FullJid> },
+    Keep {
+        remaining: Vec<jid::FullJid>,
+    },
+    /// Reapply current subject state without contributing historical progress.
+    SubjectRebroadcast,
     Drop,
 }
 
@@ -121,18 +134,31 @@ fn route_progress_filter(
     if !matches!(
         effect,
         ExternalEffect::Delivery(
-            ExternalDeliveryEffect::QueueDetached { .. }
+            ExternalDeliveryEffect::HostOwnedCopy { .. }
+                | ExternalDeliveryEffect::QueueDetached { .. }
                 | ExternalDeliveryEffect::RouteToPeer { .. }
+                | ExternalDeliveryEffect::RelayFullJid { .. }
         )
     ) {
         return RouteProgressFilter::Untracked;
     }
-    let Some(progress) = progress.iter().find(|progress| progress.matches(effect)) else {
+    let relay = matches!(
+        effect,
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { .. })
+    );
+    let Some(progress) = progress
+        .iter()
+        .find(|progress| (!relay || !progress.is_direct()) && progress.correlates(effect))
+    else {
         return RouteProgressFilter::Untracked;
     };
     let remaining = progress.remaining(effect);
     if remaining.is_empty() {
-        RouteProgressFilter::Drop
+        if !progress.is_direct() && subject_rebroadcast(effect) {
+            RouteProgressFilter::SubjectRebroadcast
+        } else {
+            RouteProgressFilter::Drop
+        }
     } else {
         RouteProgressFilter::Keep { remaining }
     }
@@ -165,14 +191,42 @@ fn duplicate_policy(planned: &PlannedEffect) -> PlanSuppressionPolicy {
     }
 }
 
-fn sender_delivery(effect: &ExternalEffect, sender: Option<&jid::Jid>) -> bool {
+fn sender_delivery(
+    effect: &ExternalEffect,
+    sender: Option<&jid::Jid>,
+    attempt_sender: Option<&jid::FullJid>,
+) -> bool {
+    let stanza = match effect {
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+            | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
+            | ExternalDeliveryEffect::QueueDetached { stanza, .. },
+        )
+        | ExternalEffect::Frame(stanza) => stanza,
+        _ => return false,
+    };
+    if let Stanza::Message(message) = stanza.as_ref() {
+        if message.type_ == xmpp_parsers::message::MessageType::Groupchat {
+            // A sibling resource is an occupant copy, never this attempt's reflection.
+            return attempt_sender.is_some_and(|sender| match effect {
+                ExternalEffect::Frame(_) => message
+                    .to
+                    .as_ref()
+                    .is_some_and(|target| target.try_as_full().ok() == Some(sender)),
+                _ => super::recorded::single_target(effect) == Some(sender),
+            });
+        }
+    }
     let Some(sender) = sender else {
         return false;
     };
     match effect {
-        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. }) => {
-            jid.to_bare() == sender.to_bare()
-        }
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::RouteToPeer { .. }
+            | ExternalDeliveryEffect::RelayFullJid { .. }
+            | ExternalDeliveryEffect::QueueDetached { .. },
+        ) => super::recorded::single_target(effect)
+            .is_some_and(|target| target.to_bare() == sender.to_bare()),
         ExternalEffect::Frame(stanza) => {
             matches!(stanza.as_ref(), Stanza::Message(message) if message.to.as_ref().is_some_and(|recipient| recipient.to_bare() == sender.to_bare()))
         }
@@ -203,7 +257,7 @@ fn subject_stanza(stanza: &Stanza) -> bool {
     matches!(stanza, Stanza::Message(message) if subject_message(message))
 }
 
-fn subject_rebroadcast(effect: &ExternalEffect) -> bool {
+pub(super) fn subject_rebroadcast(effect: &ExternalEffect) -> bool {
     match effect {
         ExternalEffect::Frame(stanza) => subject_stanza(stanza),
         ExternalEffect::Delivery(
@@ -227,6 +281,93 @@ mod tests {
     use jid::BareJid;
     use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::{Lang, MessageType};
+
+    #[test]
+    fn duplicate_sender_copy_requires_exact_full_jid_only_for_groupchat() {
+        use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+        let sender: jid::FullJid = "sender@example.com/a".parse().expect("sender");
+        let sibling: jid::FullJid = "sender@example.com/b".parse().expect("sibling");
+        for message_type in [MessageType::Groupchat, MessageType::Chat] {
+            let mut incoming = Message::new(Some("room@example.com".parse().expect("room")));
+            incoming.from = Some(sender.clone().into());
+            incoming.type_ = message_type.clone();
+            let mut effects = Vec::new();
+            for target in [&sender, &sibling] {
+                let mut message = incoming.clone();
+                message.to = Some(target.clone().into());
+                let stanza = Box::new(Stanza::Message(message));
+                effects.extend([
+                    ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                        route_identity: None,
+                        jid: target.clone(),
+                        stanza: stanza.clone(),
+                        kind: PeerDeliveryKind::RegistryFrame,
+                        call_setup: None,
+                    }),
+                    ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid {
+                        route_identity: None,
+                        origin: None,
+                        target: target.clone(),
+                        stanza: stanza.clone(),
+                        call_setup: None,
+                    }),
+                    ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+                        route_identity: None,
+                        bare: target.to_bare(),
+                        resources: vec![target.clone()],
+                        stanza: stanza.clone(),
+                        call_setup: None,
+                    }),
+                    ExternalEffect::Frame(stanza),
+                ]);
+            }
+            let plan = IngressPlan {
+                failure: None,
+                rejection: None,
+                plan: effects
+                    .into_iter()
+                    .map(|effect| {
+                        PlannedEffect::new(Effect::External(effect))
+                            .with_suppression(PlanSuppressionPolicy::SenderOnly)
+                    })
+                    .collect(),
+                intents: vec![],
+                room_canonical_message: None,
+                sanitized_message: incoming,
+                error_reply: None,
+                room_execution: RoomExecutionPath::None,
+            };
+            // Fully receipted aggregate: neither repairable intents nor progress remain.
+            let expected = if message_type == MessageType::Groupchat {
+                vec![0, 1, 2, 3]
+            } else {
+                (0..8).collect()
+            };
+            assert_eq!(
+                external_effect_indices(
+                    &plan,
+                    Some(&sender),
+                    &ReconcileVerdict::Consistent,
+                    &[],
+                    &[],
+                    &[]
+                ),
+                expected
+            );
+            assert_eq!(
+                filter_external_effects(
+                    &plan,
+                    Some(&sender),
+                    &ReconcileVerdict::Consistent,
+                    &[],
+                    &[],
+                    &[]
+                )
+                .len(),
+                expected.len()
+            );
+        }
+    }
 
     #[test]
     fn planned_subject_retry_only_rebroadcasts_without_thread() {
@@ -285,18 +426,33 @@ mod tests {
                 failure: None,
                 plan: sink.snapshot(),
                 intents: vec![],
+                room_canonical_message: None,
                 sanitized_message: message,
                 error_reply: None,
                 rejection: None,
                 room_execution: RoomExecutionPath::None,
             };
             assert_eq!(
-                external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[], &[]),
+                external_effect_indices(
+                    &plan,
+                    Some(&sender),
+                    &ReconcileVerdict::FirstCommit,
+                    &[],
+                    &[],
+                    &[]
+                ),
                 vec![0, 1]
             );
             let expected = if has_thread { vec![0] } else { vec![0, 1] };
             assert_eq!(
-                external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &[]),
+                external_effect_indices(
+                    &plan,
+                    Some(&sender),
+                    &ReconcileVerdict::Consistent,
+                    &[],
+                    &[],
+                    &[]
+                ),
                 expected
             );
         }
@@ -345,20 +501,24 @@ mod tests {
                         room.clone().into(),
                     )),
                 }],
+                room_canonical_message: None,
                 sanitized_message: message,
                 error_reply: None,
                 rejection: None,
                 room_execution: RoomExecutionPath::None,
             };
             for verdict in [ReconcileVerdict::FirstCommit, ReconcileVerdict::Consistent] {
-                assert!(external_effect_indices(&plan, &verdict, &[], &[], &[]).is_empty());
+                assert!(
+                    external_effect_indices(&plan, Some(&sender), &verdict, &[], &[], &[])
+                        .is_empty()
+                );
                 plan.intents
                     .push(IngressEffectIntent::NotificationActivityPreview {
                         owner: owner.clone(),
                         mutation: mutation.clone(),
                     });
                 assert_eq!(
-                    external_effect_indices(&plan, &verdict, &[], &[], &[]),
+                    external_effect_indices(&plan, Some(&sender), &verdict, &[], &[], &[]),
                     vec![0]
                 );
                 let IngressEffectIntent::NotificationActivityPreview {
@@ -369,7 +529,10 @@ mod tests {
                     panic!("activity intent");
                 };
                 *recorded_owner = "other@example.com".parse().expect("other owner");
-                assert!(external_effect_indices(&plan, &verdict, &[], &[], &[]).is_empty());
+                assert!(
+                    external_effect_indices(&plan, Some(&sender), &verdict, &[], &[], &[])
+                        .is_empty()
+                );
                 plan.intents.pop();
                 let mut changed_mutation = mutation.clone();
                 match &mut changed_mutation {
@@ -388,7 +551,10 @@ mod tests {
                         owner: owner.clone(),
                         mutation: changed_mutation,
                     });
-                assert!(external_effect_indices(&plan, &verdict, &[], &[], &[]).is_empty());
+                assert!(
+                    external_effect_indices(&plan, Some(&sender), &verdict, &[], &[], &[])
+                        .is_empty()
+                );
                 plan.intents.pop();
             }
         }
@@ -419,14 +585,16 @@ mod tests {
             error_reply: None,
             rejection: None,
             room_execution: RoomExecutionPath::None,
+            room_canonical_message: None,
         };
         assert_eq!(plan.plan[0].suppression, PlanSuppressionPolicy::SenderOnly);
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[], &[]),
+            external_effect_indices(&plan, None, &ReconcileVerdict::FirstCommit, &[], &[], &[]),
             vec![0]
         );
         assert!(
-            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &[]).is_empty()
+            external_effect_indices(&plan, None, &ReconcileVerdict::Consistent, &[], &[], &[])
+                .is_empty()
         );
     }
 
@@ -462,6 +630,7 @@ mod tests {
                 failure: None,
                 plan: vec![effect],
                 intents: vec![],
+                room_canonical_message: None,
                 sanitized_message: message,
                 error_reply: None,
                 rejection: None,
@@ -484,7 +653,7 @@ mod tests {
                 vec![]
             };
             assert_eq!(
-                filter_external_effects(&plan, &verdict, &outcomes, &[], &[]).len(),
+                filter_external_effects(&plan, None, &verdict, &outcomes, &[], &[]).len(),
                 expected
             );
         }
@@ -509,6 +678,7 @@ mod tests {
                 }),
             ],
             intents: vec![],
+            room_canonical_message: None,
             sanitized_message: message,
             error_reply: None,
             rejection: None,
@@ -526,6 +696,7 @@ mod tests {
             assert_eq!(
                 filter_external_effects(
                     &plan,
+                    None,
                     &ReconcileVerdict::Consistent,
                     &[(
                         PlanEffectDependency::AfterArchive {
@@ -568,16 +739,31 @@ mod tests {
             rejection: None,
             plan: effects,
             intents: vec![],
+            room_canonical_message: None,
             sanitized_message: incoming,
             error_reply: None,
             room_execution: RoomExecutionPath::None,
         };
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[], &[]),
+            external_effect_indices(
+                &plan,
+                Some(&sender),
+                &ReconcileVerdict::FirstCommit,
+                &[],
+                &[],
+                &[]
+            ),
             vec![0, 1]
         );
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &[]),
+            external_effect_indices(
+                &plan,
+                Some(&sender),
+                &ReconcileVerdict::Consistent,
+                &[],
+                &[],
+                &[]
+            ),
             vec![0]
         );
     }
@@ -603,11 +789,14 @@ mod progress_tests {
         };
         let progress = RouteProgress {
             receipt: crate::ingress::durable::receipt_key(&intent).expect("receipt"),
-            recipient: a.to_bare(),
+            obligation: super::super::ProgressObligation::Direct {
+                recipient: a.to_bare(),
+            },
             fanout: vec![a.clone(), b.clone()],
             route_identity: identity.clone(),
             received_at: None,
             completed: vec![a.clone()],
+            current_attempt_reflection: None,
         };
         let message = Message::new(Some(a.to_bare().into()));
         let mut plan = IngressPlan {
@@ -625,6 +814,7 @@ mod progress_tests {
                 .with_suppression(PlanSuppressionPolicy::SenderOnly),
             ],
             intents: vec![intent],
+            room_canonical_message: None,
             sanitized_message: message,
             error_reply: None,
             rejection: None,
@@ -632,12 +822,12 @@ mod progress_tests {
         };
         let saved = [progress];
         let effects =
-            filter_external_effects(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved);
+            filter_external_effects(&plan, None, &ReconcileVerdict::Consistent, &[], &[], &saved);
         assert!(
             matches!(&effects[..], [ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. })] if resources == &[b])
         );
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved),
+            external_effect_indices(&plan, None, &ReconcileVerdict::Consistent, &[], &[], &saved),
             vec![0]
         );
         if let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
@@ -647,13 +837,26 @@ mod progress_tests {
         {
             *resources = vec![a];
         }
-        assert!(
-            filter_external_effects(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved)
-                .is_empty()
-        );
-        assert!(
-            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved)
-                .is_empty()
-        );
+        assert!(filter_external_effects(
+            &plan,
+            None,
+            &ReconcileVerdict::Consistent,
+            &[],
+            &[],
+            &saved
+        )
+        .is_empty());
+        assert!(external_effect_indices(
+            &plan,
+            None,
+            &ReconcileVerdict::Consistent,
+            &[],
+            &[],
+            &saved
+        )
+        .is_empty());
     }
 }
+
+#[cfg(test)]
+mod backend_tests;

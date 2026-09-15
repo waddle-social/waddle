@@ -9,6 +9,7 @@ mod error;
 mod generation;
 mod keys;
 mod ordinal;
+mod stored_message_payload;
 mod stream;
 mod target;
 
@@ -38,5 +39,6 @@ pub use error::IngressTypeError;
 pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision, TransportGeneration};
 pub use keys::{DeliveryKey, MessageKey};
 pub use ordinal::{IngressOrdinal, WireHandledCount};
+pub use stored_message_payload::StoredMessagePayload;
 pub use stream::{IngressStreamId, SmIngressId};
 pub use target::{NormalizedTarget, NormalizedTargetStorage};

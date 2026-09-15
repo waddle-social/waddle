@@ -161,6 +161,8 @@ impl ExtensionHostAdapter {
 
     fn interpret_deps<'a>(&'a self, session: Option<&'a Session>) -> Deps<'a> {
         Deps {
+            delivery_execution_context:
+                crate::server::routes::interpret::DeliveryExecutionContext::Live,
             effects: &crate::server::routes::interpret::effects::ImmediateSink,
             connection_registry: &self.state.deps.protocol.connection_registry,
             user_registry: Some(&self.state.deps.protocol.user_registry),

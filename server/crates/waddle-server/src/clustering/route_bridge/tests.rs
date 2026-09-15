@@ -340,5 +340,6 @@ async fn services_with_claims_and_blocking(
 }
 
 pub(crate) mod delivery;
+pub(crate) mod muc_refresh;
 mod nack_channels;
 mod reassert;

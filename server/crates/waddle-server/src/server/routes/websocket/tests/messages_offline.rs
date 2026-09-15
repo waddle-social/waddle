@@ -56,6 +56,7 @@ pub(super) async fn commit_offline_events(state: &WebSocketState, events: Vec<Ou
             rejection: None,
             plan: effects,
             intents: capture.snapshot().intents,
+            room_canonical_message: None,
             sanitized_message: message,
             error_reply: None,
             room_execution,

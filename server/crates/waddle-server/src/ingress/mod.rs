@@ -28,7 +28,7 @@ pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOut
 use recovery_environment::RecoveryBinding;
 pub use recovery_environment::RecoveryEnvironment;
 mod recorded;
-pub use recorded::RouteProgress;
+pub use recorded::{ProgressObligation, RouteProgress};
 mod rejection;
 pub mod restamp;
 mod restore_offline;
@@ -1190,6 +1190,14 @@ mod room_pin_tests;
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    /// Model the room dispatcher's explicit canonical capture in synthetic plans.
+    pub(crate) fn capture_room_message(
+        plan: &mut super::IngressPlan,
+        message: &xmpp_parsers::message::Message,
+    ) {
+        plan.room_canonical_message = Some(Box::new(message.clone()));
+    }
+
     use crate as waddle_server;
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1208,3 +1216,8 @@ mod offline_settlement_tests;
 
 #[cfg(test)]
 mod offline_hardening_tests;
+
+#[cfg(test)]
+mod muc_occupant_progress_tests;
+
+mod room_canonical;

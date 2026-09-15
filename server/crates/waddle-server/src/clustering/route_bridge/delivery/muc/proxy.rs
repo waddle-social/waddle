@@ -171,6 +171,7 @@ impl OrderedRelayDeliveryBridge {
             epoch: target_snapshot.claim_epoch,
         };
         let seed = RemoteDeliverySeed {
+            ingress_append_context: None,
             services: services.clone(),
             target_entity: target_entity.clone(),
             previous_owner: previous_owner.clone(),
@@ -204,6 +205,7 @@ impl OrderedRelayDeliveryBridge {
                 let retry = Arc::clone(self)
                     .deliver_seeded_remote(
                         RemoteDeliverySeed {
+                            ingress_append_context: None,
                             services: services.clone(),
                             target_entity: target_entity.clone(),
                             previous_owner: previous_owner.clone(),
@@ -394,6 +396,7 @@ impl OrderedRelayDeliveryBridge {
             target_epoch: target_snapshot.claim_epoch,
         };
         let seed = RemoteDeliverySeed {
+            ingress_append_context: None,
             services,
             target_entity,
             previous_owner: target_snapshot.owner,

@@ -21,38 +21,95 @@ use waddle_xmpp::ingress::{
     InboxProjectionMutation, IngressEffectIntent, RoomPinMutation,
 };
 
-/// Frozen fanout authority and the resources already durably completed.
-#[derive(Clone, Debug)]
-pub struct RouteProgress {
-    pub receipt: super::decision::EffectReceiptKey,
-    pub recipient: jid::BareJid,
-    pub fanout: Vec<jid::FullJid>,
-    pub route_identity: waddle_xmpp::ingress::EffectMessageIdentity,
-    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub completed: Vec<jid::FullJid>,
-}
+mod progress;
+mod reflection;
+pub(crate) use progress::single_target;
+pub use progress::{ProgressObligation, RouteProgress};
+pub(super) use reflection::prepare_attempt_reflections;
 
-impl RouteProgress {
-    pub(super) fn matches(&self, effect: &ExternalEffect) -> bool {
-        external_route_recipient(effect).as_ref() == Some(&self.recipient)
-            && external_route_identity(effect) == Some(&self.route_identity)
-    }
-
-    pub(super) fn remaining(&self, effect: &ExternalEffect) -> Vec<jid::FullJid> {
-        external_route_targets(effect)
-            .into_iter()
-            .filter(|target| self.fanout.contains(target) && !self.completed.contains(target))
-            .collect()
-    }
-}
-
-/// Restore direct delivery copies from canonical content and recorded archive
-/// authority. Synthetic pin, invitation and room copies have their own restorers.
+/// Restore room copies from their frozen source and direct copies from canonical
+/// content plus recorded archive authority. Invitations retain their own restorer.
 pub fn restore_delivery_payloads(
     plan: &mut IngressPlan,
     envelope: &crate::ingress_substrate::MessageEnvelope,
+    route_progress: &[RouteProgress],
+    sender: &jid::FullJid,
 ) {
     use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    let mut repairs = Vec::new();
+    plan.plan.retain_mut(|planned| {
+        // A retry's reflection is fresh work, never frozen occupant repair.
+        if reflection::is_attempt_reflection(planned, sender, &plan.intents) {
+            if let Some(repair) = reflection::historical_repair(
+                planned, envelope, &plan.intents, route_progress,
+            ) {
+                repairs.push(repair);
+            }
+            return true;
+        }
+        let Effect::External(effect) = &mut planned.effect else {
+            return true;
+        };
+        if !matches!(
+            effect,
+            ExternalEffect::Delivery(
+                ExternalDeliveryEffect::HostOwnedCopy { .. }
+                    | ExternalDeliveryEffect::RouteToPeer { .. }
+                    | ExternalDeliveryEffect::QueueDetached { .. }
+                    | ExternalDeliveryEffect::RelayFullJid { .. }
+            )
+        ) {
+            return true;
+        }
+        let Some(target) = single_target(effect).cloned() else {
+            return true;
+        };
+        let Some(intent) = plan.intents.iter().find(|intent| {
+            let (IngressEffectIntent::RouteMucGroupchat { route_identity, .. }
+            | IngressEffectIntent::RouteMucSystemBroadcast { route_identity, .. }) = intent
+            else {
+                return false;
+            };
+            super::receipts::routing::full_delivery(effect, &target).is_some_and(|message| {
+                super::receipts::routing::message_identity(message, route_identity)
+            })
+        }) else {
+            return true;
+        };
+        let source = match super::room_canonical::source(envelope, intent) {
+            Ok(source) => source,
+            Err(error) => {
+                // Completed/new subject recipients reapply current state through
+                // the generic executor; only pending copies need frozen content.
+                if super::suppression::subject_rebroadcast(effect)
+                    && !route_progress.iter().any(|progress| {
+                        !progress.is_direct()
+                            && progress.matches(effect)
+                            && !progress.remaining(effect).is_empty()
+                    })
+                {
+                    return true;
+                }
+                tracing::debug!(%error, "frozen MUC source unavailable; leaving obligation pending");
+                return false;
+            }
+        };
+        if let ExternalEffect::Delivery(
+            ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+            | ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+            | ExternalDeliveryEffect::QueueDetached { stanza, .. }
+            | ExternalDeliveryEffect::RelayFullJid { stanza, .. },
+        ) = effect
+        {
+            **stanza = waddle_xmpp::Stanza::Message(super::room_canonical::occupant_copy_message(
+                source,
+                &target,
+                &plan.intents,
+            ));
+        }
+        true
+    });
+    plan.plan.extend(repairs);
     for planned in &mut plan.plan {
         if planned
             .dependencies
@@ -336,6 +393,7 @@ pub fn restore_subject_rejection_replies(
         if errors.next().is_some() {
             return Err(IngressUowError::EffectIntentConflict);
         }
+        // The non-observer planner already stores this canonical prototype; only reply addressing changes.
         let mut reply = envelope.message().clone();
         reply.type_ = xmpp_parsers::message::MessageType::Error;
         reply.from = Some(room.clone().into());
@@ -346,32 +404,37 @@ pub fn restore_subject_rejection_replies(
     Ok(())
 }
 
-pub fn room_observer_envelope(
+pub fn room_canonical_envelope(
     plan: &IngressPlan,
 ) -> Option<crate::ingress_substrate::MessageEnvelope> {
-    if !plan
-        .intents
-        .iter()
-        .any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }))
-    {
+    if !plan.intents.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::RouteMucGroupchat { .. }
+                | IngressEffectIntent::RouteMucSystemBroadcast { .. }
+                | IngressEffectIntent::RoomObserver { .. }
+        )
+    }) {
         return None;
     }
-    plan.plan.iter().find_map(|effect| {
+    let message = plan.room_canonical_message.as_deref()?;
+    let request = plan.plan.iter().find_map(|effect| {
         if let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
-            message,
             error_request,
             ..
         })) = &effect.effect
         {
-            Some(
-                crate::ingress_substrate::MessageEnvelope::with_room_observer(
-                    (**message).clone(),
-                    (**error_request).clone(),
-                ),
-            )
+            Some(error_request.as_ref())
         } else {
             None
         }
+    });
+    Some(match request {
+        Some(request) => crate::ingress_substrate::MessageEnvelope::with_room_observer(
+            message.clone(),
+            request.clone(),
+        ),
+        None => crate::ingress_substrate::MessageEnvelope::new(message.clone()),
     })
 }
 
@@ -494,7 +557,10 @@ fn external_route_targets(effect: &ExternalEffect) -> Vec<jid::FullJid> {
         ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
             route.resources.clone()
         }
-        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. }) => {
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::HostOwnedCopy { target: jid, .. }
+            | ExternalDeliveryEffect::RouteToPeer { jid, .. },
+        ) => {
             vec![jid.clone()]
         }
         ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. }) => {

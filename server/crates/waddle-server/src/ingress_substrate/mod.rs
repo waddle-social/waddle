@@ -11,7 +11,7 @@ mod authority_tests;
 pub use authority::{
     advance_frontier, flush_checkpoint, load_envelope, load_stream_checkpoint, lookup_wire_binding,
     receipt_count, receipts_complete, record_receipt, record_receipt_pooled,
-    record_room_observer_envelope, EffectReceiptKind, EnvelopeVersion, FrontierOutcome,
+    record_room_canonical_envelope, EffectReceiptKind, EnvelopeVersion, FrontierOutcome,
     MessageEnvelope,
 };
 

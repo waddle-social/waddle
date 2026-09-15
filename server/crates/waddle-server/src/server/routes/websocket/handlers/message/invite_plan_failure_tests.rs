@@ -205,6 +205,7 @@ async fn invite_plan(
         plan,
         room_execution,
         intents: capture.snapshot().intents,
+        room_canonical_message: None,
         sanitized_message: message.clone(),
         rejection: sink.rejection(),
         error_reply: frames.into_iter().next(),

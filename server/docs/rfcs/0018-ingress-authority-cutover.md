@@ -26,11 +26,12 @@ resources and families lacking reconstructible payloads (including room pin
 chains without a recorded pinner nick) remain pending. Keyless live sends and
 observer invocations are at-least-once, including after send-before-receipt
 failures and against concurrent client retransmission;
-(ii) non-idempotent fan-out to non-senders remains suppressed on a repaired
-duplicate except for unfinished recorded direct resources tracked below;
-per-resource detached delivery now guarantees one durable queue allocation per
-(recorded obligation, resource), with no retry-induced duplicate (§3.3a), rather
-than at-least-once queue allocation; (iii) live full-JID delivery keeps the
+(ii) repaired duplicates retry unfinished recorded direct resources (§3.3a)
+and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
+payload. Local keyed detached delivery guarantees one durable queue allocation
+per (recorded obligation, resource). Remote receiver appends remain outside
+that keying guarantee (#1778), live sends remain at-least-once, and maintenance
+never relays remote-hosted resources; (iii) live full-JID delivery keeps the
 destination connection's own recipient archive/inbox pipeline (#1658, now tracked as #1759);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
@@ -300,10 +301,6 @@ The remaining limits are explicit:
   A retry between them reads `AlreadyAppended`; an eviction landing between
   them is the custody problem tracked by #1760.
 
-MUC groupchat occupant fanout is outside this mechanism. `QueueDetached`
-effects without a matching recorded direct route retain generic execution and
-receipt ownership; the variant is shared by MUC occupant delivery.
-
 ### 3.3b Per-plugin observer obligations (#1740)
 
 Room observer work is one typed intent and one external effect per eligible
@@ -353,6 +350,87 @@ originally offline recipient is refused (recorded audience wins), and when the
 row is already receipted only the unfinished notification work runs. T0 push
 policy is never re-evaluated for recorded `Inserted` candidates.
 
+### 3.3e Per-occupant room fan-out progress (#1757)
+
+`RouteMucGroupchat` and `RouteMucSystemBroadcast` share storage kind 2 and the
+existing `room|route_identity` semantic key. `ProgressObligation` retains the
+verbatim intent evidence separately from the derived `RouteProgress.fanout`;
+`RouteProgress::settle_evidence` reconstructs the exact recorded obligation.
+Groupchat fanout is the frozen occupant set minus the sender reflection;
+system broadcast fanout includes every recorded occupant. An empty fanout
+settles inside the acceptance or recovery-freeze transaction under the canonical
+lock, without manufacturing delivery progress. The canonical row terminalizes
+only when every sibling obligation is receipted; MUC delivery never discharges
+an inbox `RouteDirect` intent.
+
+Each completed occupant is recorded in `ingress_delivery_receipts` under the
+MUC receipt key and full JID. Local detached copies use that same receipt key
+plus the occupant resource in `SmIngressAppendContext`, so append-before-progress
+rollback and concurrent retries share one durable queue allocation. Delivery
+happens before the progress transaction; progress and the aggregate kind-2
+receipt commit together under the canonical row lock. The aggregate is arm-owned,
+not generic all-or-nothing fanout evidence.
+
+The sender reflection remains `Always`: every duplicate can resend it, including
+a relayed-owner frame. It carries no kind-2 receipt identity, contributes no
+occupant progress, and supplies no aggregate proof through frame completion or
+`owner_receipts`. Its delivery proof remains the sender's XEP-0198 stream.
+Ordinary cross-node occupant copies still use `deliver_ordered.v10`; a definite
+`Delivered` ACK proves that occupant's copy. The MUC-only `RelayFullJid` executor
+arm records progress and preserves the MUC append context when ownership becomes
+local before execution or during relay fallback. Declined or uncertain delivery
+leaves the occupant pending. Direct-route relay fallback retains its existing
+contract, and keyed receiver-side cross-node appends remain #1778.
+
+Phase B freezes the room-canonical groupchat envelope at first owner acceptance,
+independently of observer eligibility, retaining observer request context when
+present. Recorded MUC authority, including archive-free broadcasts, prevents a
+later retry from replacing it. Replay and recovery require `Groupchat`, a
+`from` of `room/nick`, the exact recorded room stanza-id, and the XEP-0421
+occupant-id (`missing_canonical_provenance` otherwise). Copies personalize only
+`to`, preserving the XEP-0045 §7.4 room sender, content and XEP-0359/0421 stamps.
+System broadcasts instead carry their exact room-bare-sender message in
+`system_message: Option<StoredMessagePayload>` on the recorded intent. The
+additive storage field defaults to `None`; those older rows remain pending with
+`missing_payload`, never reconstructed from a triggering command. Neither the
+kind/semantic key nor the relay wire shape changes; no schema reset is needed.
+
+Ordinary duplicate planning keeps only `(fresh audience ∩ frozen fanout) −
+completed`, restoring frozen payloads and room identities even for archive-free
+messages. Subject rebroadcast remains a separate path: pending recorded copies
+can discharge progress; completed or newly joined occupants receive state
+reapplication through generic execution without a MUC append context or widened
+historical proof. Subject/pin dependencies still gate delivery.
+
+Maintenance recovers kind-2 obligations from frozen payloads as one
+`QueueDetached` per unfinished occupant, without rerunning room MAM or inbox
+projections. Subject copies require a receipted `RoomSubjectMutation`; system
+broadcasts require receipted room `Pin` intents and the exact correlated
+`SystemMessageArchive`. Missing or pending prerequisites yield
+`prerequisite_pending`; maintenance does not perform those mutations or archives.
+Remote-owned occupants stay pending with `Unavailable`: maintenance never relays.
+The existing one-second row and four-second recovery budgets are unchanged.
+
+After relay reachability returns, a client retransmission with the same
+origin-id can complete the unfinished remote copy, record its progress, settle
+the aggregate receipt and terminalize the row once all obligations are complete.
+The two-process regression checks this recovery without assuming that the
+failed attempt diverted the occupant-copy channel: a timeout of the fault-control
+ask alone does not establish that the separate delivery ask timed out.
+
+An actual diversion has no time-based expiry. A changed room-origin or
+target-user ownership epoch selects a fresh channel. Owner refresh during an
+in-flight send explicitly forgets the old channel when the target becomes local
+or its target epoch changes; it cannot rescue an already-diverted unchanged
+channel, which is rejected before sending. A relay lookup miss (`NotFound`)
+instead rolls back the sequence without diverting and permits delivery fallback.
+Successful ping or resource re-registration alone does not clear a diversion.
+The regression's recovered socket delivery and receipts do not identify which
+of these paths occurred; they do not prove a same-channel diversion reset.
+Maintenance never relays. Ownership is relative to the recovering node: the
+destination node's own maintenance can still deliver the globally recorded copy
+through its local registry and settle its progress.
+
 ### 3.4 Alias-only dedupe, MAM identity, reconciliation
 - Deleted: `origin_dedup.rs`, the `origin_dedup_*` columns and both partial
   unique indexes, `StoreOutcome::Deduplicated`, pool and transaction dedupe
@@ -381,13 +459,16 @@ policy is never re-evaluated for recorded `Inserted` candidates.
   code (membership grants never demote; subject re-apply **and rebroadcast**
   to all occupants per XEP-0045 §8.1), sends the sender's reflection/reply,
   and suppresses non-idempotent fan-out to non-senders except for unfinished
-  recorded direct resources with per-resource progress.
+  recorded direct resources and MUC occupant copies with per-resource progress
+  (§3.3a, §3.3e).
 - Owner side of a relayed groupchat runs the same pipeline with the
   `Relayed` identity; the proxy envelope carries `IngressCanonicalRef
   { message_key, sender_bare, origin_id }` (relay ask/reply version bumped).
-  No room `ArchiveAuthoritative` intent yet → `OwnerFirstAcceptance` (full
-  fan-out); present → `OwnerDuplicate` (repair, sender-only reflection +
-  subject exception, `WriteAccepted { stanza_id: recorded }`).
+  For MUC fanout, no recorded MUC authority yet → `OwnerFirstAcceptance`
+  (full fanout); present → `OwnerDuplicate` (repair, remaining recorded
+  occupants, sender reflection and subject rebroadcast,
+  `WriteAccepted { stanza_id: recorded }`). Plans without MUC fanout retain
+  the room-archive authority check.
 - Deposed-owner scenario: first message commits under the live room claim;
   claim stolen; retry → `ClaimFenceMissing` before alias resolution.
 
@@ -444,6 +525,10 @@ recipient preparation and no delegated live full-JID route. Pin-owned
 belong to their restorers. Receipted DM mutations permit route-only recovery;
 unreceipted mutations and their routes remain pending. Unsupported families
 are metered when evaluated; see the runbook's "What recovery handles" table.
+
+| Intent family | Automatic recovery or reason it stays pending |
+| --- | --- |
+| `route_muc` (kind 2, including system broadcasts) | Rebuilds unfinished frozen non-sender groupchat copies or system broadcast copies (§3.3e), with canonical provenance and receipted subject/pin/archive prerequisites. Missing payload/provenance and pending prerequisites remain unresolved. Remote-owned occupants are never relayed; groupchat inbox `RouteDirect` siblings remain unsupported. |
 
 Recovery has a 4 s phase budget, a 1 s absolute per-row deadline covering
 freeze, execution, delegation and recount, 64-key scan pages and at most 64

@@ -12,6 +12,7 @@ fn empty_plan() -> IngressPlan {
         failure: None,
         plan: Vec::new(),
         intents: Vec::new(),
+        room_canonical_message: None,
         sanitized_message: xmpp_parsers::message::Message::new(None),
         rejection: None,
         error_reply: None,

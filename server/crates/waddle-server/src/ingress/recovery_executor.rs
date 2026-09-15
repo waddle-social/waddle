@@ -18,6 +18,7 @@ use crate::{
 };
 
 use super::{recovery_rebuild, Deps, EffectReceiptKey, ImmediateSink, RouteProgress};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 
 pub(super) enum RowRecovery {
     Vanished,
@@ -58,6 +59,13 @@ pub(super) async fn recover_row(
     #[cfg(test)]
     super::execute::test_hooks::after_recovery_freeze(key).await;
     let blocked_recipients = blocked_recipients(deps, &frozen).await?;
+    let host_owned_resources = frozen
+        .route_progress
+        .iter()
+        .flat_map(|progress| &progress.fanout)
+        .filter(|target| deps.owns_host_resource(target))
+        .cloned()
+        .collect();
     let rebuilt = recovery_rebuild::rebuild(recovery_rebuild::RecoveryInput {
         key,
         envelope: &frozen.envelope,
@@ -65,6 +73,7 @@ pub(super) async fn recover_row(
         recorded: &frozen.recorded,
         unreceipted: &frozen.unreceipted,
         route_progress: frozen.route_progress,
+        host_owned_resources,
         blocked_recipients: &blocked_recipients,
     })?;
     record_discarded_receipts(uow, key, &rebuilt.discarded_receipts).await?;
@@ -76,12 +85,14 @@ pub(super) async fn recover_row(
     // obligation could still settle. Non-empty once a frame-only effect ran.
     let mut settled_here: Vec<&EffectReceiptKey> = Vec::new();
     if !rebuilt.decision.external.is_empty() {
+        let mut recovery_deps = deps.clone();
+        recovery_deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
         let report = super::execute::execute_effects(
             uow,
             database,
             &rebuilt.decision,
             &ImmediateSink,
-            deps,
+            &recovery_deps,
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
@@ -246,29 +257,27 @@ async fn freeze(
     // One bulk read of delivery progress for the same reason as the receipts.
     let progress = DeliveryProgressRepository::load_all(&mut tx, key).await?;
     let mut route_progress = Vec::new();
+    let mut empty_muc = Vec::new();
     for intent in &unreceipted {
-        let IngressEffectIntent::RouteDirect {
-            recipient,
-            fanout,
-            route_identity,
-        } = intent
+        let Some(mut route) = RouteProgress::from_intent(intent, Some(created_at), Vec::new())?
         else {
             continue;
         };
-        let receipt = super::receipt_key(intent)?;
-        let completed = progress
+        route.completed = progress
             .iter()
-            .find(|(candidate, _)| *candidate == receipt)
+            .find(|(receipt, _)| receipt == &route.receipt)
             .map(|(_, completed)| completed.clone())
             .unwrap_or_default();
-        route_progress.push(RouteProgress {
-            receipt,
-            recipient: recipient.clone(),
-            fanout: fanout.clone(),
-            route_identity: route_identity.clone(),
-            completed,
-            received_at: Some(created_at),
-        });
+        if !route.is_direct() && route.fanout.is_empty() {
+            crate::ingress_uow::settle_recorded(&mut tx, key, &[route.settle_evidence()]).await?;
+            empty_muc.push(route.settle_evidence());
+        } else {
+            route_progress.push(route);
+        }
+    }
+    if !empty_muc.is_empty() {
+        unreceipted.retain(|intent| !empty_muc.contains(intent));
+        super::execute::terminalize_if_complete_in_transaction(&mut tx, key).await?;
     }
     tx.commit().await?;
     Ok(Some(FrozenRecovery {
