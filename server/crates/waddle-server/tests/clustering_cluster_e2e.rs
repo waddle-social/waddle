@@ -2716,15 +2716,17 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         "remote occupant must have no copy while relay is blocked: {absent:?}"
     );
 
-    receive_fanout_copy(
-        &mut sender,
-        &from,
-        "m2",
-        None,
-        FANOUT_COPY_BUDGET_BEHIND_RELAY_TIMEOUT,
-    )
-    .await
-    .expect("first attempt reflection");
+    // The sender's own reflection for the blocked attempt is not part of the
+    // contract under test and its timing depends on how long the faulted relay
+    // holds the execution batch; drain it if it is already here, never wait.
+    let _ = sender
+        .recv_matching_within(Duration::from_millis(250), |frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                    && element.attr("id") == Some("m2")
+            })
+        })
+        .await;
     // Restore reachability, then exercise a real same-origin retransmission.
     // The socket and durable receipts prove recovery; this does not assume
     // that the failed attempt permanently diverted an unchanged channel.
@@ -2732,15 +2734,9 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         .await
         .expect("B relay wakes");
     send_partial_fanout_with_origin(&mut sender, &room, "m2", pending).await;
-    receive_fanout_copy(
-        &mut sender,
-        &from,
-        "m2",
-        None,
-        FANOUT_COPY_BUDGET_BEHIND_RELAY_TIMEOUT,
-    )
-    .await
-    .expect("retransmission reflection proves the retry was processed");
+    receive_fanout_copy(&mut sender, &from, "m2", None, FANOUT_COPY_BUDGET)
+        .await
+        .expect("retransmission reflection proves the retry was processed");
     receive_fanout_copy(&mut remote, &from, "m2", None, FANOUT_COPY_BUDGET)
         .await
         .expect("remaining remote copy arrives after relay recovery");
@@ -2953,10 +2949,7 @@ fn fanout_message(room: &jid::BareJid, id: &str, body: Option<&str>) -> minidom:
         .build()
 }
 
-/// Reflections that execute behind a blocked or timing-out remote relay
-/// arrive only after the ordered-delivery and fault-reply timeouts elapse.
 const FANOUT_COPY_BUDGET: Duration = Duration::from_secs(10);
-const FANOUT_COPY_BUDGET_BEHIND_RELAY_TIMEOUT: Duration = Duration::from_secs(45);
 
 async fn receive_fanout_copy(
     client: &mut WsXmppClient,
