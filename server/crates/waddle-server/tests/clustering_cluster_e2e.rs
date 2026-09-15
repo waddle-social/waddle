@@ -2452,7 +2452,9 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
         (&mut client_b, "B receives local-owner copy"),
         (&mut client_a, "A receives local self-reflection"),
     ] {
-        if let Err(error) = receive_fanout_copy(client, &owner, "m1", Some(&body_a)).await {
+        if let Err(error) =
+            receive_fanout_copy(client, &owner, "m1", Some(&body_a), FANOUT_COPY_BUDGET).await
+        {
             failures.push(format!("{label}: {error}"));
         }
     }
@@ -2464,7 +2466,9 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
         (&mut client_a, "A receives relayed copy"),
         (&mut client_b, "B receives ACK self-reflection"),
     ] {
-        if let Err(error) = receive_fanout_copy(client, &joiner, "m2", Some(&body_b)).await {
+        if let Err(error) =
+            receive_fanout_copy(client, &joiner, "m2", Some(&body_b), FANOUT_COPY_BUDGET).await
+        {
             failures.push(format!("{label}: {error}"));
         }
     }
@@ -2472,7 +2476,15 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
         .send(&String::from(&fanout_message(&room, "chat-state", None)))
         .await
         .expect("A sends bodyless composing groupchat");
-    if let Err(error) = receive_fanout_copy(&mut client_b, &owner, "chat-state", None).await {
+    if let Err(error) = receive_fanout_copy(
+        &mut client_b,
+        &owner,
+        "chat-state",
+        None,
+        FANOUT_COPY_BUDGET,
+    )
+    .await
+    {
         failures.push(format!("B receives bodyless composing: {error}"));
     }
     if let Err(error) = wait_for_fanout_receipts(&db, &started_at).await {
@@ -2612,13 +2624,13 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
 
     // Establish a complete broadcast baseline before injecting the fault.
     let baseline = send_partial_fanout(&mut sender, &room, "m1").await;
-    receive_fanout_copy(&mut local, &from, "m1", None)
+    receive_fanout_copy(&mut local, &from, "m1", None, FANOUT_COPY_BUDGET)
         .await
         .expect("warm local copy");
-    receive_fanout_copy(&mut remote, &from, "m1", None)
+    receive_fanout_copy(&mut remote, &from, "m1", None, FANOUT_COPY_BUDGET)
         .await
         .expect("warm remote copy");
-    receive_fanout_copy(&mut sender, &from, "m1", None)
+    receive_fanout_copy(&mut sender, &from, "m1", None, FANOUT_COPY_BUDGET)
         .await
         .expect("warm reflection");
     let baseline_key = partial_fanout_key(db, &baseline).await;
@@ -2639,7 +2651,7 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         "sleep ask must time out"
     );
     let pending = send_partial_fanout(&mut sender, &room, "m2").await;
-    receive_fanout_copy(&mut local, &from, "m2", None)
+    receive_fanout_copy(&mut local, &from, "m2", None, FANOUT_COPY_BUDGET)
         .await
         .expect("local copy before timeout");
     let pending_key = partial_fanout_key(db, &pending).await;
@@ -2704,9 +2716,15 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         "remote occupant must have no copy while relay is blocked: {absent:?}"
     );
 
-    receive_fanout_copy(&mut sender, &from, "m2", None)
-        .await
-        .expect("first attempt reflection");
+    receive_fanout_copy(
+        &mut sender,
+        &from,
+        "m2",
+        None,
+        FANOUT_COPY_BUDGET_BEHIND_RELAY_TIMEOUT,
+    )
+    .await
+    .expect("first attempt reflection");
     // Restore reachability, then exercise a real same-origin retransmission.
     // The socket and durable receipts prove recovery; this does not assume
     // that the failed attempt permanently diverted an unchanged channel.
@@ -2714,10 +2732,16 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         .await
         .expect("B relay wakes");
     send_partial_fanout_with_origin(&mut sender, &room, "m2", pending).await;
-    receive_fanout_copy(&mut sender, &from, "m2", None)
-        .await
-        .expect("retransmission reflection proves the retry was processed");
-    receive_fanout_copy(&mut remote, &from, "m2", None)
+    receive_fanout_copy(
+        &mut sender,
+        &from,
+        "m2",
+        None,
+        FANOUT_COPY_BUDGET_BEHIND_RELAY_TIMEOUT,
+    )
+    .await
+    .expect("retransmission reflection proves the retry was processed");
+    receive_fanout_copy(&mut remote, &from, "m2", None, FANOUT_COPY_BUDGET)
         .await
         .expect("remaining remote copy arrives after relay recovery");
     assert_eq!(partial_fanout_key(db, &pending).await, pending_key);
@@ -2910,14 +2934,20 @@ fn fanout_message(room: &jid::BareJid, id: &str, body: Option<&str>) -> minidom:
         .build()
 }
 
+/// Reflections that execute behind a blocked or timing-out remote relay
+/// arrive only after the ordered-delivery and fault-reply timeouts elapse.
+const FANOUT_COPY_BUDGET: Duration = Duration::from_secs(10);
+const FANOUT_COPY_BUDGET_BEHIND_RELAY_TIMEOUT: Duration = Duration::from_secs(45);
+
 async fn receive_fanout_copy(
     client: &mut WsXmppClient,
     from: &jid::FullJid,
     id: &str,
     body: Option<&str>,
+    budget: Duration,
 ) -> Result<(), String> {
     let frame = client
-        .recv_matching_within(Duration::from_secs(10), |frame| {
+        .recv_matching_within(budget, |frame| {
             frame.parse::<minidom::Element>().is_ok_and(|element| {
                 element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
                     && matches!(element.attr("id"), Some("m1" | "m2" | "chat-state"))
