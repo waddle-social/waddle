@@ -2450,9 +2450,17 @@ async fn cleanup_muc_presence_with_origin(
         .protocol
         .remote_muc_memberships
         .occupancy_sessions_for_occupant_below(jid, remote_ceiling, connection_generation);
-    let mut completed =
-        cleanup_remote_muc_presence(state, jid, origin, remote_ceiling, connection_generation)
-            .await;
+    // Refused SM detach can re-enter shutdown once. Keep the remote relay
+    // future out of the enclosing shutdown future so that bounded re-entry
+    // also fits the default debug-test stack.
+    let mut completed = Box::pin(cleanup_remote_muc_presence(
+        state,
+        jid,
+        origin,
+        remote_ceiling,
+        connection_generation,
+    ))
+    .await;
 
     let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .list_rooms()
