@@ -3116,8 +3116,21 @@ async fn acquire_remote_muc_cleanup_origin(
     // Ownership observations are advisory: the registry still performs the
     // fenced acquisition. Do not repeatedly ask it to acquire a live foreign
     // claim; restored snapshots retain responsibility for the reconciler.
-    if !remote_muc_cleanup_claim_available(&state.deps.app_state.clustering_claims, &entity).await {
-        return None;
+    match remote_muc_cleanup_claim_available(&state.deps.app_state.clustering_claims, &entity).await
+    {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(error) => {
+            if state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .should_warn_cleanup(jid)
+            {
+                warn!(jid = %jid, error = %error, "failed to observe UserActor claim for remote MUC cleanup");
+            }
+            return None;
+        }
     }
     match state
         .deps
@@ -3158,31 +3171,38 @@ async fn acquire_remote_muc_cleanup_origin(
 }
 
 #[cfg(feature = "clustering")]
+#[derive(Debug, thiserror::Error)]
+enum RemoteMucCleanupClaimObservationError {
+    #[error("claim-store observation failed: {0}")]
+    Store(#[from] waddle_xmpp::ownership::ClaimError),
+    #[error("claim-store observation timed out")]
+    TimedOut,
+    #[error("local claim identity is unavailable")]
+    NodeIdentityUnavailable,
+}
+
+#[cfg(feature = "clustering")]
 async fn remote_muc_cleanup_claim_available(
     claims: &crate::clustering::ClusteringHandles,
     entity: &waddle_xmpp::ownership::Entity,
-) -> bool {
+) -> Result<bool, RemoteMucCleanupClaimObservationError> {
     let (Some(store), Some(identity)) = (&claims.claim_store, &claims.node_identity) else {
-        return claims.claim_store.is_none();
+        return if claims.claim_store.is_none() {
+            Ok(true)
+        } else {
+            Err(RemoteMucCleanupClaimObservationError::NodeIdentityUnavailable)
+        };
     };
-    match tokio::time::timeout(
+    let claim = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         store.current_claim(entity),
     )
     .await
-    {
-        Ok(Ok(claim)) => {
-            super::remote_muc_retry::cleanup_claim_is_available(claim.as_ref(), &identity.current())
-        }
-        result => {
-            debug!(
-                ?entity,
-                ?result,
-                "remote MUC cleanup ownership recheck failed; retaining membership"
-            );
-            false
-        }
-    }
+    .map_err(|_| RemoteMucCleanupClaimObservationError::TimedOut)??;
+    Ok(super::remote_muc_retry::cleanup_claim_is_available(
+        claim.as_ref(),
+        &identity.current(),
+    ))
 }
 
 #[cfg(feature = "clustering")]
@@ -5579,16 +5599,28 @@ mod remote_muc_retry_tests {
             node_identity: Some(SharedNodeIdentity::new(local.clone())),
             ..Default::default()
         };
-        assert!(remote_muc_cleanup_claim_available(&claims, &entity).await);
+        assert!(remote_muc_cleanup_claim_available(&claims, &entity)
+            .await
+            .unwrap());
         let epoch = store.acquire(&entity, &foreign).await.unwrap();
-        assert!(!remote_muc_cleanup_claim_available(&claims, &entity).await);
+        assert!(!remote_muc_cleanup_claim_available(&claims, &entity)
+            .await
+            .unwrap());
         assert_eq!(
             store.current_claim(&entity).await.unwrap().unwrap().owner,
             foreign
         );
         store.release_exact(&entity, &foreign, epoch).await.unwrap();
-        assert!(remote_muc_cleanup_claim_available(&claims, &entity).await);
+        assert!(remote_muc_cleanup_claim_available(&claims, &entity)
+            .await
+            .unwrap());
         store.acquire(&entity, &local).await.unwrap();
-        assert!(remote_muc_cleanup_claim_available(&claims, &entity).await);
+        assert!(remote_muc_cleanup_claim_available(&claims, &entity)
+            .await
+            .unwrap());
     }
 }
+
+#[cfg(all(test, feature = "clustering"))]
+#[path = "cleanup/remote_muc_observation_tests.rs"]
+mod remote_muc_observation_tests;
