@@ -287,7 +287,7 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
     fixture.close().await;
 }
 
-fn select_remote_copy(submission: &mut IngressSubmission, target: &jid::FullJid) {
+pub(super) fn select_remote_copy(submission: &mut IngressSubmission, target: &jid::FullJid) {
     let mut replaced = false;
     for planned in &mut submission.plan.plan {
         let crate::server::routes::interpret::effects::Effect::External(ExternalEffect::Delivery(

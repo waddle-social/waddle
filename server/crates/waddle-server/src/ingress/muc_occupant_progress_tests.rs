@@ -393,6 +393,10 @@ mod replay;
 #[path = "muc_occupant_progress_tests/relay.rs"]
 mod relay;
 
+#[cfg(feature = "clustering")]
+#[path = "muc_occupant_progress_tests/stalled_relay.rs"]
+mod stalled_relay;
+
 #[tokio::test]
 async fn sqlite_muc_occupant_progress_reconnected_sender() {
     partial_broadcast(
