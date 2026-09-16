@@ -802,6 +802,8 @@ mod resolver_affiliation_sync_scheduler_tests {
 
 #[derive(Debug, Default)]
 pub struct RemoteMucMemberships {
+    #[cfg(feature = "clustering")]
+    cleanup_warnings: super::remote_muc_retry::RemoteMucCleanupWarnings,
     entries: dashmap::DashMap<(FullJid, BareJid), RemoteMucMembershipEntry>,
     locks: dashmap::DashMap<(FullJid, BareJid), std::sync::Arc<tokio::sync::Mutex<()>>>,
     next_generation: std::sync::atomic::AtomicU64,
@@ -819,6 +821,8 @@ enum RemoteMucMembershipEntry {
 
 #[derive(Debug, Clone)]
 struct RemoteMucMembership {
+    #[cfg(feature = "clustering")]
+    retry: super::remote_muc_retry::RemoteMucCleanupRetry,
     nick: String,
     generation: u64,
     occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
@@ -849,6 +853,8 @@ impl MembershipGenerationFilter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMucMembershipSnapshot {
+    #[cfg(feature = "clustering")]
+    pub(super) retry: super::remote_muc_retry::RemoteMucCleanupRetry,
     occupant: FullJid,
     room: BareJid,
     nick: String,
@@ -871,6 +877,12 @@ impl RemoteMucMembershipSnapshot {
 }
 
 impl RemoteMucMemberships {
+    #[cfg(feature = "clustering")]
+    pub(super) fn should_warn_cleanup(&self, occupant: &FullJid) -> bool {
+        self.cleanup_warnings
+            .should_warn(occupant, std::time::Instant::now())
+    }
+
     pub async fn lock_membership(
         &self,
         occupant: &FullJid,
@@ -905,6 +917,8 @@ impl RemoteMucMemberships {
         self.entries.insert(
             (occupant.clone(), room.clone()),
             RemoteMucMembershipEntry::Active(RemoteMucMembership {
+                #[cfg(feature = "clustering")]
+                retry: Default::default(),
                 nick: nick.to_string(),
                 generation,
                 occupant_session,
@@ -1033,6 +1047,8 @@ impl RemoteMucMemberships {
                     return None;
                 }
                 Some(RemoteMucMembershipSnapshot {
+                    #[cfg(feature = "clustering")]
+                    retry: membership.retry.clone(),
                     occupant: entry_occupant.clone(),
                     room: room.clone(),
                     nick: membership.nick.clone(),
@@ -1056,6 +1072,8 @@ impl RemoteMucMemberships {
                     if *generation == snapshot.generation
             ) {
                 entry.insert(RemoteMucMembershipEntry::Active(RemoteMucMembership {
+                    #[cfg(feature = "clustering")]
+                    retry: snapshot.retry.clone(),
                     nick: snapshot.nick.clone(),
                     generation: snapshot.generation,
                     occupant_session: snapshot.occupant_session,
@@ -1096,6 +1114,14 @@ impl RemoteMucMemberships {
             RemoteMucMembershipEntry::Active(membership)
                 if membership.generation == snapshot.generation =>
             {
+                // Another cleanup may have failed and restored this generation
+                // since collection. Take its CURRENT budget under the entry
+                // guard, so a stale collected snapshot cannot bypass backoff.
+                #[cfg(feature = "clustering")]
+                let snapshot = RemoteMucMembershipSnapshot {
+                    retry: membership.retry.clone(),
+                    ..snapshot
+                };
                 *entry = RemoteMucMembershipEntry::Tombstone {
                     generation: snapshot.generation,
                 };
@@ -1137,6 +1163,30 @@ impl RemoteMucMemberships {
 #[cfg(test)]
 mod remote_muc_membership_tests {
     use super::*;
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn stale_collected_snapshot_cannot_reset_a_concurrent_cleanup_retry() {
+        let memberships = RemoteMucMemberships::default();
+        let occupant: FullJid = "departed@example.com/web".parse().unwrap();
+        let room: BareJid = "room@muc.example.com".parse().unwrap();
+        memberships.record_join(
+            &occupant,
+            &room,
+            "departed",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
+        let stale = memberships.take_for_occupant(&occupant).pop().unwrap();
+        let mut failed = stale.clone();
+        let now = std::time::Instant::now();
+        failed.retry.failed(now);
+        memberships.restore_snapshot_if_current(&failed);
+        // Model a collector paused before mark_snapshot_taken while another
+        // cleanup took and restored the same membership generation.
+        let taken = memberships.mark_snapshot_taken(stale).unwrap();
+        assert_eq!(taken.retry, failed.retry);
+        assert!(!taken.retry.ready(now));
+    }
 
     fn full_jid(s: &str) -> FullJid {
         s.parse().expect("valid full jid")

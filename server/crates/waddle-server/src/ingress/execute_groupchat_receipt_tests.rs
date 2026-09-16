@@ -10,7 +10,7 @@ use waddle_xmpp::ingress::{
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 use xmpp_parsers::message::MessageType;
 
-async fn groupchat_decision(fixture: &IngressFixture) -> IngressDecision {
+pub(super) async fn groupchat_decision(fixture: &IngressFixture) -> IngressDecision {
     let mut submission = fixture.submission(Some("groupchat-receipt"), "room fanout");
     let room: BareJid = "room@muc.example.com".parse().expect("room");
     let local: FullJid = "juliet@example.com/phone".parse().expect("local occupant");

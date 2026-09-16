@@ -49,6 +49,12 @@
 
 #![cfg(feature = "clustering")]
 
+#[path = "xep0045_remote_cleanup_retry/mod.rs"]
+mod xep0045_remote_cleanup_retry;
+
+#[path = "xep0045_partial_fanout/mod.rs"]
+mod xep0045_partial_fanout;
+
 use base64::Engine;
 use libp2p::identity::ed25519;
 use std::time::{Duration, Instant};

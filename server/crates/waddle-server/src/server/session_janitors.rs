@@ -11712,10 +11712,9 @@ mod local_muc_departure_tests {
 }
 
 /// Interval for the remote-MUC-membership reconciliation janitor
-/// (#1249). 30s bounds how long a ghost occupant survives a failed
-/// disconnect-cleanup relay while keeping the sweep trivially cheap
-/// (an in-memory DashMap scan; the relay only runs for entries whose
-/// occupant has no local presence at all).
+/// (#1249). The 30s scan observes retained membership work; each snapshot
+/// gates actual cleanup with exponential backoff. After five failures it
+/// moves to 15-minute reconciliation, retaining provenance until recovery.
 #[cfg(feature = "clustering")]
 const REMOTE_MUC_MEMBERSHIP_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -11813,8 +11812,9 @@ async fn collect_remote_muc_reconcile_candidates(
 /// disconnect-time attempt failed (remote node unreachable, claim
 /// lookup failure, origin `UserActor` claim held by another node).
 /// `cleanup_remote_muc_presence` restores the membership snapshot on
-/// every failed relay, so this janitor retries until the remote side
-/// recovers — making cross-node occupancy cleanup convergent instead of
+/// every failed relay together with its retry budget. This janitor checks
+/// liveness on every sweep and re-drives only when backoff permits, making
+/// cross-node occupancy cleanup convergent instead of
 /// one-shot (the root cause of the recurring production error
 /// `failed to relay remote MUC unavailable during disconnect cleanup`).
 #[cfg(feature = "clustering")]
@@ -11848,9 +11848,9 @@ async fn run_remote_muc_membership_sweep(state: &WebSocketState) {
             );
             return;
         }
-        info!(
+        debug!(
             candidates = candidates.occupants.len(),
-            "remote MUC reconciler: re-driving unavailable relays for departed occupants"
+            "remote MUC reconciler: checking retained cleanup for departed occupants"
         );
         let mut sweep_failed = candidates.had_failure;
         for occupant in candidates.occupants {

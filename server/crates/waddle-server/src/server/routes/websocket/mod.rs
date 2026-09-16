@@ -76,6 +76,8 @@ pub(crate) mod muc_invites;
 mod outbound;
 mod parse_errors;
 mod registration;
+#[cfg(feature = "clustering")]
+mod remote_muc_retry;
 pub(crate) mod replay;
 mod resource_binding;
 mod resume_replay;

@@ -30,6 +30,9 @@ mod carbon_progress;
 #[path = "execute_observers.rs"]
 mod observers;
 
+#[path = "execute_muc_fanout.rs"]
+mod muc_fanout;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalOutcome {
     Done,
@@ -392,6 +395,15 @@ pub async fn execute_effects(
                 }
             }
             break;
+        };
+        // Recipient snapshots are unordered. A stalled remote occupant must
+        // not consume the whole budget before ready local copies of the same
+        // broadcast can record progress. Failed dependency results retain
+        // their original order, and reflection is excluded by RouteProgress.
+        let index = if ready {
+            muc_fanout::local_before_remote(decision, &planned, &completed, index).unwrap_or(index)
+        } else {
+            index
         };
         let effect = &decision.external[index];
         if ready && observers::is_observer(effect) {
