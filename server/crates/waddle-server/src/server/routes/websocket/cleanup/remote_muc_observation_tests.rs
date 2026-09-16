@@ -154,20 +154,16 @@ async fn assert_failed_observation_warns_once_per_full_jid(failure: ObservationF
     let capture = WarningCapture::default();
     async {
         for _ in 0..2 {
-            assert!(
-                acquire_remote_muc_cleanup_origin(&state, &jid)
-                    .await
-                    .is_none()
-            );
+            assert!(acquire_remote_muc_cleanup_origin(&state, &jid)
+                .await
+                .is_none());
         }
         let warnings = capture.messages();
         assert_eq!(warnings.lines().count(), 1, "{warnings}");
         assert!(warnings.contains("failed to observe UserActor claim for remote MUC cleanup"));
-        assert!(
-            acquire_remote_muc_cleanup_origin(&state, &sibling)
-                .await
-                .is_none()
-        );
+        assert!(acquire_remote_muc_cleanup_origin(&state, &sibling)
+            .await
+            .is_none());
         assert_eq!(capture.messages().lines().count(), 2);
     }
     .with_subscriber(capture.subscriber())
@@ -196,25 +192,19 @@ async fn fresh_foreign_claim_defers_cleanup_without_consuming_warning_budget() {
     let state = state_with_claim_store(store).await;
     let capture = WarningCapture::default();
     async {
-        assert!(
-            acquire_remote_muc_cleanup_origin(&state, &jid)
-                .await
-                .is_none()
-        );
-        assert!(
-            acquire_remote_muc_cleanup_origin(&state, &jid)
-                .await
-                .is_none()
-        );
+        assert!(acquire_remote_muc_cleanup_origin(&state, &jid)
+            .await
+            .is_none());
+        assert!(acquire_remote_muc_cleanup_origin(&state, &jid)
+            .await
+            .is_none());
     }
     .with_subscriber(capture.subscriber())
     .await;
     assert!(capture.messages().is_empty());
-    assert!(
-        state
-            .deps
-            .protocol
-            .remote_muc_memberships
-            .should_warn_cleanup(&jid)
-    );
+    assert!(state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .should_warn_cleanup(&jid));
 }
