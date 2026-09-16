@@ -486,9 +486,9 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
 /// Residual (documented, #1195): when the user's `UserActor` claim is
 /// held by another node (second device online there) AND the
 /// disconnect-time remote-resource relay failed (e.g. partition), the
-/// re-drive's `Entity(UserActor)` origin stays `OriginUnavailable`
-/// until that claim is released — the ghost heals when the other
-/// device disconnects or the claim expires, not before.
+/// re-drive retains its membership and observes ownership with backoff.
+/// After five failed attempts, it checks every 15 minutes; acquisition
+/// resumes once the live foreign claim is released or becomes stale.
 #[cfg(feature = "clustering")]
 pub(crate) async fn redrive_remote_muc_cleanup(
     state: &WebSocketState,
@@ -2768,13 +2768,33 @@ async fn cleanup_remote_muc_presence(
     remote_ceiling: u64,
     connection_generation: MembershipGenerationFilter,
 ) -> bool {
-    let memberships = state
+    let mut memberships = state
         .deps
         .protocol
         .remote_muc_memberships
         .take_for_occupant_below_with_session(jid, remote_ceiling, connection_generation);
     if memberships.is_empty() {
         return true;
+    }
+    let mut completed = true;
+    let now = std::time::Instant::now();
+    // Taking/restoring keeps the existing generation fence. A sweep during
+    // backoff must neither consume attempts nor slide the stored deadline.
+    memberships.retain(|membership| {
+        if membership.retry.ready(now) {
+            true
+        } else {
+            completed = false;
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .restore_snapshot_if_current(membership);
+            false
+        }
+    });
+    if memberships.is_empty() {
+        return completed;
     }
     let Some(bridge) = state
         .deps
@@ -2783,12 +2803,8 @@ async fn cleanup_remote_muc_presence(
         .ordered_relay_delivery_bridge
         .as_ref()
     else {
-        for membership in &memberships {
-            state
-                .deps
-                .protocol
-                .remote_muc_memberships
-                .restore_snapshot_if_current(membership);
+        for membership in &mut memberships {
+            retain_failed_remote_muc_cleanup(state, membership);
         }
         return false;
     };
@@ -2797,20 +2813,15 @@ async fn cleanup_remote_muc_presence(
         Some(origin) => origin,
         None => {
             let Some(origin) = acquire_remote_muc_cleanup_origin(state, jid).await else {
-                for membership in &memberships {
-                    state
-                        .deps
-                        .protocol
-                        .remote_muc_memberships
-                        .restore_snapshot_if_current(membership);
+                for membership in &mut memberships {
+                    retain_failed_remote_muc_cleanup(state, membership);
                 }
                 return false;
             };
             origin
         }
     };
-    let mut completed = true;
-    for membership in memberships {
+    for mut membership in memberships {
         let room_jid = membership.room().clone();
         let nick = membership.nick().to_string();
         let Some(to) = room_jid
@@ -2820,11 +2831,7 @@ async fn cleanup_remote_muc_presence(
             .map(jid::Jid::from)
         else {
             completed = false;
-            state
-                .deps
-                .protocol
-                .remote_muc_memberships
-                .restore_snapshot_if_current(&membership);
+            retain_failed_remote_muc_cleanup(state, &mut membership);
             continue;
         };
         let _remote_muc_membership_guard = state
@@ -2916,11 +2923,7 @@ async fn cleanup_remote_muc_presence(
                     decision = ?decision,
                     "remote MUC unavailable cleanup commit uncertain; keeping retry provenance"
                 );
-                state
-                    .deps
-                    .protocol
-                    .remote_muc_memberships
-                    .restore_snapshot_if_current(&membership);
+                retain_failed_remote_muc_cleanup(state, &mut membership);
             }
             // #1249: the harmful case. Restore the membership so the
             // reconciliation janitor re-drives the relay until the remote
@@ -2928,25 +2931,25 @@ async fn cleanup_remote_muc_presence(
             // of one-shot.
             RemoteMucCleanupDisposition::RetryableFailure => {
                 completed = false;
-                // Log-level split (race review P2 on PR #1277):
-                // `OriginUnavailable` is the EXPECTED steady state while
-                // the user's other device holds the `UserActor` claim on
-                // another node — the janitor re-drives every 30s and the
-                // relay converges when that claim releases, so a warn per
-                // attempt would just recreate the recurring-noise problem
-                // this fix retires. Genuine relay failures stay at warn.
+                // Expected ownership contention is debug-only; genuine relay
+                // failures share a per-full-JID warning budget across rooms.
                 if matches!(
                     decision,
                     crate::clustering::route_bridge::MucProxyRouteDecision::OriginUnavailable
                 ) {
-                    info!(
+                    debug!(
                         room = %room_jid,
                         nick = %nick,
                         jid = %jid,
                         "remote MUC unavailable cleanup deferred: origin claim held \
                          elsewhere; membership kept for janitor re-drive"
                     );
-                } else {
+                } else if state
+                    .deps
+                    .protocol
+                    .remote_muc_memberships
+                    .should_warn_cleanup(jid)
+                {
                     warn!(
                         room = %room_jid,
                         nick = %nick,
@@ -2956,11 +2959,7 @@ async fn cleanup_remote_muc_presence(
                          membership kept for janitor re-drive"
                     );
                 }
-                state
-                    .deps
-                    .protocol
-                    .remote_muc_memberships
-                    .restore_snapshot_if_current(&membership);
+                retain_failed_remote_muc_cleanup(state, &mut membership);
             }
         }
     }
@@ -2968,6 +2967,21 @@ async fn cleanup_remote_muc_presence(
         completed &= reap_remote_muc_cleanup_origin_if_empty(state, jid).await;
     }
     completed
+}
+
+#[cfg(feature = "clustering")]
+fn retain_failed_remote_muc_cleanup(
+    state: &WebSocketState,
+    membership: &mut super::state::RemoteMucMembershipSnapshot,
+) {
+    if membership.retry.failed(std::time::Instant::now()) {
+        info!(room = %membership.room(), "remote MUC cleanup active retry budget exhausted; retained for 15-minute reconciliation");
+    }
+    state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .restore_snapshot_if_current(membership);
 }
 
 /// How the disconnect-cleanup pass converges one remote MUC membership
@@ -3091,47 +3105,76 @@ async fn acquire_remote_muc_cleanup_origin(
         waddle_xmpp::ownership::EntityType::UserActor,
         bare_jid.to_string(),
     );
-    // A resumed resource may still be registered under the old node while
-    // that node drains its force-detach cleanup.  Foreign ownership is a
-    // legitimate transient state, not a terminal one-shot failure.
-    for attempt in 0..3 {
-        match state
-            .deps
-            .protocol
-            .user_registry
-            .ask(waddle_xmpp::registry::GetOrCreateUser {
-                bare_jid: bare_jid.clone(),
-            })
-            .mailbox_timeout(std::time::Duration::from_secs(2))
-            .reply_timeout(std::time::Duration::from_secs(2))
-            .await
-        {
-            Ok(_) => {
-                return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-                    kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-                        entity.clone(),
-                    ),
-                    sender_entity: entity,
-                    inbound_sequence: 0,
-                    handoff: None,
-                });
+    // Ownership observations are advisory: the registry still performs the
+    // fenced acquisition. Do not repeatedly ask it to acquire a live foreign
+    // claim; restored snapshots retain responsibility for the reconciler.
+    if !remote_muc_cleanup_claim_available(&state.deps.app_state.clustering_claims, &entity).await {
+        return None;
+    }
+    match state
+        .deps
+        .protocol
+        .user_registry
+        .ask(waddle_xmpp::registry::GetOrCreateUser { bare_jid })
+        .mailbox_timeout(std::time::Duration::from_secs(2))
+        .reply_timeout(std::time::Duration::from_secs(2))
+        .await
+    {
+        Ok(_) => Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
+            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
+                entity.clone(),
+            ),
+            sender_entity: entity,
+            inbound_sequence: 0,
+            handoff: None,
+        }),
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::registry::UserRegistryError::ClaimHeldByAnotherNode(_),
+        )) => {
+            // A holder can win between the observation and acquisition.
+            debug!(jid = %jid, "remote MUC cleanup deferred to live UserActor claim holder");
+            None
+        }
+        Err(error) => {
+            if state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .should_warn_cleanup(jid)
+            {
+                warn!(jid = %jid, error = ?error, "failed to acquire UserActor claim for remote MUC cleanup");
             }
-            Err(kameo::error::SendError::HandlerError(
-                waddle_xmpp::registry::UserRegistryError::ClaimHeldByAnotherNode(_),
-            )) if attempt < 2 => {
-                tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt + 1))).await;
-            }
-            Err(error) => {
-                warn!(
-                    jid = %jid,
-                    error = ?error,
-                    "failed to acquire UserActor claim for remote MUC cleanup"
-                );
-                return None;
-            }
+            None
         }
     }
-    None
+}
+
+#[cfg(feature = "clustering")]
+async fn remote_muc_cleanup_claim_available(
+    claims: &crate::clustering::ClusteringHandles,
+    entity: &waddle_xmpp::ownership::Entity,
+) -> bool {
+    let (Some(store), Some(identity)) = (&claims.claim_store, &claims.node_identity) else {
+        return claims.claim_store.is_none();
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.current_claim(entity),
+    )
+    .await
+    {
+        Ok(Ok(claim)) => {
+            super::remote_muc_retry::cleanup_claim_is_available(claim.as_ref(), &identity.current())
+        }
+        result => {
+            debug!(
+                ?entity,
+                ?result,
+                "remote MUC cleanup ownership recheck failed; retaining membership"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(feature = "clustering")]
@@ -5451,5 +5494,93 @@ async fn retire_ingress_stream(
 ) {
     if let Err(error) = Box::pin(state.deps.protocol.ingress.forget_stream(stream_id)).await {
         warn!(%stream_id, %error, "failed to retire ingress stream");
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod remote_muc_retry_tests {
+    use super::super::tests::create_test_websocket_state;
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_remote_cleanup_backs_off_without_losing_membership_or_resetting_on_poll() {
+        let state = create_test_websocket_state().await;
+        let occupant: FullJid = "departed@example.com/web".parse().unwrap();
+        let room: BareJid = "room@muc.example.com".parse().unwrap();
+        let memberships = &state.deps.protocol.remote_muc_memberships;
+        memberships.record_join(
+            &occupant,
+            &room,
+            "departed",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
+        assert!(
+            !cleanup_remote_muc_presence(
+                &state,
+                &occupant,
+                None,
+                u64::MAX,
+                MembershipGenerationFilter::Any
+            )
+            .await
+        );
+        let first = memberships.take_for_occupant(&occupant).pop().unwrap();
+        assert!(
+            !first.retry.ready(std::time::Instant::now()),
+            "a failed relay must back off"
+        );
+        memberships.restore_snapshot_if_current(&first);
+        assert!(
+            !cleanup_remote_muc_presence(
+                &state,
+                &occupant,
+                None,
+                u64::MAX,
+                MembershipGenerationFilter::Any
+            )
+            .await
+        );
+        let polled = memberships.take_for_occupant(&occupant).pop().unwrap();
+        assert_eq!(
+            first.retry, polled.retry,
+            "polling during backoff must not consume attempts or slide the deadline"
+        );
+        memberships.restore_snapshot_if_current(&polled);
+        memberships.record_join(
+            &occupant,
+            &room,
+            "replacement",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
+        memberships.restore_snapshot_if_current(&first);
+        let replacement = memberships.take_for_occupant(&occupant).pop().unwrap();
+        assert!(replacement.retry.ready(std::time::Instant::now()));
+        assert_eq!(replacement.nick(), "replacement");
+    }
+    #[tokio::test]
+    async fn remote_cleanup_rechecks_foreign_claim_release_before_acquiring() {
+        use waddle_xmpp::ownership::{
+            ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+        };
+        let store = Arc::new(InProcessClaimStore::new());
+        let local = NodeIdentity::new("local", "incarnation");
+        let foreign = NodeIdentity::new("foreign", "incarnation");
+        let entity = Entity::new(EntityType::UserActor, "departed@example.com");
+        let claims = crate::clustering::ClusteringHandles {
+            claim_store: Some(store.clone()),
+            node_identity: Some(SharedNodeIdentity::new(local.clone())),
+            ..Default::default()
+        };
+        assert!(remote_muc_cleanup_claim_available(&claims, &entity).await);
+        let epoch = store.acquire(&entity, &foreign).await.unwrap();
+        assert!(!remote_muc_cleanup_claim_available(&claims, &entity).await);
+        assert_eq!(
+            store.current_claim(&entity).await.unwrap().unwrap().owner,
+            foreign
+        );
+        store.release_exact(&entity, &foreign, epoch).await.unwrap();
+        assert!(remote_muc_cleanup_claim_available(&claims, &entity).await);
+        store.acquire(&entity, &local).await.unwrap();
+        assert!(remote_muc_cleanup_claim_available(&claims, &entity).await);
     }
 }
