@@ -142,7 +142,11 @@ async fn membership_runs_before_dependents_and_preserved_grant_cannot_be_compens
             .map(|(_, outcome)| *outcome)
             .collect::<Vec<_>>(),
         vec![
-            ExternalOutcome::Failed,
+            // The ledger write failed in storage and may still have committed,
+            // so it is uncertain rather than failed (#1782). Dependents remain
+            // blocked either way: `permits_dependents` admits only
+            // `InviteLedger(Ok(..))`, so the grant is still not compensated.
+            ExternalOutcome::Uncertain,
             ExternalOutcome::AwaitingFrameDelivery,
             ExternalOutcome::Done
         ]
