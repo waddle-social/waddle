@@ -18,14 +18,25 @@ impl OrderedRelayDeliveryBridge {
                     OrderedRelayPayload::Message { ingress_append, .. } => ingress_append.as_ref(),
                     _ => None,
                 };
-                let ingress_append_context = super::ingress_append::authorize_ingress_append(
-                    &services,
-                    &envelope.sender_claim.entity,
-                    target,
-                    stanza,
-                    obligation,
-                )
-                .await;
+                // This path either forwards to a registered socket, which carries
+                // no obligation at all (#1789), or appends locally. So when this
+                // node holds no detached session for the resource the key cannot
+                // be used, and the canonical read behind authorization -- which
+                // decodes a whole envelope -- is pure cost on every live
+                // recipient. Skipping is safe HERE precisely because nothing
+                // downstream of this call forwards the obligation onward.
+                let ingress_append_context =
+                    if super::ingress_append::local_append_can_use_key(&services, target).await {
+                        super::ingress_append::authorize_ingress_append(
+                            &services,
+                            &envelope.sender_claim.entity,
+                            stanza,
+                            obligation,
+                        )
+                        .await
+                    } else {
+                        None
+                    };
                 self.deliver_reserved_full_jid(
                     &services,
                     target,

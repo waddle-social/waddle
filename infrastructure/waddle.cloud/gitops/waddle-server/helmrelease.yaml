@@ -32,21 +32,33 @@ spec:
     # it must never change across upgrades or rollbacks.
     deployment:
       uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
-    # Zero-downtime rollouts (ADR-0017 Phase 4). Safe under mixed
-    # versions because the ordered-relay envelope message id is
-    # versioned (deliver_ordered.vN, #1597/#1600): an old replica
-    # rejects a newer envelope pre-handler and the sender rolls back
-    # the sequence instead of poisoning the shared channel. Any
-    # envelope or reply-type change MUST bump the version (see
-    # server/CLAUDE.md) — that invariant is what keeps this strategy
-    # sound. The #1770 archive_seq cutover (PR #1771) was the fourth one-shot
-    # Recreate (after the #1657 V1012, #1739-#1743 V1014 and #1756 V1015/V1016
-    # cutovers); this restores the steady state.
+    # Zero-downtime rollouts (ADR-0017 Phase 4) are the steady state, and are
+    # safe under mixed versions because the ordered-relay envelope message id is
+    # versioned (deliver_ordered.vN, #1597/#1600): an old replica rejects a
+    # newer envelope pre-handler and the sender rolls back the sequence instead
+    # of poisoning the shared channel. Any envelope or reply-type change MUST
+    # bump the version (see server/CLAUDE.md) — that invariant is what keeps
+    # that strategy sound.
+    #
+    # One-shot Recreate for the #1778 remote_resource_route.v7 cutover
+    # (PR #1788); flip back to RollingUpdate (maxSurge 1, maxUnavailable 0) in a
+    # follow-up PR once the rollout is verified. This is the fifth one-shot
+    # Recreate, after the #1657 V1012, #1739-#1743 V1014, #1756 V1015/V1016 and
+    # #1770 archive_seq cutovers.
+    #
+    # Why a rolling update is NOT safe for this one: the versioned-envelope
+    # argument above covers `deliver_ordered`, which synthesizes an
+    # `UnsupportedEnvelope` NACK from `UnknownMessage` and rolls the sequence
+    # back. `remote_resource_route` has no such fallback — the ask error is
+    # classified by `outcome_for_ask_error` as a definite no-effect, i.e.
+    # `Dropped` for messages and presence and `Unavailable` for IQs. Unlike an
+    # ingress-committed message, the live IQ, presence and MUC-proxy operations
+    # that remote-owned connections route through that endpoint are not
+    # obligations and have no maintenance recovery, so a v6/v7 window would lose
+    # them outright rather than delay them. The #1756 v5 -> v6 bump rode a
+    # Recreate for the same reason (PR #1758).
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main

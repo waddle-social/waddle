@@ -363,6 +363,153 @@ async fn ingress_append_authority(
     fixture.close().await;
 }
 
+// An intermediate sender owner has no local detached recipient. It must still
+// authorize the key before forwarding, so recovery cannot append it twice.
+async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture) {
+    let pool = crate::db::DatabasePool::new(
+        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("shared database");
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress(
+        Arc::new(pool),
+        Arc::new(fixture.authority().await),
+    )
+    .await;
+    let keypair = Keypair::generate_ed25519();
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        origin_identity(),
+        keypair.public().to_peer_id().to_string(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    let recipient = target_full();
+    let mut submission = fixture.submission(None, "forwarded obligation");
+    let source = submission.sender.clone();
+    services
+        .claim_store
+        .acquire(&user_entity(&source.to_bare()), &origin_identity())
+        .await
+        .expect("local sender claim");
+    assert!(services
+        .sm_session_registry
+        .detached_resources_for_user(&recipient.to_bare())
+        .await
+        .expect("local detached resources")
+        .is_empty());
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: recipient.to_bare(),
+        fanout: vec![recipient.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    };
+    let receipt = crate::ingress::receipt_key(&intent).expect("receipt");
+    submission.plan.intents = vec![intent];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("canonical row naming the sender");
+    let obligation = IngressAppendObligationRef {
+        message_key: decision.message_key.expect("canonical key"),
+        sender_bare: source.to_bare(),
+        receipt,
+        received_at: Some(chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp")),
+    };
+    let mut message = submission.plan.sanitized_message.clone();
+    message.to = Some(recipient.clone().into());
+    let stanza = Stanza::Message(message.clone());
+    let (tx, _rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(source.clone(), entry.clone());
+    services
+        .user_registry
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: source.clone(),
+            entry,
+        })
+        .await
+        .expect("source registration");
+    let stopped = CancellationToken::new();
+    stopped.cancel();
+    let bridge = OrderedRelayDeliveryBridge::new(stopped, &ClusteringMessagingConfig::default());
+    bridge.wire_origin_signer(keypair);
+    bridge.wire(Arc::new(services));
+    let registration_id = RemoteResourceRegistrationId::fresh();
+    let socket_generation = RemoteResourceSocketGeneration::next(None);
+    bridge.remote_owner_resources.lock().await.insert(
+        source.clone(),
+        RemoteOwnerRegistration {
+            registration_id,
+            socket_generation,
+            socket_node: NodeId::new("source-socket-node".to_owned()),
+            owner,
+        },
+    );
+    // Capture at the real ordered ask boundary; cancellation needs no remote
+    // actor or elapsed-time synchronization and leaves the offered payload intact.
+    let captured = TEST_CANCELLED_ENVELOPES
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            bridge
+                .route_remote_resource_stanza_on_owner(
+                    RelayRouteRemoteResourceStanza {
+                        source_jid: source,
+                        registration_id,
+                        socket_generation,
+                        target: RemoteResourceRouteTarget::FullJid {
+                            target: recipient.clone(),
+                            stanza: RemoteStanza(stanza.clone()),
+                            ingress_append: Some(obligation.clone()),
+                        },
+                        trace: RelayTraceContext::default(),
+                    },
+                    &mut None,
+                )
+                .await;
+            TEST_CANCELLED_ENVELOPES.with(|envelopes| envelopes.take())
+        })
+        .await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "must forward exactly one ordered envelope"
+    );
+    let OrderedRelayPayload::Message {
+        recipient: forwarded_recipient,
+        stanza: forwarded_stanza,
+        ingress_append,
+    } = &captured[0].payload
+    else {
+        panic!("onward message envelope");
+    };
+    assert_eq!(forwarded_recipient, &jid::Jid::from(recipient));
+    let Stanza::Message(forwarded_message) = &forwarded_stanza.0 else {
+        panic!("forwarded message stanza");
+    };
+    assert_eq!(forwarded_message, &message);
+    assert_eq!(
+        ingress_append.as_ref(),
+        Some(&obligation),
+        "intermediate hop must preserve the append obligation"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_forwarded_obligation_survives_intermediate_hop() {
+    forwarded_obligation_survives_intermediate_hop(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_forwarded_obligation_survives_intermediate_hop() {
+    if let Some(fixture) = IngressFixture::postgres("forwarded_obligation").await {
+        forwarded_obligation_survives_intermediate_hop(fixture).await;
+    }
+}
+
 #[tokio::test]
 async fn sqlite_live_recipient_skips_ingress_append_authorization() {
     ingress_append_authority(IngressFixture::sqlite().await, false, false, true).await;
