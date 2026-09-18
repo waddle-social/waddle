@@ -792,9 +792,66 @@ fn failed_accounting_reads_are_requeued_ahead_and_bounded() {
     );
 }
 
+/// The detached accounting worker serializes its reads, so it can observe an
+/// attempt long after it happened. The streak must therefore measure attempt
+/// times: two attempts inside one sample interval count once even when their
+/// accounting lands minutes later, otherwise a still-recoverable row is parked
+/// after ~90 s of attempts instead of the intended two minutes (#1782).
+#[tokio::test(start_paused = true)]
+async fn the_sample_interval_measures_attempt_times_not_accounting_times() {
+    let key = MessageKey::new();
+    let evidence = crate::ingress_substrate::RecoveryEvidence {
+        intents: 1,
+        receipts: 0,
+        progress: 0,
+    };
+    let budget = MaintenanceBudget::DEFAULT;
+    let mut stalled = super::StalledRows::default();
+    let mut suppressed = super::UnsupportedRows::default();
+    let attempt = |generation: u64| super::RecoveryAttempt {
+        key,
+        attempted_at: tokio::time::Instant::now(),
+        observed: evidence,
+        classification: super::AttemptClassification::Evaluable,
+        pending: vec![waddle_xmpp::ingress::IngressEffectKind::RouteDirect],
+        generation,
+    };
+
+    let first = attempt(1);
+    tokio::time::advance(budget.recovery_stall_sample_interval / 2).await;
+    let inside_the_interval = attempt(2);
+    // Both are accounted long after the fact, as a saturated worker would.
+    tokio::time::advance(budget.recovery_stall_sample_interval * 5).await;
+    stalled.account(&first, evidence, budget, &mut suppressed);
+    stalled.account(&inside_the_interval, evidence, budget, &mut suppressed);
+    assert!(
+        suppressed.get(key, evidence).is_none(),
+        "two attempts inside one interval are a single sample"
+    );
+
+    let second_sample = attempt(3);
+    stalled.account(&second_sample, evidence, budget, &mut suppressed);
+    assert!(
+        suppressed.get(key, evidence).is_none(),
+        "two samples are below the threshold"
+    );
+
+    tokio::time::advance(budget.recovery_stall_sample_interval).await;
+    let third_sample = attempt(4);
+    stalled.account(&third_sample, evidence, budget, &mut suppressed);
+    assert!(
+        matches!(
+            suppressed.get(key, evidence),
+            Some(super::Suppression::StalledUntil(_))
+        ),
+        "the third sample parks the row"
+    );
+}
+
 fn accounting_attempt(key: MessageKey, generation: u64) -> super::RecoveryAttempt {
     super::RecoveryAttempt {
         key,
+        attempted_at: tokio::time::Instant::now(),
         observed: crate::ingress_substrate::RecoveryEvidence {
             intents: 1,
             receipts: 0,

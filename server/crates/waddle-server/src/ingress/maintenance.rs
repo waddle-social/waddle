@@ -449,6 +449,7 @@ async fn recover_candidates(
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(RecoveryAttempt {
                     key: candidate.key,
+                    attempted_at: tokio::time::Instant::now(),
                     observed: candidate.evidence,
                     classification: AttemptClassification::Inconclusive,
                     pending: Vec::new(),

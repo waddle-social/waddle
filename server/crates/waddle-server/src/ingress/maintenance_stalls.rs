@@ -17,6 +17,10 @@ use crate::ingress_substrate::RecoveryEvidence;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RecoveryAttempt {
     pub(super) key: MessageKey,
+    /// When the pass attempted the row. The detached accounting worker
+    /// serializes its reads, so it can observe an attempt much later than it
+    /// happened; the streak must measure attempt times, not accounting times.
+    pub(super) attempted_at: Instant,
     pub(super) observed: RecoveryEvidence,
     pub(super) classification: AttemptClassification,
     pub(super) pending: Vec<IngressEffectKind>,
@@ -154,13 +158,14 @@ impl StalledRows {
         // Maintenance also runs at startup and after every committed decision.
         // Only one attempt per sample interval counts, so the streak measures
         // elapsed time without progress rather than commit volume.
-        let now = Instant::now();
         if let Some(last) = row.last_counted {
-            if now.duration_since(last) < budget.recovery_stall_sample_interval {
+            if attempt.attempted_at.saturating_duration_since(last)
+                < budget.recovery_stall_sample_interval
+            {
                 return;
             }
         }
-        row.last_counted = Some(now);
+        row.last_counted = Some(attempt.attempted_at);
         row.consecutive = row.consecutive.saturating_add(1);
         if row.consecutive < budget.recovery_stall_attempts {
             return;
