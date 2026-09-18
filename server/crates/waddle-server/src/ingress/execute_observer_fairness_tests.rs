@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use tokio::sync::Notify;
 use waddle_extensions::{
@@ -70,11 +71,13 @@ async fn fair_observers(fixture: IngressFixture, slow_first: bool) {
     assert_eq!(report.outcomes[slow_index].1, ExternalOutcome::Uncertain);
     assert!(report.receipt_failures.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(
-        !terminalize_if_complete(&fixture.uow, first.message_key.expect("key"))
-            .await
-            .expect("pending")
-    );
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        first.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("pending"));
     drop(deps);
     drop(state);
 
@@ -115,11 +118,13 @@ async fn fair_observers(fixture: IngressFixture, slow_first: bool) {
         "canonical observer body"
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
-    assert!(
-        terminalize_if_complete(&fixture.uow, first.message_key.expect("key"))
-            .await
-            .expect("terminal")
-    );
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        first.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("terminal"));
     fixture.close().await;
 }
 
@@ -153,11 +158,13 @@ async fn warning_observer(fixture: IngressFixture) {
     assert_eq!(report.frame_obligations.len(), 1);
     assert!(report.frame_obligations[0].receipt_keys.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(
-        !terminalize_if_complete(&fixture.uow, decision.message_key.expect("key"))
-            .await
-            .expect("pending warning")
-    );
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        decision.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("pending warning"));
     fixture.close().await;
 }
 
@@ -197,11 +204,13 @@ async fn receipt_failure(fixture: IngressFixture) {
     assert_eq!(report.receipt_failures.len(), 1);
     assert_eq!(&report.receipt_failures[0].0, key);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(
-        !terminalize_if_complete(&fixture.uow, first.message_key.expect("key"))
-            .await
-            .expect("pending receipt")
-    );
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        first.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("pending receipt"));
     let sql = match fixture.db.driver() {
         crate::db::DatabaseDriver::Sqlite => "DROP TRIGGER fail_observer_receipt",
         crate::db::DatabaseDriver::Postgres => {

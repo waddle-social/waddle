@@ -565,9 +565,13 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
     );
     assert!(report.receipt_failures.is_empty());
     let key = decision.message_key.expect("canonical key");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("partial receipts"));
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        key,
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
+    )
+    .await
+    .expect("partial receipts"));
     for (recipient, receiver) in [(first, &mut first_rx), (last, &mut last_rx)] {
         let delivered = receiver.try_recv().expect("healthy carbon destination");
         let Stanza::Message(copy) = delivered.stanza else {
@@ -608,9 +612,13 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
         last_rx.try_recv().is_err(),
         "confirmed last destination is not repeated"
     );
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("complete receipts"));
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        key,
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
+    )
+    .await
+    .expect("complete receipts"));
     fixture.close().await;
 }
 

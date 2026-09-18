@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::{invite::MucUserRoute, EffectSink, PlanSink};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, IngressEffectIntent, PendingDeliveryMutation},
     pending_delivery::{PendingPayload, PendingRow, PendingRowId},
@@ -93,7 +94,8 @@ async fn invite_delivered(fixture: IngressFixture, live: bool) {
     );
     assert!(terminalize_if_complete(
         &fixture.uow,
-        decision.message_key.expect("canonical message")
+        decision.message_key.expect("canonical message"),
+        DeliveryExecutionContext::Live.into()
     )
     .await
     .expect("terminalize"));
@@ -162,9 +164,11 @@ async fn remote_carbons_failure(fixture: IngressFixture) {
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Failed);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     let key = decision.message_key.expect("canonical key");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending")
+    );
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("retry");
@@ -190,9 +194,11 @@ async fn remote_carbons_failure(fixture: IngressFixture) {
         .await
         .expect("owner reply receipt");
     }
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminalized"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminalized")
+    );
     let confirmed_retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("confirmed retry");

@@ -1,4 +1,5 @@
 //! Maintenance regressions against committed obligations and their actual sinks.
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress::{
         commit::commit_submission,
@@ -67,6 +68,7 @@ fn immediate_recovery_budget() -> MaintenanceBudget {
         recovery: Duration::from_secs(20),
         recovery_row: Duration::from_secs(5),
         hard_deadline: Duration::from_secs(30),
+        recovery_stall_sample_interval: Duration::ZERO,
         ..MaintenanceBudget::DEFAULT
     }
 }
@@ -321,14 +323,20 @@ async fn blocked_direct_recovery(f: IngressFixture, read_fails: bool) {
     blocking.set_blocklist(resource.to_bare(), vec![submission.sender.to_bare()]);
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     let cursor = MaintenanceCursor::default();
-    for _ in 0..2 {
+    for attempt in 1..=5 {
         let outcome = pass(&f, &env, &cursor).await;
+        cursor.wait_for_recovery_accounting().await;
         assert_eq!(append_count(&sm, &resource).await, 0);
         assert_eq!(f.count("sm_ingress_appends").await, 0);
         if read_fails {
             assert_eq!(outcome, MaintenanceOutcome::Partial);
             assert_pending(&f, key).await;
             assert_eq!(f.count("ingress_effect_receipts").await, 0);
+            assert_eq!(
+                super::attempt_count(key),
+                attempt,
+                "storage failures never park"
+            );
         } else {
             assert_eq!(outcome, MaintenanceOutcome::Complete);
             assert_recovered(&f, key, 1).await;
@@ -1920,18 +1928,22 @@ async fn row_deadline_bounds_a_stalled_route_and_later_rows_still_run(f: Ingress
         ..immediate_recovery_budget()
     };
     let entered = Arc::new(AtomicBool::new(false));
-    let outcome = STALL_DELIVERY_RESOURCE
-        .scope(
-            (first.clone(), entered.clone()),
-            run_maintenance_pass_with_cursor(&f.db, &f.uow, budget, &cursor, Some(env.clone())),
-        )
-        .await;
-    assert!(entered.load(Ordering::SeqCst));
-    assert_eq!(outcome, MaintenanceOutcome::Partial);
-    assert_pending(&f, a).await;
-    assert_recovered(&f, b, 1).await;
-    assert_eq!(append_count(&sm, &first).await, 0);
-    assert_eq!(append_count(&sm, &second).await, 1);
+    for attempt in 1..=5 {
+        let outcome = STALL_DELIVERY_RESOURCE
+            .scope(
+                (first.clone(), entered.clone()),
+                run_maintenance_pass_with_cursor(&f.db, &f.uow, budget, &cursor, Some(env.clone())),
+            )
+            .await;
+        cursor.wait_for_recovery_accounting().await;
+        assert!(entered.load(Ordering::SeqCst));
+        assert_eq!(outcome, MaintenanceOutcome::Partial);
+        assert_pending(&f, a).await;
+        assert_recovered(&f, b, 1).await;
+        assert_eq!(append_count(&sm, &first).await, 0);
+        assert_eq!(append_count(&sm, &second).await, 1);
+        assert_eq!(super::attempt_count(a), attempt, "row deadlines never park");
+    }
     for _ in 0..2 {
         assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
         assert_recovered(&f, a, 1).await;
@@ -2445,3 +2457,234 @@ mod xep0045_decline_recovery;
 
 #[path = "recovery_muc_tests.rs"]
 mod muc;
+
+#[test]
+fn recovery_report_requires_proven_execution_and_persistence() {
+    use super::{classify_report, AttemptClassification};
+    use crate::ingress::execute::{ExecutionPersistenceFailure, ExecutionReport, ExternalOutcome};
+    let mut report = ExecutionReport::new(DeliveryExecutionContext::MaintenanceRecovery.into());
+    assert_eq!(classify_report(&report), AttemptClassification::Evaluable);
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    let effect = ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+        route_identity: None,
+        call_setup: None,
+        bare: resource.to_bare(),
+        resources: vec![resource],
+        stanza: Box::new(Stanza::Message(xmpp_parsers::message::Message::new(None))),
+    });
+    for outcome in [ExternalOutcome::Done, ExternalOutcome::Failed] {
+        report.outcomes = vec![(effect.clone(), outcome)];
+        assert_eq!(classify_report(&report), AttemptClassification::Evaluable);
+    }
+    report.outcomes = vec![(effect, ExternalOutcome::Uncertain)];
+    assert_eq!(
+        classify_report(&report),
+        AttemptClassification::Inconclusive
+    );
+    report.outcomes.clear();
+    report.terminalization_failure = Some(ExecutionPersistenceFailure::BudgetExhausted);
+    assert_eq!(
+        classify_report(&report),
+        AttemptClassification::Inconclusive
+    );
+    report.terminalization_failure = None;
+    report.receipt_failures.push((
+        crate::ingress::EffectReceiptKey {
+            kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+                waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
+            ),
+            semantic_identity_hash: [0; 32],
+        },
+        ExecutionPersistenceFailure::BudgetExhausted,
+    ));
+    assert_eq!(
+        classify_report(&report),
+        AttemptClassification::Inconclusive
+    );
+}
+
+#[test]
+fn recovery_pending_kinds_preserve_first_occurrence_order() {
+    use waddle_xmpp::ingress::IngressEffectKind;
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    let direct = IngressEffectIntent::RouteDirect {
+        recipient: resource.to_bare(),
+        fanout: vec![resource.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    };
+    let occupant = IngressEffectIntent::RouteOccupantPm {
+        recipient: resource.clone(),
+        sender: resource,
+    };
+    assert_eq!(
+        super::pending_kinds(&[direct.clone(), occupant, direct]),
+        vec![
+            IngressEffectKind::RouteDirect,
+            IngressEffectKind::RouteOccupantPm
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sqlite_present_detached_session_append_failure_never_parks() {
+    use super::{AttemptClassification, RowRecovery};
+    let fixture = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&fixture).await;
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    store_detached(&sm, &resource).await;
+    let env: Arc<dyn RecoveryEnvironment> =
+        Arc::new(StateEnvironment(state_for(&fixture, sm.clone()).await));
+    let key = commit_submission(
+        &fixture.uow,
+        &direct_submission(
+            &fixture,
+            "append-storage-failure",
+            std::slice::from_ref(&resource),
+        ),
+        5,
+    )
+    .await
+    .expect("commit")
+    .message_key
+    .expect("key");
+    fixture.execute(
+        "CREATE TRIGGER fail_detached_append BEFORE INSERT ON sm_ingress_appends BEGIN SELECT RAISE(ABORT, 'append storage error'); END",
+        (),
+    ).await;
+    let deps = env.recovery_deps();
+    let recovery = super::recover_row(
+        &fixture.db,
+        &fixture.uow,
+        &deps,
+        key,
+        tokio::time::Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .expect("execution report");
+    let RowRecovery::Executed {
+        classification,
+        pending,
+        ..
+    } = recovery
+    else {
+        panic!("pending route must execute");
+    };
+    assert_eq!(classification, AttemptClassification::Inconclusive);
+    assert_eq!(
+        pending,
+        vec![waddle_xmpp::ingress::IngressEffectKind::RouteDirect]
+    );
+    let cursor = MaintenanceCursor::default();
+    for attempt in 2..=6 {
+        assert_eq!(
+            pass(&fixture, &env, &cursor).await,
+            MaintenanceOutcome::Complete
+        );
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            super::attempt_count(key),
+            attempt,
+            "uncertain append never parks"
+        );
+        assert_pending(&fixture, key).await;
+        assert_eq!(append_count(&sm, &resource).await, 0);
+    }
+    fixture
+        .execute("DROP TRIGGER fail_detached_append", ())
+        .await;
+    assert_eq!(
+        pass(&fixture, &env, &cursor).await,
+        MaintenanceOutcome::Complete
+    );
+    assert_eq!(append_count(&sm, &resource).await, 1);
+    assert_recovered(&fixture, key, 1).await;
+    drop(deps);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_unresolved_effects_distinguish_recovery_from_live_execution() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let fixture = IngressFixture::sqlite().await;
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    let submission = direct_submission(
+        &fixture,
+        "unresolved-execution-phase",
+        std::slice::from_ref(&resource),
+    );
+    let decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("commit");
+    let key = decision.message_key.expect("key");
+    let registry = waddle_xmpp::registry::ConnectionRegistry::new();
+    let deps = Deps::new(&registry, "example.com");
+    let before_live = metrics
+        .counter_sum("ingress.effects.unresolved", &[("phase", "live")])
+        .unwrap_or(0);
+    let before_recovery = metrics
+        .counter_sum(
+            "ingress.effects.unresolved",
+            &[("phase", "maintenance_recovery")],
+        )
+        .unwrap_or(0);
+    assert!(matches!(
+        super::recover_row(
+            &fixture.db,
+            &fixture.uow,
+            &deps,
+            key,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("recover unavailable resource"),
+        super::RowRecovery::Executed { .. }
+    ));
+    assert_pending(&fixture, key).await;
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.effects.unresolved", &[("phase", "live")])
+            .unwrap_or(0),
+        before_live,
+        "maintenance recovery must not increment the live alert series"
+    );
+    let after_recovery = metrics
+        .counter_sum(
+            "ingress.effects.unresolved",
+            &[("phase", "maintenance_recovery")],
+        )
+        .unwrap_or(0);
+    assert!(after_recovery > before_recovery);
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(report.outcomes.len(), 1);
+    assert_eq!(
+        report.outcomes[0].1,
+        crate::ingress::execute::ExternalOutcome::Failed
+    );
+    drop(report);
+    assert!(
+        metrics
+            .counter_sum("ingress.effects.unresolved", &[("phase", "live")])
+            .unwrap_or(0)
+            > before_live,
+        "connection-driven execution increments the live alert series"
+    );
+    assert_eq!(
+        metrics
+            .counter_sum(
+                "ingress.effects.unresolved",
+                &[("phase", "maintenance_recovery")],
+            )
+            .unwrap_or(0),
+        after_recovery,
+        "live execution must not increment the recovery series"
+    );
+    fixture.close().await;
+}

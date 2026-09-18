@@ -65,11 +65,13 @@ async fn bounded_keyset_scan(fixture: IngressFixture) {
     set_created_at(&fixture, young, cutoff).await;
     let terminal = receipt_complete_message(&fixture, "maintenance-terminal").await;
     set_created_at(&fixture, terminal, old).await;
-    assert!(
-        waddle_server::ingress::execute::terminalize_if_complete(&fixture.uow, terminal)
-            .await
-            .expect("terminalize excluded row")
-    );
+    assert!(waddle_server::ingress::execute::terminalize_if_complete(
+        &fixture.uow,
+        terminal,
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
+    )
+    .await
+    .expect("terminalize excluded row"));
 
     let mut missing = fixture.submission(Some("maintenance-missing"), "unsettled route");
     missing.plan.intents.push(IngressEffectIntent::RouteDirect {

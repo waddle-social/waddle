@@ -3,16 +3,15 @@
 mod authority;
 mod maintenance;
 pub use maintenance::{
-    receipt_complete_nonterminal_keys, unreceipted_nonterminal_candidates, RecoveryCandidate,
-    RecoveryEvidence,
+    receipt_complete_nonterminal_keys, recovery_evidence_pooled,
+    unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
 };
 #[cfg(test)]
 mod authority_tests;
 pub use authority::{
     advance_frontier, flush_checkpoint, load_envelope, load_stream_checkpoint, lookup_wire_binding,
-    receipt_count, receipts_complete, record_receipt, record_receipt_pooled,
-    record_room_canonical_envelope, EffectReceiptKind, EnvelopeVersion, FrontierOutcome,
-    MessageEnvelope,
+    receipts_complete, record_receipt, record_receipt_pooled, record_room_canonical_envelope,
+    EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};

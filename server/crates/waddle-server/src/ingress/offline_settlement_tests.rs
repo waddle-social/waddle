@@ -104,7 +104,7 @@ async fn rollback(fixture: IngressFixture) {
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(failed.outcomes[0].1, ExternalOutcome::Failed);
+    assert_eq!(failed.outcomes[0].1, ExternalOutcome::Uncertain);
     assert_eq!(fixture.count("pending_delivery").await, 0);
     assert_eq!(fixture.count("notification_candidates").await, 0);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);

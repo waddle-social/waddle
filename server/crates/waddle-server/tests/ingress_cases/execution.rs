@@ -44,9 +44,13 @@ async fn receipts_terminalization(fixture: IngressFixture) {
     let key = decision.message_key.expect("canonical");
     assert_eq!(fixture.count("ingress_effect_intents").await, 2);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("partial receipts"));
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        key,
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
+    )
+    .await
+    .expect("partial receipts"));
     let unresolved_after = metrics
         .counter_sum("ingress.effects.unresolved", &[("kind", "terminalization")])
         .expect("missing receipts export an unresolved terminalization sample");
@@ -68,9 +72,13 @@ async fn receipts_terminalization(fixture: IngressFixture) {
         .await
         .expect("external completion receipt");
     }
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("complete receipts"));
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        key,
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
+    )
+    .await
+    .expect("complete receipts"));
     assert_eq!(
         metrics.counter_sum("ingress.effects.unresolved", &[("kind", "terminalization")]),
         Some(unresolved_after),
@@ -182,7 +190,8 @@ async fn external_reply_execution(fixture: IngressFixture) {
     drop(report);
     assert!(!waddle_server::ingress::execute::terminalize_if_complete(
         &fixture.uow,
-        decision.message_key.expect("key")
+        decision.message_key.expect("key"),
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
     )
     .await
     .expect("still pending"));

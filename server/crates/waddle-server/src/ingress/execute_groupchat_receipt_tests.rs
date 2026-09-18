@@ -2,6 +2,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use jid::{BareJid, FullJid};
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
@@ -91,7 +92,7 @@ fn groupchat_outcomes(
     decision: &IngressDecision,
     relay: FullJidDeliveryOutcome,
 ) -> (ExecutionReport, Vec<Vec<EffectReceiptKey>>) {
-    let mut report = ExecutionReport::default();
+    let mut report = ExecutionReport::new(DeliveryExecutionContext::Live.into());
     report.message_key = decision.message_key;
     let mut proven = Vec::new();
     for (index, effect) in decision.external.iter().enumerate() {
@@ -131,9 +132,11 @@ async fn groupchat_aggregate_receipt(fixture: IngressFixture, relay: FullJidDeli
     let decision = groupchat_decision(&fixture).await;
     let (mut report, proven) = groupchat_outcomes(&decision, relay);
     let key = decision.message_key.expect("canonical room message");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("fanout is pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("fanout is pending")
+    );
     // Even generic Delivered proof for both occupants plus a written sender
     // frame cannot replace the transactional per-resource progress arm.
     report.outcomes[2].1 = ExternalOutcome::Done;
@@ -142,9 +145,11 @@ async fn groupchat_aggregate_receipt(fixture: IngressFixture, relay: FullJidDeli
     }
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("MUC progress remains pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("MUC progress remains pending")
+    );
     fixture.close().await;
 }
 
@@ -163,11 +168,13 @@ async fn groupchat_frame_completion(fixture: IngressFixture, relay: FullJidDeliv
         "no aggregate proof is exported to retained frames or owner replies"
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert!(
-        !terminalize_if_complete(&fixture.uow, decision.message_key.expect("canonical key"))
-            .await
-            .expect("frame write still pending")
-    );
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        decision.message_key.expect("canonical key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("frame write still pending"));
     assert!(!report
         .complete_frame_obligations(&fixture.uow, &fixture.db, Duration::from_secs(5))
         .await

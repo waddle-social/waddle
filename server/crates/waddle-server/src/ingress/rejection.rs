@@ -191,6 +191,7 @@ pub(super) fn recorded_rejection_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::interpret::DeliveryExecutionContext;
     async fn malformed_reply_receipt(fixture: crate::ingress::test_support::IngressFixture) {
         use crate::ingress::{
             commit::commit_submission,
@@ -209,9 +210,11 @@ mod tests {
         let key = decision.message_key.expect("canonical key");
         assert_eq!(fixture.count("ingress_effect_intents").await, 1);
         assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-        assert!(!terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("pending reply"));
+        assert!(
+            !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("pending reply")
+        );
         let registry = waddle_xmpp::registry::ConnectionRegistry::new();
         let deps = Deps::registry_only(&registry);
         let mut report = execute_effects(
@@ -225,9 +228,11 @@ mod tests {
         .await;
         assert_eq!(report.frame_obligations.len(), 1);
         assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-        assert!(!terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("frame not written"));
+        assert!(
+            !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("frame not written")
+        );
         assert!(report
             .complete_frame_obligations(
                 &fixture.uow,

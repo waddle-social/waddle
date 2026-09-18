@@ -189,6 +189,7 @@ impl OrderedRelayAck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::interpret::DeliveryExecutionContext;
 
     async fn completion() -> RelayFrameReceiptCompletion {
         let database = crate::db::Database::in_memory("relay-reply-receipts")
@@ -196,7 +197,9 @@ mod tests {
             .expect("database");
         RelayFrameReceiptCompletion::new(super::super::super::route_bridge::RelayFrameCompletion {
             authority: Arc::new(crate::ingress::IngressAuthority::for_test(database).await),
-            report: crate::ingress::execute::ExecutionReport::default(),
+            report: crate::ingress::execute::ExecutionReport::new(
+                DeliveryExecutionContext::Live.into(),
+            ),
         })
     }
 

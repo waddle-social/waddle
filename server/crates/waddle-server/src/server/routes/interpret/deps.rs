@@ -3,11 +3,27 @@ use std::sync::Arc;
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::protocol::TimerId;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeliveryExecutionContext {
-    #[default]
     Live,
     MaintenanceRecovery,
+    MaintenanceTerminalization,
+    StreamRetirement,
+}
+
+impl From<DeliveryExecutionContext>
+    for waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase
+{
+    fn from(context: DeliveryExecutionContext) -> Self {
+        match context {
+            DeliveryExecutionContext::Live => Self::Live,
+            DeliveryExecutionContext::MaintenanceRecovery => Self::MaintenanceRecovery,
+            DeliveryExecutionContext::MaintenanceTerminalization => {
+                Self::MaintenanceTerminalization
+            }
+            DeliveryExecutionContext::StreamRetirement => Self::StreamRetirement,
+        }
+    }
 }
 
 /// Per-stanza origin provenance needed to build an ordered-relay envelope.

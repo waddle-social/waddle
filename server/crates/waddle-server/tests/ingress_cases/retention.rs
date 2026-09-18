@@ -85,9 +85,13 @@ async fn terminal_replay_reopens(fixture: IngressFixture) {
         .await
         .expect("receipt omitted intent");
     }
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("re-terminalize"));
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        key,
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
+    )
+    .await
+    .expect("re-terminalize"));
     assert_eq!(
         fixture
             .count("ingress_messages WHERE terminal_at IS NOT NULL")

@@ -7,6 +7,7 @@ use super::{
     test_support::IngressFixture,
     *,
 };
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress_uow::{DeliveryProgressRepository, EffectReceiptRepository},
     server::routes::{
@@ -183,9 +184,11 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
     .await
     .expect("aggregate"));
     tx.commit().await.expect("read commit");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending")
+    );
     let c: jid::FullJid = "claire@example.com/phone".parse().expect("C");
     let (tx, mut c_rx) = tokio::sync::mpsc::channel(16);
     socket_tests::register_test_connection(&state, &c, tx).await;
@@ -311,9 +314,11 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
     );
     assert!(c_rx.try_recv().is_err(), "C receives no historical copy");
     if retry_case == RetryCase::MissingProvenance {
-        assert!(!terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("old row pending"));
+        assert!(
+            !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("old row pending")
+        );
         let mut tx = fixture.uow.begin().await.expect("old source");
         let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
@@ -350,9 +355,11 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
     .await
     .expect("aggregate"));
     tx.commit().await.expect("read commit");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("complete"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("complete")
+    );
     fixture.close().await;
 }
 #[tokio::test]

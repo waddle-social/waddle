@@ -4,6 +4,7 @@ use crate::notification_activity::{
     NotificationActivityReader, NotificationActivityStore, NotificationChatState,
 };
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, NotificationActivityMutation},
     registry::ConnectionRegistry,
@@ -89,9 +90,13 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
     assert_eq!(completed.outcomes[0].1, ExternalOutcome::Done);
     assert!(completed.receipt_failures.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(terminalize_if_complete(&fixture.uow, canonical)
-        .await
-        .expect("complete"));
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        canonical,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("complete"));
 
     let duplicate = commit_submission(&fixture.uow, &submission, 1)
         .await

@@ -1,6 +1,7 @@
 //! A frozen remote route retains its receipt identity when execution falls back locally.
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, IngressEffectIntent},
@@ -110,9 +111,13 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture) {
         "fallback must preserve the exact recorded receipt identity"
     );
     assert_eq!(fixture.count("sm_ingress_appends").await, 1);
-    assert!(!terminalize_if_complete(&fixture.uow, message_key)
-        .await
-        .expect("pending receipt"));
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        message_key,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("pending receipt"));
     let drop_trigger = match fixture.db.driver() {
         crate::db::DatabaseDriver::Sqlite => "DROP TRIGGER fail_relay_receipt",
         crate::db::DatabaseDriver::Postgres => {
@@ -143,9 +148,13 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture) {
     );
     assert_eq!(fixture.count("sm_ingress_appends").await, 1);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(terminalize_if_complete(&fixture.uow, message_key)
-        .await
-        .expect("terminal receipt"));
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        message_key,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("terminal receipt"));
     fixture.close().await;
 }
 

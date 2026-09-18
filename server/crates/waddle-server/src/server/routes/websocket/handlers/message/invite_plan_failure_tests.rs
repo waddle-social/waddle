@@ -6,6 +6,7 @@ use crate::ingress::{
 };
 use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::interpret::effects::{EffectSink, IngressPlan, PlanSink};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget, WireHandledCount};
 
@@ -519,7 +520,8 @@ async fn membership_cancel_replay(fixture: IngressFixture, cancel_after: CancelA
     assert!(rx.try_recv().is_ok(), "missed invitation delivered");
     assert!(crate::ingress::execute::terminalize_if_complete(
         &fixture.uow,
-        replay.message_key.expect("canonical key")
+        replay.message_key.expect("canonical key"),
+        DeliveryExecutionContext::Live.into()
     )
     .await
     .expect("terminalize"));
@@ -721,6 +723,7 @@ async fn fallback_receipt_replay(fixture: IngressFixture, partial: bool) {
     assert!(crate::ingress::execute::terminalize_if_complete(
         &fixture.uow,
         replay.message_key.expect("canonical"),
+        DeliveryExecutionContext::Live.into()
     )
     .await
     .expect("terminalize"));

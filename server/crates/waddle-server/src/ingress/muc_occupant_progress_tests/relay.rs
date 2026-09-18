@@ -1,6 +1,7 @@
 //! Controlled outcomes test ingress progress, not retry eligibility on a diverted relay channel.
 use super::*;
 use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{
     ControlledMucRelay, FullJidDeliveryOutcome, CONTROLLED_MUC_RELAY,
 };
@@ -193,9 +194,11 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
         if local { vec![] } else { vec![a.clone()] }
     );
     tx.commit().await.expect("read commit");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending")
+    );
     if local {
         assert_eq!(append_count(&sm, &target).await, 1);
         let append_key = waddle_xmpp::stream_management::SmIngressAppendKey {
@@ -270,9 +273,11 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
     .await
     .expect("aggregate"));
     tx.commit().await.expect("read commit");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminal")
+    );
     if local {
         assert_eq!(
             append_count(&sm, &target).await,

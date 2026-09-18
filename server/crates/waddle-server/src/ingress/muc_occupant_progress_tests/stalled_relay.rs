@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{
     ControlledMucRelay, FullJidDeliveryOutcome, CONTROLLED_MUC_RELAY,
 };
@@ -130,7 +131,11 @@ async fn sqlite_stalled_remote_first_preserves_independent_local_muc_progress() 
         "stalled remote prevents aggregate completion"
     );
     tx.commit().await.unwrap();
-    assert!(!terminalize_if_complete(&fixture.uow, key).await.unwrap());
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .unwrap()
+    );
 
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
@@ -178,6 +183,10 @@ async fn sqlite_stalled_remote_first_preserves_independent_local_muc_progress() 
     .await
     .unwrap());
     tx.commit().await.unwrap();
-    assert!(terminalize_if_complete(&fixture.uow, key).await.unwrap());
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .unwrap()
+    );
     fixture.close().await;
 }

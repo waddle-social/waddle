@@ -2,6 +2,7 @@ use super::super::frame::{handle_xmpp_frame, settle_inbound_dispatch};
 use super::super::frame_backstop::InboundDisposition;
 use super::super::state::WsConnState;
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::pending_delivery::SmSessionId;
 
 async fn connection(state: &WebSocketState, resumable: bool) -> WsConnState {
@@ -582,7 +583,8 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
         } else {
             completion
         };
-        let mut origin_report = crate::ingress::ExecutionReport::default();
+        let mut origin_report =
+            crate::ingress::ExecutionReport::new(DeliveryExecutionContext::Live.into());
         origin_report.retain_relay_frame_completion(completion);
         if remote_owner {
             // This fixture replaced execute_committed_message's prepared frames

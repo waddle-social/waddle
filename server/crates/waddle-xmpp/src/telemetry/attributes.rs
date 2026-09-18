@@ -634,6 +634,40 @@ impl MetricAttribute for IngressUnresolvedEffectKind {
     }
 }
 
+/// `phase` — the execution context leaving an ingress effect unresolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressEffectExecutionPhase {
+    Live,
+    MaintenanceRecovery,
+    MaintenanceTerminalization,
+    StreamRetirement,
+}
+
+impl IngressEffectExecutionPhase {
+    pub const ALL: [Self; 4] = [
+        Self::Live,
+        Self::MaintenanceRecovery,
+        Self::MaintenanceTerminalization,
+        Self::StreamRetirement,
+    ];
+}
+
+impl sealed::Sealed for IngressEffectExecutionPhase {}
+impl MetricAttribute for IngressEffectExecutionPhase {
+    fn key(&self) -> &'static str {
+        "phase"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::MaintenanceRecovery => "maintenance_recovery",
+            Self::MaintenanceTerminalization => "maintenance_terminalization",
+            Self::StreamRetirement => "stream_retirement",
+        }
+    }
+}
+
 /// `outcome` — the closed alias-resolution result set for ingress authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressAliasOutcome {
@@ -706,6 +740,31 @@ impl MetricAttribute for IngressGcOutcome {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// Why maintenance classified an ingress obligation as unrecoverable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressUnrecoverableReason {
+    Unsupported,
+    NoDurableProgress,
+}
+
+impl IngressUnrecoverableReason {
+    pub const ALL: [Self; 2] = [Self::Unsupported, Self::NoDurableProgress];
+}
+
+impl sealed::Sealed for IngressUnrecoverableReason {}
+impl MetricAttribute for IngressUnrecoverableReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::NoDurableProgress => "no_durable_progress",
         }
     }
 }

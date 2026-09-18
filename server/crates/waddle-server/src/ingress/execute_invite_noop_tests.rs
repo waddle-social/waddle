@@ -1,6 +1,7 @@
 //! XEP-0045 repeated invitations discharge the delivery excluded by ledger deduplication.
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::{
     interpret::effects::{invite::MucUserRoute, PlanEffectDependency, PlanSuppressionPolicy},
     websocket::{
@@ -145,9 +146,11 @@ async fn outstanding_invite_discharges_delivery(fixture: IngressFixture) {
     );
     assert_eq!(fixture.count("muc_pending_invites").await, 1);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminalize no-op"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminalize no-op")
+    );
     assert!(matches!(
         muc_invites::record_invite_at(ledger, &invite, chrono::Utc::now())
             .await

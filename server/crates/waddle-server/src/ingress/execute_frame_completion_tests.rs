@@ -3,6 +3,7 @@
 use super::*;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::CanonicalMessageRepository;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
 
 async fn terminalization_failure_after_receipts_is_not_unresolved(fixture: IngressFixture) {
@@ -19,7 +20,7 @@ async fn terminalization_failure_after_receipts_is_not_unresolved(fixture: Ingre
     .expect("record canonical message");
     transaction.commit().await.expect("commit");
     let frame = Stanza::Message(xmpp_parsers::message::Message::new(None));
-    let mut report = ExecutionReport::default();
+    let mut report = ExecutionReport::new(DeliveryExecutionContext::Live.into());
     report.message_key = Some(key);
     report.outcomes.push((
         ExternalEffect::Frame(Box::new(frame.clone())),
@@ -53,9 +54,11 @@ async fn terminalization_failure_after_receipts_is_not_unresolved(fixture: Ingre
         "delivered and receipted frames are not unresolved effects"
     );
     drop(held);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminalize once the row is free"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminalize once the row is free")
+    );
     fixture.close().await;
 }
 

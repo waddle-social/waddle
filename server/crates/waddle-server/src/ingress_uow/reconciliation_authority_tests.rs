@@ -7,6 +7,7 @@ use crate::server::routes::interpret::effects::{
     room::ExternalRoomEffect,
     Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect,
 };
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::ingress::{
     EffectMessageIdentity, GroupDmHistoryVisibility, GroupDmMembershipGrant, IngressEffectIntent,
 };
@@ -19,9 +20,11 @@ async fn empty_accepted_authority(fixture: IngressFixture) {
         .expect("empty acceptance");
     assert_eq!(first.class, IngressDecisionClass::Accepted);
     let key = first.message_key.expect("canonical key");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("empty authority terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("empty authority terminal")
+    );
     let repeat = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("unchanged replay");
@@ -74,9 +77,11 @@ async fn empty_accepted_authority(fixture: IngressFixture) {
     assert_eq!(fixture.count("ingress_messages").await, 1);
     assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
     assert_eq!(fixture.count("ingress_effect_intents").await, 0);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("still terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("still terminal")
+    );
     fixture.close().await;
 }
 

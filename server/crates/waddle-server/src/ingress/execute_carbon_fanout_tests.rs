@@ -1,5 +1,6 @@
 //! Actual owner fanout replies must only prove complete remote obligations.
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     clustering::{
         relay::RelayRemoteUserSideEffectStatus,
@@ -104,7 +105,7 @@ async fn owner_fanout_receipts(fixture: IngressFixture, fail_append: bool) {
         i64::from(!fail_append)
     );
     assert_eq!(
-        terminalize_if_complete(&fixture.uow, key)
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
             .expect("terminalize"),
         !fail_append
@@ -225,9 +226,11 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
         classify_outcome(&effect, partial, &mut Vec::new()),
         ExternalOutcome::Failed
     );
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("still pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("still pending")
+    );
     for index in [0, 2] {
         assert!(receivers[index]
             .as_mut()
@@ -304,9 +307,11 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
         .await
         .expect("complete relay intent");
     }
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminal")
+    );
     assert_eq!(fixture.count("ingress_carbon_receipts").await, 3);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     assert!(receivers[1]

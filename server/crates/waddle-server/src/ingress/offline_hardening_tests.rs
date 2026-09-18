@@ -349,7 +349,7 @@ async fn missing_pending_obligation(fixture: IngressFixture) {
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(report.outcomes[0].1, ExternalOutcome::Failed);
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
     assert_eq!(
         fixture.count("pending_delivery").await,
         0,

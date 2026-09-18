@@ -86,7 +86,7 @@ pub(super) async fn execute_ready(
                     });
                 }
                 if outcome != ExternalOutcome::Done {
-                    meter_unresolved(effect);
+                    meter_unresolved(effect, batch.report.phase);
                     Vec::new()
                 } else {
                     completed_receipts(decision, &batch.report.outcomes, batch.proven, index)
@@ -113,11 +113,11 @@ pub(super) async fn execute_ready(
                 match result {
                     Ok(Ok(())) => batch.recorded.push(key),
                     Ok(Err(error)) => {
-                        meter_unresolved(effect);
+                        meter_unresolved(effect, batch.report.phase);
                         batch.report.receipt_failures.push((key, error.into()));
                     }
                     Err(_) => {
-                        meter_unresolved(effect);
+                        meter_unresolved(effect, batch.report.phase);
                         batch
                             .report
                             .receipt_failures

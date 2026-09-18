@@ -138,21 +138,26 @@ async fn queue_detached_without_direct_progress(
 ) -> FullJidDeliveryOutcome {
     let mut outcomes = Vec::with_capacity(resources.len());
     for resource in resources {
-        let (queued, _) = route_to_connection::queue_processed_for_detached(
+        let detached_outcomes = route_to_connection::queue_processed_for_detached(
             deps,
             vec![resource.clone()],
             &std::collections::HashSet::new(),
             stanza,
         )
         .await;
-        outcomes.push(if queued.contains(&resource) {
-            FullJidDeliveryOutcome::QueuedDetached
-        } else {
-            route_to_connection::deliver_direct_to_full_with_registered_remote(
-                deps, &resource, stanza,
-            )
-            .await
-        });
+        outcomes.push(
+            if detached_outcomes.contains(&(
+                resource.clone(),
+                route_to_connection::DetachedQueueOutcome::Queued,
+            )) {
+                FullJidDeliveryOutcome::QueuedDetached
+            } else {
+                route_to_connection::deliver_direct_to_full_with_registered_remote(
+                    deps, &resource, stanza,
+                )
+                .await
+            },
+        );
     }
     if outcomes.is_empty() {
         FullJidDeliveryOutcome::Unavailable

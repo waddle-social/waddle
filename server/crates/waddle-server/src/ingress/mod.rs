@@ -1,4 +1,5 @@
 //! Durable ingress authority: immutable planning, atomic commit, bounded execution.
+use crate::server::routes::interpret::DeliveryExecutionContext;
 mod archive_authority;
 mod capture;
 #[cfg(test)]
@@ -442,7 +443,12 @@ impl IngressAuthority {
             keys.sort_unstable_by_key(waddle_xmpp::ingress::MessageKey::to_storage);
             keys.dedup();
             for key in keys {
-                execute::terminalize_if_complete_in_transaction(&mut transaction, key).await?;
+                execute::terminalize_if_complete_in_transaction(
+                    &mut transaction,
+                    key,
+                    DeliveryExecutionContext::StreamRetirement.into(),
+                )
+                .await?;
             }
             for (ordinal, _) in refs {
                 SmIngressRepository::delete_stream_ref(&mut transaction, id, ordinal).await?;
@@ -516,7 +522,7 @@ impl IngressAuthority {
     ) -> ExecutionReport {
         let admission = self.admission.read().await;
         if self.cancellation.is_cancelled() || !*admission {
-            return ExecutionReport::default();
+            return ExecutionReport::new(deps.delivery_execution_context.into());
         }
         execute::execute_effects(
             &self.uow,

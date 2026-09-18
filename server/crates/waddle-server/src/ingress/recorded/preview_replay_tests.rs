@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     db::{DatabaseConfig, DatabasePool, PoolConfig},
     ingress::{
@@ -79,9 +80,11 @@ async fn preview_reference_policy_drift(fixture: IngressFixture) {
     assert_eq!(completed.outcomes[0].1, ExternalOutcome::Done);
     assert!(completed.receipt_failures.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("confirmed preview terminalizes"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("confirmed preview terminalizes")
+    );
     assert_eq!(
         fixture
             .count("link_preview_media_refs WHERE state = 'current'")
@@ -144,9 +147,11 @@ async fn preview_reference_policy_drift(fixture: IngressFixture) {
         );
         assert_eq!(fixture.count("ingress_effect_intents").await, 1);
         assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-        assert!(terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("recorded authority remains complete"));
+        assert!(
+            terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("recorded authority remains complete")
+        );
     }
     fixture.close().await;
 }

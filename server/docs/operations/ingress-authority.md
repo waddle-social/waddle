@@ -152,9 +152,9 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.maintenance.runs{phase,outcome}` (phases: `pass`, `terminalization`, `recovery`, `retention_gc`) | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
 | `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
 | `ingress.maintenance.recovered_obligations` | `ingress_maintenance_recovered_obligations_total` | Recovery progress |
-| `ingress.maintenance.unrecoverable_obligations{kind}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported recovery evaluations; read alongside `IngressNonTerminalBacklog` |
+| `ingress.maintenance.unrecoverable_obligations{kind,reason}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported evaluations and stalled recovery classifications; read alongside `IngressNonTerminalBacklog` |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
-| `ingress.effects.unresolved{kind}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` |
+| `ingress.effects.unresolved{kind,phase}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` considers only `phase="live"`; `maintenance_recovery`, `maintenance_terminalization`, and `stream_retirement` remain available for inspection |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
 | CNPG oldest non-terminal message older than 10m (seconds; zero when empty) | `cnpg_waddle_ingress_nonterminal_age_oldest_seconds` | `IngressCnpgQueriesMissing` |
 | CNPG GC eligibility and oldest eligible age | `cnpg_waddle_ingress_gc_eligible_messages`, `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds` | `IngressGcBacklog`, `IngressGcAge`, `IngressCnpgQueriesMissing` |
@@ -182,7 +182,7 @@ at startup, so absence indicates missing telemetry even on idle pods.
 backlog query always emits the `none` sentinel row, so a missing or failing
 query cannot masquerade as healthy receipt completeness.
 `IngressUnresolvedEffectsGrowing` warns on a positive counter increase over
-1h, grouped by kind. It sees only locally executed effects, not obligations
+1h for `phase="live"`, grouped by kind. It sees only locally executed effects, not obligations
 that were recorded but never executed; it is not a current queue gauge. Use
 `IngressNonTerminalBacklog` for the canonical row-level view.
 
@@ -219,7 +219,7 @@ the pool override.
 ## Periodic maintenance
 
 Each pod runs bounded maintenance at startup, after committed decisions, and
-on a jittered 30-second periodic tick, including when no traffic arrives.
+on a jittered 27–33-second periodic tick, including when no traffic arrives.
 The tick resets after a run. A partial, failed or timed-out pass schedules a
 continuation with exponential backoff from 1 second to 30 seconds; a complete
 pass resets that backoff.
@@ -242,7 +242,7 @@ Recovery is skipped and not recorded until the websocket state binds its
 recovery phase; the first periodic tick after binding includes it.
 The recovery scan pages every old non-terminal row that still has an
 unreceipted intent, in `(created_at, message_key)` order, and flags rows whose
-unreceipted intents include a recoverable kind: `route_direct`,
+unreceipted intents include a recoverable kind: `route_direct`, `route_muc`,
 `notification_activity_preview`, `dm_pin_mutation`, `muc_invite_ledger`,
 `groupchat_notification_recovery`, `pending_delivery` and `room_observer`.
 Unflagged rows only move the cursor (no lock, no attempt), so a large backlog
@@ -251,7 +251,7 @@ does not prove recoverability; payload provenance and the family rules below
 still apply.
 
 A process-local unsupported-row cache stores each message key with its
-`(intents, receipts)` evidence counts when rebuilding yields no executable
+`(intents, receipts, delivery progress)` evidence counts when rebuilding yields no executable
 effect and no delegation. It holds 4096 entries with FIFO eviction. Unchanged
 evidence skips the row without using an attempt; changed evidence re-evaluates
 it. Restart or overflow only causes re-evaluation. A backlog larger than the
@@ -263,7 +263,8 @@ the attempt budget, not that no pending unsupported work remains. Recovery is
 `partial` when the attempt budget is exhausted before the tail, a row is
 deferred by an error or timeout (including freeze), or a resumed cursor reaches
 the tail and wraps around. A row that executes but remains non-terminal does
-not by itself make the phase partial; it is retried on a later tick.
+not by itself make the phase partial; later scans retry it subject to stall
+parking (see "What recovery handles").
 
 `ingress.maintenance.runs` labels phases as `pass`, `terminalization`,
 `recovery`, or `retention_gc`, with outcomes `complete`, `partial`, `failed`, or
@@ -285,9 +286,13 @@ in the same transaction. GC also checks receipt completeness while holding the
 canonical-row lock, so unresolved effects protect a message even when its
 terminal timestamp is stale. The maintenance recovery phase re-executes
 recoverable recorded families; unsupported obligations remain pending and are
-metered when evaluated. Read `ingress.maintenance.unrecoverable_obligations{kind}`
+metered when evaluated. Read `ingress.maintenance.unrecoverable_obligations{kind,reason}`
 alongside the CNPG backlog gauge: rows whose pending kinds are all unsupported
-are paged past without an attempt and never metered. Never delete protected rows to silence alerts.
+are paged past without an attempt and never metered. Stall parking writes no
+receipts or terminal state: the obligation remains GC-protected and the row
+still appears in the non-terminal backlog gauge. Never delete protected rows
+to silence alerts.
+Repair-path and stream-retirement attributions are separated by `phase` and excluded from the live alert.
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
@@ -672,7 +677,7 @@ maintenance and GC; absent metrics are not evidence of healthy zero activity:
 
 ```promql
 sum by (class) (rate(ingress_decisions_total[10m]))
-sum by (kind) (increase(ingress_effects_unresolved_total[1h]))
+sum by (kind, phase) (increase(ingress_effects_unresolved_total[1h]))
 histogram_quantile(0.99, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10m])))
 sum by (outcome) (increase(ingress_gc_runs_total[1h]))
 sum by (phase, outcome) (increase(ingress_maintenance_runs_total[1h]))
@@ -711,7 +716,8 @@ mismatch against the RFC before changing data.
 
 In `psql` on the primary, use a read-only role (the CNPG queries also run
 under `pg_monitor`) and a consistent snapshot. Empty `pending_pairs` denotes
-terminalization-only work; every old non-terminal row appears.
+terminalization-only work; every old non-terminal row appears, including
+rows parked after repeated attempts with no durable progress.
 
 ```sql
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
@@ -742,7 +748,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 25 THEN 'room_observer'
+           WHEN 27 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family
@@ -792,6 +798,35 @@ fail-closed before rebuilding routes.
 | `relay_carbons`, `route_occupant_pm`, `dispatch_to_room_remote`, `group_dm_membership_grant`, `group_dm_invite_ledger`, `muc_invite_membership_grant`, `room_subject_mutation`, `link_preview_media_ref`, `call_signal`, `extension`, `tombstone_replay_deletion`, `error_reply` | Unrecoverable from the recorded envelope and intents alone: these need actor handles, reflected payloads or a sender socket. |
 | `archive`, `inbox_project`, `retraction_tombstone` | Phase B obligations should already be receipted; missing receipts indicate a contradiction and are never re-applied. `archive` also includes `SystemMessageArchive`, which recovery cannot rebuild. |
 
+Recovery counts an attempt toward a stall only when it provably changed
+nothing durable: no new effect receipt and no new delivery-progress row.
+At most one attempt per 60-second sample interval counts, because maintenance
+also runs at startup and after every committed decision: without that interval
+a burst of commits would spend the whole streak in milliseconds and park a row
+that is merely waiting for its recipient to return.
+After 3 such samples — so at least two minutes of continuous no durable
+progress — the row is parked for 15 minutes and
+classified once per distinct pending kind as
+`ingress_maintenance_unrecoverable_obligations_total{kind=...,reason="no_durable_progress"}`.
+A new delivery-progress row, including one completed occupant copy without an
+aggregate receipt, resets the streak. An attempt that cannot prove nothing
+landed is inconclusive and resets the streak: this includes storage errors,
+row-deadline elapse, uncertain settlement and a failed accounting read.
+
+Parking writes no receipts and no terminal state. The obligation is preserved,
+remains GC-protected and still appears in the non-terminal backlog gauge.
+The row is eligible after the cooldown, attempted on a subsequent scan.
+Periodic ticks jitter between 27 and 33 seconds and partial continuations back
+off from 1 second to 30 seconds; neither is an upper bound on the parked row's
+next attempt.
+
+The streak and classification caches are per-process and bounded to 4096
+entries with FIFO eviction. Both replicas can classify the same row; eviction
+or a restart permits re-attempt and re-classification. Another replica's
+progress changes the row's evidence and re-arms it on the next scan, resetting
+the streak and classification episode. The counter is a diagnostic, not an
+exact queue depth or a cluster-wide count of distinct obligations.
+
 Recovered direct notification candidates retain canonical receipt time and delegated groupchat candidates retain their frozen creation time, preserving outbox ordering relative to newer candidates.
 
 Recovered detached SM appends retain the canonical receipt time, preserving
@@ -816,10 +851,12 @@ clustering a sender attached to another replica still receives it.
 Recovery adds attempts, not new keyless sinks; a durable per-obligation send
 lease and keyed live sends remain follow-up work.
 
-Read `ingress.maintenance.unrecoverable_obligations{kind}` (Prometheus:
+Read `ingress.maintenance.unrecoverable_obligations{kind,reason}` (Prometheus:
 `ingress_maintenance_unrecoverable_obligations_total`) next to the CNPG backlog
-gauge. It counts unsupported evaluations, not the current queue: cached rows
-are skipped and rows with only unsupported kinds are paged past unattempted.
+gauge. It counts unsupported evaluations (`reason="unsupported"`) and stall
+classifications (`reason="no_durable_progress"`), not the current queue:
+cached rows are skipped and rows with only unsupported kinds are paged past
+unattempted.
 `ingress.maintenance.recovered_obligations` is the number of receipts that
 appeared on a row between the scan and the end of its attempt, so a row
 deadline cancelling an attempt mid-way cannot lose credit; a concurrent client
@@ -881,7 +918,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 25 THEN 'room_observer'
+           WHEN 27 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family
@@ -1001,6 +1038,250 @@ RETURNING message_key;
 COMMIT;
 ```
 
+
+## Repair for legacy route_muc obligations (#1782)
+
+The pre-#1757 legacy backlog was 183 non-terminal rows when #1782 was recorded.
+That count is incident context, not a selection criterion. Stall parking
+reduces repeated attempts but does not abandon these obligations. Running
+this repair is the operator's decision: its receipts record **abandonment,
+not delivery**, after review and acceptance of the affected losses.
+
+The incident bound is **created before the #1757 rollout completed on both
+replicas**. Record the actual rollout-completion timestamp in the audit record
+and replace `<both-replicas-1757-rollout-completed-at>` below. Deployment of
+`sha-8915560` began `2026-09-15T08:51Z`; neither that deployment start nor the
+first upgraded replica's start time is the bound.
+
+Never select repair targets with a kind predicate: kind 2 also covers
+`RouteMucSystemBroadcast`. Selection is by a reviewed `message_key` manifest
+only. Review the recorded payload, audience, pending pairs and live or detached
+session evidence for each selected row. Per-row archive verification belongs
+to that review; do not assume the room MAM archive holds its content. Bodyless
+chat states and markers were never archived, as described in the #1749 repair.
+Record what remains recoverable from the archive and what is being abandoned.
+
+Recovery's `freeze()` releases the canonical lock before effects run, and a
+detached delivery happens before its progress transaction. Keyed detached
+writes survive caller cancellation. An attempt already past freeze on either
+replica can therefore still land a copy after the repair commits. `FOR UPDATE`
+fences only attempts that have not yet frozen; keyed dedup prevents a second
+append, not a first one landing late. Neither the row deadline nor the parking
+cooldown bounds this race.
+
+The only real fence is quiescing ingress maintenance on both replicas for the
+repair window. Scale the deployment to zero, or run the repair in a maintenance
+window where both replicas are stopped. Perform the payload, audience and
+archive review **with the replicas running**: the write transaction fails closed
+if anything changed between review and write, so the review itself needs no
+outage. Record the original replica count, then quiesce both replicas and keep
+them stopped only through the confirming dry run, the write and the
+verification, and prevent deployment reconciliation from restarting them during
+that window.
+The deployment is reconciled by Flux from the `waddle-server` HelmRelease, so
+`kubectl scale` alone is reverted at the next reconciliation: suspend the
+HelmRelease **before** scaling, and resume it only after verification.
+Confirm both processes have exited and their outstanding database work has
+finished before taking the dry-run snapshot. Scaling causes a service outage.
+
+```sh
+kubectl --context teleport.waddle.social-production -n waddle get deployment waddle-server -o jsonpath='{.spec.replicas}'
+kubectl --context teleport.waddle.social-production -n waddle patch helmrelease waddle-server --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context teleport.waddle.social-production -n waddle scale deployment/waddle-server --replicas=0
+kubectl --context teleport.waddle.social-production -n waddle get pods -o wide
+```
+
+First run this read-only dry run on the primary, replacing the timestamp
+placeholder. It lists candidates, not approved targets. Keep the reviewed
+subset as the manifest: every selected canonical key, including keys with no
+pending pairs, and its exact pending integer-kind and hex-hash pairs. Do not
+select all candidates merely because they precede the bound.
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+WITH pending AS (
+  SELECT intent.message_key, intent.kind, intent.semantic_identity_hash,
+         CASE intent.kind
+           WHEN 0 THEN 'archive'
+           WHEN 1 THEN 'route_direct'
+           WHEN 2 THEN 'route_muc'
+           WHEN 3 THEN 'route_occupant_pm'
+           WHEN 5 THEN 'carbons'
+           WHEN 6 THEN 'inbox_project'
+           WHEN 7 THEN 'notification_activity_preview'
+           WHEN 8 THEN 'call_signal'
+           WHEN 9 THEN 'pin'
+           WHEN 10 THEN 'extension'
+           WHEN 11 THEN 'error_reply'
+           WHEN 12 THEN 'dispatch_to_room_remote'
+           WHEN 13 THEN 'room_subject_mutation'
+           WHEN 14 THEN 'retraction_tombstone'
+           WHEN 15 THEN 'dm_pin_mutation'
+           WHEN 16 THEN 'group_dm_membership_grant'
+           WHEN 17 THEN 'group_dm_invite_ledger'
+           WHEN 18 THEN 'link_preview_media_ref'
+           WHEN 19 THEN 'muc_invite_membership_grant'
+           WHEN 20 THEN 'muc_invite_ledger'
+           WHEN 21 THEN 'groupchat_notification_recovery'
+           WHEN 22 THEN 'pending_delivery'
+           WHEN 23 THEN 'tombstone_replay_deletion'
+           WHEN 24 THEN 'relay_carbons'
+           WHEN 27 THEN 'room_observer'
+           WHEN 26 THEN 'dm_call_thread_state'
+           ELSE 'kind_' || intent.kind::text
+         END AS kind_family
+  FROM ingress_effect_intents intent
+  WHERE NOT EXISTS (
+    SELECT 1 FROM ingress_effect_receipts receipt
+    WHERE receipt.message_key = intent.message_key
+      AND receipt.kind = intent.kind
+      AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+  )
+)
+SELECT message.message_key, message.created_at,
+       coalesce(jsonb_agg(jsonb_build_object(
+         'kind', pending.kind,
+         'semantic_identity_hash', encode(pending.semantic_identity_hash, 'hex'),
+         'kind_family', pending.kind_family
+       ) ORDER BY pending.kind, pending.semantic_identity_hash)
+         FILTER (WHERE pending.kind IS NOT NULL), '[]'::jsonb) AS pending_pairs,
+       CASE WHEN count(pending.kind) = 0 THEN 'terminalization' END AS missing_step
+FROM ingress_messages message
+LEFT JOIN pending USING (message_key)
+WHERE message.terminal_at IS NULL
+  AND message.created_at < timestamptz '<both-replicas-1757-rollout-completed-at>'
+GROUP BY message.message_key, message.created_at
+ORDER BY message.created_at, message.message_key;
+COMMIT;
+```
+
+Then connect `psql` to the primary with the **application role, never
+`pg_monitor`**. Replace all placeholders and expand the two `VALUES` lists
+from the reviewed manifest; if every selected key has an empty pending list,
+omit the `reviewed_pending` INSERT entirely. Preserve the `RETURNING` output
+and successful commit result with the dry-run output as the audit record.
+
+This uses the #1749 transaction machinery: lock the epoch singleton first,
+set the epoch GUCs, then lock canonical rows `FOR UPDATE` in key order before
+child writes, following [ingress epoch guards](ingress-epoch-guards.md).
+The transaction-local xid proof is harmless at epoch 0 and required at later
+epochs. This does not activate or change the protocol epoch. The transaction
+aborts if a key disappeared, terminalized, falls outside the incident bound,
+or its pending pairs differ in either direction. On any error, `ROLLBACK`
+and perform a fresh dry run and review; do not weaken the checks.
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE;
+SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE;
+SET LOCAL waddle.protocol_epoch = '<current epoch>';
+SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true);
+
+CREATE TEMP TABLE reviewed_messages (
+  message_key uuid PRIMARY KEY
+) ON COMMIT DROP;
+CREATE TEMP TABLE reviewed_pending (
+  message_key uuid NOT NULL REFERENCES reviewed_messages (message_key),
+  kind integer NOT NULL,
+  semantic_identity_hash bytea NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
+  PRIMARY KEY (message_key, kind, semantic_identity_hash)
+) ON COMMIT DROP;
+INSERT INTO reviewed_messages (message_key) VALUES
+  ('<reviewed-message-key>'::uuid);
+INSERT INTO reviewed_pending (message_key, kind, semantic_identity_hash) VALUES
+  ('<reviewed-message-key>'::uuid, <reviewed-kind>, decode('<reviewed-hex-hash>', 'hex'));
+
+SELECT message.message_key
+FROM ingress_messages message
+JOIN reviewed_messages reviewed USING (message_key)
+ORDER BY message.message_key
+FOR UPDATE OF message;
+
+DO $$
+BEGIN
+  IF (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1)
+       IS DISTINCT FROM current_setting('waddle.protocol_epoch') THEN
+    RAISE EXCEPTION 'epoch changed or singleton missing; abort repair';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM reviewed_messages) OR EXISTS (
+    SELECT 1 FROM reviewed_messages reviewed
+    LEFT JOIN ingress_messages message USING (message_key)
+    WHERE message.message_key IS NULL OR message.terminal_at IS NOT NULL
+       OR message.created_at >= timestamptz '<both-replicas-1757-rollout-completed-at>'
+  ) THEN
+    RAISE EXCEPTION 'manifest empty, missing, terminal, or outside incident window';
+  END IF;
+  IF EXISTS (
+    WITH actual_pending AS (
+      SELECT intent.message_key, intent.kind, intent.semantic_identity_hash
+      FROM ingress_effect_intents intent
+      JOIN reviewed_messages reviewed USING (message_key)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM ingress_effect_receipts receipt
+        WHERE receipt.message_key = intent.message_key
+          AND receipt.kind = intent.kind
+          AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+      )
+    )
+    (SELECT * FROM actual_pending EXCEPT SELECT * FROM reviewed_pending)
+    UNION ALL
+    (SELECT * FROM reviewed_pending EXCEPT SELECT * FROM actual_pending)
+  ) THEN
+    RAISE EXCEPTION 'pending pairs differ from reviewed manifest; abort repair';
+  END IF;
+END $$;
+
+INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+SELECT message_key, kind, semantic_identity_hash FROM reviewed_pending
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+UPDATE ingress_messages SET terminal_at = now()
+WHERE message_key IN (SELECT message_key FROM reviewed_messages)
+  AND terminal_at IS NULL
+RETURNING message_key;
+COMMIT;
+```
+
+While both replicas remain stopped, re-run this read-only verification with
+every key from the reviewed manifest. Every key must exist, have a non-NULL
+`terminal_at` and have `pending_pairs = 0`. Keep the output with the audit
+record. These checks establish abandonment, not delivery, and cannot detect
+a late copy from an attempt already past freeze if the repair ran without
+the maintenance fence.
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+WITH reviewed_messages (message_key) AS (
+  VALUES ('<reviewed-message-key>'::uuid)
+)
+SELECT reviewed.message_key, message.created_at, message.terminal_at,
+       message.message_key IS NOT NULL AS canonical_present,
+       (SELECT count(*)
+        FROM ingress_effect_intents intent
+        WHERE intent.message_key = reviewed.message_key
+          AND NOT EXISTS (
+            SELECT 1 FROM ingress_effect_receipts receipt
+            WHERE receipt.message_key = intent.message_key
+              AND receipt.kind = intent.kind
+              AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+          )) AS pending_pairs
+FROM reviewed_messages reviewed
+LEFT JOIN ingress_messages message USING (message_key)
+ORDER BY reviewed.message_key;
+COMMIT;
+```
+
+After successful verification, restore the recorded replica count and normal
+deployment reconciliation. Re-run the same read-only query after both replicas
+are ready, then re-run "Non-terminal backlog triage" for remaining work. Do not
+expect the backlog gauge to reach zero if other obligations remain pending.
+
+```sh
+kubectl --context teleport.waddle.social-production -n waddle scale deployment/waddle-server --replicas=<recorded-replica-count>
+kubectl --context teleport.waddle.social-production -n waddle rollout status deployment/waddle-server
+kubectl --context teleport.waddle.social-production -n waddle patch helmrelease waddle-server --type=merge -p '{"spec":{"suspend":false}}'
+```
 
 ## Detached delivery progress
 

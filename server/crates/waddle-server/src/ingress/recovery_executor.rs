@@ -20,11 +20,19 @@ use crate::{
 use super::{recovery_rebuild, Deps, EffectReceiptKey, ImmediateSink, RouteProgress};
 use crate::server::routes::interpret::DeliveryExecutionContext;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AttemptClassification {
+    Evaluable,
+    Inconclusive,
+}
+
 pub(super) enum RowRecovery {
     Vanished,
     NothingPending,
     Executed {
         unrecoverable: Vec<IngressEffectKind>,
+        pending: Vec<IngressEffectKind>,
+        classification: AttemptClassification,
         /// Nothing left on the row can make progress until its evidence changes.
         unsupported: bool,
     },
@@ -58,6 +66,8 @@ pub(super) async fn recover_row(
     }
     #[cfg(test)]
     super::execute::test_hooks::after_recovery_freeze(key).await;
+    let pending = pending_kinds(&frozen.unreceipted);
+    let mut classification = AttemptClassification::Evaluable;
     let blocked_recipients = blocked_recipients(deps, &frozen).await?;
     let host_owned_resources = frozen
         .route_progress
@@ -96,6 +106,7 @@ pub(super) async fn recover_row(
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
+        classification = classify_report(&report);
         // Frames belong to the sender's connection, which no longer exists
         // during recovery. A warning reply an observer produced cannot be
         // delivered; retrying every tick would only re-invoke the plugin.
@@ -111,11 +122,16 @@ pub(super) async fn recover_row(
     }
     for row in &rebuilt.delegated {
         let Some(state) = deps.web_socket_state else {
+            classification = AttemptClassification::Inconclusive;
             tracing::debug!(?key, "groupchat recovery has no websocket state");
             continue;
         };
-        crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
-            .await?;
+        let outcome =
+            crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
+                .await?;
+        if outcome != super::RecoverySweepOutcome::Completed {
+            classification = AttemptClassification::Inconclusive;
+        }
     }
     // Classify after every arm and delegation on this row has settled: the row
     // is cached only when nothing left on it can make progress until its
@@ -128,10 +144,40 @@ pub(super) async fn recover_row(
                 .iter()
                 .all(|receipt| settled_here.contains(&receipt));
     }
+    if unsupported {
+        classification = AttemptClassification::Inconclusive;
+    }
     Ok(RowRecovery::Executed {
         unrecoverable,
+        pending,
+        classification,
         unsupported,
     })
+}
+
+fn pending_kinds(intents: &[IngressEffectIntent]) -> Vec<IngressEffectKind> {
+    let mut kinds = Vec::new();
+    for intent in intents {
+        let kind = intent.kind();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+fn classify_report(report: &super::execute::ExecutionReport) -> AttemptClassification {
+    if report
+        .outcomes
+        .iter()
+        .any(|(_, outcome)| *outcome == super::execute::ExternalOutcome::Uncertain)
+        || !report.receipt_failures.is_empty()
+        || report.terminalization_failure.is_some()
+    {
+        AttemptClassification::Inconclusive
+    } else {
+        AttemptClassification::Evaluable
+    }
 }
 
 /// Consult current policy only after freeze released the ingress transaction.
@@ -200,7 +246,12 @@ async fn record_discarded_receipts(
         )
         .await?;
     }
-    super::execute::terminalize_if_complete_in_transaction(&mut tx, key).await?;
+    super::execute::terminalize_if_complete_in_transaction(
+        &mut tx,
+        key,
+        DeliveryExecutionContext::MaintenanceRecovery.into(),
+    )
+    .await?;
     tx.commit().await
 }
 
@@ -277,7 +328,12 @@ async fn freeze(
     }
     if !empty_muc.is_empty() {
         unreceipted.retain(|intent| !empty_muc.contains(intent));
-        super::execute::terminalize_if_complete_in_transaction(&mut tx, key).await?;
+        super::execute::terminalize_if_complete_in_transaction(
+            &mut tx,
+            key,
+            DeliveryExecutionContext::MaintenanceRecovery.into(),
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(Some(FrozenRecovery {

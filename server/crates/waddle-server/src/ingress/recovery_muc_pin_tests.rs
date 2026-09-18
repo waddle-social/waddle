@@ -193,14 +193,14 @@ async fn pin_recovery(f: IngressFixture, case: PinCase) {
                 )
                 .unwrap_or(0),
             before_unrecoverable + 1,
-            "missing payload counts under the kind-only label"
+            "missing payload is classified once"
         );
         let (_, attribute_counts) = metrics
             .counter_shape("ingress.maintenance.unrecoverable_obligations")
             .expect("exported counter");
         assert!(
-            attribute_counts.iter().all(|count| *count == 1),
-            "reason remains a log field; kind is the only metric label"
+            attribute_counts.iter().all(|count| *count == 2),
+            "classification exports the kind and reason labels"
         );
     }
     let complete = matches!(case, PinCase::Complete);

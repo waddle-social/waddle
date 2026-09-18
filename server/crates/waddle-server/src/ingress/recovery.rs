@@ -1,5 +1,6 @@
 //! Reconcile notification obligations without exposing ingress transactions.
 use super::IngressAuthority;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress_substrate::MessageEnvelope,
     ingress_uow::{
@@ -179,8 +180,12 @@ impl IngressAuthority {
             }
         }
         settle_recorded(&mut tx, recovery.message_key, &evidence).await?;
-        super::execute::terminalize_if_complete_in_transaction(&mut tx, recovery.message_key)
-            .await?;
+        super::execute::terminalize_if_complete_in_transaction(
+            &mut tx,
+            recovery.message_key,
+            DeliveryExecutionContext::MaintenanceRecovery.into(),
+        )
+        .await?;
         tx.commit().await?;
         Ok(RecoverySweepOutcome::Completed)
     }

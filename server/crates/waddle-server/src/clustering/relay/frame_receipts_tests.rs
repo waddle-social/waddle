@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     config::{IngressConfig, LineageConfig},
     ingress::{
@@ -108,9 +109,11 @@ async fn cached_reply_receipt(fixture: IngressFixture, fail_storage: bool) {
     assert_eq!(ack.reply_receipt, Some(token));
     let token = ack.reply_receipt.expect("received proof");
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("awaiting duplicate frame write"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("awaiting duplicate frame write")
+    );
     // Only frames from the received duplicate authorize confirmation.
     for frame in &ack.client_replies {
         let Stanza::Message(message) = &frame.0 else {
@@ -145,9 +148,11 @@ async fn cached_reply_receipt(fixture: IngressFixture, fail_storage: bool) {
             .await;
     }
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("unreceipted reply"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("unreceipted reply")
+    );
     assert!(
         confirm(&receipts, token).await,
         "same proof retries successfully"
@@ -162,9 +167,11 @@ async fn cached_reply_receipt(fixture: IngressFixture, fail_storage: bool) {
         "success releases heavy completion capacity"
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminal reply"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminal reply")
+    );
     drop(receipts);
     assert!(authority.drain_and_join(Duration::from_secs(5)).await);
     drop(authority);
@@ -281,13 +288,15 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
     };
     let (frames, completion) =
         ack.into_frame_delivery(NodeId::generate(), CancellationToken::new());
-    let mut origin = crate::ingress::ExecutionReport::default();
+    let mut origin = crate::ingress::ExecutionReport::new(DeliveryExecutionContext::Live.into());
     origin.retain_relay_frame_completion(completion.expect("owner completion"));
     let retained = origin.frame_receipts();
     assert_eq!(retained, owner_receipts);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("owner already terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("owner already terminal")
+    );
     // Disconnect before writing. Neither the origin report nor the owner's
     // expiring token table survives the reconnect.
     drop(origin);
@@ -314,9 +323,11 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
             .expect("owner confirmation"));
     }
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("owner terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("owner terminal")
+    );
     assert!(authority.drain_and_join(Duration::from_secs(5)).await);
     drop(authority);
     fixture.close().await;
