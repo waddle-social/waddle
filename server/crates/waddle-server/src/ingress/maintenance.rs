@@ -48,6 +48,11 @@ pub(crate) struct MaintenanceBudget {
     pub(crate) recovery_page_size: u32,
     pub(crate) recovery_max_attempts: u32,
     pub(crate) recovery_stall_attempts: u32,
+    /// Shortest gap between two attempts that both count toward a stall. The
+    /// maintenance coordinator also runs after every committed decision, so
+    /// without this a burst of commits would burn the whole streak in
+    /// milliseconds and park a row that is merely waiting for its recipient.
+    pub(crate) recovery_stall_sample_interval: Duration,
     pub(crate) recovery_stall_cooldown: Duration,
     pub(crate) retention: RetentionGcBudget,
     pub(crate) hard_deadline: Duration,
@@ -64,6 +69,7 @@ impl MaintenanceBudget {
         recovery_page_size: 64,
         recovery_max_attempts: 64,
         recovery_stall_attempts: 3,
+        recovery_stall_sample_interval: Duration::from_secs(60),
         recovery_stall_cooldown: Duration::from_secs(15 * 60),
         retention: RetentionGcBudget::DEFAULT,
         hard_deadline: Duration::from_secs(13),

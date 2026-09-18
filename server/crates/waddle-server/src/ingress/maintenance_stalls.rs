@@ -95,6 +95,9 @@ struct StalledRow {
     consecutive: u32,
     classified: ClassificationEpisode,
     generation: u64,
+    /// When this row last contributed a sample to the streak, so a burst of
+    /// commit-triggered passes counts once rather than once per pass.
+    last_counted: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -128,11 +131,13 @@ impl StalledRows {
             consecutive: 0,
             classified: ClassificationEpisode::Unclassified,
             generation: 0,
+            last_counted: None,
         });
         row.generation = attempt.generation;
         if row.evidence != attempt.observed || fresh != attempt.observed {
             row.consecutive = 0;
             row.classified = ClassificationEpisode::Unclassified;
+            row.last_counted = None;
             suppressed.remove_stalled(attempt.key);
         }
         row.evidence = fresh;
@@ -140,11 +145,22 @@ impl StalledRows {
             || fresh != attempt.observed
         {
             row.consecutive = 0;
+            row.last_counted = None;
             // A newer attempt can start before an older accounting worker parks
             // the row. Its uncertainty invalidates that older parking decision.
             suppressed.remove_stalled(attempt.key);
             return;
         }
+        // Maintenance also runs at startup and after every committed decision.
+        // Only one attempt per sample interval counts, so the streak measures
+        // elapsed time without progress rather than commit volume.
+        let now = Instant::now();
+        if let Some(last) = row.last_counted {
+            if now.duration_since(last) < budget.recovery_stall_sample_interval {
+                return;
+            }
+        }
+        row.last_counted = Some(now);
         row.consecutive = row.consecutive.saturating_add(1);
         if row.consecutive < budget.recovery_stall_attempts {
             return;

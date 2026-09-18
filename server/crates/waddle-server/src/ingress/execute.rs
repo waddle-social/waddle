@@ -933,9 +933,18 @@ fn classify_outcome(
                 | InviteLedgerOutcome::Claimed(_) => ExternalOutcome::Done,
             }
         }
-        EffectOutcome::PlannedInbox(_)
-        | EffectOutcome::MucUserDelivery(Err(_))
-        | EffectOutcome::InviteLedger(Err(_)) => ExternalOutcome::Failed,
+        // A storage failure may still have committed its row, so it can never
+        // prove that nothing landed. Quota refusal and an unavailable executor
+        // are deterministic: nothing was written.
+        EffectOutcome::MucUserDelivery(Err(
+            crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError::Storage(_),
+        ))
+        | EffectOutcome::InviteLedger(Err(
+            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError::Storage,
+        )) => ExternalOutcome::Uncertain,
+        EffectOutcome::PlannedInbox(_) | EffectOutcome::MucUserDelivery(Err(_)) => {
+            ExternalOutcome::Failed
+        }
         EffectOutcome::Completed if !has_confirmed_completion(effect) => ExternalOutcome::Uncertain,
         EffectOutcome::Completed | EffectOutcome::Archive(Ok(_)) | EffectOutcome::Inbox(Ok(_)) => {
             ExternalOutcome::Done
@@ -1134,6 +1143,35 @@ mod tests {
             (
                 EffectOutcome::Delivery(FullJidDeliveryOutcome::Dropped),
                 ExternalOutcome::Uncertain,
+            ),
+            // A storage failure may have committed its row: recovery must not
+            // count the attempt as proof that nothing landed (#1782).
+            (
+                EffectOutcome::InviteLedger(Err(
+                    crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError::Storage,
+                )),
+                ExternalOutcome::Uncertain,
+            ),
+            (
+                EffectOutcome::MucUserDelivery(Err(
+                    crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError::Storage(
+                        waddle_xmpp::pending_delivery::storage::PendingStorageError::Other("storage".to_owned()),
+                    ),
+                )),
+                ExternalOutcome::Uncertain,
+            ),
+            // Deterministic refusals prove nothing was written.
+            (
+                EffectOutcome::MucUserDelivery(Err(
+                    crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError::QuotaExceeded,
+                )),
+                ExternalOutcome::Failed,
+            ),
+            (
+                EffectOutcome::MucUserDelivery(Err(
+                    crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError::Unavailable,
+                )),
+                ExternalOutcome::Failed,
             ),
         ];
         for (result, expected) in cases {

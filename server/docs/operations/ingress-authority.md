@@ -748,7 +748,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 25 THEN 'room_observer'
+           WHEN 27 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family
@@ -800,7 +800,12 @@ fail-closed before rebuilding routes.
 
 Recovery counts an attempt toward a stall only when it provably changed
 nothing durable: no new effect receipt and no new delivery-progress row.
-After 3 consecutive such attempts, the row is parked for 15 minutes and
+At most one attempt per 60-second sample interval counts, because maintenance
+also runs at startup and after every committed decision: without that interval
+a burst of commits would spend the whole streak in milliseconds and park a row
+that is merely waiting for its recipient to return.
+After 3 such samples — so at least two minutes of continuous no durable
+progress — the row is parked for 15 minutes and
 classified once per distinct pending kind as
 `ingress_maintenance_unrecoverable_obligations_total{kind=...,reason="no_durable_progress"}`.
 A new delivery-progress row, including one completed occupant copy without an
@@ -913,7 +918,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 25 THEN 'room_observer'
+           WHEN 27 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family
@@ -1066,9 +1071,13 @@ cooldown bounds this race.
 
 The only real fence is quiescing ingress maintenance on both replicas for the
 repair window. Scale the deployment to zero, or run the repair in a maintenance
-window where both replicas are stopped. Record the original replica count,
-keep both replicas stopped through the dry run, review, write and verification,
-and prevent deployment reconciliation from restarting them during the window.
+window where both replicas are stopped. Perform the payload, audience and
+archive review **with the replicas running**: the write transaction fails closed
+if anything changed between review and write, so the review itself needs no
+outage. Record the original replica count, then quiesce both replicas and keep
+them stopped only through the confirming dry run, the write and the
+verification, and prevent deployment reconciliation from restarting them during
+that window.
 The deployment is reconciled by Flux from the `waddle-server` HelmRelease, so
 `kubectl scale` alone is reverted at the next reconciliation: suspend the
 HelmRelease **before** scaling, and resume it only after verification.
@@ -1117,7 +1126,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 25 THEN 'room_observer'
+           WHEN 27 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family

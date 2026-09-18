@@ -40,8 +40,12 @@ connection-generation fence (follow-up issue); (vi) ~~extension-host dispatch ru
 
 ### Recovery convergence (#1782)
 
-Recovery (§3.6b) parks a row for 15 minutes after three consecutive attempts
-that provably added neither an effect receipt nor a delivery-progress row.
+Recovery (§3.6b) parks a row for 15 minutes after three attempts that provably
+added neither an effect receipt nor a delivery-progress row. At most one attempt
+per 60-second sample interval counts toward that streak, so parking follows at
+least two minutes of continuous no durable progress. Maintenance also runs at
+startup and after every committed decision, and without that interval a burst of
+commits would park a row still waiting for its recipient.
 Storage errors, elapsed row deadlines, uncertain settlement and failed
 accounting reads are inconclusive and reset the streak. Parking writes no
 receipts or terminal state: obligations remain pending, GC-protected and

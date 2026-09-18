@@ -29,6 +29,7 @@ use waddle_xmpp::{
 fn immediate_budget() -> MaintenanceBudget {
     MaintenanceBudget {
         grace: chrono::Duration::zero(),
+        recovery_stall_sample_interval: Duration::ZERO,
         ..MaintenanceBudget::DEFAULT
     }
 }
@@ -827,6 +828,37 @@ async fn stalled_route(fixture: &IngressFixture) -> MessageKey {
         .await
         .expect("commit route");
     decision.message_key.expect("key")
+}
+
+/// Maintenance also runs at startup and after every committed decision, so a
+/// burst of passes must not burn the streak: parking a row that is merely
+/// waiting for its recipient would suppress a recoverable delivery for a whole
+/// cooldown. Only one attempt per sample interval counts (#1782).
+#[tokio::test]
+async fn sqlite_rapid_passes_within_the_sample_interval_never_park_a_row() {
+    let fixture = IngressFixture::sqlite().await;
+    let key = stalled_route(&fixture).await;
+    let environment = EmptyRecoveryEnvironment(ConnectionRegistry::new());
+    let cursor = MaintenanceCursor::default();
+    // The production sample interval, with everything else immediate.
+    let budget = MaintenanceBudget {
+        grace: chrono::Duration::zero(),
+        ..MaintenanceBudget::DEFAULT
+    };
+    for _ in 0..(budget.recovery_stall_attempts * 4) {
+        assert_eq!(
+            super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment)
+                .await,
+            MaintenanceOutcome::Complete
+        );
+        cursor.wait_for_recovery_accounting().await;
+    }
+    assert_eq!(
+        super::super::recovery_executor::attempt_count(key),
+        u64::from(budget.recovery_stall_attempts * 4),
+        "every rapid pass still attempts the row; none of them parks it"
+    );
+    fixture.close().await;
 }
 
 #[tokio::test]

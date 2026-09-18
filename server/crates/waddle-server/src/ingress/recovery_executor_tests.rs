@@ -68,6 +68,7 @@ fn immediate_recovery_budget() -> MaintenanceBudget {
         recovery: Duration::from_secs(20),
         recovery_row: Duration::from_secs(5),
         hard_deadline: Duration::from_secs(30),
+        recovery_stall_sample_interval: Duration::ZERO,
         ..MaintenanceBudget::DEFAULT
     }
 }
