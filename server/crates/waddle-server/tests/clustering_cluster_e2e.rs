@@ -2793,9 +2793,12 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     );
     // The remote occupant's copy is at-least-once: the fault-delayed first
     // relay attempt can land on node B after the relay wakes, and the retry's
-    // relayed copy lands as well because receiver-side cross-node appends are
-    // not keyed by the origin's obligation (RFC 0018 §3.3a residue, #1778).
-    // Any extra frame must be the same canonical message, never a different one.
+    // relayed copy lands as well. This occupant is LIVE, so its copy is a live
+    // socket send, and live sends carry no idempotency key (#1776). It is NOT
+    // the #1778 residue: since #1778 the receiving node's *detached* append is
+    // keyed by the origin's obligation, which is what the local assertion above
+    // proves. Any extra frame must be the same canonical message, never a
+    // different one.
     let remote_duplicate = remote
         .recv_matching_within(Duration::from_millis(500), |frame| {
             frame.parse::<minidom::Element>().is_ok_and(|element| {
@@ -2808,7 +2811,7 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         let element: minidom::Element = frame.parse().expect("duplicate remote copy parses");
         assert_eq!(element.attr("from"), Some(from.to_string().as_str()));
         assert_eq!(element.attr("type"), Some("groupchat"));
-        eprintln!("remote copy delivered at-least-once after relay recovery (#1778 residue)");
+        eprintln!("remote copy delivered at-least-once after relay recovery (live send, #1776)");
     }
     assert!(partial_fanout_terminal(db, pending_key).await);
     assert!(

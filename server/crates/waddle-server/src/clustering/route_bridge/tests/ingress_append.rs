@@ -11,13 +11,19 @@ use waddle_xmpp::stream_management::{
 #[derive(Clone, Copy, Debug)]
 enum AuthorityCase {
     Authorized,
+    LiveRecipient,
     CanonicalAbsent,
     CanonicalSenderMismatch,
     ClaimMismatch,
     StanzaMismatch,
 }
 
-async fn ingress_append_authority(fixture: IngressFixture, second_hop: bool, muc: bool) {
+async fn ingress_append_authority(
+    fixture: IngressFixture,
+    second_hop: bool,
+    muc: bool,
+    live_recipient: bool,
+) {
     let persistence = Arc::new(
         crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
@@ -94,46 +100,72 @@ async fn ingress_append_authority(fixture: IngressFixture, second_hop: bool, muc
         },
     );
 
-    for (index, case) in [
-        AuthorityCase::Authorized,
-        AuthorityCase::CanonicalAbsent,
-        AuthorityCase::CanonicalSenderMismatch,
-        AuthorityCase::ClaimMismatch,
-        AuthorityCase::StanzaMismatch,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let cases: &[AuthorityCase] = if live_recipient {
+        &[AuthorityCase::Authorized, AuthorityCase::LiveRecipient]
+    } else {
+        &[
+            AuthorityCase::Authorized,
+            AuthorityCase::CanonicalAbsent,
+            AuthorityCase::CanonicalSenderMismatch,
+            AuthorityCase::ClaimMismatch,
+            AuthorityCase::StanzaMismatch,
+        ]
+    };
+    for (index, case) in cases.iter().copied().enumerate() {
         if muc && index != 0 {
             continue;
         }
         let recipient = target_bare()
             .with_resource_str(&format!("authority-{index}"))
             .expect("recipient");
-        sm.store_session(DetachedSession {
-            stream_id: recipient.to_string(),
-            user_id: recipient.to_bare().to_string(),
-            jid: recipient.clone(),
-            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            inbound_count: 0,
-            outbound_count: 0,
-            last_acked: 0,
-            replay_gap_through: None,
-            unacked_stanzas: Vec::new(),
-            max_resume_time: Some(300),
-            detached_at: std::time::Instant::now(),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-            pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("detached recipient");
+        let mut live_rx = if matches!(case, AuthorityCase::LiveRecipient) {
+            let (tx, rx) = mpsc::channel(1);
+            let entry = ConnectionEntry::new(tx);
+            services
+                .connection_registry
+                .register_entry(recipient.clone(), entry.clone());
+            services
+                .user_registry
+                .ask(waddle_xmpp::registry::RegisterUserResource {
+                    jid: recipient.clone(),
+                    entry,
+                })
+                .await
+                .expect("live recipient registration");
+            assert!(sm
+                .peek_session(&recipient.to_string())
+                .await
+                .expect("session read")
+                .is_none());
+            assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+            Some(rx)
+        } else {
+            sm.store_session(DetachedSession {
+                stream_id: recipient.to_string(),
+                user_id: recipient.to_bare().to_string(),
+                jid: recipient.clone(),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            })
+            .await
+            .expect("detached recipient");
+            None
+        };
         let mut submission = fixture.submission(None, "receiver authority");
         let intent = if muc {
             IngressEffectIntent::RouteMucGroupchat {
@@ -176,7 +208,7 @@ async fn ingress_append_authority(fixture: IngressFixture, second_hop: bool, muc
             .clone();
         message.to = Some(recipient.clone().into());
         match case {
-            AuthorityCase::Authorized => {}
+            AuthorityCase::Authorized | AuthorityCase::LiveRecipient => {}
             AuthorityCase::CanonicalAbsent => {
                 obligation.message_key = waddle_xmpp::ingress::MessageKey::new()
             }
@@ -278,6 +310,28 @@ async fn ingress_append_authority(fixture: IngressFixture, second_hop: bool, muc
                 .await
                 .expect("authority rejection must not reject delivery");
         }
+        if let Some(rx) = live_rx.as_mut() {
+            let outbound = rx
+                .try_recv()
+                .expect("live recipient receives relayed stanza");
+            let Stanza::Message(delivered) = outbound.stanza else {
+                panic!("live recipient receives a message");
+            };
+            assert_eq!(delivered, message);
+            assert!(sm
+                .peek_session(&recipient.to_string())
+                .await
+                .expect("session read")
+                .is_none());
+            assert!(
+                crate::sm_persistence::ingress_append::get(&fixture.db, &ledger_key)
+                    .await
+                    .expect("live recipient ledger read")
+                    .is_none()
+            );
+            assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+            continue;
+        }
         let queued = sm
             .peek_session(&recipient.to_string())
             .await
@@ -310,34 +364,45 @@ async fn ingress_append_authority(fixture: IngressFixture, second_hop: bool, muc
 }
 
 #[tokio::test]
+async fn sqlite_live_recipient_skips_ingress_append_authorization() {
+    ingress_append_authority(IngressFixture::sqlite().await, false, false, true).await;
+}
+#[tokio::test]
+async fn postgres_live_recipient_skips_ingress_append_authorization() {
+    if let Some(fixture) = IngressFixture::postgres("live_recipient_append_auth").await {
+        ingress_append_authority(fixture, false, false, true).await;
+    }
+}
+
+#[tokio::test]
 async fn sqlite_ordered_ingress_append_authorization() {
-    ingress_append_authority(IngressFixture::sqlite().await, false, false).await;
+    ingress_append_authority(IngressFixture::sqlite().await, false, false, false).await;
 }
 #[tokio::test]
 async fn postgres_ordered_ingress_append_authorization() {
     if let Some(fixture) = IngressFixture::postgres("ordered_append_auth").await {
-        ingress_append_authority(fixture, false, false).await;
+        ingress_append_authority(fixture, false, false, false).await;
     }
 }
 #[tokio::test]
 async fn sqlite_second_hop_ingress_append_authorization() {
-    ingress_append_authority(IngressFixture::sqlite().await, true, false).await;
+    ingress_append_authority(IngressFixture::sqlite().await, true, false, false).await;
 }
 #[tokio::test]
 async fn postgres_second_hop_ingress_append_authorization() {
     if let Some(fixture) = IngressFixture::postgres("second_hop_append_auth").await {
-        ingress_append_authority(fixture, true, false).await;
+        ingress_append_authority(fixture, true, false, false).await;
     }
 }
 
 #[tokio::test]
 async fn sqlite_muc_occupant_ingress_append_is_keyed() {
-    ingress_append_authority(IngressFixture::sqlite().await, false, true).await;
+    ingress_append_authority(IngressFixture::sqlite().await, false, true, false).await;
 }
 #[tokio::test]
 async fn postgres_muc_occupant_ingress_append_is_keyed() {
     if let Some(fixture) = IngressFixture::postgres("muc_occupant_append").await {
-        ingress_append_authority(fixture, false, true).await;
+        ingress_append_authority(fixture, false, true, false).await;
     }
 }
 

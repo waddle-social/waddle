@@ -139,37 +139,67 @@ pub(crate) async fn run_retention_gc_coordinator(
 
 fn classify_retention_gc_result(
     result: Result<AliasGcOutcome, AliasGcFailure>,
-) -> (waddle_xmpp::telemetry::attributes::IngressGcOutcome, usize) {
+) -> (
+    waddle_xmpp::telemetry::attributes::IngressGcOutcome,
+    usize,
+    usize,
+) {
     use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
 
     match result {
         Ok(AliasGcOutcome {
             deleted_messages,
+            deleted_orphan_proofs,
             completed: true,
-        }) => (IngressGcOutcome::Completed, deleted_messages),
+        }) => (
+            IngressGcOutcome::Completed,
+            deleted_messages,
+            deleted_orphan_proofs,
+        ),
         Ok(AliasGcOutcome {
             deleted_messages,
+            deleted_orphan_proofs,
             completed: false,
-        }) => (IngressGcOutcome::Partial, deleted_messages),
+        }) => (
+            IngressGcOutcome::Partial,
+            deleted_messages,
+            deleted_orphan_proofs,
+        ),
         Err(AliasGcFailure {
             deleted_messages,
+            deleted_orphan_proofs,
             error: AliasGcError::DatabaseTimeout { .. },
-        }) => (IngressGcOutcome::TimedOut, deleted_messages),
+        }) => (
+            IngressGcOutcome::TimedOut,
+            deleted_messages,
+            deleted_orphan_proofs,
+        ),
         Err(AliasGcFailure {
             deleted_messages,
+            deleted_orphan_proofs,
             error: AliasGcError::Substrate(_),
-        }) => (IngressGcOutcome::Failed, deleted_messages),
+        }) => (
+            IngressGcOutcome::Failed,
+            deleted_messages,
+            deleted_orphan_proofs,
+        ),
     }
 }
 
 fn record_retention_gc_result(
     outcome: waddle_xmpp::telemetry::attributes::IngressGcOutcome,
     deleted_messages: usize,
+    deleted_orphan_proofs: usize,
 ) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
     waddle_xmpp::telemetry::reliability::increment_ingress_gc_run(outcome);
     if deleted_messages > 0 {
         waddle_xmpp::telemetry::reliability::add_ingress_gc_reclaimed_messages(
             u64::try_from(deleted_messages).unwrap_or(u64::MAX),
+        );
+    }
+    if deleted_orphan_proofs > 0 {
+        waddle_xmpp::telemetry::reliability::add_ingress_gc_reclaimed_orphan_proofs(
+            u64::try_from(deleted_orphan_proofs).unwrap_or(u64::MAX),
         );
     }
     outcome
@@ -247,14 +277,16 @@ pub(crate) async fn run_retention_gc_with_budget(
             if let Err(failure) = &result {
                 tracing::warn!(%failure, "ingress retention GC failed");
             }
-            let (outcome, deleted_messages) = classify_retention_gc_result(result);
-            record_retention_gc_result(outcome, deleted_messages)
+            let (outcome, deleted_messages, deleted_orphan_proofs) =
+                classify_retention_gc_result(result);
+            record_retention_gc_result(outcome, deleted_messages, deleted_orphan_proofs)
         }
         Err(error) => {
             tracing::warn!(%error, "ingress retention GC exceeded hard deadline");
             record_retention_gc_result(
                 waddle_xmpp::telemetry::attributes::IngressGcOutcome::TimedOut,
                 progress.committed(),
+                progress.committed_orphan_proofs(),
             )
         }
     }
@@ -267,6 +299,71 @@ mod tests {
     use crate::ingress_substrate::{record_message, terminalize_message};
     use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
     use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
+
+    #[tokio::test]
+    async fn retention_gc_reports_orphan_proofs_separately_for_every_outcome() {
+        use crate::ingress_substrate::{DatabaseTimeoutKind, IngressSubstrateError};
+
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let cases = [
+            (
+                Ok(AliasGcOutcome {
+                    deleted_messages: 2,
+                    deleted_orphan_proofs: 3,
+                    completed: true,
+                }),
+                IngressGcOutcome::Completed,
+            ),
+            (
+                Ok(AliasGcOutcome {
+                    deleted_messages: 2,
+                    deleted_orphan_proofs: 3,
+                    completed: false,
+                }),
+                IngressGcOutcome::Partial,
+            ),
+            (
+                Err(AliasGcFailure {
+                    deleted_messages: 2,
+                    deleted_orphan_proofs: 3,
+                    error: AliasGcError::DatabaseTimeout {
+                        kind: DatabaseTimeoutKind::Statement,
+                    },
+                }),
+                IngressGcOutcome::TimedOut,
+            ),
+            (
+                Err(AliasGcFailure {
+                    deleted_messages: 2,
+                    deleted_orphan_proofs: 3,
+                    error: AliasGcError::Substrate(IngressSubstrateError::InvalidStoredMessageKey),
+                }),
+                IngressGcOutcome::Failed,
+            ),
+        ];
+        for (result, expected) in cases {
+            let (outcome, messages, orphan_proofs) = classify_retention_gc_result(result);
+            assert_eq!((outcome, messages, orphan_proofs), (expected, 2, 3));
+            let messages_before = metrics
+                .counter_sum("ingress.gc.reclaimed_messages", &[])
+                .unwrap_or(0);
+            let orphans_before = metrics
+                .counter_sum("ingress.gc.reclaimed.orphan.proofs", &[])
+                .unwrap_or(0);
+            assert_eq!(
+                record_retention_gc_result(outcome, messages, orphan_proofs),
+                expected
+            );
+            assert_eq!(
+                metrics.counter_sum("ingress.gc.reclaimed_messages", &[]),
+                Some(messages_before + 2)
+            );
+            assert_eq!(
+                metrics.counter_sum("ingress.gc.reclaimed.orphan.proofs", &[]),
+                Some(orphans_before + 3)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn sqlite_retention_gc_collects_expired_terminal_rows() {

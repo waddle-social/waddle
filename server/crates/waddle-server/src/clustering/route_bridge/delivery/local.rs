@@ -21,6 +21,7 @@ impl OrderedRelayDeliveryBridge {
                 let ingress_append_context = super::ingress_append::authorize_ingress_append(
                     &services,
                     &envelope.sender_claim.entity,
+                    target,
                     stanza,
                     obligation,
                 )

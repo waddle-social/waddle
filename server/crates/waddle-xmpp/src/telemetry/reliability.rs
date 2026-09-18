@@ -297,6 +297,7 @@ pub fn register_reliability_counters() {
     }
     add_ingress_tx_retry(0);
     add_ingress_gc_reclaimed_messages(0);
+    add_ingress_gc_reclaimed_orphan_proofs(0);
     add_push_candidate_created(0);
     add_push_candidate_coalesced(0);
     add_push_outbox_published(0);
@@ -510,6 +511,15 @@ pub fn add_ingress_gc_reclaimed_messages(count: u64) {
     record_ingress_gc_reclaimed_messages(count);
 }
 
+pub fn add_ingress_gc_reclaimed_orphan_proofs(count: u64) {
+    crate::counter_add!(
+        "ingress.gc.reclaimed.orphan.proofs",
+        "{proof}",
+        "Orphan stream-management append proofs reclaimed by ingress retention GC runs (lower bound: progress lost to external cancellation is not counted).",
+        count,
+    );
+}
+
 fn add_ingress_maintenance_runs(
     count: u64,
     phase: IngressMaintenancePhase,
@@ -718,6 +728,7 @@ mod tests {
         let guard = setup().await;
         increment_ingress_gc_run(IngressGcOutcome::Partial);
         add_ingress_gc_reclaimed_messages(3);
+        add_ingress_gc_reclaimed_orphan_proofs(5);
         assert_eq!(
             guard.counter_sum("ingress.gc.runs", &[("outcome", "partial")]),
             Some(1)
@@ -725,6 +736,10 @@ mod tests {
         assert_eq!(
             guard.counter_sum("ingress.gc.reclaimed_messages", &[]),
             Some(3)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.gc.reclaimed.orphan.proofs", &[]),
+            Some(5)
         );
     }
 
@@ -1007,6 +1022,7 @@ mod tests {
         "ingress.tx.retries",
         "ingress.gc.runs",
         "ingress.gc.reclaimed_messages",
+        "ingress.gc.reclaimed.orphan.proofs",
         "ingress.maintenance.runs",
         "ingress.maintenance.terminalized_messages",
         "ingress.maintenance.recovered_obligations",

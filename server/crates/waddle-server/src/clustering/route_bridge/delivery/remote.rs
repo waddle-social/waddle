@@ -304,6 +304,7 @@ impl OrderedRelayDeliveryBridge {
                 let ingress_append_context = super::ingress_append::authorize_ingress_append(
                     &services,
                     &origin.sender_entity,
+                    &target,
                     &stanza.0,
                     ingress_append.as_ref(),
                 )

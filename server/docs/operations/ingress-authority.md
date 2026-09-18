@@ -435,6 +435,28 @@ recorded ingress append obligation identity, including through a full-JID
 second hop. Treat the prior `v6`/`v10` endpoints as historical; the current
 endpoints are `remote_resource_route.v7` and `deliver_ordered.v11`.
 
+**#1778 is the first genuine ordered-relay mixed-version window.** #1758's
+cutover rode its own `Recreate` and its flip-back rolled two builds of identical
+server code, so `deliver_ordered.v10` never actually met an older peer. #1778
+ships as an ordinary `RollingUpdate` — it adds no migration, and a versioned
+envelope id is exactly the invariant that makes that strategy sound — so for the
+length of the rollout a `v11` replica and a `v10` replica coexist. Expect this,
+and do not treat it as an incident:
+
+- A cross-node full-JID relay between mismatched replicas fails the ask with
+  `UnknownMessage` before the peer's handler runs. The ordered relay maps that to
+  an `UnsupportedEnvelope` NACK: the sequence is rolled back and the channel is
+  kept, never diverted, so no shared channel is poisoned.
+- Those obligations are not lost. The effect records no receipt, its canonical
+  row stays non-terminal, and maintenance recovery re-executes it once the
+  replicas agree on a version. The delivery is delayed, not dropped.
+- So `ingress.effects.unresolved` and `IngressNonTerminalBacklog` may rise for
+  the rollout and drain afterwards. Judge the rollout by whether they return to
+  baseline once every replica is `v11`, not by their peak during it.
+- Until every replica runs `v11`, a `v10` receiver still performs the old unkeyed
+  append, so the #1778 duplicate remains reachable for that window. That is the
+  status quo ante, not a regression.
+
 **Ledger lifetime.** The obligation owns the proof, not the stream. A successful
 resume deletes the detached snapshot while the logical stream continues, so
 session-scoped evidence would vanish while the obligation was still retryable.

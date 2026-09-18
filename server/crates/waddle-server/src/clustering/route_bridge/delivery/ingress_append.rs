@@ -18,6 +18,8 @@ enum Rejection {
     CanonicalReadTimedOut,
     CanonicalSenderMissing,
     CanonicalSenderMismatch,
+    /// Not a failure: the recipient is not detached, so no keyed append is possible.
+    RecipientNotDetached,
 }
 
 impl Rejection {
@@ -39,6 +41,8 @@ impl Rejection {
             Self::ServicesUnavailable | Self::CanonicalReadFailed | Self::CanonicalReadTimedOut => {
                 IngressAppendAuthorizationFailure::Indeterminate
             }
+            // Never reaches the counter; classified for exhaustiveness only.
+            Self::RecipientNotDetached => IngressAppendAuthorizationFailure::Indeterminate,
         }
     }
 }
@@ -48,12 +52,17 @@ impl Rejection {
 pub(super) async fn authorize_ingress_append(
     services: &OrderedRelayDeliveryServices,
     validated_sender: &Entity,
+    target: &jid::FullJid,
     stanza: &Stanza,
     obligation: Option<&IngressAppendObligationRef>,
 ) -> Option<SmIngressAppendContext> {
     let obligation = obligation?;
-    match check_authority(services, validated_sender, stanza, obligation).await {
+    match check_authority(services, validated_sender, target, stanza, obligation).await {
         Ok(()) => Some(obligation.clone().into_context()),
+        // An unused key is an ordinary outcome, not a degraded one: nothing is
+        // logged or counted, so the failure counter keeps meaning "a key that
+        // should have applied did not".
+        Err(Rejection::RecipientNotDetached) => None,
         Err(reason) => {
             tracing::warn!(
                 ?reason,
@@ -77,6 +86,7 @@ pub(super) async fn authorize_ingress_append(
 async fn check_authority(
     services: &OrderedRelayDeliveryServices,
     validated_sender: &Entity,
+    target: &jid::FullJid,
     stanza: &Stanza,
     obligation: &IngressAppendObligationRef,
 ) -> Result<(), Rejection> {
@@ -91,6 +101,15 @@ async fn check_authority(
     }
     if message.from.as_ref().map(jid::Jid::to_bare).as_ref() != Some(&obligation.sender_bare) {
         return Err(Rejection::StanzaSenderMismatch);
+    }
+    // The key is only ever consulted by a detached append, so a live recipient
+    // would pay for a canonical read whose result is discarded. Skip it: this
+    // is not an authorization failure and must not be counted as one. A
+    // resource that detaches between here and the append degrades to an
+    // unkeyed append, which is the same already-documented fallback as a failed
+    // authorization -- never a dropped delivery.
+    if !target_is_detached(services, target).await {
+        return Err(Rejection::RecipientNotDetached);
     }
     let state = services
         .web_socket_state
@@ -111,4 +130,17 @@ async fn check_authority(
         return Err(Rejection::CanonicalSenderMismatch);
     }
     Ok(())
+}
+
+/// Whether this resource currently holds a detached session, read from the
+/// in-memory registry only. A miss means no keyed append can happen for it.
+async fn target_is_detached(
+    services: &OrderedRelayDeliveryServices,
+    target: &jid::FullJid,
+) -> bool {
+    services
+        .sm_session_registry
+        .detached_resources_for_user(&target.to_bare())
+        .await
+        .is_ok_and(|resources| resources.iter().any(|resource| resource == target))
 }

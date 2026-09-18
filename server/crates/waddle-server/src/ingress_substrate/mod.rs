@@ -127,6 +127,7 @@ pub enum TerminalizeOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AliasGcOutcome {
     pub deleted_messages: usize,
+    pub deleted_orphan_proofs: usize,
     pub completed: bool,
 }
 
@@ -144,17 +145,24 @@ pub struct AliasGcBudget {
     pub progress: AliasGcProgress,
 }
 
-/// Messages committed as deleted so far by one alias GC run.
+/// Messages and orphan proofs committed as deleted so far by one alias GC run.
 #[derive(Debug, Clone, Default)]
-pub struct AliasGcProgress(Arc<AtomicUsize>);
+pub struct AliasGcProgress {
+    messages: Arc<AtomicUsize>,
+    orphan_proofs: Arc<AtomicUsize>,
+}
 
 impl AliasGcProgress {
     pub fn committed(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.messages.load(Ordering::Acquire)
+    }
+
+    pub fn committed_orphan_proofs(&self) -> usize {
+        self.orphan_proofs.load(Ordering::Acquire)
     }
 
     fn record(&self, deleted_messages: usize) {
-        self.0.fetch_add(deleted_messages, Ordering::AcqRel);
+        self.messages.fetch_add(deleted_messages, Ordering::AcqRel);
     }
 }
 
@@ -176,9 +184,10 @@ pub enum AliasGcError {
 
 /// Alias GC failure with all successfully committed progress retained.
 #[derive(Debug, Error)]
-#[error("ingress alias GC failed after deleting {deleted_messages} messages: {error}")]
+#[error("ingress alias GC failed after deleting {deleted_messages} messages and {deleted_orphan_proofs} orphan proofs: {error}")]
 pub struct AliasGcFailure {
     pub deleted_messages: usize,
+    pub deleted_orphan_proofs: usize,
     #[source]
     pub error: AliasGcError,
 }
@@ -562,12 +571,84 @@ pub async fn gc_expired_aliases(
     now: DateTime<Utc>,
     budget: AliasGcBudget,
 ) -> Result<AliasGcOutcome, AliasGcFailure> {
+    let mut outcome = gc_canonical_candidates(db, now, &budget).await?;
+    if !outcome.completed {
+        return Ok(outcome);
+    }
+    // A cross-node ledger writer can insert after its canonical parent was
+    // reclaimed: authorization and append are separate transactions. Sweep
+    // independently so those late proofs (and pre-existing orphans) are found
+    // even though no canonical candidate remains to drive their reclamation.
+    loop {
+        if Instant::now() >= budget.deadline {
+            outcome.completed = false;
+            return Ok(outcome);
+        }
+        let deleted = gc_orphan_proof_batch(db, &budget)
+            .await
+            .map_err(|error| AliasGcFailure {
+                deleted_messages: outcome.deleted_messages,
+                deleted_orphan_proofs: outcome.deleted_orphan_proofs,
+                error,
+            })?;
+        budget
+            .progress
+            .orphan_proofs
+            .fetch_add(deleted, Ordering::AcqRel);
+        outcome.deleted_orphan_proofs += deleted;
+        if Instant::now() >= budget.deadline {
+            outcome.completed = false;
+            return Ok(outcome);
+        }
+        if deleted < GC_BATCH_LIMIT {
+            return Ok(outcome);
+        }
+    }
+}
+
+async fn gc_orphan_proof_batch(
+    db: &Database,
+    budget: &AliasGcBudget,
+) -> Result<usize, AliasGcError> {
+    let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
+    // This statement scans retained history, just like expired_candidates.
+    install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
+    // Connection acquisition and timeout installation may consume the budget.
+    if Instant::now() >= budget.deadline {
+        return Ok(0);
+    }
+    let deleted = tx
+        .execute(
+            dialect_sql(
+                tx.driver(),
+                GC_DELETE_ORPHAN_PROOFS_POSTGRES,
+                GC_DELETE_ORPHAN_PROOFS_SQLITE,
+            ),
+            crate::db_params![GC_BATCH_LIMIT as i64],
+        )
+        .await
+        .map_err(gc_error_from_database)?;
+    let deleted = usize::try_from(deleted).map_err(|_| {
+        AliasGcError::Substrate(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })
+    })?;
+    tx.commit().await.map_err(gc_error_from_database)?;
+    Ok(deleted)
+}
+
+async fn gc_canonical_candidates(
+    db: &Database,
+    now: DateTime<Utc>,
+    budget: &AliasGcBudget,
+) -> Result<AliasGcOutcome, AliasGcFailure> {
     let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
     let mut deleted_messages = 0usize;
 
     loop {
         if Instant::now() >= budget.deadline {
             return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages,
                 completed: false,
             });
@@ -575,17 +656,18 @@ pub async fn gc_expired_aliases(
         // Bounded batches of rows with work left to do: expired rows kept
         // alive by SM refs stop matching once aliases and delivery markers are gone,
         // so retained history does not grow the scan or the candidate vector.
-        let candidates = expired_candidates(db, &cutoff, &budget)
+        let candidates = expired_candidates(db, &cutoff, budget)
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?;
         if candidates.is_empty() {
             return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages,
                 completed: true,
             });
         }
         let batch_len = candidates.len();
-        let batch = match gc_candidate_batch(db, &cutoff, candidates, &budget).await {
+        let batch = match gc_candidate_batch(db, &cutoff, candidates, budget).await {
             Ok(batch) => batch,
             Err(mut failure) => {
                 failure.deleted_messages += deleted_messages;
@@ -595,6 +677,7 @@ pub async fn gc_expired_aliases(
         deleted_messages += batch.deleted_messages;
         if batch.deadline_reached {
             return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages,
                 completed: false,
             });
@@ -605,6 +688,7 @@ pub async fn gc_expired_aliases(
         // rescan the same locked rows.
         if batch_len < GC_BATCH_LIMIT || batch.processed == 0 {
             return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages,
                 completed: batch_len < GC_BATCH_LIMIT && batch.skipped_locked == 0,
             });
@@ -1078,6 +1162,7 @@ fn discard_database_error(error: DatabaseError) -> IngressSubstrateError {
 
 fn gc_failure(deleted_messages: usize, error: AliasGcError) -> AliasGcFailure {
     AliasGcFailure {
+        deleted_orphan_proofs: 0,
         deleted_messages,
         error,
     }
@@ -1210,14 +1295,35 @@ const DELETE_ALIASES_POSTGRES: &str =
 const DELETE_ALIASES_SQLITE: &str = r#"DELETE FROM ingress_origin_aliases WHERE message_key = ?"#;
 const GC_DELETE_DELIVERIES_POSTGRES: &str =
     r#"DELETE FROM ingress_deliveries WHERE message_key = ?::uuid"#;
-// Append proofs outlive the SM session deliberately, so nothing else deletes
-// them: the obligation, not the stream, owns their lifetime (#1756). Once the
+// Append proofs outlive the SM session deliberately: the obligation, not the stream, owns their lifetime (#1756). Once the
 // canonical row is reclaimed the obligation can never be retried again, which
 // is exactly when the proof stops being load-bearing.
 const GC_DELETE_INGRESS_APPENDS_POSTGRES: &str =
     r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
 const GC_DELETE_INGRESS_APPENDS_SQLITE: &str =
     r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
+const GC_DELETE_ORPHAN_PROOFS_POSTGRES: &str = r#"
+    DELETE FROM sm_ingress_appends
+    WHERE (message_key, receipt_kind, semantic_identity_hash, resource) IN (
+        SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+        FROM sm_ingress_appends a
+        WHERE NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
+        )
+        LIMIT ?
+    )
+"#;
+const GC_DELETE_ORPHAN_PROOFS_SQLITE: &str = r#"
+    DELETE FROM sm_ingress_appends
+    WHERE (message_key, receipt_kind, semantic_identity_hash, resource) IN (
+        SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+        FROM sm_ingress_appends a
+        WHERE NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
+        )
+        LIMIT ?
+    )
+"#;
 const GC_DELETE_DELIVERIES_SQLITE: &str = r#"DELETE FROM ingress_deliveries WHERE message_key = ?"#;
 const GC_DELETE_MESSAGE_POSTGRES: &str = r#"
                 DELETE FROM ingress_messages m
@@ -1366,6 +1472,167 @@ mod tests {
             scan_timeout: StdDuration::from_secs(10),
             progress: AliasGcProgress::default(),
         }
+    }
+
+    async fn seed_gc_proofs(db: &Database, key: MessageKey, count: usize) {
+        let mut tx = db.begin_immediate().await.expect("seed transaction");
+        for index in 0..count {
+            tx.execute(
+                "INSERT INTO sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                crate::db_params![key.to_storage().to_string(), 1i64, vec![7u8; 32], format!("resource-{index}"), "retired-stream", 1i64, 0i64],
+            ).await.expect("seed proof");
+        }
+        tx.commit().await.expect("commit proofs");
+    }
+
+    async fn gc_proof_count(db: &Database) -> i64 {
+        let connection = db.guard().await.expect("read proofs");
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM sm_ingress_appends", ())
+            .await
+            .expect("count proofs");
+        rows.next()
+            .await
+            .expect("read count")
+            .expect("count row")
+            .get(0)
+            .expect("decode count")
+    }
+
+    async fn orphan_gc_reclaims_bounded_batches(db: &Database) {
+        // Multiple proofs for the SAME message catch incorrectly bounding keys
+        // instead of proof rows, and force a second sweep batch.
+        seed_gc_proofs(db, MessageKey::new(), GC_BATCH_LIMIT + 1).await;
+        let budget = gc_budget();
+        assert_eq!(
+            gc_orphan_proof_batch(db, &budget).await.expect("batch"),
+            GC_BATCH_LIMIT
+        );
+        assert_eq!(gc_proof_count(db).await, 1);
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("GC");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                deleted_orphan_proofs: 1,
+                completed: true
+            }
+        );
+        assert_eq!(budget.progress.committed_orphan_proofs(), 1);
+        assert_eq!(gc_proof_count(db).await, 0);
+    }
+
+    async fn orphan_gc_preserves_live_parent(db: &Database) {
+        let key = MessageKey::new();
+        let mut tx = db.begin_immediate().await.expect("begin canonical insert");
+        record_message(&mut tx, key, &digest(1), None)
+            .await
+            .expect("live canonical parent");
+        tx.commit().await.expect("commit parent");
+        seed_gc_proofs(db, key, 1).await;
+        seed_gc_proofs(db, MessageKey::new(), 1).await;
+        let outcome = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("GC");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                deleted_orphan_proofs: 1,
+                completed: true
+            }
+        );
+        assert_eq!(gc_proof_count(db).await, 1);
+        let connection = db.guard().await.expect("read retained proof");
+        let mut rows = connection
+            .query("SELECT message_key FROM sm_ingress_appends", ())
+            .await
+            .expect("retained proof");
+        let retained: String = rows
+            .next()
+            .await
+            .expect("read row")
+            .expect("proof row")
+            .get(0)
+            .expect("message key");
+        assert_eq!(retained, key.to_storage().to_string());
+    }
+
+    async fn orphan_gc_expired_budget_preserves_proofs(db: &Database) {
+        seed_gc_proofs(db, MessageKey::new(), 1).await;
+        let budget = AliasGcBudget {
+            deadline: Instant::now(),
+            ..gc_budget()
+        };
+        assert_eq!(
+            gc_orphan_proof_batch(db, &budget)
+                .await
+                .expect("expired batch"),
+            0
+        );
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("GC");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                deleted_orphan_proofs: 0,
+                completed: false
+            }
+        );
+        assert_eq!(budget.progress.committed_orphan_proofs(), 0);
+        assert_eq!(gc_proof_count(db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_reclaims_bounded_batches() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_reclaims_bounded_batches(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_reclaims_bounded_batches() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_reclaims_bounded_batches(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_preserves_live_parent() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_preserves_live_parent(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_preserves_live_parent() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_preserves_live_parent(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_expired_budget_preserves_proofs() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_expired_budget_preserves_proofs(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_expired_budget_preserves_proofs() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_expired_budget_preserves_proofs(&fixture.db).await;
+        fixture.close().await;
     }
 
     #[test]
@@ -1821,6 +2088,7 @@ mod tests {
         assert_eq!(
             no_work,
             AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages: 0,
                 completed: false,
             }
@@ -1901,6 +2169,7 @@ mod tests {
         assert_eq!(
             outcome,
             AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages: GC_BATCH_LIMIT,
                 completed: true,
             }
@@ -1940,6 +2209,7 @@ mod tests {
         assert_eq!(
             outcome,
             AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages: 1,
                 completed: false,
             },
@@ -1960,6 +2230,7 @@ mod tests {
         assert_eq!(
             outcome,
             AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages: 1,
                 completed: true,
             }
@@ -1997,6 +2268,7 @@ mod tests {
         assert_eq!(
             outcome,
             AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages: total - 1,
                 completed: false,
             },
@@ -2406,6 +2678,7 @@ mod tests {
             Err(AliasGcFailure {
                 deleted_messages: 0,
                 error: AliasGcError::Substrate(IngressSubstrateError::UnsupportedLiveEpoch),
+                deleted_orphan_proofs: 0,
             })
         ));
         drop(conn);
@@ -2953,6 +3226,7 @@ mod tests {
         assert_eq!(
             outcome,
             AliasGcOutcome {
+                deleted_orphan_proofs: 0,
                 deleted_messages: 0,
                 completed: false,
             }
