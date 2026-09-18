@@ -4,6 +4,7 @@ use crate::ingress::{
     IngressStreamIdentity, IngressSubmission,
 };
 use crate::ingress_uow::SmIngressStreamRepository;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{effects::PlanFailure, plan_message_dispatch};
 use crate::server::routes::websocket::{
     tests::{create_test_websocket_state, create_test_websocket_state_with_db_pool_and_ingress},
@@ -532,7 +533,8 @@ async fn decline_claim_crash_replay(fixture: IngressFixture, receipt: bool, two_
     assert!(rx.try_recv().is_err());
     assert!(crate::ingress::execute::terminalize_if_complete(
         &fixture.uow,
-        replay.message_key.expect("key")
+        replay.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
     )
     .await
     .expect("terminalize"));
@@ -704,7 +706,8 @@ async fn losing_decline_replay(fixture: IngressFixture) {
     );
     assert!(crate::ingress::execute::terminalize_if_complete(
         &fixture.uow,
-        replay.message_key.expect("key")
+        replay.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
     )
     .await
     .expect("terminalize loser"));
@@ -843,7 +846,8 @@ async fn decline_delivery_failure_retains_winner(fixture: IngressFixture) {
     );
     assert!(crate::ingress::execute::terminalize_if_complete(
         &fixture.uow,
-        replay.message_key.expect("key")
+        replay.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
     )
     .await
     .expect("terminalize winner"));

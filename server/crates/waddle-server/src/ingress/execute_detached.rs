@@ -14,7 +14,8 @@ use crate::{
             delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
             EffectOutcome, ImmediateSink, SettledCompletion, SettledOutcome,
         },
-        queue_processed_for_detached, Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
+        queue_processed_for_detached, Deps, DetachedQueueOutcome, FullJidDeliveryOutcome,
+        SmIngressAppendContext,
     },
 };
 
@@ -95,10 +96,10 @@ pub(super) async fn execute(
             receipt: progress.receipt.clone(),
             received_at: progress.received_at,
         });
-        let outcome = append_resource(&resource_deps, effect, resource).await;
+        let ResourceDelivery { outcome, certainty } =
+            append_resource(&resource_deps, effect, resource).await;
         destinations.push((resource.clone(), outcome));
-        #[cfg(feature = "clustering")]
-        if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+        if certainty == DeliveryCertainty::Uncertain {
             completion = SettledCompletion::Uncertain;
         }
         if accepted(outcome) {
@@ -135,24 +136,42 @@ pub(super) async fn execute(
     })
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DeliveryCertainty {
+    Proven,
+    Uncertain,
+}
+
+struct ResourceDelivery {
+    outcome: FullJidDeliveryOutcome,
+    certainty: DeliveryCertainty,
+}
+
 async fn append_resource(
     deps: &Deps<'_>,
     effect: &ExternalDeliveryEffect,
     resource: &FullJid,
-) -> FullJidDeliveryOutcome {
-    match effect {
+) -> ResourceDelivery {
+    let mut certainty = DeliveryCertainty::Proven;
+    let outcome = match effect {
         ExternalDeliveryEffect::HostOwnedCopy { target, .. } if target == resource => {
             FullJidDeliveryOutcome::Delivered
         }
         ExternalDeliveryEffect::QueueDetached { stanza, .. } => {
-            let (queued, _) = queue_processed_for_detached(
+            let outcomes = queue_processed_for_detached(
                 deps,
                 vec![resource.clone()],
                 &std::collections::HashSet::new(),
                 stanza,
             )
             .await;
-            if queued.contains(resource) {
+            if outcomes
+                .iter()
+                .any(|(_, outcome)| *outcome == DetachedQueueOutcome::AppendFailed)
+            {
+                certainty = DeliveryCertainty::Uncertain;
+            }
+            if outcomes.contains(&(resource.clone(), DetachedQueueOutcome::Queued)) {
                 FullJidDeliveryOutcome::QueuedDetached
             } else if deps.delivery_execution_context
                 == crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery
@@ -185,7 +204,12 @@ async fn append_resource(
             super::relay_copy::append(deps, effect).await
         }
         _ => FullJidDeliveryOutcome::Unavailable,
+    };
+    #[cfg(feature = "clustering")]
+    if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+        certainty = DeliveryCertainty::Uncertain;
     }
+    ResourceDelivery { outcome, certainty }
 }
 
 async fn record_resource(

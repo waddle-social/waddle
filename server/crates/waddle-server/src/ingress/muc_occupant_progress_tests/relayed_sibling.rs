@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{effects::Effect, plan_muc_for_relay};
 use crate::server::routes::interpret::{
     ControlledMucRelay, FullJidDeliveryOutcome, OrderedRelayRouteOrigin, CONTROLLED_MUC_RELAY,
@@ -400,9 +401,11 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
     )
     .await
     .expect("confirm origin dispatch");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("complete fanout"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("complete fanout")
+    );
     fixture.close().await;
 }
 

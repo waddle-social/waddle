@@ -255,13 +255,13 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
             summary: "The ingress transaction p99 exceeded 2 seconds for 30m."
         - alert: IngressUnresolvedEffectsGrowing
-          expr: sum by (kind) (increase(ingress_effects_unresolved_total[1h])) > 0
+          expr: sum by (kind) (increase(ingress_effects_unresolved_total{phase="live"}[1h])) > 0
           labels:
             severity: warning
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
-            summary: "Unresolved locally executed ingress effects increased in the last hour; effects executed on another node are not counted here. See IngressNonTerminalBacklog for the canonical row-level view. Maintenance recovery re-executes recoverable recorded families; unsupported obligations remain pending and protected from GC. Check ingress_maintenance_unrecoverable_obligations_total alongside the backlog."
+            summary: 'Unresolved effects from live ingress executions increased in the last hour. Repair and stream-retirement attributions are excluded; inspect ingress_effects_unresolved_total with phase="maintenance_recovery", phase="maintenance_terminalization", or phase="stream_retirement" for those paths. See IngressNonTerminalBacklog for the canonical row-level view and ingress_maintenance_unrecoverable_obligations_total for recovery classifications.'
         - alert: IngressNonTerminalBacklog
           expr: max by (kind) (cnpg_waddle_ingress_nonterminal_messages) > 0
           for: 10m

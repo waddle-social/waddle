@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::ingress::{
     DmCallThreadKey, IngressEffectIntent, PendingDmCallOffer, PlannedDmCallState,
 };
@@ -40,9 +41,13 @@ async fn cancelled_call_offer_replays(fixture: IngressFixture) {
     let canonical = first.message_key.expect("canonical");
     assert_eq!(fixture.count("ingress_effect_intents").await, 1);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert!(!terminalize_if_complete(&fixture.uow, canonical)
-        .await
-        .expect("offer pending"));
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        canonical,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("offer pending"));
     // Phase C never starts. Replanning no longer observes the stored propose,
     // so replay must reconstruct the saved transition without mutable lookups.
     submission.plan.intents.clear();
@@ -78,9 +83,13 @@ async fn cancelled_call_offer_replays(fixture: IngressFixture) {
         state.pending.as_ref().expect("pending")
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(terminalize_if_complete(&fixture.uow, canonical)
-        .await
-        .expect("complete"));
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        canonical,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("complete"));
     let duplicate = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("receipted retry");
@@ -262,9 +271,13 @@ async fn confirmed_proceed_state_supersedes_pending_transition(fixture: IngressF
     assert_eq!(report.receipt_failures.len(), 1);
     assert_eq!(report.receipt_failures[0].0, *first_receipt);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 4);
-    assert!(!terminalize_if_complete(&fixture.uow, canonical)
-        .await
-        .expect("earliest receipt pending"));
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        canonical,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("earliest receipt pending"));
     allow_call_receipt(&fixture).await;
     submission.plan.intents.clear();
     submission.plan.plan.clear();
@@ -309,9 +322,13 @@ async fn confirmed_proceed_state_supersedes_pending_transition(fixture: IngressF
             .contains(&(archive.clone(), key.clone())));
     }
     assert_eq!(fixture.count("ingress_effect_receipts").await, 5);
-    assert!(terminalize_if_complete(&fixture.uow, canonical)
-        .await
-        .expect("terminalized"));
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        canonical,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("terminalized"));
     fixture.close().await;
 }
 

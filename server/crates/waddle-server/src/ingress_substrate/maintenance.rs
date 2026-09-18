@@ -4,7 +4,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use waddle_xmpp::ingress::MessageKey;
 
 use super::{dialect_sql, discard_database_error, EffectReceiptKind, IngressSubstrateError};
-use crate::db::{DatabaseDriver, Row, Transaction};
+use crate::db::{Database, DatabaseDriver, Row, Transaction};
 use crate::ingress_uow::DbRetryClass;
 
 /// Counts of all durable obligations and completion evidence for a canonical row.
@@ -12,6 +12,7 @@ use crate::ingress_uow::DbRetryClass;
 pub struct RecoveryEvidence {
     pub intents: u32,
     pub receipts: u32,
+    pub progress: u32,
 }
 
 /// A recovery scan position and the evidence used to invalidate unsupported rows.
@@ -55,6 +56,40 @@ pub async fn unreceipted_nonterminal_candidates(
     page_nonterminal_rows(tx, after, older_than, Some(kinds), limit, decode_candidate).await
 }
 
+/// Read every durable recovery-evidence count in one pooled database snapshot.
+pub async fn recovery_evidence_pooled(
+    db: &Database,
+    key: MessageKey,
+) -> Result<RecoveryEvidence, IngressSubstrateError> {
+    const POSTGRES: &str = "SELECT
+        (SELECT count(*) FROM ingress_effect_intents WHERE message_key = ?::uuid),
+        (SELECT count(*) FROM ingress_effect_receipts WHERE message_key = ?::uuid),
+        (SELECT count(*) FROM ingress_delivery_receipts WHERE message_key = ?::uuid)";
+    const SQLITE: &str = "SELECT
+        (SELECT count(*) FROM ingress_effect_intents WHERE message_key = ?),
+        (SELECT count(*) FROM ingress_effect_receipts WHERE message_key = ?),
+        (SELECT count(*) FROM ingress_delivery_receipts WHERE message_key = ?)";
+    let connection = db.guard().await.map_err(discard_database_error)?;
+    let stored_key = key.to_storage().to_string();
+    let mut rows = connection
+        .query(
+            dialect_sql(db.driver(), POSTGRES, SQLITE),
+            crate::db_params![stored_key.clone(), stored_key.clone(), stored_key],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::InvalidStoredStream)?;
+    Ok(RecoveryEvidence {
+        intents: decode_count(&row, 0)?,
+        receipts: decode_count(&row, 1)?,
+        progress: decode_count(&row, 2)?,
+    })
+}
+
 async fn page_nonterminal_rows<T>(
     tx: &mut Transaction<'_>,
     after: Option<(DateTime<Utc>, MessageKey)>,
@@ -90,7 +125,8 @@ async fn page_nonterminal_rows<T>(
         Some(kinds) => format!(
             ", (SELECT count(*) FROM ingress_effect_intents i WHERE i.message_key = m.message_key),
              (SELECT count(*) FROM ingress_effect_receipts r WHERE r.message_key = m.message_key),
-             EXISTS ({})",
+             EXISTS ({}),
+             (SELECT count(*) FROM ingress_delivery_receipts d WHERE d.message_key = m.message_key)",
             UNRECEIPTED.replace(
                 "{kind_filter}",
                 &format!(
@@ -170,6 +206,7 @@ fn decode_position(row: &Row) -> Result<(DateTime<Utc>, MessageKey), IngressSubs
 
 fn decode_candidate(row: &Row) -> Result<RecoveryCandidate, IngressSubstrateError> {
     let (created_at, key) = decode_position(row)?;
+    // Columns: created_at, key, intents, receipts, recoverable, progress.
     let recoverable: bool = row.get(4).map_err(discard_database_error)?;
     Ok(RecoveryCandidate {
         created_at,
@@ -177,6 +214,7 @@ fn decode_candidate(row: &Row) -> Result<RecoveryCandidate, IngressSubstrateErro
         evidence: RecoveryEvidence {
             intents: decode_count(row, 2)?,
             receipts: decode_count(row, 3)?,
+            progress: decode_count(row, 5)?,
         },
         recoverable,
     })

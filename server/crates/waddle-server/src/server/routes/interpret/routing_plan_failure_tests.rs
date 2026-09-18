@@ -9,6 +9,7 @@ use crate::ingress::{
     IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
 };
 use crate::ingress_uow::SmIngressStreamRepository;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, WireHandledCount},
@@ -269,11 +270,13 @@ async fn nonexistent_rejection(fixture: IngressFixture) {
         .await
         .expect("frame receipt");
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(
-        terminalize_if_complete(&fixture.uow, decision.message_key.expect("key"))
-            .await
-            .expect("terminalize")
-    );
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        decision.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("terminalize"));
     // The recorded denial is the durable decision; no recipient obligation was
     // ever accepted, so later account creation cannot resurrect one.
     assert_eq!(fixture.count("ingress_messages").await, 1);

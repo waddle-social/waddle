@@ -38,6 +38,28 @@ destination connection's own recipient archive/inbox pipeline (#1658, now tracke
 connection-generation fence (follow-up issue); (vi) ~~extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.~~ Resolved by #1753: typed extension ingress covers direct and local-room bot sends (§3.1).
 (vii) archive ordinals do not yet enforce concurrent live dispatch order (#1770, §3.7).
 
+### Recovery convergence (#1782)
+
+Recovery (§3.6b) parks a row for 15 minutes after three consecutive attempts
+that provably added neither an effect receipt nor a delivery-progress row.
+Storage errors, elapsed row deadlines, uncertain settlement and failed
+accounting reads are inconclusive and reset the streak. Parking writes no
+receipts or terminal state: obligations remain pending, GC-protected and
+included in the non-terminal backlog gauge.
+
+The row is eligible after the cooldown, attempted on a subsequent scan. The
+scheduler's 27–33 s jittered ticks and partial-continuation backoff from 1 s
+to 30 s give no upper bound on that attempt. Progress by another replica
+changes the row's evidence and re-arms it on the next scan.
+
+Streak and classification caches are per-process and bounded to 4096 entries
+with FIFO eviction. A stalled row is classified once per episode as
+`ingress_maintenance_unrecoverable_obligations_total{kind=...,reason="no_durable_progress"}`.
+Both replicas can classify the same row; eviction or restart permits
+re-attempt and re-classification. The counter is a diagnostic, not an exact
+queue depth. Parking limits recovery churn; it does not discharge the
+remaining obligations or close the recovery gaps listed above.
+
 ### Recovery follow-ups from combined review
 
 Five gaps were inherited from the pre-review implementation and filed under

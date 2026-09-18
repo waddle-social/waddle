@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 
 fn sorted(mut resources: Vec<jid::FullJid>) -> Vec<jid::FullJid> {
     resources.sort_by(|left, right| left.as_str().cmp(right.as_str()));
@@ -188,9 +189,11 @@ async fn host_owned_progress(fixture: IngressFixture) {
     .await
     .expect("aggregate receipt"));
     tx.commit().await.expect("inspection commit");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("partial fanout stays pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("partial fanout stays pending")
+    );
 
     plan_broadcast(&mut submission, &room, &message, &deps).await;
     let retry = commit_submission(&fixture.uow, &submission, 1)
@@ -247,9 +250,11 @@ async fn host_owned_progress(fixture: IngressFixture) {
     .await
     .expect("aggregate receipt"));
     tx.commit().await.expect("inspection commit");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminal")
+    );
     fixture.close().await;
 }
 

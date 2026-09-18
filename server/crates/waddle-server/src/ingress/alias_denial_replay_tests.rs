@@ -3,6 +3,7 @@ use crate::ingress::{
     execute::{execute_effects, terminalize_if_complete},
     test_support::IngressFixture,
 };
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{
     effects::{AuthorizationDeniedReason, ImmediateSink, PlanRejection},
     Deps,
@@ -28,9 +29,11 @@ async fn accepted_alias_precedes_denial(fixture: IngressFixture) {
         .await
         .expect("accepted authority");
     let key = first.message_key.expect("key");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("unreceipted mutation"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("unreceipted mutation")
+    );
     let error = FrozenStanzaError::new(
         FrozenStanzaErrorType::Cancel,
         waddle_xmpp::StanzaErrorCondition::Forbidden,
@@ -84,9 +87,11 @@ async fn accepted_alias_precedes_denial(fixture: IngressFixture) {
     .await
     .expect("receipt landed"));
     tx.commit().await.expect("read commit");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("repaired terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("repaired terminal")
+    );
     fixture.close().await;
 }
 
@@ -211,9 +216,11 @@ async fn nonexistent_account_bounce_replay(fixture: IngressFixture) {
         1,
         "only the carbon is complete before the error frame write"
     );
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("reply pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("reply pending")
+    );
     assert_eq!(first_report.frame_obligations.len(), 1);
     assert!(first_report
         .complete_frame_obligations(&fixture.uow, &fixture.db, std::time::Duration::from_secs(5))

@@ -832,15 +832,6 @@ impl EffectReceiptRepository {
     }
 
     /// Receipts present for the row, for maintenance progress accounting.
-    pub async fn count_pooled(
-        db: &Database,
-        message_key: MessageKey,
-    ) -> Result<u64, IngressUowError> {
-        ingress_substrate::receipt_count(db, message_key)
-            .await
-            .map_err(Into::into)
-    }
-
     pub async fn record_receipt_pooled(
         db: &Database,
         message_key: MessageKey,

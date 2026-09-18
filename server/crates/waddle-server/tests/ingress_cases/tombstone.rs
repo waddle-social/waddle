@@ -157,6 +157,7 @@ async fn tombstoned_retry_does_not_recreate_inbox(fixture: IngressFixture) {
     assert!(waddle_server::ingress::execute::terminalize_if_complete(
         &fixture.uow,
         decision.message_key.expect("canonical row"),
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
     )
     .await
     .expect("original archive obligation is complete"));

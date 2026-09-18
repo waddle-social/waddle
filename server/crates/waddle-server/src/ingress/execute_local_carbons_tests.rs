@@ -4,6 +4,7 @@ use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressEffectCapture,
     IngressSubmission,
 };
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{
     effects::{EffectSink, PlanSink},
     interpret,
@@ -127,7 +128,7 @@ async fn local_carbons_receipts(
         } as i64
     );
     assert_eq!(
-        terminalize_if_complete(&fixture.uow, key)
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
             .expect("terminalize"),
         !partial
@@ -182,9 +183,11 @@ async fn local_carbons_receipts(
             );
             assert!(receiver.try_recv().is_err());
         }
-        assert!(terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("completed retry"));
+        assert!(
+            terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("completed retry")
+        );
         assert_eq!(
             fixture.count("ingress_effect_receipts").await,
             audience_size as i64

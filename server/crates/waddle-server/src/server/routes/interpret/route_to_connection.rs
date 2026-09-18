@@ -478,13 +478,14 @@ async fn route_dm_to_full_jid(
                 side_routes,
             } => {
                 if let Some(processed) = processed {
-                    let (queued_for_replay, not_queued) = queue_processed_for_detached(
+                    let outcomes = queue_processed_for_detached(
                         deps,
                         vec![full.clone()],
                         &std::collections::HashSet::new(),
                         &processed,
                     )
                     .await;
+                    let (queued_for_replay, not_queued) = partition_detached_outcomes(outcomes);
                     let mut captured_fanout = queued_for_replay;
                     let retried_live =
                         retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
@@ -523,13 +524,14 @@ async fn route_dm_to_full_jid(
                 // fixtures): fall back to the legacy verbatim queueing
                 // so the message is not lost while resumable. Keep the
                 // successful replay append observable with its own identity.
-                let (queued_for_replay, not_queued) = queue_processed_for_detached(
+                let outcomes = queue_processed_for_detached(
                     deps,
                     vec![full],
                     &std::collections::HashSet::new(),
                     stanza.as_ref(),
                 )
                 .await;
+                let (queued_for_replay, not_queued) = partition_detached_outcomes(outcomes);
                 let mut captured_fanout = queued_for_replay;
                 let retried_live =
                     retry_unqueued_detached_as_live(deps, not_queued, stanza.as_ref()).await;
@@ -751,13 +753,15 @@ async fn route_to_bare_jid(
                             // <stanza-id/> (closes the
                             // stanza-id-parity gap documented on
                             // the legacy path).
-                            let (queued_for_replay, not_queued) = queue_processed_for_detached(
+                            let outcomes = queue_processed_for_detached(
                                 deps,
                                 detached_targets,
                                 &live_set,
                                 &processed,
                             )
                             .await;
+                            let (queued_for_replay, not_queued) =
+                                partition_detached_outcomes(outcomes);
                             captured_fanout.extend(queued_for_replay);
                             let retried_live =
                                 retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
@@ -1410,6 +1414,29 @@ fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Act
         .map(|jingle| jingle.action)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DetachedQueueOutcome {
+    Queued,
+    SessionGone,
+    AppendFailed,
+}
+
+fn partition_detached_outcomes(
+    outcomes: Vec<(jid::FullJid, DetachedQueueOutcome)>,
+) -> (Vec<jid::FullJid>, Vec<jid::FullJid>) {
+    let mut queued = Vec::new();
+    let mut not_queued = Vec::new();
+    for (target, outcome) in outcomes {
+        match outcome {
+            DetachedQueueOutcome::Queued => queued.push(target),
+            DetachedQueueOutcome::SessionGone | DetachedQueueOutcome::AppendFailed => {
+                not_queued.push(target)
+            }
+        }
+    }
+    (queued, not_queued)
+}
+
 /// #1106: queue the PROCESSED (recipient-stamped) stanza into the
 /// detached XEP-0198 replay buffers of `detached_targets`, skipping any
 /// resource that was just delivered live. Because the queued form is
@@ -1418,9 +1445,9 @@ fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Act
 /// persistence side effects already ran exactly once in the shared
 /// pass, so replay is delivery-only.
 ///
-/// Returns the targets whose queueing did NOT land (session expired or
-/// resumed between enumeration and record, or a storage error) so the
-/// caller can make a second-chance LIVE delivery attempt — the common
+/// Retains the distinction between a vanished session and an append error,
+/// which may have committed. Callers can make a second-chance LIVE delivery
+/// attempt — the common
 /// cause of `Ok(false)` is the resource resuming mid-route, in which
 /// case a direct send reaches it (the persistence already happened, so
 /// the retry is delivery-only and cannot duplicate rows).
@@ -1429,20 +1456,22 @@ pub(crate) async fn queue_processed_for_detached(
     detached_targets: Vec<jid::FullJid>,
     live_set: &std::collections::HashSet<jid::FullJid>,
     stanza: &Stanza,
-) -> (Vec<jid::FullJid>, Vec<jid::FullJid>) {
+) -> Vec<(jid::FullJid, DetachedQueueOutcome)> {
     if deps.effects.is_planning() {
         let targets: Vec<_> = detached_targets
             .into_iter()
             .filter(|full| !live_set.contains(full))
             .collect();
         plan::queue_detached(deps, targets.clone(), stanza);
-        return (targets, Vec::new());
+        return targets
+            .into_iter()
+            .map(|target| (target, DetachedQueueOutcome::Queued))
+            .collect();
     }
     let Some(sm) = deps.sm_session_registry else {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     };
-    let mut queued = Vec::new();
-    let mut not_queued = Vec::new();
+    let mut outcomes = Vec::new();
     for full in detached_targets {
         if live_set.contains(&full) {
             continue;
@@ -1451,8 +1480,7 @@ pub(crate) async fn queue_processed_for_detached(
             .await
         {
             Ok(true) => {
-                let queued_full = full.clone();
-                queued.push(queued_full);
+                outcomes.push((full.clone(), DetachedQueueOutcome::Queued));
                 debug!(
                     jid = %full,
                     message_id = stanza_message_id(stanza),
@@ -1468,7 +1496,7 @@ pub(crate) async fn queue_processed_for_detached(
                      enumeration and queue (resumed or expired); retrying \
                      as live delivery"
                 );
-                not_queued.push(full);
+                outcomes.push((full, DetachedQueueOutcome::SessionGone));
             }
             Err(error) => {
                 warn!(
@@ -1478,11 +1506,11 @@ pub(crate) async fn queue_processed_for_detached(
                     "RouteToConnection: failed to record processed DM for \
                      detached resource; retrying as live delivery"
                 );
-                not_queued.push(full);
+                outcomes.push((full, DetachedQueueOutcome::AppendFailed));
             }
         }
     }
-    (queued, not_queued)
+    outcomes
 }
 
 /// Second-chance delivery for detached targets whose replay-buffer

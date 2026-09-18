@@ -1,5 +1,6 @@
 use super::*;
 use crate::server::routes::interpret::effects::Effect;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Lang, MessageType};
 
@@ -104,9 +105,11 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         receivers[1].try_recv().is_err(),
         "sibling remains undelivered"
     );
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending")
+    );
     let mut tx = fixture.uow.begin().await.expect("inspect source");
     assert!(DeliveryProgressRepository::load(&mut tx, key, &receipt)
         .await
@@ -264,7 +267,7 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
     }
     tx.commit().await.expect("read commit");
     assert_eq!(
-        terminalize_if_complete(&fixture.uow, key)
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
             .expect("terminal"),
         canonical

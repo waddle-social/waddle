@@ -1,5 +1,6 @@
 use super::*;
 use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
@@ -203,9 +204,13 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
             );
             assert_eq!(append_count(&sm, &target).await, 1);
             assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
-            assert!(!terminalize_if_complete(&fixture.uow, key)
-                .await
-                .expect("pending"));
+            assert!(!terminalize_if_complete(
+                &fixture.uow,
+                key,
+                DeliveryExecutionContext::Live.into()
+            )
+            .await
+            .expect("pending"));
             let retry = commit_submission(&fixture.uow, &submission, 1)
                 .await
                 .expect("retry");
@@ -263,7 +268,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
         }
         tx.commit().await.expect("read commit");
         assert_eq!(
-            terminalize_if_complete(&fixture.uow, key)
+            terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
                 .await
                 .expect("terminality"),
             !matches!(case, Case::Inbox)

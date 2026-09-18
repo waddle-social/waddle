@@ -12,9 +12,10 @@
 use crate::ingress::IngressEffectKind;
 
 use super::attributes::{
-    IngressAliasOutcome, IngressDecisionClass, IngressGcOutcome, IngressMaintenanceOutcome,
-    IngressMaintenancePhase, IngressUnresolvedEffectKind, Janitor, PushRetryReason,
-    PushSuppressReason, SmAckOutcome, SmEvictionPath, SmResumeOutcome, SweepOutcome,
+    IngressAliasOutcome, IngressDecisionClass, IngressEffectExecutionPhase, IngressGcOutcome,
+    IngressMaintenanceOutcome, IngressMaintenancePhase, IngressUnrecoverableReason,
+    IngressUnresolvedEffectKind, Janitor, PushRetryReason, PushSuppressReason, SmAckOutcome,
+    SmEvictionPath, SmResumeOutcome, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -279,7 +280,9 @@ pub fn register_reliability_counters() {
     add_ingress_maintenance_terminalized_messages(0);
     increment_ingress_maintenance_recovered_obligations(0);
     for kind in IngressEffectKind::ALL {
-        increment_ingress_maintenance_unrecoverable_obligations(0, kind);
+        for reason in IngressUnrecoverableReason::ALL {
+            increment_ingress_maintenance_unrecoverable_obligations(0, kind, reason);
+        }
     }
     for class in IngressDecisionClass::ALL {
         add_ingress_decision(0, class);
@@ -288,7 +291,9 @@ pub fn register_reliability_counters() {
         add_ingress_alias_outcome(0, outcome);
     }
     for kind in IngressUnresolvedEffectKind::ALL {
-        add_ingress_effect_unresolved(0, kind);
+        for phase in IngressEffectExecutionPhase::ALL {
+            add_ingress_effect_unresolved(0, kind, phase);
+        }
     }
     add_ingress_tx_retry(0);
     add_ingress_gc_reclaimed_messages(0);
@@ -436,17 +441,25 @@ pub fn increment_ingress_alias_outcome(outcome: IngressAliasOutcome) {
     add_ingress_alias_outcome(1, outcome);
 }
 
-fn add_ingress_effect_unresolved(count: u64, kind: IngressUnresolvedEffectKind) {
+fn add_ingress_effect_unresolved(
+    count: u64,
+    kind: IngressUnresolvedEffectKind,
+    phase: IngressEffectExecutionPhase,
+) {
     crate::counter_add!(
         "ingress.effects.unresolved",
         "{event}",
         "Ingress authority effects.unresolved.",
         count,
-        kind
+        kind,
+        phase
     );
 }
-pub fn increment_ingress_effect_unresolved(kind: IngressUnresolvedEffectKind) {
-    add_ingress_effect_unresolved(1, kind);
+pub fn increment_ingress_effect_unresolved(
+    kind: IngressUnresolvedEffectKind,
+    phase: IngressEffectExecutionPhase,
+) {
+    add_ingress_effect_unresolved(1, kind, phase);
 }
 
 fn add_ingress_tx_retry(count: u64) {
@@ -540,13 +553,15 @@ pub fn increment_ingress_maintenance_recovered_obligations(count: u64) {
 pub fn increment_ingress_maintenance_unrecoverable_obligations(
     count: u64,
     kind: IngressEffectKind,
+    reason: IngressUnrecoverableReason,
 ) {
     crate::counter_add!(
         "ingress.maintenance.unrecoverable_obligations",
         "{obligation}",
-        "Ingress obligations that maintenance cannot recover, by kind.",
+        "Ingress obligations that maintenance cannot recover, by kind and reason.",
         count,
         kind,
+        reason,
     );
 }
 
@@ -608,7 +623,10 @@ mod tests {
         increment_ingress_decision(IngressDecisionClass::ExistingCommitted);
         increment_ingress_alias_outcome(IngressAliasOutcome::NoOrigin);
         increment_ingress_tx_retry();
-        increment_ingress_effect_unresolved(IngressUnresolvedEffectKind::Delivery);
+        increment_ingress_effect_unresolved(
+            IngressUnresolvedEffectKind::Delivery,
+            IngressEffectExecutionPhase::Live,
+        );
         record_ingress_tx_duration(std::time::Duration::from_millis(250));
         assert_eq!(
             guard.counter_sum("ingress.decisions", &[("class", "existing_committed")]),
@@ -620,10 +638,79 @@ mod tests {
         );
         assert_eq!(guard.counter_sum("ingress.tx.retries", &[]), Some(1));
         assert_eq!(
-            guard.counter_sum("ingress.effects.unresolved", &[("kind", "delivery")]),
+            guard.counter_sum(
+                "ingress.effects.unresolved",
+                &[("kind", "delivery"), ("phase", "live")]
+            ),
             Some(1)
         );
         assert_eq!(guard.histogram_count("ingress.tx.duration", &[]), Some(1));
+    }
+
+    #[tokio::test]
+    async fn ingress_unresolved_registration_exports_every_kind_and_phase() {
+        let guard = setup().await;
+        register_reliability_counters();
+        let mut samples = guard
+            .counter_samples("ingress.effects.unresolved")
+            .expect("unresolved counter exports");
+        let mut expected = Vec::new();
+        for kind in IngressUnresolvedEffectKind::ALL {
+            for phase in IngressEffectExecutionPhase::ALL {
+                expected.push((
+                    0,
+                    vec![
+                        ("kind".to_owned(), kind.value().to_owned()),
+                        ("phase".to_owned(), phase.value().to_owned()),
+                    ],
+                ));
+            }
+        }
+        samples.sort();
+        expected.sort();
+        assert_eq!(samples, expected);
+    }
+
+    #[tokio::test]
+    async fn ingress_unresolved_samples_keep_execution_phases_separate() {
+        let guard = setup().await;
+        assert_eq!(
+            IngressEffectExecutionPhase::ALL.map(|phase| phase.value()),
+            [
+                "live",
+                "maintenance_recovery",
+                "maintenance_terminalization",
+                "stream_retirement",
+            ]
+        );
+        for (index, phase) in IngressEffectExecutionPhase::ALL.into_iter().enumerate() {
+            for _ in 0..=index {
+                increment_ingress_effect_unresolved(IngressUnresolvedEffectKind::Delivery, phase);
+            }
+        }
+        let mut samples = guard
+            .counter_samples("ingress.effects.unresolved")
+            .expect("unresolved counter exports");
+        let mut expected: Vec<_> = [
+            (1, "live"),
+            (2, "maintenance_recovery"),
+            (3, "maintenance_terminalization"),
+            (4, "stream_retirement"),
+        ]
+        .into_iter()
+        .map(|(count, phase)| {
+            (
+                count,
+                vec![
+                    ("kind".to_owned(), "delivery".to_owned()),
+                    ("phase".to_owned(), phase.to_owned()),
+                ],
+            )
+        })
+        .collect();
+        samples.sort();
+        expected.sort();
+        assert_eq!(samples, expected);
     }
 
     #[tokio::test]
@@ -642,6 +729,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingress_unrecoverable_registration_exports_every_kind_and_reason() {
+        let guard = setup().await;
+        register_reliability_counters();
+        let mut samples = guard
+            .counter_samples("ingress.maintenance.unrecoverable_obligations")
+            .expect("unrecoverable counter exports");
+        let mut expected = Vec::new();
+        for kind in IngressEffectKind::ALL {
+            for reason in IngressUnrecoverableReason::ALL {
+                expected.push((
+                    0,
+                    vec![
+                        ("kind".to_owned(), kind.value().to_owned()),
+                        ("reason".to_owned(), reason.value().to_owned()),
+                    ],
+                ));
+            }
+        }
+        samples.sort();
+        expected.sort();
+        assert_eq!(samples, expected);
+    }
+
+    #[tokio::test]
     async fn ingress_recovery_helpers_emit_with_typed_labels() {
         let guard = setup().await;
         register_reliability_counters();
@@ -653,6 +764,7 @@ mod tests {
         increment_ingress_maintenance_unrecoverable_obligations(
             1,
             crate::ingress::IngressEffectKind::Carbons,
+            IngressUnrecoverableReason::Unsupported,
         );
         assert_eq!(
             guard.counter_sum(
@@ -668,21 +780,22 @@ mod tests {
         assert_eq!(
             guard.counter_sum(
                 "ingress.maintenance.unrecoverable_obligations",
-                &[("kind", "carbons")]
+                &[("kind", "carbons"), ("reason", "unsupported")]
             ),
             Some(1)
         );
-        for kind in crate::ingress::IngressEffectKind::ALL {
-            assert!(
-                guard
-                    .counter_sum(
-                        "ingress.maintenance.unrecoverable_obligations",
-                        &[("kind", kind.value())]
-                    )
-                    .is_some(),
-                "{kind:?} zero-registered"
-            );
-        }
+        increment_ingress_maintenance_unrecoverable_obligations(
+            2,
+            IngressEffectKind::Carbons,
+            IngressUnrecoverableReason::NoDurableProgress,
+        );
+        assert_eq!(
+            guard.counter_sum(
+                "ingress.maintenance.unrecoverable_obligations",
+                &[("kind", "carbons"), ("reason", "no_durable_progress")]
+            ),
+            Some(2)
+        );
     }
     #[tokio::test]
     async fn ingress_maintenance_helpers_emit_with_typed_labels() {
@@ -965,12 +1078,18 @@ mod tests {
             );
         }
         for kind in IngressUnresolvedEffectKind::ALL {
-            assert_eq!(
-                guard.counter_sum("ingress.effects.unresolved", &[("kind", kind.value())]),
-                Some(0),
-                "ingress unresolved effect kind {} not registered",
-                kind.value()
-            );
+            for phase in IngressEffectExecutionPhase::ALL {
+                assert_eq!(
+                    guard.counter_sum(
+                        "ingress.effects.unresolved",
+                        &[("kind", kind.value()), ("phase", phase.value())]
+                    ),
+                    Some(0),
+                    "ingress unresolved effect kind {} phase {} not registered",
+                    kind.value(),
+                    phase.value()
+                );
+            }
         }
         for outcome in IngressAliasOutcome::ALL {
             assert_eq!(

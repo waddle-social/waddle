@@ -3,6 +3,7 @@ use super::*;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressEffectCapture,
 };
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::{
     interpret::{effects::PlanSink, interpret},
     websocket::tests as socket_tests,
@@ -116,7 +117,7 @@ async fn direct_receipt(fixture: IngressFixture, partial: bool) {
     );
     tx.commit().await.expect("receipt read complete");
     assert_eq!(
-        terminalize_if_complete(&fixture.uow, key)
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
             .expect("terminalize"),
         !partial
@@ -179,9 +180,11 @@ async fn relayed_direct_receipt(fixture: IngressFixture) {
     let receipts = completed_receipts(&decision, &[(effect, classified)], &proven, 0);
     assert_eq!(receipts.len(), 1);
     let key = decision.message_key.expect("canonical message");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("await delivery receipt"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("await delivery receipt")
+    );
     for receipt in receipts {
         EffectReceiptRepository::record_receipt_pooled(
             &fixture.db,
@@ -192,9 +195,11 @@ async fn relayed_direct_receipt(fixture: IngressFixture) {
         .await
         .expect("record remote delivery");
     }
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminalize confirmed relay"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminalize confirmed relay")
+    );
     fixture.close().await;
 }
 

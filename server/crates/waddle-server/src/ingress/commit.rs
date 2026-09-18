@@ -9,6 +9,7 @@ use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, DbRetryClass, EffectIntentRepository,
     IngressUnitOfWork, IngressUowError, IngressUowTransaction, ReconcileVerdict,
 };
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::time::Instant;
 use waddle_xmpp::ingress::{AliasOutcome, AliasResolution, IngressEffectIntent, MessageKey};
 
@@ -513,7 +514,12 @@ async fn commit_attempt(
         }
     }
     if empty_muc {
-        super::execute::terminalize_if_complete_in_transaction(&mut tx, key).await?;
+        super::execute::terminalize_if_complete_in_transaction(
+            &mut tx,
+            key,
+            DeliveryExecutionContext::Live.into(),
+        )
+        .await?;
     }
     if alias == AliasOutcomeClass::Existing
         || !matches!(filter_verdict, ReconcileVerdict::FirstCommit)

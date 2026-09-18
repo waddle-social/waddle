@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_extensions::{
     observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
@@ -226,11 +227,13 @@ async fn revoked_membership(fixture: IngressFixture) {
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Failed);
     assert!(a.invocations().is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert!(
-        !terminalize_if_complete(&fixture.uow, first.message_key.expect("key"))
-            .await
-            .expect("pending")
-    );
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        first.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("pending"));
     fixture.close().await;
 }
 

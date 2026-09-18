@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{
     ingress::IngressEffectIntent, protocol::CarbonKind, registry::ConnectionRegistry,
 };
@@ -38,9 +39,11 @@ async fn local_carbons_retry_on_remote_owner(fixture: IngressFixture) {
     )
     .await
     .expect("confirm first local fanout");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("completed local fanout"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("completed local fanout")
+    );
 
     // The same resource reconnects through a different socket node, so its
     // unchanged origin-id now produces a remote-owner carbon plan.

@@ -516,9 +516,13 @@ async fn receipts_retention(fixture: IngressFixture) {
         .expect("commit");
     let key = decision.message_key.expect("key");
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("partial"));
+    assert!(!terminalize_if_complete(
+        &fixture.uow,
+        key,
+        waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase::Live
+    )
+    .await
+    .expect("partial"));
     assert_eq!(
         collect(
             &fixture,

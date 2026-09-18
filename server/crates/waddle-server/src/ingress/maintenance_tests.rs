@@ -516,7 +516,17 @@ async fn postgres_pool_one_remains_admissible_during_maintenance() {
         let key = interrupted_delivery(&fixture, origin).await;
         backdate_created(&fixture, key, 120).await;
     }
-    let maintenance = run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None);
+    let pending = stalled_route(&fixture).await;
+    let cursor = MaintenanceCursor::default();
+    let environment: Arc<dyn super::RecoveryEnvironment> =
+        Arc::new(EmptyRecoveryEnvironment(ConnectionRegistry::new()));
+    let maintenance = run_maintenance_pass_with_cursor(
+        &fixture.db,
+        &fixture.uow,
+        immediate_budget(),
+        &cursor,
+        Some(environment),
+    );
     let foreground = async {
         let transaction = tokio::time::timeout(Duration::from_secs(2), fixture.uow.begin())
             .await
@@ -527,6 +537,8 @@ async fn postgres_pool_one_remains_admissible_during_maintenance() {
     let (outcome, ()) = tokio::join!(maintenance, foreground);
     assert_eq!(outcome, MaintenanceOutcome::Complete);
     assert_eq!(terminal_count(&fixture).await, 2);
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(super::super::recovery_executor::attempt_count(pending), 1);
     fixture.close().await;
 }
 
@@ -754,20 +766,20 @@ async fn postgres_recovery_phase_completes_a_lost_detached_route() {
 #[test]
 fn failed_accounting_reads_are_requeued_ahead_and_bounded() {
     let queue = std::sync::Mutex::new(Vec::new());
-    let newer = (MessageKey::new(), 3);
-    let failed = (MessageKey::new(), 1);
-    queue.lock().expect("queue").push(newer);
+    let newer = accounting_attempt(MessageKey::new(), 3);
+    let failed = accounting_attempt(MessageKey::new(), 1);
+    queue.lock().expect("queue").push(newer.clone());
     requeue_failed_accounting(&queue, Vec::new());
-    assert_eq!(*queue.lock().expect("queue"), vec![newer]);
-    requeue_failed_accounting(&queue, vec![failed]);
-    assert_eq!(*queue.lock().expect("queue"), vec![failed, newer]);
+    assert_eq!(*queue.lock().expect("queue"), vec![newer.clone()]);
+    requeue_failed_accounting(&queue, vec![failed.clone()]);
+    assert_eq!(*queue.lock().expect("queue"), vec![failed, newer.clone()]);
 
     let flood: Vec<_> = (0..RECOVERY_ACCOUNTING_QUEUE_BOUND + 5)
-        .map(|_| (MessageKey::new(), 0))
+        .map(|_| accounting_attempt(MessageKey::new(), 0))
         .collect();
     // Two items already queued plus the flood exceed the bound by this many.
     let excess = flood.len() + 2 - RECOVERY_ACCOUNTING_QUEUE_BOUND;
-    let survivor = flood[excess];
+    let survivor = flood[excess].clone();
     requeue_failed_accounting(&queue, flood.clone());
     let bounded = queue.lock().expect("queue").clone();
     assert_eq!(bounded.len(), RECOVERY_ACCOUNTING_QUEUE_BOUND);
@@ -776,5 +788,373 @@ fn failed_accounting_reads_are_requeued_ahead_and_bounded() {
         bounded[bounded.len() - 1],
         newer,
         "existing rows stay behind the retries"
+    );
+}
+
+fn accounting_attempt(key: MessageKey, generation: u64) -> super::RecoveryAttempt {
+    super::RecoveryAttempt {
+        key,
+        observed: crate::ingress_substrate::RecoveryEvidence {
+            intents: 1,
+            receipts: 0,
+            progress: 0,
+        },
+        classification: super::AttemptClassification::Evaluable,
+        pending: vec![waddle_xmpp::ingress::IngressEffectKind::RouteDirect],
+        generation,
+    }
+}
+
+struct EmptyRecoveryEnvironment(ConnectionRegistry);
+impl super::RecoveryEnvironment for EmptyRecoveryEnvironment {
+    fn recovery_deps(&self) -> Deps<'_> {
+        Deps::new(&self.0, "example.com")
+    }
+}
+
+async fn stalled_route(fixture: &IngressFixture) -> MessageKey {
+    let mut submission = fixture.submission(Some("maintenance-stall"), "pending delivery");
+    let resources = ["juliet@example.com/phone", "juliet@example.com/laptop"]
+        .into_iter()
+        .map(|resource| resource.parse().expect("resource"))
+        .collect();
+    submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("recipient"),
+        fanout: resources,
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    }];
+    let decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("commit route");
+    decision.message_key.expect("key")
+}
+
+#[tokio::test]
+async fn sqlite_stalled_row_parks_exactly_at_threshold_and_cache_hit_queues_nothing() {
+    let fixture = IngressFixture::sqlite().await;
+    let key = stalled_route(&fixture).await;
+    let environment = EmptyRecoveryEnvironment(ConnectionRegistry::new());
+    let cursor = MaintenanceCursor::default();
+    let budget = immediate_budget();
+    for attempt in 1..=budget.recovery_stall_attempts {
+        assert_eq!(
+            super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment)
+                .await,
+            MaintenanceOutcome::Complete
+        );
+        assert_eq!(
+            super::super::recovery_executor::attempt_count(key),
+            u64::from(attempt)
+        );
+        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        cursor.wait_for_recovery_accounting().await;
+    }
+    assert_eq!(
+        super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await,
+        MaintenanceOutcome::Complete
+    );
+    assert_eq!(
+        super::super::recovery_executor::attempt_count(key),
+        u64::from(budget.recovery_stall_attempts)
+    );
+    assert!(cursor.recovery_accounting.lock().expect("queue").is_empty());
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(terminal_count(&fixture).await, 0);
+    tokio::time::pause();
+    tokio::time::advance(budget.recovery_stall_cooldown).await;
+    tokio::time::resume();
+    super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
+    assert_eq!(
+        super::super::recovery_executor::attempt_count(key),
+        u64::from(budget.recovery_stall_attempts) + 1
+    );
+    assert_eq!(cursor.recovery_accounting.lock().expect("queue").len(), 1);
+    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    cursor.wait_for_recovery_accounting().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn stale_requeued_accounting_cannot_resurrect_a_reset_streak() {
+    let key = MessageKey::new();
+    let mut stalled = super::StalledRows::default();
+    let mut suppressed = super::UnsupportedRows::default();
+    let budget = immediate_budget();
+    for generation in 1..=2 {
+        let attempt = accounting_attempt(key, generation);
+        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+    }
+    let stale = accounting_attempt(key, 3);
+    let mut newer = accounting_attempt(key, 4);
+    newer.classification = super::AttemptClassification::Inconclusive;
+    stalled.account(&newer, newer.observed, budget, &mut suppressed);
+    let queue = std::sync::Mutex::new(Vec::new());
+    requeue_failed_accounting(&queue, vec![stale]);
+    for attempt in queue.into_inner().expect("queue") {
+        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+    }
+    for generation in 5..=6 {
+        let attempt = accounting_attempt(key, generation);
+        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+        assert_eq!(suppressed.get(key, attempt.observed), None);
+    }
+    let attempt = accounting_attempt(key, 7);
+    stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+    assert!(matches!(
+        suppressed.get(key, attempt.observed),
+        Some(super::Suppression::StalledUntil(_))
+    ));
+}
+
+#[tokio::test]
+async fn accounting_storage_failure_resets_streak_and_retry_only_credits_progress() {
+    let fixture = IngressFixture::sqlite().await;
+    let key = stalled_route(&fixture).await;
+    let cursor = MaintenanceCursor::default();
+    let budget = immediate_budget();
+    for generation in 1..=2 {
+        cursor
+            .recovery_accounting
+            .lock()
+            .expect("queue")
+            .push(accounting_attempt(key, generation));
+        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        cursor.wait_for_recovery_accounting().await;
+    }
+    fixture
+        .execute(
+            "ALTER TABLE ingress_delivery_receipts RENAME TO suspended_progress",
+            vec![],
+        )
+        .await;
+    cursor
+        .recovery_accounting
+        .lock()
+        .expect("queue")
+        .push(accounting_attempt(key, 3));
+    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(
+        cursor.recovery_accounting.lock().expect("queue")[0].classification,
+        super::AttemptClassification::Inconclusive
+    );
+    fixture
+        .execute(
+            "ALTER TABLE suspended_progress RENAME TO ingress_delivery_receipts",
+            vec![],
+        )
+        .await;
+    // Read recovery cannot convert the failed observation into a no-progress attempt.
+    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    cursor.wait_for_recovery_accounting().await;
+    for generation in 4..=5 {
+        let attempt = accounting_attempt(key, generation);
+        cursor
+            .recovery_accounting
+            .lock()
+            .expect("queue")
+            .push(attempt.clone());
+        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            cursor
+                .recovery_unsupported
+                .lock()
+                .expect("suppression")
+                .get(key, attempt.observed),
+            None
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_replica_progress_rearms_parked_row_and_counts_a_new_episode() {
+    use waddle_xmpp::ingress::IngressEffectKind;
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let fixture = IngressFixture::sqlite().await;
+    let key = stalled_route(&fixture).await;
+    let environment = EmptyRecoveryEnvironment(ConnectionRegistry::new());
+    let cursor = MaintenanceCursor::default();
+    let budget = immediate_budget();
+    let labels = [("kind", "route_direct"), ("reason", "no_durable_progress")];
+    let before = metrics
+        .counter_sum("ingress.maintenance.unrecoverable_obligations", &labels)
+        .unwrap_or(0);
+    for _ in 0..budget.recovery_stall_attempts {
+        super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
+        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        cursor.wait_for_recovery_accounting().await;
+    }
+    assert_eq!(
+        metrics.counter_sum("ingress.maintenance.unrecoverable_obligations", &labels),
+        Some(before + 1)
+    );
+    for _ in 0..3 {
+        super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
+        assert!(cursor.recovery_accounting.lock().expect("queue").is_empty());
+    }
+    // An unchanged retry after expiry is the same episode, not another classification.
+    tokio::time::pause();
+    tokio::time::advance(budget.recovery_stall_cooldown).await;
+    tokio::time::resume();
+    super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
+    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(
+        metrics.counter_sum("ingress.maintenance.unrecoverable_obligations", &labels),
+        Some(before + 1)
+    );
+    let old = super::evidence_now(&fixture.db, key)
+        .await
+        .expect("old evidence");
+    // A second replica records one recipient, without the aggregate receipt.
+    let mut tx = fixture.uow.begin().await.expect("replica transaction");
+    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("intents");
+    let receipt = super::super::durable::receipt_key(&intents[0]).expect("receipt key");
+    crate::ingress_uow::DeliveryProgressRepository::record(
+        &mut tx,
+        key,
+        &receipt,
+        &["juliet@example.com/phone".parse().expect("resource")],
+    )
+    .await
+    .expect("replica progress");
+    tx.commit().await.expect("replica commit");
+    let fresh = super::evidence_now(&fixture.db, key)
+        .await
+        .expect("fresh evidence");
+    assert_eq!(fresh.progress, old.progress + 1);
+    assert_eq!(fresh.receipts, old.receipts);
+    let mut tx = fixture.db.begin().await.expect("scan");
+    let page = crate::ingress_substrate::unreceipted_nonterminal_candidates(
+        &mut tx,
+        None,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+        &[crate::ingress_substrate::EffectReceiptKind::from_storage(
+            IngressEffectKind::RouteDirect.storage_tag(),
+        )],
+        10,
+    )
+    .await
+    .expect("scan evidence");
+    tx.commit().await.expect("scan commit");
+    assert_eq!(
+        page.iter()
+            .find(|row| row.key == key)
+            .expect("row")
+            .evidence,
+        fresh
+    );
+    let attempts = super::super::recovery_executor::attempt_count(key);
+    for index in 1..=budget.recovery_stall_attempts {
+        super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
+        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            super::super::recovery_executor::attempt_count(key),
+            attempts + u64::from(index)
+        );
+        assert_eq!(
+            metrics.counter_sum("ingress.maintenance.unrecoverable_obligations", &labels),
+            Some(before + 1 + u64::from(index == budget.recovery_stall_attempts))
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn accounting_timeout_resets_streak_and_is_requeued_as_inconclusive() {
+    let fixture = IngressFixture::sqlite().await;
+    let key = stalled_route(&fixture).await;
+    let mut config =
+        crate::db::DatabaseConfig::new(DatabaseDriver::Sqlite, fixture.db.database_url());
+    config.pool_size = 1;
+    let accounting_db = crate::db::Database::from_config("accounting-timeout", &config)
+        .await
+        .expect("one-connection accounting pool");
+    let cursor = MaintenanceCursor::default();
+    let budget = immediate_budget();
+    for generation in 1..=2 {
+        cursor
+            .recovery_accounting
+            .lock()
+            .expect("queue")
+            .push(accounting_attempt(key, generation));
+        super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+        cursor.wait_for_recovery_accounting().await;
+    }
+    // Occupy the only pool slot so the bounded accounting read must time out.
+    let held = accounting_db.begin().await.expect("occupy connection");
+    cursor
+        .recovery_accounting
+        .lock()
+        .expect("queue")
+        .push(accounting_attempt(key, 3));
+    tokio::time::pause();
+    super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+    cursor.wait_for_recovery_accounting().await;
+    tokio::time::resume();
+    held.commit().await.expect("release connection");
+    assert_eq!(
+        cursor.recovery_accounting.lock().expect("queue")[0].classification,
+        super::AttemptClassification::Inconclusive
+    );
+    super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+    cursor.wait_for_recovery_accounting().await;
+    for generation in 4..=5 {
+        let attempt = accounting_attempt(key, generation);
+        cursor
+            .recovery_accounting
+            .lock()
+            .expect("queue")
+            .push(attempt.clone());
+        super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            cursor
+                .recovery_unsupported
+                .lock()
+                .expect("suppression")
+                .get(key, attempt.observed),
+            None
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn newer_inconclusive_attempt_clears_an_older_workers_parking_decision() {
+    let key = MessageKey::new();
+    let budget = immediate_budget();
+    let mut stalled = super::StalledRows::default();
+    let mut suppressed = super::UnsupportedRows::default();
+    for generation in 1..=3 {
+        let attempt = accounting_attempt(key, generation);
+        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+    }
+    let mut newer = accounting_attempt(key, 4);
+    assert!(matches!(
+        suppressed.get(key, newer.observed),
+        Some(super::Suppression::StalledUntil(_))
+    ));
+    // This attempt began before the older worker installed the suppression.
+    newer.classification = super::AttemptClassification::Inconclusive;
+    stalled.account(&newer, newer.observed, budget, &mut suppressed);
+    assert_eq!(suppressed.get(key, newer.observed), None);
+    for generation in 5..=6 {
+        let attempt = accounting_attempt(key, generation);
+        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+        assert_eq!(suppressed.get(key, attempt.observed), None);
+    }
+    // Unsupported suppression retains its existing semantics on uncertainty.
+    suppressed.insert(key, newer.observed, super::Suppression::Unsupported);
+    newer.generation = 7;
+    stalled.account(&newer, newer.observed, budget, &mut suppressed);
+    assert_eq!(
+        suppressed.get(key, newer.observed),
+        Some(super::Suppression::Unsupported)
     );
 }

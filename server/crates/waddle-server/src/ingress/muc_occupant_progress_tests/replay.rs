@@ -1,5 +1,6 @@
 use super::*;
 use crate::server::routes::interpret::effects::{Effect, PlanEffectDependency};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{stream_management::InMemorySmSessionRegistry, Stanza};
 use xmpp_parsers::message::{Lang, MessageType};
@@ -313,9 +314,13 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
             );
         }
         if matches!(case, ReplayCase::MissingProvenanceSubject) {
-            assert!(!terminalize_if_complete(&fixture.uow, key)
-                .await
-                .expect("pending"));
+            assert!(!terminalize_if_complete(
+                &fixture.uow,
+                key,
+                DeliveryExecutionContext::Live.into()
+            )
+            .await
+            .expect("pending"));
             let mut tx = fixture.uow.begin().await.expect("unchanged progress");
             assert_eq!(
                 DeliveryProgressRepository::load(&mut tx, key, &receipt)
@@ -343,9 +348,11 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .await
         .expect("aggregate"));
         tx.commit().await.expect("read commit");
-        assert!(terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("terminal"));
+        assert!(
+            terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("terminal")
+        );
     }
     fixture.close().await;
 }

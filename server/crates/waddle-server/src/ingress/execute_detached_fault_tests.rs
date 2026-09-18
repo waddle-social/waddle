@@ -1,5 +1,6 @@
 //! Durable progress survives executor cancellation and rolls back on storage faults.
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress::{
         commit::commit_submission,
@@ -226,9 +227,11 @@ async fn detached_delivery_fault(
     .await
     .expect("receipt"));
     tx.commit().await.expect("read commit");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("not terminal"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("not terminal")
+    );
     assert_eq!(append_count(&sm, &first).await, 1);
     assert_eq!(
         append_count(&sm, &second).await,
@@ -251,9 +254,11 @@ async fn detached_delivery_fault(
     .await;
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert!(report.receipt_failures.is_empty());
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminal"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminal")
+    );
     assert_eq!(
         append_count(&sm, &first).await,
         1,
@@ -354,11 +359,13 @@ async fn detached_muc_records_occupant_progress(fixture: IngressFixture) {
     .await;
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(append_count(&sm, &target).await, 1);
-    assert!(
-        terminalize_if_complete(&fixture.uow, decision.message_key.expect("key"))
-            .await
-            .expect("MUC aggregate settled")
-    );
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        decision.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("MUC aggregate settled"));
     fixture.close().await;
 }
 
@@ -494,11 +501,13 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
     assert_eq!(fixture.count("sm_ingress_appends").await, 3);
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 3);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
-    assert!(
-        terminalize_if_complete(&fixture.uow, decision.message_key.expect("key"))
-            .await
-            .expect("mixed obligations settle")
-    );
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        decision.message_key.expect("key"),
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("mixed obligations settle"));
     fixture.close().await;
 }
 
@@ -512,4 +521,84 @@ async fn postgres_mixed_direct_muc_detached_context_isolation() {
     if let Some(fixture) = IngressFixture::postgres("mixed_direct_muc_context").await {
         mixed_direct_muc_context_isolation(fixture).await;
     }
+}
+
+#[tokio::test]
+async fn sqlite_present_detached_session_append_failure_is_uncertain() {
+    let fixture = IngressFixture::sqlite().await;
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .expect("SM persistence"),
+    );
+    let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    store_detached(&sm, &target).await;
+    let registry = waddle_xmpp::registry::ConnectionRegistry::new();
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.sm_session_registry = Some(&sm);
+    let mut submission = fixture.submission(Some("append-storage-error"), "durable copy");
+    let identity = EffectMessageIdentity::capture_ordinal(1);
+    submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        recipient: target.to_bare(),
+        fanout: vec![target.clone()],
+        route_identity: identity.clone(),
+    }];
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            route_identity: Some(identity),
+            call_setup: None,
+            bare: target.to_bare(),
+            resources: vec![target.clone()],
+            stanza: Box::new(Stanza::Message(submission.plan.sanitized_message.clone())),
+        }),
+    ))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit");
+    fixture.db.execute("CREATE TRIGGER fail_detached_append BEFORE INSERT ON sm_ingress_appends BEGIN SELECT RAISE(ABORT, 'append storage error'); END")
+        .await.expect("inject append failure only");
+    for _ in 0..4 {
+        let report = execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+        assert!(
+            report.receipt_failures.is_empty(),
+            "receipt storage stays healthy"
+        );
+        assert!(report.terminalization_failure.is_none());
+        assert_eq!(
+            append_count(&sm, &target).await,
+            0,
+            "session remains present"
+        );
+        assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+        assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    }
+    fixture
+        .db
+        .execute("DROP TRIGGER fail_detached_append")
+        .await
+        .expect("restore append storage");
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+    assert!(report.receipt_failures.is_empty());
+    assert_eq!(append_count(&sm, &target).await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    fixture.close().await;
 }

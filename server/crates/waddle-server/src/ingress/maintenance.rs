@@ -1,8 +1,12 @@
 //! Periodic, bounded repair of terminal proofs followed by retention collection.
 
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -19,7 +23,12 @@ use crate::ingress_substrate::{
 use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
 
 use super::gc::{run_retention_gc_with_budget, RetentionGcBudget};
+use super::recovery_executor::AttemptClassification;
 use super::RecoveryEnvironment;
+
+#[path = "maintenance_stalls.rs"]
+mod stalls;
+use stalls::{RecoveryAttempt, StalledRows, Suppression, UnsupportedRows};
 
 type MaintenancePosition = (DateTime<Utc>, MessageKey);
 
@@ -38,6 +47,8 @@ pub(crate) struct MaintenanceBudget {
     pub(crate) recovery_row: Duration,
     pub(crate) recovery_page_size: u32,
     pub(crate) recovery_max_attempts: u32,
+    pub(crate) recovery_stall_attempts: u32,
+    pub(crate) recovery_stall_cooldown: Duration,
     pub(crate) retention: RetentionGcBudget,
     pub(crate) hard_deadline: Duration,
     pub(crate) page_size: u32,
@@ -52,6 +63,8 @@ impl MaintenanceBudget {
         recovery_row: Duration::from_secs(1),
         recovery_page_size: 64,
         recovery_max_attempts: 64,
+        recovery_stall_attempts: 3,
+        recovery_stall_cooldown: Duration::from_secs(15 * 60),
         retention: RetentionGcBudget::DEFAULT,
         hard_deadline: Duration::from_secs(13),
         page_size: 256,
@@ -65,19 +78,36 @@ pub(super) struct MaintenanceCursor {
     after: Arc<Mutex<Option<MaintenancePosition>>>,
     recovery_after: Arc<Mutex<Option<MaintenancePosition>>>,
     recovery_unsupported: Arc<Mutex<UnsupportedRows>>,
-    /// Rows attempted this pass, with the receipt count the scan observed.
+    recovery_stalled: Arc<Mutex<StalledRows>>,
+    recovery_generation: Arc<AtomicU64>,
+    /// Rows attempted this pass, with the evidence the scan observed.
     /// Drained by one detached worker after the phase so the credit survives
     /// the phase deadline without fanning out pooled reads.
-    recovery_accounting: Arc<Mutex<Vec<(MessageKey, u32)>>>,
+    recovery_accounting: Arc<Mutex<Vec<RecoveryAttempt>>>,
     /// Held by the accounting worker; continuations of a partial pass spawn
     /// their own worker, and this serializes them to one pooled read at a time.
     recovery_accounting_worker: Arc<tokio::sync::Mutex<()>>,
     /// Highest receipt total already credited per row, so a delayed worker
     /// and a later pass's worker never credit the same receipt twice.
     recovery_credited: Arc<Mutex<CreditedRows>>,
+    #[cfg(test)]
+    accounting_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl MaintenanceCursor {
+    #[cfg(test)]
+    pub(super) async fn wait_for_recovery_accounting(&self) {
+        let tasks = std::mem::take(
+            &mut *self
+                .accounting_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for task in tasks {
+            task.await.expect("accounting worker");
+        }
+    }
+
     fn get(&self) -> Option<MaintenancePosition> {
         *self
             .after
@@ -173,7 +203,7 @@ pub(super) async fn run_maintenance_pass_with_cursor(
             )
             .await
             .unwrap_or(MaintenanceOutcome::TimedOut);
-            spawn_recovery_accounting(database, cursor);
+            spawn_recovery_accounting(database, cursor, budget);
             record(IngressMaintenancePhase::Recovery, outcome)
         } else {
             MaintenanceOutcome::Complete
@@ -266,7 +296,13 @@ async fn terminalize_candidates(
             // starts after it and cannot starve later candidates.
             after = Some((created_at, key));
             cursor.set(after);
-            match super::execute::terminalize_if_complete_outcome(uow, key).await {
+            match super::execute::terminalize_if_complete_outcome(
+                uow,
+                key,
+                DeliveryExecutionContext::MaintenanceTerminalization.into(),
+            )
+            .await
+            {
                 Ok(Some(crate::ingress_substrate::TerminalizeOutcome::Terminalized)) => {
                     waddle_xmpp::telemetry::reliability::add_ingress_maintenance_terminalized_messages(1);
                 }
@@ -296,36 +332,6 @@ async fn terminalize_candidates(
         }
     }
     MaintenanceOutcome::Partial
-}
-
-/// FIFO bounds memory; evidence changes always invalidate an unsupported evaluation.
-#[derive(Default)]
-struct UnsupportedRows {
-    evidence: HashMap<MessageKey, RecoveryEvidence>,
-    order: VecDeque<MessageKey>,
-}
-
-impl UnsupportedRows {
-    fn contains(&self, candidate: &RecoveryCandidate) -> bool {
-        self.evidence.get(&candidate.key) == Some(&candidate.evidence)
-    }
-
-    fn remove(&mut self, key: MessageKey) {
-        if self.evidence.remove(&key).is_some() {
-            self.order.retain(|stored| *stored != key);
-        }
-    }
-
-    fn insert(&mut self, candidate: RecoveryCandidate) {
-        self.remove(candidate.key);
-        if self.order.len() == 4096 {
-            if let Some(oldest) = self.order.pop_front() {
-                self.evidence.remove(&oldest);
-            }
-        }
-        self.order.push_back(candidate.key);
-        self.evidence.insert(candidate.key, candidate.evidence);
-    }
 }
 
 fn recoverable_receipt_kinds() -> Vec<EffectReceiptKind> {
@@ -408,7 +414,8 @@ async fn recover_candidates(
                 .recovery_unsupported
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&candidate);
+                .get(candidate.key, candidate.evidence)
+                .is_some();
             if !unsupported && attempts >= budget.recovery_max_attempts {
                 return MaintenanceOutcome::Partial;
             }
@@ -429,11 +436,18 @@ async fn recover_candidates(
             attempts += 1;
             // Queue accounting before the attempt: the phase deadline can cancel
             // this await after an effect committed, and the credit must survive.
+            let generation = cursor.recovery_generation.fetch_add(1, Ordering::Relaxed) + 1;
             cursor
                 .recovery_accounting
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((candidate.key, candidate.evidence.receipts));
+                .push(RecoveryAttempt {
+                    key: candidate.key,
+                    observed: candidate.evidence,
+                    classification: AttemptClassification::Inconclusive,
+                    pending: Vec::new(),
+                    generation,
+                });
             let deadline = tokio::time::Instant::now() + budget.recovery_row;
             let result = tokio::time::timeout_at(
                 deadline,
@@ -446,6 +460,23 @@ async fn recover_candidates(
                 ),
             )
             .await;
+            if let Ok(Ok(super::recovery_executor::RowRecovery::Executed {
+                classification,
+                pending,
+                ..
+            })) = &result
+            {
+                if let Some(attempt) = cursor
+                    .recovery_accounting
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter_mut()
+                    .find(|attempt| attempt.generation == generation)
+                {
+                    attempt.classification = *classification;
+                    attempt.pending.clone_from(pending);
+                }
+            }
             match record_recovery_result(candidate, result) {
                 RowDisposition::Deferred => outcome = MaintenanceOutcome::Partial,
                 RowDisposition::Done => {}
@@ -455,18 +486,16 @@ async fn recover_candidates(
                     // next scan re-invoke the warning-only observer.
                     match tokio::time::timeout(
                         RECOVERY_ACCOUNTING_BUDGET,
-                        receipts_now(database, candidate.key),
+                        evidence_now(database, candidate.key),
                     )
                     .await
                     {
-                        Ok(Ok(receipts)) => {
-                            let mut cached = candidate;
-                            cached.evidence.receipts = u32::try_from(receipts).unwrap_or(u32::MAX);
+                        Ok(Ok(evidence)) => {
                             cursor
                                 .recovery_unsupported
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .insert(cached);
+                                .insert(candidate.key, evidence, Suppression::Unsupported);
                         }
                         Ok(Err(error)) => {
                             tracing::warn!(%error, key = ?candidate.key, "ingress recovery cache refresh failed");
@@ -500,8 +529,12 @@ async fn recover_candidates(
 /// dedicated ingress pool. A concurrent client retransmission settling the
 /// same row in this window is attributed here too; the counter is progress
 /// telemetry, not an audit log.
-fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
-    let attempted: Vec<(MessageKey, u32)> = std::mem::take(
+fn spawn_recovery_accounting(
+    database: &Database,
+    cursor: &MaintenanceCursor,
+    budget: MaintenanceBudget,
+) {
+    let attempted: Vec<RecoveryAttempt> = std::mem::take(
         &mut *cursor
             .recovery_accounting
             .lock()
@@ -514,7 +547,9 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
     let worker = Arc::clone(&cursor.recovery_accounting_worker);
     let credited = Arc::clone(&cursor.recovery_credited);
     let queue = Arc::clone(&cursor.recovery_accounting);
-    tokio::spawn(async move {
+    let stalled = Arc::clone(&cursor.recovery_stalled);
+    let suppressed = Arc::clone(&cursor.recovery_unsupported);
+    let task = tokio::spawn(async move {
         use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_recovered_obligations;
         // One accounting read at a time across passes: a partial pass's
         // continuation (gc.rs backoff) must not stack a second worker onto the
@@ -522,27 +557,44 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
         let _serial = worker.lock().await;
         let mut recovered = 0;
         let mut failed = Vec::new();
-        for (key, before) in attempted {
-            match tokio::time::timeout(RECOVERY_ACCOUNTING_BUDGET, receipts_now(&database, key))
-                .await
-            {
-                Ok(Ok(now)) => {
-                    // Credit only above the higher of this pass's scan baseline
-                    // and what any earlier worker already credited for the row.
+        for mut attempt in attempted {
+            let key = attempt.key;
+            let result =
+                tokio::time::timeout(RECOVERY_ACCOUNTING_BUDGET, evidence_now(&database, key))
+                    .await
+                    .unwrap_or(Err(IngressUowError::Timeout));
+            let fresh = match result {
+                Ok(now) => {
                     recovered += credited
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .credit(key, u64::from(before), now);
+                        .credit(
+                            key,
+                            u64::from(attempt.observed.receipts),
+                            u64::from(now.receipts),
+                        );
+                    now
                 }
-                Ok(Err(error)) => {
+                Err(error) => {
                     tracing::warn!(%error, ?key, "ingress recovery accounting failed");
-                    failed.push((key, before));
+                    // Retrying can credit receipts, but cannot turn a failed
+                    // observation into proof that no progress occurred.
+                    attempt.classification = AttemptClassification::Inconclusive;
+                    failed.push(attempt.clone());
+                    attempt.observed
                 }
-                Err(_) => {
-                    tracing::warn!(?key, "ingress recovery accounting timed out");
-                    failed.push((key, before));
-                }
-            }
+            };
+            stalled
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .account(
+                    &attempt,
+                    fresh,
+                    budget,
+                    &mut suppressed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
         }
         if recovered > 0 {
             increment_ingress_maintenance_recovered_obligations(recovered);
@@ -552,16 +604,21 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
         // next pass's worker retries the read with its own bounded budget.
         requeue_failed_accounting(&queue, failed);
     });
+    #[cfg(test)]
+    cursor
+        .accounting_tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(task);
+    #[cfg(not(test))]
+    drop(task);
 }
 
 /// Rows the recovery accounting read could not settle go back on the queue
 /// for the next pass's worker. Bounded so a database that stays unreachable
 /// cannot grow the queue without limit; beyond the bound the oldest failed
 /// items are dropped and only telemetry credit is lost.
-fn requeue_failed_accounting(
-    queue: &Mutex<Vec<(MessageKey, u32)>>,
-    failed: Vec<(MessageKey, u32)>,
-) {
+fn requeue_failed_accounting(queue: &Mutex<Vec<RecoveryAttempt>>, failed: Vec<RecoveryAttempt>) {
     if failed.is_empty() {
         return;
     }
@@ -637,9 +694,14 @@ fn record_recovery_result(
         Ok(Ok(RowRecovery::Executed {
             unrecoverable,
             unsupported,
+            ..
         })) => {
             for kind in unrecoverable {
-                increment_ingress_maintenance_unrecoverable_obligations(1, kind);
+                increment_ingress_maintenance_unrecoverable_obligations(
+                    1,
+                    kind,
+                    waddle_xmpp::telemetry::attributes::IngressUnrecoverableReason::Unsupported,
+                );
             }
             if unsupported {
                 RowDisposition::Unsupported
@@ -659,8 +721,13 @@ fn record_recovery_result(
     }
 }
 
-async fn receipts_now(database: &Database, key: MessageKey) -> Result<u64, IngressUowError> {
-    crate::ingress_uow::EffectReceiptRepository::count_pooled(database, key).await
+async fn evidence_now(
+    database: &Database,
+    key: MessageKey,
+) -> Result<RecoveryEvidence, IngressUowError> {
+    crate::ingress_substrate::recovery_evidence_pooled(database, key)
+        .await
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

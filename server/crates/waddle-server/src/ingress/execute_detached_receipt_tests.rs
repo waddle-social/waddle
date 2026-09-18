@@ -1,6 +1,7 @@
 //! Phase C records each successful resource before settling the frozen batch.
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, IngressEffectIntent},
@@ -114,7 +115,7 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
     assert_eq!(progress.contains(&second), !missing_second);
     tx.commit().await.expect("read receipt");
     assert_eq!(
-        terminalize_if_complete(&fixture.uow, key)
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
             .expect("terminalization"),
         !missing_second
@@ -154,7 +155,7 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
             "aggregate pending receipt must not repeat the completed resource"
         );
         assert!(
-            !terminalize_if_complete(&fixture.uow, key)
+            !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
                 .await
                 .expect("partial batch remains pending"),
             "missing resources remain unresolved until a retry can reach them"
@@ -208,9 +209,11 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
             ),
             "a resumed target of a partial aggregate must not receive another live delivery"
         );
-        assert!(!terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("aggregate remains incomplete after resume"));
+        assert!(
+            !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("aggregate remains incomplete after resume")
+        );
     }
     if live_second {
         assert!(

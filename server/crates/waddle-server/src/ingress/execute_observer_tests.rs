@@ -4,6 +4,7 @@ use crate::ingress::{
     test_support::{capture_room_message, IngressFixture},
 };
 use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, PlanSuppressionPolicy};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
 use xmpp_parsers::message::Message;
 
@@ -70,9 +71,11 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
     .await;
     assert_eq!(failed.outcomes[0].1, ExternalOutcome::Failed);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("pending observer"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending observer")
+    );
 
     // Reconciliation retains the recorded invocation even if current enrichment
     // changes. The duplicate must execute the original payload while unresolved.
@@ -131,9 +134,11 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
     assert_eq!(completed.outcomes[0].1, ExternalOutcome::Done);
     assert!(completed.receipt_failures.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("complete observer"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("complete observer")
+    );
 
     let duplicate = commit_submission(&fixture.uow, &submission, 1)
         .await

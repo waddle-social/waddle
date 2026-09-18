@@ -7,6 +7,7 @@ use crate::ingress::{
 };
 use crate::ingress_uow::{EffectReceiptRepository, SmIngressStreamRepository};
 use crate::server::routes::interpret::effects::{EffectSink, ImmediateSink, PlanSink};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::websocket::tests::{
     create_test_websocket_state, register_test_connection,
 };
@@ -135,9 +136,11 @@ async fn assert_receipted(fixture: &IngressFixture, decision: &crate::ingress::I
         .expect("receipt"));
     }
     tx.commit().await.expect("receipt read");
-    assert!(terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("terminalize"));
+    assert!(
+        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminalize")
+    );
 }
 
 fn assert_pin_notification(
@@ -301,11 +304,13 @@ async fn dm_pin_receipts(fixture: IngressFixture, replay: bool, cascade: bool) {
             ));
             assert!(!state.deps.protocol.dm_pin_store.contains(&pair, &target));
         }
-        assert!(
-            !terminalize_if_complete(&fixture.uow, decision.message_key.expect("key"))
-                .await
-                .expect("pending receipt")
-        );
+        assert!(!terminalize_if_complete(
+            &fixture.uow,
+            decision.message_key.expect("key"),
+            DeliveryExecutionContext::Live.into()
+        )
+        .await
+        .expect("pending receipt"));
         plan(&state, &mut submission, cascade).await;
         assert!(
             submission.plan.plan.is_empty(),

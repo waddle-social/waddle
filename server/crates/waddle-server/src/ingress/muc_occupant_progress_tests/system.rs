@@ -3,6 +3,7 @@ use super::*;
 use crate::ingress::execute_uow::STALL_DELIVERY_RESOURCE;
 use crate::ingress_substrate::MessageEnvelope;
 use crate::ingress_uow::EffectIntentRepository;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::{atomic::AtomicBool, Arc};
 use waddle_xmpp::{
     mam::{MamStorage, SqlxMamStorage},
@@ -184,9 +185,11 @@ async fn partial_pin_broadcast(fixture: IngressFixture) {
     .await
     .expect("aggregate"));
     tx.commit().await.expect("read commit");
-    assert!(!terminalize_if_complete(&fixture.uow, key)
-        .await
-        .expect("pending"));
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending")
+    );
     fixture.close().await;
 }
 

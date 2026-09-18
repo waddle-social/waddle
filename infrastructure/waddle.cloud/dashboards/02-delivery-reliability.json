@@ -275,13 +275,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Unresolved effects by kind (1h increase)",
-      "description": "Recorded intents without completion receipts remain protected from GC. #1658 adds the recovery executor. This counter measures newly observed unresolved effects, not the current backlog.",
+      "title": "Unresolved effects by kind and phase (1h increase)",
+      "description": "Recorded intents without completion receipts remain protected from GC. This counter measures newly observed unresolved effects, not the current backlog. IngressUnresolvedEffectsGrowing considers only phase=live; maintenance_recovery, maintenance_terminalization, and stream_retirement remain visible here.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (kind) (increase(ingress_effects_unresolved_total[1h]))",
-          "legendFormat": "{{kind}}",
+          "expr": "sum by (kind, phase) (increase(ingress_effects_unresolved_total[1h]))",
+          "legendFormat": "{{kind}} {{phase}}",
           "refId": "A"
         }
       ],

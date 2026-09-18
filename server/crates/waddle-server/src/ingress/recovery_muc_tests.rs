@@ -315,14 +315,14 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
                 )
                 .unwrap_or(0),
             before_unrecoverable + 1,
-            "source and prerequisite failures count once under the kind-only label"
+            "source and prerequisite failures count once"
         );
         let (_, attribute_counts) = metrics
             .counter_shape("ingress.maintenance.unrecoverable_obligations")
             .expect("exported counter");
         assert!(
-            attribute_counts.iter().all(|count| *count == 1),
-            "reason remains a log field; kind is the only metric label"
+            attribute_counts.iter().all(|count| *count == 2),
+            "classification exports the kind and reason labels"
         );
     }
     let blocked = matches!(
@@ -456,3 +456,113 @@ paired!(
     postgres_muc_recovery_subject_receipted,
     Case::SubjectReady
 );
+
+#[tokio::test]
+async fn sqlite_muc_occupant_progress_resets_streak_and_parked_copy_recovers_after_cooldown() {
+    let fixture = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&fixture).await;
+    let state = state_for(&fixture, sm.clone()).await;
+    let resources: Vec<jid::FullJid> = ["alice@example.com/phone", "ben@example.com/phone"]
+        .into_iter()
+        .map(|resource| resource.parse().expect("occupant"))
+        .collect();
+    let submission = planned_room(&fixture, &state, Case::Unavailable, &resources).await;
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit room fanout");
+    let key = decision.message_key.expect("key");
+    let receipt = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .map(|intent| receipt_key(intent).expect("MUC receipt"))
+        .expect("MUC route");
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
+    let cursor = MaintenanceCursor::default();
+    for attempt in 1..=2 {
+        assert_eq!(
+            pass(&fixture, &env, &cursor).await,
+            MaintenanceOutcome::Complete
+        );
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(super::super::attempt_count(key), attempt);
+    }
+    // One occupant becomes reachable, while the aggregate MUC receipt remains pending.
+    store_detached(&sm, &resources[0]).await;
+    assert_eq!(
+        pass(&fixture, &env, &cursor).await,
+        MaintenanceOutcome::Complete
+    );
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(super::super::attempt_count(key), 3);
+    assert_eq!(append_count(&sm, &resources[0]).await, 1);
+    let mut tx = fixture.uow.begin().await.expect("inspect partial progress");
+    assert_eq!(
+        DeliveryProgressRepository::load(&mut tx, key, &receipt)
+            .await
+            .expect("progress"),
+        vec![resources[0].clone()],
+    );
+    assert!(!EffectReceiptRepository::contains(
+        &mut tx,
+        key,
+        receipt.kind,
+        &receipt.semantic_identity_hash
+    )
+    .await
+    .expect("aggregate remains pending"));
+    tx.commit().await.expect("inspection commit");
+    // The partial delivery reset the two prior stalls: three new attempts are required.
+    for attempt in 4..=6 {
+        assert_eq!(
+            pass(&fixture, &env, &cursor).await,
+            MaintenanceOutcome::Complete
+        );
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(super::super::attempt_count(key), attempt);
+    }
+    store_detached(&sm, &resources[1]).await;
+    assert_eq!(
+        pass(&fixture, &env, &cursor).await,
+        MaintenanceOutcome::Complete
+    );
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(super::super::attempt_count(key), 6, "parked until cooldown");
+    assert_eq!(append_count(&sm, &resources[1]).await, 0);
+    tokio::time::pause();
+    tokio::time::advance(MaintenanceBudget::DEFAULT.recovery_stall_cooldown).await;
+    tokio::time::resume();
+    assert_eq!(
+        pass(&fixture, &env, &cursor).await,
+        MaintenanceOutcome::Complete
+    );
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(
+        super::super::attempt_count(key),
+        7,
+        "one attempt after expiry"
+    );
+    assert_eq!(
+        append_count(&sm, &resources[0]).await,
+        1,
+        "first occupant is not duplicated"
+    );
+    assert_eq!(append_count(&sm, &resources[1]).await, 1);
+    assert_eq!(
+        fixture.count("sm_ingress_appends").await,
+        2,
+        "one keyed allocation per occupant"
+    );
+    let mut tx = fixture.uow.begin().await.expect("inspect completion");
+    assert!(EffectReceiptRepository::contains(
+        &mut tx,
+        key,
+        receipt.kind,
+        &receipt.semantic_identity_hash
+    )
+    .await
+    .expect("aggregate receipt"));
+    tx.commit().await.expect("inspection commit");
+    fixture.close().await;
+}

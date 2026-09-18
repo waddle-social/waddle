@@ -1,5 +1,6 @@
 //! Recorded invitation authority survives a later silent block policy.
 use super::*;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 
 async fn policy_replay(fixture: IngressFixture, blocked: bool) {
     use crate::server::routes::interpret::effects::ImmediateSink;
@@ -80,6 +81,7 @@ async fn policy_replay(fixture: IngressFixture, blocked: bool) {
     assert!(crate::ingress::execute::terminalize_if_complete(
         &fixture.uow,
         replay.message_key.expect("canonical"),
+        DeliveryExecutionContext::Live.into()
     )
     .await
     .expect("terminalize"));

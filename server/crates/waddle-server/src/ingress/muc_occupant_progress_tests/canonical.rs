@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress_uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::effects::Effect;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 
 async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool) {
     #[cfg(feature = "clustering")]
@@ -247,9 +248,11 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool
             receiver.try_recv().is_ok(),
             "retry delivers to the newly available occupant"
         );
-        assert!(terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("settled room fanout"));
+        assert!(
+            terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+                .await
+                .expect("settled room fanout")
+        );
     }
     let mut tx = fixture.uow.begin().await.expect("inspect retry");
     assert_eq!(
@@ -359,11 +362,13 @@ async fn old_sender_envelope_stays_pending(fixture: IngressFixture) {
         retry.external.is_empty(),
         "missing canonical provenance cannot borrow today's sender or content"
     );
-    assert!(
-        !crate::ingress::execute::terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("pending old obligation")
-    );
+    assert!(!crate::ingress::execute::terminalize_if_complete(
+        &fixture.uow,
+        key,
+        DeliveryExecutionContext::Live.into()
+    )
+    .await
+    .expect("pending old obligation"));
     let mut tx = fixture.uow.begin().await.expect("inspect frozen old row");
     assert_eq!(
         CanonicalMessageRepository::load_envelope(&mut tx, key)

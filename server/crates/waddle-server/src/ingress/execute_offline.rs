@@ -97,7 +97,12 @@ pub(super) async fn execute(
         }
         Err(error) => {
             tracing::warn!(%error, "offline delivery settlement failed");
-            EffectOutcome::Unavailable
+            EffectOutcome::Settled(SettledOutcome {
+                refusal: None,
+                persisted: Vec::new(),
+                completion: SettledCompletion::Uncertain,
+                detached: None,
+            })
         }
     }
 }

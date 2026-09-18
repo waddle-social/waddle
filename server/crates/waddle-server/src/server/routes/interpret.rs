@@ -224,7 +224,7 @@ pub(crate) use route_to_connection::{
     bounce_undeliverable_iq, deliver_direct_to_full_locally,
     deliver_direct_to_full_with_registered_remote, deliver_full_jid_via_ordered_relay,
     deliver_peer_to_full_with_registered_remote, queue_processed_for_detached, route_to_connection,
-    undeliverable_iq_reply,
+    undeliverable_iq_reply, DetachedQueueOutcome,
 };
 pub(crate) use routing::deliver_peer_to_full;
 pub(crate) use routing::{

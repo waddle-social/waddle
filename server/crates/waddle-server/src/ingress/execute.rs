@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use waddle_xmpp::{ingress::MessageKey, Stanza};
+use waddle_xmpp::{
+    ingress::MessageKey, telemetry::attributes::IngressEffectExecutionPhase, Stanza,
+};
 
 use crate::{
     db::Database,
@@ -148,8 +150,9 @@ pub struct FrameObligation {
     pub(super) effect_index: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ExecutionReport {
+    phase: IngressEffectExecutionPhase,
     pub refusal: Option<crate::server::routes::interpret::effects::SettledRefusal>,
     pub outcomes: Vec<(ExternalEffect, ExternalOutcome)>,
     pub frame_obligations: Vec<FrameObligation>,
@@ -168,13 +171,28 @@ impl Drop for ExecutionReport {
         // represent unresolved effects (including cancellation and disconnect).
         for (effect, outcome) in &self.outcomes {
             if *outcome == ExternalOutcome::AwaitingFrameDelivery {
-                meter_unresolved(effect);
+                meter_unresolved(effect, self.phase);
             }
         }
     }
 }
 
 impl ExecutionReport {
+    pub(crate) fn new(phase: IngressEffectExecutionPhase) -> Self {
+        Self {
+            phase,
+            refusal: None,
+            outcomes: Vec::new(),
+            frame_obligations: Vec::new(),
+            #[cfg(feature = "clustering")]
+            relay_frame_completions: Vec::new(),
+            message_key: None,
+            frame_completion_receipts: Vec::new(),
+            receipt_failures: Vec::new(),
+            terminalization_failure: None,
+        }
+    }
+
     /// The durable receipt identities this batch's frames discharge. The
     /// websocket writer carries them with the XEP-0198 replay entry so a
     /// transport failure can still receipt them once the retained frames are
@@ -223,6 +241,7 @@ impl ExecutionReport {
             {
                 Some(report) => report.frame_completion_receipts.push(key),
                 None => reports.push(Self {
+                    phase: IngressEffectExecutionPhase::Live,
                     refusal: None,
                     outcomes: Vec::new(),
                     frame_obligations: Vec::new(),
@@ -299,10 +318,13 @@ impl ExecutionReport {
         if remaining.is_zero() {
             return Err(ExecutionPersistenceFailure::BudgetExhausted);
         }
-        tokio::time::timeout(remaining, terminalize_if_complete(uow, message_key))
-            .await
-            .map_err(|_| ExecutionPersistenceFailure::BudgetExhausted)?
-            .map_err(ExecutionPersistenceFailure::from)
+        tokio::time::timeout(
+            remaining,
+            terminalize_if_complete(uow, message_key, self.phase),
+        )
+        .await
+        .map_err(|_| ExecutionPersistenceFailure::BudgetExhausted)?
+        .map_err(ExecutionPersistenceFailure::from)
     }
 }
 
@@ -347,7 +369,7 @@ pub async fn execute_effects(
     deps: &Deps<'_>,
     budget: Duration,
 ) -> ExecutionReport {
-    let mut report = ExecutionReport::default();
+    let mut report = ExecutionReport::new(deps.delivery_execution_context.into());
     if !decision.class.advances() {
         return report;
     }
@@ -391,7 +413,7 @@ pub async fn execute_effects(
             for (index, result) in completed.iter_mut().enumerate() {
                 if result.is_none() {
                     *result = Some(false);
-                    meter_unresolved(&decision.external[index]);
+                    meter_unresolved(&decision.external[index], report.phase);
                 }
             }
             break;
@@ -595,7 +617,7 @@ pub async fn execute_effects(
             continue;
         }
         if outcome != ExternalOutcome::Done {
-            meter_unresolved(effect);
+            meter_unresolved(effect, report.phase);
             continue;
         }
         if !settled_complete
@@ -603,7 +625,7 @@ pub async fn execute_effects(
                 .iter()
                 .any(|key| !proven[index].contains(key))
         {
-            meter_unresolved(effect);
+            meter_unresolved(effect, report.phase);
         }
         let Some(message_key) = decision.message_key else {
             continue;
@@ -614,7 +636,7 @@ pub async fn execute_effects(
             }
             #[cfg(test)]
             if test_hooks::take_receipt_failure(message_key, &key) {
-                meter_unresolved(effect);
+                meter_unresolved(effect, report.phase);
                 report
                     .receipt_failures
                     .push((key, IngressUowError::Timeout.into()));
@@ -633,12 +655,12 @@ pub async fn execute_effects(
             match result {
                 Ok(Ok(())) => recorded.push(key),
                 Ok(Err(error)) => {
-                    meter_unresolved(effect);
+                    meter_unresolved(effect, report.phase);
                     report.receipt_failures.push((key, error.into()));
                 }
                 Err(_) => {
                     // The receipt may have committed. Do not repeat the side effect.
-                    meter_unresolved(effect);
+                    meter_unresolved(effect, report.phase);
                     report
                         .receipt_failures
                         .push((key, ExecutionPersistenceFailure::BudgetExhausted));
@@ -674,13 +696,13 @@ pub async fn execute_effects(
             return report;
         }
         // Terminalization is maintenance, independently bounded from side effects.
-        match tokio::time::timeout(budget, terminalize_if_complete(uow, key)).await {
+        match tokio::time::timeout(budget, terminalize_if_complete(uow, key, report.phase)).await {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => report.terminalization_failure = Some(error.into()),
             Err(_) => {
                 report.terminalization_failure = Some(ExecutionPersistenceFailure::BudgetExhausted);
                 for (effect, _) in &report.outcomes {
-                    meter_unresolved(effect);
+                    meter_unresolved(effect, report.phase);
                 }
             }
         }
@@ -980,7 +1002,7 @@ fn has_confirmed_completion(effect: &ExternalEffect) -> bool {
     )
 }
 
-fn meter_unresolved(effect: &ExternalEffect) {
+fn meter_unresolved(effect: &ExternalEffect, phase: IngressEffectExecutionPhase) {
     use waddle_xmpp::telemetry::attributes::IngressUnresolvedEffectKind;
     let kind = match effect {
         ExternalEffect::Frame(_) => IngressUnresolvedEffectKind::Frame,
@@ -994,16 +1016,17 @@ fn meter_unresolved(effect: &ExternalEffect) {
         }
         ExternalEffect::Delivery(_) => IngressUnresolvedEffectKind::Delivery,
     };
-    waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(kind);
+    waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(kind, phase);
 }
 
 /// Returns false while any durable intent remains without a receipt.
 pub async fn terminalize_if_complete(
     uow: &IngressUnitOfWork,
     message_key: MessageKey,
+    phase: IngressEffectExecutionPhase,
 ) -> Result<bool, IngressUowError> {
     Ok(matches!(
-        terminalize_if_complete_outcome(uow, message_key).await?,
+        terminalize_if_complete_outcome(uow, message_key, phase).await?,
         Some(
             crate::ingress_substrate::TerminalizeOutcome::Terminalized
                 | crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
@@ -1014,6 +1037,7 @@ pub async fn terminalize_if_complete(
 pub(crate) async fn terminalize_if_complete_outcome(
     uow: &IngressUnitOfWork,
     message_key: MessageKey,
+    phase: IngressEffectExecutionPhase,
 ) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
     #[cfg(test)]
     if test_hooks::take_terminalization_timeout(message_key) {
@@ -1023,7 +1047,8 @@ pub(crate) async fn terminalize_if_complete_outcome(
         .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
         .await?;
     let outcome =
-        terminalize_if_complete_outcome_in_transaction(&mut transaction, message_key).await?;
+        terminalize_if_complete_outcome_in_transaction(&mut transaction, message_key, phase)
+            .await?;
     transaction.commit().await?;
     Ok(outcome)
 }
@@ -1032,9 +1057,10 @@ pub(crate) async fn terminalize_if_complete_outcome(
 pub(super) async fn terminalize_if_complete_in_transaction(
     transaction: &mut IngressUowTransaction<'_>,
     message_key: MessageKey,
+    phase: IngressEffectExecutionPhase,
 ) -> Result<bool, IngressUowError> {
     Ok(matches!(
-        terminalize_if_complete_outcome_in_transaction(transaction, message_key).await?,
+        terminalize_if_complete_outcome_in_transaction(transaction, message_key, phase).await?,
         Some(
             crate::ingress_substrate::TerminalizeOutcome::Terminalized
                 | crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
@@ -1045,6 +1071,7 @@ pub(super) async fn terminalize_if_complete_in_transaction(
 async fn terminalize_if_complete_outcome_in_transaction(
     transaction: &mut IngressUowTransaction<'_>,
     message_key: MessageKey,
+    phase: IngressEffectExecutionPhase,
 ) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
     if !CanonicalMessageRepository::lock(transaction, message_key).await? {
         return Ok(Some(
@@ -1054,6 +1081,7 @@ async fn terminalize_if_complete_outcome_in_transaction(
     if !EffectReceiptRepository::receipts_complete(transaction, message_key).await? {
         waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(
             waddle_xmpp::telemetry::attributes::IngressUnresolvedEffectKind::Terminalization,
+            phase,
         );
         return Ok(None);
     }
