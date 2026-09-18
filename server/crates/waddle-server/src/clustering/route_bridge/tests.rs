@@ -134,11 +134,11 @@ impl AllowlistStore for StaticAllowlist {
     }
 }
 
-pub(super) fn origin_identity() -> NodeIdentity {
+pub(crate) fn origin_identity() -> NodeIdentity {
     NodeIdentity::new("origin-node", "origin-epoch")
 }
 
-pub(super) fn receiver_identity() -> NodeIdentity {
+pub(crate) fn receiver_identity() -> NodeIdentity {
     NodeIdentity::new("receiver-node", "receiver-epoch")
 }
 
@@ -341,6 +341,7 @@ async fn services_with_claims_and_blocking(
 }
 
 pub(crate) mod delivery;
+mod ingress_append;
 pub(crate) mod muc_refresh;
 mod nack_channels;
 mod reassert;

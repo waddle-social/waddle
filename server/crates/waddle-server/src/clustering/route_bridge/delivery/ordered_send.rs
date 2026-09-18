@@ -171,6 +171,12 @@ impl OrderedRelayDeliveryBridge {
         owner: &NodeIdentity,
         envelope: RemoteStanzaEnvelope,
     ) -> Result<OrderedRelayReply, RelayAskError> {
+        #[cfg(test)]
+        if let Ok(receiver) =
+            crate::ingress::execute::relay_detached_tests::CROSS_NODE_RECEIVER.try_with(Arc::clone)
+        {
+            return Ok(Box::pin(receiver.deliver(envelope)).await);
+        }
         let mut handle =
             RelayHandle::new(NodeId::new(owner.node_id.clone()), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);

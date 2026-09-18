@@ -189,6 +189,7 @@ fn muji_initiate_stanza(action: xmpp_parsers::jingle::Action, room: &str) -> Rem
     )))
 }
 
+mod ingress_append;
 mod muc_validation;
 mod receiver;
 mod sender;
