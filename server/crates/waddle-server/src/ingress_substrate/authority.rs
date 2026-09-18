@@ -153,7 +153,7 @@ pub async fn record_room_canonical_envelope(
 }
 
 /// Stable effect codec discriminator carried by receipt identities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EffectReceiptKind(i32);
 
 impl EffectReceiptKind {

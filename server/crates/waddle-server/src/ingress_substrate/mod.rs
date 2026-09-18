@@ -1,6 +1,8 @@
 //! Transactional ingress identity storage for PostgreSQL and SQLite.
 
 mod authority;
+mod canonical_sender;
+pub(crate) use canonical_sender::canonical_sender_pooled;
 mod maintenance;
 pub use maintenance::{
     receipt_complete_nonterminal_keys, recovery_evidence_pooled,

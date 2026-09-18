@@ -60,6 +60,7 @@ pub(in super::super) fn payload_for_recipient(
             None
         }
         Stanza::Message(_) => Some(OrderedRelayPayload::Message {
+            ingress_append: None,
             recipient,
             stanza: RemoteStanza(stanza.clone()),
         }),

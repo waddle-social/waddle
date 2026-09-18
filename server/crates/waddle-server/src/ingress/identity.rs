@@ -3,7 +3,7 @@ use jid::BareJid;
 use serde::{Deserialize, Serialize};
 use waddle_xmpp::{
     auth::AuthenticatedPrincipalRef,
-    ingress::{MessageKey, SmIngressId, WireHandledCount},
+    ingress::{IngressEffectKind, MessageKey, SmIngressId, WireHandledCount},
     pending_delivery::SmSessionId,
 };
 #[cfg(feature = "clustering")]
@@ -47,6 +47,49 @@ pub struct IngressCanonicalRef {
     pub message_key: MessageKey,
     pub sender_bare: BareJid,
     pub origin_id: Option<OriginId>,
+}
+
+/// Recorded ingress obligation an append on another node discharges.
+/// Serialization is confined to the relay boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngressAppendObligationRef {
+    pub message_key: MessageKey,
+    /// Binds the obligation to an entity whose claim the relaying node must own.
+    pub sender_bare: BareJid,
+    pub receipt: super::EffectReceiptKey,
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl IngressAppendObligationRef {
+    pub fn from_context(
+        context: &crate::server::routes::interpret::SmIngressAppendContext,
+        sender_bare: BareJid,
+    ) -> Self {
+        Self {
+            message_key: context.message_key,
+            sender_bare,
+            receipt: context.receipt.clone(),
+            received_at: context.received_at,
+        }
+    }
+
+    pub fn into_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {
+        crate::server::routes::interpret::SmIngressAppendContext {
+            message_key: self.message_key,
+            receipt: self.receipt,
+            received_at: self.received_at,
+        }
+    }
+
+    /// Only recorded direct and MUC groupchat routes allocate keyed SM appends.
+    pub fn kind_is_append_eligible(&self) -> bool {
+        [
+            IngressEffectKind::RouteDirect,
+            IngressEffectKind::RouteMucGroupchat,
+        ]
+        .into_iter()
+        .any(|kind| self.receipt.kind.to_storage() == kind.storage_tag())
+    }
 }
 
 /// Authenticated origin context propagated with a committed room proxy.

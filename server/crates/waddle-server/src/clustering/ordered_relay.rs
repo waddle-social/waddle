@@ -222,6 +222,7 @@ pub enum OrderedRelayPayload {
     Message {
         recipient: jid::Jid,
         stanza: RemoteStanza,
+        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
     },
     Iq {
         recipient: jid::Jid,
@@ -250,6 +251,17 @@ impl OrderedRelayPayload {
             | OrderedRelayPayload::Iq { stanza, .. }
             | OrderedRelayPayload::Presence { stanza, .. }
             | OrderedRelayPayload::MucProxy { stanza, .. } => &stanza.0,
+        }
+    }
+
+    fn matches_ingress_append_obligation(&self) -> bool {
+        match self {
+            Self::Message {
+                recipient,
+                ingress_append: Some(obligation),
+                ..
+            } => recipient.is_full() && obligation.kind_is_append_eligible(),
+            _ => true,
         }
     }
 
@@ -293,7 +305,9 @@ impl OrderedRelayPayload {
 
     fn matches_stanza_addressing(&self) -> bool {
         match self {
-            OrderedRelayPayload::Message { recipient, stanza }
+            OrderedRelayPayload::Message {
+                recipient, stanza, ..
+            }
             | OrderedRelayPayload::Iq { recipient, stanza }
             | OrderedRelayPayload::Presence { recipient, stanza } => {
                 stanza_to(&stanza.0).is_some_and(|to| to == recipient)
@@ -352,12 +366,15 @@ impl OrderedRelayPayload {
 
     fn fingerprint(&self) -> OrderedRelayPayloadFingerprint {
         match self {
-            OrderedRelayPayload::Message { recipient, stanza } => {
-                OrderedRelayPayloadFingerprint::Message {
-                    recipient: recipient.clone(),
-                    stanza: stanza.0.to_element(),
-                }
-            }
+            OrderedRelayPayload::Message {
+                recipient,
+                stanza,
+                ingress_append,
+            } => OrderedRelayPayloadFingerprint::Message {
+                recipient: recipient.clone(),
+                stanza: stanza.0.to_element(),
+                ingress_append: ingress_append.clone(),
+            },
             OrderedRelayPayload::Iq { recipient, stanza } => OrderedRelayPayloadFingerprint::Iq {
                 recipient: recipient.clone(),
                 stanza: stanza.0.to_element(),
@@ -604,6 +621,7 @@ enum OrderedRelayPayloadFingerprint {
     Message {
         recipient: jid::Jid,
         stanza: minidom::Element,
+        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
     },
     Iq {
         recipient: jid::Jid,
@@ -1057,6 +1075,7 @@ fn record_ack(
 
 fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
     envelope.payload.matches_stanza_kind()
+        && envelope.payload.matches_ingress_append_obligation()
         && envelope.payload.matches_muc_proxy_origin()
         && origin_claim_matches_channel(&envelope.origin_claim, &envelope.channel.origin)
         && sender_claim_matches_channel(&envelope.sender_claim, &envelope.channel.origin)

@@ -1589,6 +1589,31 @@ impl MetricAttribute for MucJoinDenyReason {
     }
 }
 
+/// `reason` — why a relayed ingress append obligation was not used as a
+/// deduplication key (#1778). `Unauthorized` means the peer's identity was
+/// provably not usable; `Indeterminate` means the receiver could not decide,
+/// which is an availability signal rather than a peer-behaviour signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressAppendAuthorizationFailure {
+    Unauthorized,
+    Indeterminate,
+}
+
+impl sealed::Sealed for IngressAppendAuthorizationFailure {}
+
+impl MetricAttribute for IngressAppendAuthorizationFailure {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MetricAttribute;

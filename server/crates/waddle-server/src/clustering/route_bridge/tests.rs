@@ -196,6 +196,7 @@ fn message_payload() -> OrderedRelayPayload {
         .bodies
         .insert(Lang::new(), "hello from remote".to_string());
     OrderedRelayPayload::Message {
+        ingress_append: None,
         recipient: jid::Jid::from(full),
         stanza: RemoteStanza(Stanza::Message(message)),
     }

@@ -28,10 +28,13 @@ observer invocations are at-least-once, including after send-before-receipt
 failures and against concurrent client retransmission;
 (ii) repaired duplicates retry unfinished recorded direct resources (§3.3a)
 and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
-payload. Local keyed detached delivery guarantees one durable queue allocation
-per (recorded obligation, resource). Remote receiver appends remain outside
-that keying guarantee (#1778), live sends remain at-least-once, and maintenance
-never relays remote-hosted resources; (iii) live full-JID delivery keeps the
+payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger
+locally and on authorized cross-node receiver appends (#1778), including direct
+routes and recorded MUC occupant copies. The registered-remote-socket drain
+(#1789) and authorization-failure fallback remain unkeyed and at-least-once;
+#1760 custody failures still let proofs outlive payloads and suppress recovery
+(§3.3a). Live sends remain at-least-once, and maintenance never relays
+remote-hosted resources; (iii) live full-JID delivery keeps the
 destination connection's own recipient archive/inbox pipeline (#1658, now tracked as #1759);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
@@ -138,7 +141,7 @@ metered `ingress.effects.unresolved`). A Phase-C timeout never changes the
 disposition: `StanzaTimeout` maps to `Unhandled` only before commit.
 
 Full-JID room reflections to occupants owned by another node ride the ordered
-full-JID relay (`deliver_ordered.v10`), with the room's `RoomActor` claim as
+full-JID relay (`deliver_ordered.v11`), with the room's `RoomActor` claim as
 both origin and sender claim; XEP-0045 occupant-copy semantics are unchanged.
 `IngressNonTerminalBacklog` alerts on canonical rows older than 10 minutes
 that remain non-terminal (#1749/#1750), including missing receipts and
@@ -233,8 +236,8 @@ returning `NotAuthorized`; a reused occupancy is left intact. The digest uses th
 offered unsigned envelope before validation and clock-dependent signing; the signed envelope is persisted and sent. Occupant
 copies retain XEP-0045, thread, reply, markup and stanza-id semantics, with the
 added origin-id. Remote-owned rooms receive the typed
-`ExtensionRemoteRoomUnsupported` planning refusal; `IngressRelayAdmission` and
-`deliver_ordered.v10` are unchanged.
+`ExtensionRemoteRoomUnsupported` planning refusal; extension admission still uses
+`IngressRelayAdmission`, and the ordered relay now uses `deliver_ordered.v11`.
 
 Non-advancing outcome: Resumable → ordinary hole (`abandon`) → transport ends,
 session resumable before the hole. Ephemeral → typed `<stream:error>` then
@@ -317,15 +320,32 @@ The remaining limits are explicit:
   obligation stays unresolved for its recorded route to retry or degrade.
 - The `RegistryFrame` live-transport branch is not durable queue delivery and
   is out of scope.
-- The key does not cross nodes. A relayed direct delivery whose detached
-  append runs on the receiving node (`route_bridge/delivery/receiver.rs`,
-  `deliver_local_full_jid_after_target_refresh`) is unkeyed and remains
-  at-least-once until the obligation identity rides the ordered-relay
-  envelope (#1778).
+- The obligation identity now crosses nodes in `deliver_ordered.v11` and
+  `remote_resource_route.v7` (#1778). The typed `IngressAppendObligationRef`
+  carries `message_key`, `sender_bare`, the effect receipt key and `received_at`;
+  it is covered by the ordered envelope signature and payload fingerprint.
+  Both direct routes and recorded MUC groupchat occupant copies carry it.
+  Before using it, the receiver checks that `sender_bare` matches the validated
+  sender claim and stanza `from`, and that the canonical ingress row for
+  `message_key` exists and names that sender. Authorized detached appends on
+  the receiving node use the same `sm_ingress_appends` ledger as local appends.
+- **Still at-least-once (#1789):** a committed obligation delivered to a
+  registered remote socket is enqueued as a live outbound frame with no
+  obligation identity (`remote_resource_frame.v1`). If the socket later
+  detaches, the drain uses unkeyed `record_outbound_for_detached_stream_at`
+  (`server/routes/websocket/replay.rs`). Queue acceptance can precede the
+  origin's receipt, so recovery can allocate a second entry.
+- **Still at-least-once:** failed receiver-side authorization degrades to an
+  unkeyed append, with a warning and counter. Delivery never fails because
+  this check failed; availability does not depend on authorization succeeding.
 - Proof and resource progress commit in two transactions: the ledger row
   with the SM snapshot, the progress row afterwards under the canonical lock.
-  A retry between them reads `AlreadyAppended`; an eviction landing between
-  them is the custody problem tracked by #1760.
+  A retry between them reads `AlreadyAppended`. The #1760 custody limitation
+  is unchanged: quarantine deletes a session's queue but retires only
+  gap-covered proofs, so a retained entry's proof can outlive its payload and
+  turn later recovery into a false `AlreadyAppended`. Cross-node keying extends
+  these proof-suppresses-recovery failure modes to remote deliveries; it does
+  not provide lifecycle-safe exactly-once delivery.
 
 ### 3.3b Per-plugin observer obligations (#1740)
 
@@ -401,12 +421,15 @@ The sender reflection remains `Always`: every duplicate can resend it, including
 a relayed-owner frame. It carries no kind-2 receipt identity, contributes no
 occupant progress, and supplies no aggregate proof through frame completion or
 `owner_receipts`. Its delivery proof remains the sender's XEP-0198 stream.
-Ordinary cross-node occupant copies still use `deliver_ordered.v10`; a definite
+Ordinary cross-node occupant copies use `deliver_ordered.v11`; a definite
 `Delivered` ACK proves that occupant's copy. The MUC-only `RelayFullJid` executor
 arm records progress and preserves the MUC append context when ownership becomes
 local before execution or during relay fallback. Declined or uncertain delivery
-leaves the occupant pending. Direct-route relay fallback retains its existing
-contract, and keyed receiver-side cross-node appends remain #1778.
+leaves the occupant pending. Both direct-route and MUC groupchat obligations
+carry their append identity through ordered relay and the
+`remote_resource_route.v7` full-JID second hop. Receiver-authorized detached
+appends are keyed, subject to the #1789 drain gap, authorization-failure fallback
+and unchanged #1760 custody limits in §3.3a.
 
 Phase B freezes the room-canonical groupchat envelope at first owner acceptance,
 independently of observer eligibility, retaining observer request context when

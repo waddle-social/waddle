@@ -6,6 +6,7 @@ impl OrderedRelayDeliveryBridge {
         services: &OrderedRelayDeliveryServices,
         target: &jid::FullJid,
         stanza: &Stanza,
+        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Result<(), OrderedRelayNackReason> {
         if let Some(outcome) = self
             .try_deliver_registered_remote_resource(target, stanza, DeliveryKind::PeerStanza)
@@ -32,7 +33,7 @@ impl OrderedRelayDeliveryBridge {
             Some(&services.sm_session_registry),
             target,
             stanza,
-            None,
+            ingress_append_context,
         )
         .await
         {
@@ -376,7 +377,9 @@ pub(in super::super) fn relay_payload_target(
     envelope: &RemoteStanzaEnvelope,
 ) -> Result<RelayPayloadTarget<'_>, OrderedRelayNackReason> {
     let (recipient, stanza) = match &envelope.payload {
-        OrderedRelayPayload::Message { recipient, stanza }
+        OrderedRelayPayload::Message {
+            recipient, stanza, ..
+        }
         | OrderedRelayPayload::Iq { recipient, stanza }
         | OrderedRelayPayload::Presence { recipient, stanza } => Ok((recipient, &stanza.0)),
         OrderedRelayPayload::MucProxy {

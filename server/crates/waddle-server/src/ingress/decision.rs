@@ -19,7 +19,7 @@ pub enum AliasOutcomeClass {
     Conflict,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EffectReceiptKey {
     pub kind: EffectReceiptKind,
     pub semantic_identity_hash: [u8; 32],

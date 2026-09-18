@@ -558,6 +558,7 @@ fn ordered_message_payload(
         message.to = Some(jid::Jid::from(target.clone()));
     }
     OrderedRelayPayload::Message {
+        ingress_append: None,
         recipient: jid::Jid::from(target.clone()),
         stanza,
     }

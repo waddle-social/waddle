@@ -47,8 +47,28 @@ impl OrderedRelayDeliveryBridge {
 
     pub(in super::super) async fn prepare_remote_delivery(
         &self,
-        seed: RemoteDeliverySeed,
+        mut seed: RemoteDeliverySeed,
     ) -> Result<PreparedRemoteDelivery, RemotePrepareError> {
+        if let OrderedRelayPayload::Message {
+            recipient,
+            stanza,
+            ingress_append,
+        } = &mut seed.payload
+        {
+            *ingress_append = match (&stanza.0, seed.ingress_append_context.as_ref()) {
+                (Stanza::Message(message), Some(context)) if recipient.is_full() => message
+                    .from
+                    .as_ref()
+                    .map(|sender| {
+                        crate::ingress::identity::IngressAppendObligationRef::from_context(
+                            context,
+                            sender.to_bare(),
+                        )
+                    })
+                    .filter(|obligation| obligation.kind_is_append_eligible()),
+                _ => None,
+            };
+        }
         let mut envelope = {
             let mut sender = self.sender_state.lock().await;
             match sender.next_envelope(

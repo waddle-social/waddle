@@ -296,15 +296,35 @@ impl OrderedRelayDeliveryBridge {
         let services = self.services.get().cloned()?;
         let origin = local_origin_for_remote_resource(remote_origin);
         match target {
-            RemoteResourceRouteTarget::FullJid { target, stanza } => {
+            RemoteResourceRouteTarget::FullJid {
+                target,
+                stanza,
+                ingress_append,
+            } => {
+                let ingress_append_context = super::ingress_append::authorize_ingress_append(
+                    &services,
+                    &origin.sender_entity,
+                    &stanza.0,
+                    ingress_append.as_ref(),
+                )
+                .await;
                 if let Some(remote) = self
-                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin, None, None)
+                    .try_deliver_full_jid_remote(
+                        &target,
+                        &stanza.0,
+                        &origin,
+                        None,
+                        ingress_append_context.clone(),
+                    )
                     .await
                 {
                     Some(remote)
                 } else {
                     let outcome = deliver_local_full_jid_after_target_refresh(
-                        &services, &target, &stanza.0, None,
+                        &services,
+                        &target,
+                        &stanza.0,
+                        ingress_append_context.as_ref(),
                     )
                     .await;
                     Some(outcome)
