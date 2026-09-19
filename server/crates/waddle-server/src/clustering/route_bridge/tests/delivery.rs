@@ -246,6 +246,7 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
                     target.clone(),
                 ))))),
                 kind: DeliveryKind::DirectFrame,
+                ingress_append: None,
             },
             trace: RelayTraceContext::default(),
         })
@@ -260,7 +261,7 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
     );
     assert!(
         outbound.write_acceptance.is_none(),
-        "remote_resource_frame.v1 must remain enqueue-only"
+        "remote_resource_frame.v2 must remain enqueue-only"
     );
 }
 

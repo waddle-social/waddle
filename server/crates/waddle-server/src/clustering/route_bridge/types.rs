@@ -212,6 +212,9 @@ pub struct RemoteResourceOutboundFrame {
     pub registration_id: RemoteResourceRegistrationId,
     pub stanza: RemoteStanza,
     pub kind: DeliveryKind,
+    /// The origin's recorded obligation, unverified. The socket node authorizes
+    /// it only if this frame is later drained into an XEP-0198 replay queue.
+    pub ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

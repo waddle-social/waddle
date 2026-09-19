@@ -428,6 +428,7 @@ impl OrderedRelayDeliveryBridge {
                     registration_id: registration.registration_id,
                     stanza: RemoteStanza(stanza.clone()),
                     kind,
+                    ingress_append: None,
                 },
                 trace: RelayTraceContext::default(),
             })

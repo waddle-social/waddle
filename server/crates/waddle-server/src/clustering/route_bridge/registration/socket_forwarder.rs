@@ -118,6 +118,7 @@ async fn forward_remote_resource_outbound(
         registration_id,
         stanza: RemoteStanza(outbound.stanza),
         kind,
+        ingress_append: None,
     };
     let mut handle = RelayHandle::new(socket_node.clone(), bridge.stop_token.clone())
         .with_ask_timeouts(bridge.mailbox_timeout, bridge.reply_timeout);
