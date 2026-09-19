@@ -1,7 +1,11 @@
 //! Transactional ingress identity storage for PostgreSQL and SQLite.
 
 mod authority;
+// Its only consumer is the clustering receiver's append authorization, so a
+// default-feature build would see the whole module as dead code.
+#[cfg(feature = "clustering")]
 mod canonical_sender;
+#[cfg(feature = "clustering")]
 pub(crate) use canonical_sender::canonical_sender_pooled;
 mod maintenance;
 pub use maintenance::{
