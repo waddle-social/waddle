@@ -57,6 +57,23 @@ struct TerminalDrainedRecordResult {
 /// session store that proves it (issue #1789).
 pub(super) struct DrainedAppend(pub(super) waddle_xmpp::stream_management::SmDrainedIngressAppend);
 
+/// Where a detach drain records its frames.
+pub(super) struct ReplayDrainSink<'a> {
+    /// The stored detached session, once one exists (the second drain).
+    pub(super) detached_stream_id: Option<&'a str>,
+    pub(super) pending_row_policy: PendingRowDrainPolicy,
+    /// Keyed entries recorded before the detached session exists (the first drain).
+    pub(super) drained_appends: &'a mut Vec<DrainedAppend>,
+}
+
+/// One frame on its way into the replay queue.
+struct DrainedFrame {
+    xml: String,
+    original_receipt_at: chrono::DateTime<chrono::Utc>,
+    pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
+    ingress_append: Option<waddle_xmpp::stream_management::SmIngressAppendKey>,
+}
+
 /// Drain `outbound_rx` of all immediately-available
 /// [`OutboundStanza`] values and record them into the per-connection
 /// XEP-0198 unacked queue (and, when a `detached_stream_id` is
@@ -80,9 +97,7 @@ pub(super) async fn drain_outbound_into_replay(
     sm_state: &mut StreamManagementState,
     authenticated_session: Option<&crate::auth::Session>,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
-    detached_stream_id: Option<&str>,
-    pending_row_policy: PendingRowDrainPolicy,
-    drained_appends: &mut Vec<DrainedAppend>,
+    mut sink: ReplayDrainSink<'_>,
 ) {
     let principal = authenticated_session.map(super::ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal);
@@ -116,13 +131,13 @@ pub(super) async fn drain_outbound_into_replay(
                 record_drained_xml(
                     state,
                     sm_state,
-                    detached_stream_id,
-                    xml,
-                    receipt_at,
-                    pending_row_id,
-                    pending_row_policy,
-                    ingress_append.take().map(|obligation| obligation.key),
-                    drained_appends,
+                    &mut sink,
+                    DrainedFrame {
+                        xml,
+                        original_receipt_at: receipt_at,
+                        pending_row_id,
+                        ingress_append: ingress_append.take().map(|obligation| obligation.key),
+                    },
                 )
                 .await;
             }
@@ -149,13 +164,13 @@ pub(super) async fn drain_outbound_into_replay(
                     record_drained_xml(
                         state,
                         sm_state,
-                        detached_stream_id,
-                        xml,
-                        receipt_at,
-                        row_for_this,
-                        pending_row_policy,
-                        ingress_append.take().map(|obligation| obligation.key),
-                        drained_appends,
+                        &mut sink,
+                        DrainedFrame {
+                            xml,
+                            original_receipt_at: receipt_at,
+                            pending_row_id: row_for_this,
+                            ingress_append: ingress_append.take().map(|obligation| obligation.key),
+                        },
                     )
                     .await;
                 }
@@ -313,14 +328,21 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
 async fn record_drained_xml(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
-    detached_stream_id: Option<&str>,
-    xml: String,
-    original_receipt_at: chrono::DateTime<chrono::Utc>,
-    pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
-    pending_row_policy: PendingRowDrainPolicy,
-    ingress_append: Option<waddle_xmpp::stream_management::SmIngressAppendKey>,
-    drained_appends: &mut Vec<DrainedAppend>,
+    sink: &mut ReplayDrainSink<'_>,
+    frame: DrainedFrame,
 ) {
+    let DrainedFrame {
+        xml,
+        original_receipt_at,
+        pending_row_id,
+        ingress_append,
+    } = frame;
+    let ReplayDrainSink {
+        detached_stream_id,
+        pending_row_policy,
+        drained_appends,
+    } = sink;
+    let (detached_stream_id, pending_row_policy) = (*detached_stream_id, *pending_row_policy);
     if matches!(
         pending_row_policy,
         PendingRowDrainPolicy::ReleaseForTerminalRecovery

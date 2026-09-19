@@ -4,7 +4,7 @@ use super::{
     frame::ResponseBatch,
     replay::{
         drain_outbound_into_replay, drain_outbound_into_terminal_recovery, PendingRowDrainPolicy,
-        TerminalDrainContext,
+        ReplayDrainSink, TerminalDrainContext,
     },
     state::WsConnState,
     stream_management::sm_show_from_name,
@@ -837,9 +837,11 @@ async fn cleanup_connection_shutdown_inner(
                 &mut conn.sm_state,
                 conn.authenticated_session.as_ref(),
                 outbound_rx,
-                None,
-                PendingRowDrainPolicy::PreserveForReplay,
-                &mut drained_appends,
+                ReplayDrainSink {
+                    detached_stream_id: None,
+                    pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
+                    drained_appends: &mut drained_appends,
+                },
             )
             .await;
         }
@@ -1106,11 +1108,11 @@ async fn cleanup_connection_shutdown_inner(
                         &mut conn.sm_state,
                         conn.authenticated_session.as_ref(),
                         outbound_rx,
-                        Some(&stream_id),
-                        PendingRowDrainPolicy::PreserveForReplay,
-                        // The detached stream exists, so keyed entries commit
-                        // with their proof directly; nothing is deferred.
-                        &mut Vec::new(),
+                        ReplayDrainSink {
+                            detached_stream_id: Some(&stream_id),
+                            pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
+                            drained_appends: &mut Vec::new(),
+                        },
                     )
                     .await;
                     if force_detach_origin.is_some_and(force_detach_requires_actor_unregister) {

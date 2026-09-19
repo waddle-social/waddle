@@ -1368,12 +1368,33 @@ stanza `from`, and a canonical ingress row for `message_key` naming that sender.
 Failed authorization warns and increments
 `waddle.clustering.ingress_append.authorization_failed`, then degrades to an
 unkeyed append; delivery never fails because the check failed.
-That fallback remains at-least-once. So does the registered-remote-socket drain
-(#1789): queue acceptance of a live `remote_resource_frame.v1` carrying no
-obligation identity can precede the origin's receipt. If the socket detaches,
-`server/routes/websocket/replay.rs` drains via unkeyed
-`record_outbound_for_detached_stream_at`, and recovery can allocate a second
-entry. `RegistryFrame` live transport is outside the durable append guarantee;
+That fallback remains at-least-once.
+
+The registered-remote-socket drain is keyed (#1789). The owner-to-socket frame
+(`remote_resource_frame.v2`) carries the recorded obligation, and the socket node
+queues it **unverified** on the live outbound entry. Only if that socket detaches
+before writing the frame does the detach drain
+(`server/routes/websocket/drain_append.rs`) authorize it — the same canonical
+check, the same 250 ms bound — so a frame delivered live never pays the read.
+The drain consults the ledger before counting the frame: an obligation that
+already holds an allocation is dropped uncounted, because nothing on the drain
+path reached a wire and the client's `h` can never include it. Entries drained
+before the detached session exists are proven in the same transaction as the
+session snapshot; entries that arrive afterwards commit with their proof one at a
+time. What stays at-least-once on this path:
+
+- a drain-time authorization failure or timeout drains the entry unkeyed (same
+  counter, same `unauthorized` / `indeterminate` classes) — the origin was already
+  told `Delivered`, so refusing the entry would be silent loss;
+- a keyed writer that wins the ledger between the drain's read and the session
+  store keeps both entries: the drained one already holds a counted sequence, so
+  only its proof is withheld (`drained ingress obligations lost the ledger race`);
+- a frame that *was* written live but is unacknowledged at detach sits in the
+  connection-local queue with no proof. That is the #1760 family, not the drain;
+- an old peer answers the v2 frame with `UnknownMessage`: a no-effect failure that
+  leaves the owner mirror intact and the obligation unresolved for retry.
+
+`RegistryFrame` live transport is outside the durable append guarantee;
 side-effect carbons also perform their own unkeyed registry appends
 (`clustering/route_bridge/registration/side_effects.rs`). With no unexpired
 session and no prior proof, no append occurs and the obligation stays unresolved.

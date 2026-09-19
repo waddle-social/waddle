@@ -221,9 +221,11 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
             &mut socket.conn.sm_state,
             None,
             &mut late_rx,
-            Some(STREAM),
-            PendingRowDrainPolicy::PreserveForReplay,
-            &mut Vec::new(),
+            super::super::replay::ReplayDrainSink {
+                detached_stream_id: Some(STREAM),
+                pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
+                drained_appends: &mut Vec::new(),
+            },
         )
         .await;
     }

@@ -170,9 +170,11 @@ async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
         &mut conn.sm_state,
         None,
         &mut rx,
-        None,
-        super::super::replay::PendingRowDrainPolicy::PreserveForReplay,
-        &mut Vec::new(),
+        super::super::replay::ReplayDrainSink {
+            detached_stream_id: None,
+            pending_row_policy: super::super::replay::PendingRowDrainPolicy::PreserveForReplay,
+            drained_appends: &mut Vec::new(),
+        },
     )
     .await;
 
@@ -232,9 +234,11 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
         &mut conn.sm_state,
         None,
         &mut rx,
-        None,
-        super::super::replay::PendingRowDrainPolicy::PreserveForReplay,
-        &mut Vec::new(),
+        super::super::replay::ReplayDrainSink {
+            detached_stream_id: None,
+            pending_row_policy: super::super::replay::PendingRowDrainPolicy::PreserveForReplay,
+            drained_appends: &mut Vec::new(),
+        },
     )
     .await;
 
