@@ -18,25 +18,18 @@ impl OrderedRelayDeliveryBridge {
                     OrderedRelayPayload::Message { ingress_append, .. } => ingress_append.as_ref(),
                     _ => None,
                 };
-                // This path either forwards to a registered socket, which carries
-                // no obligation at all (#1789), or appends locally. So when this
-                // node holds no detached session for the resource the key cannot
-                // be used, and the canonical read behind authorization -- which
-                // decodes a whole envelope -- is pure cost on every live
-                // recipient. Skipping is safe HERE precisely because nothing
-                // downstream of this call forwards the obligation onward.
-                let ingress_append_context =
-                    if super::ingress_append::local_append_can_use_key(&services, target).await {
-                        super::ingress_append::authorize_ingress_append(
-                            &services,
-                            &envelope.sender_claim.entity,
-                            stanza,
-                            obligation,
-                        )
-                        .await
-                    } else {
-                        None
-                    };
+                // Authorize unconditionally. Deciding from a detached-session
+                // probe here is unsound: teardown inserts the detached session
+                // during cleanup, so a resource can be live at the probe and
+                // detached by the time `deliver_peer_to_full` falls back to the
+                // queue, and that append would then be unkeyed (#1790).
+                let ingress_append_context = super::ingress_append::authorize_ingress_append(
+                    &services,
+                    &envelope.sender_claim.entity,
+                    stanza,
+                    obligation,
+                )
+                .await;
                 self.deliver_reserved_full_jid(
                     &services,
                     target,

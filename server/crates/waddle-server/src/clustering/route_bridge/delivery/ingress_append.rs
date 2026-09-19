@@ -112,22 +112,3 @@ async fn check_authority(
     }
     Ok(())
 }
-
-/// Whether this node can key an append for `target` at all: it must hold the
-/// resource's detached session locally.
-///
-/// ONLY sound where the obligation's sole consumer is a local append. A caller
-/// that may instead FORWARD the obligation to another node must not use this:
-/// the recipient is legitimately not detached on an intermediate node, and
-/// skipping there would strip the key from the onward envelope and reopen the
-/// cross-node duplicate this module exists to close.
-pub(super) async fn local_append_can_use_key(
-    services: &OrderedRelayDeliveryServices,
-    target: &jid::FullJid,
-) -> bool {
-    services
-        .sm_session_registry
-        .detached_resources_for_user(&target.to_bare())
-        .await
-        .is_ok_and(|resources| resources.iter().any(|resource| resource == target))
-}
