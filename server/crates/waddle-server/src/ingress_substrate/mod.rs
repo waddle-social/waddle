@@ -590,25 +590,37 @@ pub async fn gc_expired_aliases(
     // independently to reclaim those late proofs. Cursor-page the examined
     // rows: a filter-limited scan of healthy proofs can repeatedly hit the scan
     // timeout without ever advancing to an orphan later in retained history.
-    if Instant::now() >= budget.deadline {
-        outcome.completed = false;
-        return Ok(outcome);
+    //
+    // Drain as many windows as the cooperative budget allows rather than one per
+    // pass. A mid-traversal pass reports `Partial`, and the coordinator answers
+    // that with its doubling failure backoff (to 30s) while consuming coalesced
+    // triggers, so one window per pass would traverse at ~256 rows / 30s. Message
+    // keys are time-ordered UUIDv7s, so a sustained append rate above that would
+    // extend the ordered tail faster than the cursor advances: the sweep would
+    // never wrap, and a late proof for an older key would stay orphaned
+    // indefinitely.
+    loop {
+        if Instant::now() >= budget.deadline {
+            outcome.completed = false;
+            return Ok(outcome);
+        }
+        let deleted = gc_orphan_proof_batch(db, &budget)
+            .await
+            .map_err(|error| AliasGcFailure {
+                deleted_messages: outcome.deleted_messages,
+                deleted_orphan_proofs: outcome.deleted_orphan_proofs,
+                error,
+            })?;
+        budget
+            .progress
+            .orphan_proofs
+            .fetch_add(deleted, Ordering::AcqRel);
+        outcome.deleted_orphan_proofs += deleted;
+        // A reset cursor means the short window ended the traversal.
+        if budget.progress.orphan_cursor.lock().await.is_none() {
+            return Ok(outcome);
+        }
     }
-    let deleted = gc_orphan_proof_batch(db, &budget)
-        .await
-        .map_err(|error| AliasGcFailure {
-            deleted_messages: outcome.deleted_messages,
-            deleted_orphan_proofs: outcome.deleted_orphan_proofs,
-            error,
-        })?;
-    budget
-        .progress
-        .orphan_proofs
-        .fetch_add(deleted, Ordering::AcqRel);
-    outcome.deleted_orphan_proofs += deleted;
-    outcome.completed =
-        Instant::now() < budget.deadline && budget.progress.orphan_cursor.lock().await.is_none();
-    Ok(outcome)
 }
 
 async fn gc_orphan_proof_batch(
@@ -1767,30 +1779,18 @@ mod tests {
         seed_healthy_gc_proofs(db, healthy_count).await;
         let late = MessageKey::from_storage(Uuid::from_u128(u128::MAX));
         seed_gc_proofs(db, late, 1).await;
-        let mut budget = gc_budget();
-        // A filter-limited scan would delete the late orphan in the first pass.
-        // Three empty-deletion passes prove that the examined window, rather
-        // than just its orphan matches, is bounded and traversal is retained.
+        let budget = gc_budget();
+        // Each window examines at most `GC_BATCH_LIMIT` rows and advances the
+        // cursor by exactly that much, whether or not any of them were orphans.
+        // A filter-limited scan would instead examine the whole table looking
+        // for matches, which is what could never finish under the scan timeout.
         for page in 0..3 {
-            budget.progress = budget.progress.fresh_pass();
-            let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            let deleted = gc_orphan_proof_batch(db, &budget)
                 .await
                 .expect("healthy window");
-            assert_eq!(outcome.deleted_messages, 0);
-            assert_eq!(outcome.deleted_orphan_proofs, 0);
-            assert!(!outcome.completed);
+            assert_eq!(deleted, 0);
             assert_eq!(gc_proof_count(db).await, healthy_count as i64 + 1);
             let position = budget.progress.orphan_cursor.lock().await.clone();
-            let expired = AliasGcBudget {
-                deadline: Instant::now(),
-                ..budget.clone()
-            };
-            let stopped = gc_expired_aliases(db, timestamp(7), expired)
-                .await
-                .expect("expired pass");
-            assert_eq!(stopped.deleted_orphan_proofs, 0);
-            assert!(!stopped.completed);
-            assert_eq!(*budget.progress.orphan_cursor.lock().await, position);
             let key = position.as_ref().expect("full window retains cursor");
             assert_eq!(
                 key.resource.to_string(),
@@ -1800,43 +1800,51 @@ mod tests {
                 )
             );
         }
-        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+        let deleted = gc_orphan_proof_batch(db, &budget)
             .await
             .expect("late orphan window");
-        assert_eq!(outcome.deleted_messages, 0);
+        assert_eq!(deleted, 1);
+        assert_eq!(gc_proof_count(db).await, healthy_count as i64);
+
+        // One pass drains the whole traversal within its budget rather than a
+        // single window. Windowing at one-per-pass would traverse at roughly
+        // `GC_BATCH_LIMIT` rows per coordinator backoff, which time-ordered
+        // UUIDv7 keys can outrun, leaving an orphan behind an ever-growing tail.
+        let late = MessageKey::from_storage(Uuid::from_u128(u128::MAX - 1));
+        seed_gc_proofs(db, late, 1).await;
+        let drained = gc_budget();
+        let outcome = gc_expired_aliases(db, timestamp(7), drained.clone())
+            .await
+            .expect("single draining pass");
         assert_eq!(outcome.deleted_orphan_proofs, 1);
+        assert_eq!(outcome.deleted_messages, 0);
         assert!(outcome.completed);
-        assert_eq!(budget.progress.committed_orphan_proofs(), 1);
+        assert_eq!(drained.progress.committed_orphan_proofs(), 1);
         assert_eq!(gc_proof_count(db).await, healthy_count as i64);
     }
 
     async fn orphan_gc_wraps_after_healthy_traversal(db: &Database) {
         let healthy_count = GC_BATCH_LIMIT * 2;
         seed_healthy_gc_proofs(db, healthy_count).await;
-        let mut budget = gc_budget();
-        for _ in 0..2 {
-            budget.progress = budget.progress.fresh_pass();
-            let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
-                .await
-                .expect("full healthy window");
-            assert!(!outcome.completed);
-            assert_eq!(outcome.deleted_orphan_proofs, 0);
-        }
-        // Exactly N rows in the last nonempty window needs a final empty
-        // window to observe the end and reset the traversal.
+        let budget = gc_budget();
+        // A draining pass walks every window and resets the traversal at the end.
         let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
             .await
-            .expect("end of traversal");
+            .expect("full healthy traversal");
         assert!(outcome.completed);
         assert_eq!(outcome.deleted_orphan_proofs, 0);
+        assert!(budget.progress.orphan_cursor.lock().await.is_none());
+        // A proof landing before the traversal's old position is still reclaimed,
+        // because the reset sends the next pass back to the beginning.
         let early = MessageKey::from_storage(Uuid::nil());
         seed_gc_proofs(db, early, 1).await;
-        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+        let wrapped = gc_budget();
+        let outcome = gc_expired_aliases(db, timestamp(7), wrapped.clone())
             .await
             .expect("wrapped traversal");
         assert_eq!(outcome.deleted_orphan_proofs, 1);
         assert_eq!(outcome.deleted_messages, 0);
-        assert!(!outcome.completed);
+        assert!(outcome.completed);
         assert_eq!(gc_proof_count(db).await, healthy_count as i64);
     }
 
