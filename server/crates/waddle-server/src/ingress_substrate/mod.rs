@@ -202,7 +202,17 @@ impl AliasGcProgress {
     }
 
     fn record(&self, deleted_messages: usize) {
+        if deleted_messages == 0 {
+            return;
+        }
         self.messages.fetch_add(deleted_messages, Ordering::AcqRel);
+        // Arm the sweep HERE, at the commit, not from the pass outcome. A
+        // reclaimed canonical row is exactly when a cross-node append can be
+        // orphaned, and a pass can still fail, be cancelled, or run out of
+        // budget on a later candidate -- after this deletion is durable. Those
+        // exits never reach the end of the pass, and the retry's counters are
+        // fresh, so anything derived from the outcome would lose the trigger.
+        self.mark_orphan_sweep_pending();
     }
 }
 
@@ -611,14 +621,10 @@ pub async fn gc_expired_aliases(
     now: DateTime<Utc>,
     budget: AliasGcBudget,
 ) -> Result<AliasGcOutcome, AliasGcFailure> {
+    // Committed deletions arm the sweep inside `AliasGcProgress::record`, at the
+    // commit itself, so `?` here cannot discard the trigger even though the
+    // failure carries committed progress.
     let mut outcome = gc_canonical_candidates(db, now, &budget).await?;
-    // Record the trigger before any early return. A reclaimed canonical row is
-    // exactly when a cross-node append can be orphaned, and a canonical phase
-    // that commits deletions but runs out of budget would otherwise lose that
-    // signal: the retry gets fresh pass-local counters reading zero.
-    if outcome.deleted_messages > 0 {
-        budget.progress.mark_orphan_sweep_pending();
-    }
     if !outcome.completed {
         return Ok(outcome);
     }
@@ -2906,17 +2912,25 @@ mod tests {
             .await
             .expect("install deterministic GC failure trigger");
 
+        let progress = AliasGcProgress::default();
         let failure = fixture
             .store
             .gc_expired_aliases(
                 terminal_at + ALIAS_RETENTION + Duration::days(1),
-                gc_budget(),
+                AliasGcBudget {
+                    progress: progress.clone(),
+                    ..gc_budget()
+                },
             )
             .await
             .expect_err("second candidate trigger must fail");
         assert_eq!(failure.deleted_messages, 1);
         assert!(matches!(failure.error, AliasGcError::Substrate(_)));
         assert_eq!(fixture.count("ingress_messages").await, 1);
+        // The committed deletion is exactly when a cross-node append can be
+        // orphaned, and this pass exits through `?` before the sweep would run.
+        // Arming at the commit is what keeps the retry from skipping it.
+        assert!(progress.orphan_sweep_pending.load(Ordering::Acquire));
         fixture.close().await;
     }
 
@@ -2966,6 +2980,9 @@ mod tests {
             total - remaining,
             "the progress handle must match the rows actually committed"
         );
+        // Cancellation runs no code after the await, so the sweep can only have
+        // been armed at the commit itself.
+        assert!(progress.orphan_sweep_pending.load(Ordering::Acquire));
         fixture.close().await;
     }
 
