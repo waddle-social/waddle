@@ -339,8 +339,13 @@ The remaining limits are explicit:
   transaction; later ones commit with their proof individually.
 - **Still at-least-once:** a drained entry that loses the ledger race between
   the drain's read and the session store keeps its queue entry and only its proof
-  is withheld; a frame written live but unacknowledged at detach has no proof
-  (the #1760 custody family).
+  is withheld; entries past a drain's 2 s authorization budget, or after one
+  indeterminate canonical read, drain unkeyed.
+- **Live writes (#1789):** the handler records a frame into the SM queue before the
+  transport write, so the obligation moves onto that recovery-owned entry and the
+  detach proves it with the session snapshot, whether the write failed or went
+  unacknowledged. After the client acknowledges the entry there is nothing left to
+  key; a later re-execution is the lost-receipt duplicate of #1760 direction 2.
 - **Still at-least-once:** failed receiver-side authorization degrades to an
   unkeyed append, with a warning and counter. Delivery never fails because
   this check failed; availability does not depend on authorization succeeding.

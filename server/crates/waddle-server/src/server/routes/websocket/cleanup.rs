@@ -828,6 +828,10 @@ async fn cleanup_connection_shutdown_inner(
         // store below proves them in the same write (issue #1789).
         let mut drained_appends = Vec::new();
         if !conn.sm_recovery_required {
+            // Entries the live handler recorded before a failed or unacknowledged
+            // write never pass through a drain; prove their obligations too.
+            super::drain_append::reserve_live_recorded(state, &conn.sm_state, &mut drained_appends)
+                .await;
             // First detach drain: snapshot whatever's already in the
             // channel into the unacked queue. No detached_stream_id yet
             // because we haven't decided to store the detached session.

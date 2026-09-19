@@ -1400,8 +1400,16 @@ time. What stays at-least-once on this path:
 - a re-executed `PeerStanza` runs the recipient pass before the ledger is read, so
   its archive write and received carbons repeat even though the frame is then
   dropped. "Exactly once" here means the replay-queue entry and the ledger row;
-- a frame that *was* written live but is unacknowledged at detach sits in the
-  connection-local queue with no proof. That is the #1760 family, not the drain;
+- an obligation is proven only while its entry is recovery-owned. The live handler
+  records a frame into the SM queue *before* the transport write, so the obligation
+  moves onto that entry and the detach proves it with the session snapshot — whether
+  the write failed or merely went unacknowledged. Once the client acknowledges the
+  entry, entry and obligation are both gone; a recovery re-execution after that point
+  is the ordinary lost-receipt duplicate (#1760 direction 2), not this path;
+- the first drain takes only the backlog it found and spends at most 2 s authorizing.
+  The socket is still registered while it runs, so a producer refilling the queue
+  could otherwise hold the detach open; later arrivals go to the post-unregister
+  drain, and entries past the budget drain unkeyed;
 - an old peer answers the v2 frame with `UnknownMessage`: a no-effect failure that
   leaves the owner mirror intact and the obligation unresolved for retry.
 

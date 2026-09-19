@@ -116,7 +116,7 @@ pub(super) async fn drain_outbound_into_replay(
     // unresumable and a graceful restart stuck in its drain. Later arrivals belong
     // to the second drain, which runs after the receiver is closed.
     let mut remaining = sink.detached_stream_id.is_none().then(|| outbound_rx.len());
-    while remaining.map_or(true, |remaining| remaining > 0) {
+    while remaining.is_none_or(|remaining| remaining > 0) {
         let Ok(mut outbound_stanza) = outbound_rx.try_recv() else {
             break;
         };
@@ -136,7 +136,7 @@ pub(super) async fn drain_outbound_into_replay(
         let mut ingress_append = authority
             .authorize(
                 state,
-                &outbound_stanza.stanza,
+                Some(&outbound_stanza.stanza),
                 outbound_stanza.ingress_append.take(),
             )
             .await;

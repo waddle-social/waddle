@@ -279,6 +279,43 @@ async fn peer_stanza_frames_are_keyed_after_the_recipient_pass(fixture: IngressF
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
 }
 
+/// A frame the live handler already recorded into the SM queue — written or not,
+/// but unacknowledged — is persisted by the detach with no drain involved. Its
+/// obligation is proven in that same session store, so recovery finds the proof.
+async fn live_recorded_frames_are_proven_at_detach(fixture: IngressFixture) {
+    let mut socket = detaching_socket(fixture).await;
+    let (stanza, obligation) = committed_obligation(&socket).await;
+    let _ = socket.conn.sm_state.record_outbound(
+        stanza_to_xml(&stanza),
+        waddle_xmpp::telemetry::attributes::SmEvictionPath::DirectOutbound,
+    );
+    socket
+        .conn
+        .sm_state
+        .attach_ingress_append(socket.conn.sm_state.outbound_count, obligation.clone());
+
+    let detached = detach(&mut socket).await;
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
+
+    let retried = socket
+        .sm
+        .record_keyed_stanza_for_detached_bound_resource(
+            &socket.recipient,
+            &stanza,
+            chrono::Utc::now(),
+            obligation.key,
+        )
+        .await
+        .expect("recovery re-execution");
+    assert!(matches!(
+        retried,
+        SmKeyedAppendOutcome::AlreadyAppended { .. }
+    ));
+    let after = socket.sm.peek_session(STREAM).await.unwrap().unwrap();
+    assert_eq!(after.unacked_stanzas.len(), 1, "exactly one queue entry");
+}
+
 /// The first drain runs while the socket is still registered, and each keyed frame
 /// awaits a canonical read. A producer that refills the queue faster than those reads
 /// complete must not be able to hold the detach open: the drain takes the backlog it
@@ -380,4 +417,10 @@ paired!(
     "drain_bound",
     sqlite_first_drain_is_bounded_by_the_backlog_it_found,
     postgres_first_drain_is_bounded_by_the_backlog_it_found
+);
+paired!(
+    live_recorded_frames_are_proven_at_detach,
+    "drain_live",
+    sqlite_live_recorded_frames_are_proven_at_detach,
+    postgres_live_recorded_frames_are_proven_at_detach
 );
