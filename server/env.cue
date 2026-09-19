@@ -169,7 +169,13 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixBuildDeps, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream]
+			// `_t.test` is the same task the `default` pipeline gates the image
+			// publish on (#1796). The nix* lanes build `--all-features` under
+			// the `ci-test` profile inside the nix sandbox, so they cannot
+			// stand in for it: a test failing only in the cargo lane's
+			// configuration would first surface after the merge. Keep it here
+			// for as long as `default` runs it.
+			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixBuildDeps, _t.nixTest, _t.nixDoctest, _t.test, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream]
 		}
 		rootSync: {
 			mode: "expanded"
