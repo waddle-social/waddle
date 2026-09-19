@@ -17,7 +17,7 @@ use waddle_xmpp::telemetry::attributes::{IngressGcOutcome, IngressMaintenancePha
 use crate::db::Database;
 use crate::ingress_substrate::{
     receipt_complete_nonterminal_keys, set_local_transaction_timeouts,
-    unreceipted_nonterminal_candidates, EffectReceiptKind, IngressSubstrateError,
+    unreceipted_nonterminal_candidates, AliasGcProgress, EffectReceiptKind, IngressSubstrateError,
     RecoveryCandidate, RecoveryEvidence,
 };
 use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
@@ -81,6 +81,7 @@ impl MaintenanceBudget {
 
 #[derive(Clone, Default)]
 pub(super) struct MaintenanceCursor {
+    retention_progress: AliasGcProgress,
     after: Arc<Mutex<Option<MaintenancePosition>>>,
     recovery_after: Arc<Mutex<Option<MaintenancePosition>>>,
     recovery_unsupported: Arc<Mutex<UnsupportedRows>>,
@@ -145,6 +146,7 @@ fn record(phase: IngressMaintenancePhase, outcome: MaintenanceOutcome) -> Mainte
 /// Attest before maintenance; scan and candidate transactions never overlap,
 /// so even a pool of one admits foreground work between operations. Each phase
 /// has an independent timeout inside the whole-pass hard deadline.
+#[cfg(test)]
 pub(crate) async fn run_maintenance_pass(
     database: &Database,
     uow: &IngressUnitOfWork,
@@ -216,7 +218,13 @@ pub(super) async fn run_maintenance_pass_with_cursor(
         };
         // The GC helper owns the retention phase timeout and preserves its
         // committed-progress counter when that timeout fires.
-        let retention = match run_retention_gc_with_budget(database, budget.retention).await {
+        let retention = match run_retention_gc_with_budget(
+            database,
+            budget.retention,
+            cursor.retention_progress.fresh_pass(),
+        )
+        .await
+        {
             IngressGcOutcome::Completed => MaintenanceOutcome::Complete,
             IngressGcOutcome::Partial => MaintenanceOutcome::Partial,
             IngressGcOutcome::TimedOut => MaintenanceOutcome::TimedOut,
