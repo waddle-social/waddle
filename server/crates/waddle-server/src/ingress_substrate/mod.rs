@@ -604,13 +604,28 @@ pub async fn gc_expired_aliases(
             outcome.completed = false;
             return Ok(outcome);
         }
-        let deleted = gc_orphan_proof_batch(db, &budget)
-            .await
-            .map_err(|error| AliasGcFailure {
-                deleted_messages: outcome.deleted_messages,
-                deleted_orphan_proofs: outcome.deleted_orphan_proofs,
-                error,
-            })?;
+        // Never fail the pass from here. Canonical collection has already
+        // succeeded, and the maintenance pass that wraps this one maps a failed
+        // GC phase to `MaintenanceOutcome::Failed`, which also governs the
+        // recovery phase's accounting and backoff. This sweep is opportunistic
+        // cleanup of rows nothing is waiting on, so a scan timeout or a
+        // transient database error reports the pass incomplete -- it retries --
+        // rather than dragging unrelated recovery work down with it.
+        let deleted = match gc_orphan_proof_batch(db, &budget).await {
+            Ok(deleted) => deleted,
+            Err(error) => {
+                tracing::warn!(%error, "ingress orphan proof sweep failed; pass stays incomplete");
+                waddle_xmpp::counter_add!(
+                    "waddle.ingress.gc.orphan_sweep_failed",
+                    "{sweep}",
+                    "Orphan append-proof sweeps that failed without failing their \
+                     maintenance pass.",
+                    1,
+                );
+                outcome.completed = false;
+                return Ok(outcome);
+            }
+        };
         budget
             .progress
             .orphan_proofs
@@ -623,10 +638,23 @@ pub async fn gc_expired_aliases(
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Forces the orphan sweep's error path so the decoupling from
+    /// `MaintenanceOutcome::Failed` can be asserted deterministically.
+    pub(crate) static FAIL_ORPHAN_SWEEP: bool;
+}
+
 async fn gc_orphan_proof_batch(
     db: &Database,
     budget: &AliasGcBudget,
 ) -> Result<usize, AliasGcError> {
+    #[cfg(test)]
+    if FAIL_ORPHAN_SWEEP.try_with(|fail| *fail).unwrap_or(false) {
+        return Err(AliasGcError::Substrate(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::SerializationFailure,
+        }));
+    }
     // Serialize windows sharing a traversal so a slower pass cannot rewind it.
     let mut cursor = budget.progress.orphan_cursor.lock().await;
     let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
@@ -1823,6 +1851,28 @@ mod tests {
         assert_eq!(gc_proof_count(db).await, healthy_count as i64);
     }
 
+    async fn orphan_gc_failure_does_not_fail_the_pass(db: &Database) {
+        let healthy = GC_BATCH_LIMIT * 2;
+        seed_healthy_gc_proofs(db, healthy).await;
+        let budget = gc_budget();
+        // The pass must report incomplete, never `Err`: the maintenance pass that
+        // wraps it maps a failed GC phase onto `MaintenanceOutcome::Failed`, which
+        // also governs the unrelated recovery phase's accounting and backoff. A
+        // sweep of rows nothing is waiting on must not drag recovery down.
+        let outcome = FAIL_ORPHAN_SWEEP
+            .scope(true, gc_expired_aliases(db, timestamp(7), budget.clone()))
+            .await
+            .expect("sweep failure must not fail the pass");
+        assert!(!outcome.completed);
+        assert_eq!(outcome.deleted_orphan_proofs, 0);
+        assert_eq!(gc_proof_count(db).await, healthy as i64);
+        // The next pass is unaffected and completes the traversal normally.
+        let recovered = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("later pass runs normally");
+        assert!(recovered.completed);
+    }
+
     async fn orphan_gc_wraps_after_healthy_traversal(db: &Database) {
         let healthy_count = GC_BATCH_LIMIT * 2;
         seed_healthy_gc_proofs(db, healthy_count).await;
@@ -1861,6 +1911,24 @@ mod tests {
             return;
         };
         orphan_gc_advances_across_healthy_windows(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_failure_does_not_fail_the_pass() {
+        let db = Database::in_memory("orphan-gc-failure")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_failure_does_not_fail_the_pass(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_failure_does_not_fail_the_pass() {
+        let Some(fixture) = Fixture::open("orphan_sweep_failure").await else {
+            return;
+        };
+        orphan_gc_failure_does_not_fail_the_pass(&fixture.db).await;
         fixture.close().await;
     }
 
