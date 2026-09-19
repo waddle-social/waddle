@@ -20,7 +20,7 @@ pub use authority::{
     EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
 };
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -156,9 +156,14 @@ pub struct AliasGcProgress {
     messages: Arc<AtomicUsize>,
     orphan_proofs: Arc<AtomicUsize>,
     orphan_cursor: Arc<tokio::sync::Mutex<Option<SmIngressAppendKey>>>,
-    /// When the orphan sweep last ran, shared across passes with the cursor.
-    /// `None` until the first sweep, so a fresh process sweeps once promptly.
+    /// When the orphan sweep last COMPLETED a traversal, shared across passes.
+    /// `None` until the first one, so a fresh process sweeps once promptly.
     orphan_swept_at: Arc<tokio::sync::Mutex<Option<Instant>>>,
+    /// A sweep is owed and has not finished yet. Shared across passes so the
+    /// trigger survives a pass that ends before the traversal does: a retry
+    /// carries fresh pass-local counters, so neither `deleted_messages` nor the
+    /// interval can be re-derived from it.
+    orphan_sweep_pending: Arc<AtomicBool>,
 }
 
 impl AliasGcBudget {
@@ -178,6 +183,7 @@ impl AliasGcProgress {
         Self {
             orphan_cursor: self.orphan_cursor.clone(),
             orphan_swept_at: self.orphan_swept_at.clone(),
+            orphan_sweep_pending: self.orphan_sweep_pending.clone(),
             ..Self::default()
         }
     }
@@ -188,6 +194,11 @@ impl AliasGcProgress {
 
     pub fn committed_orphan_proofs(&self) -> usize {
         self.orphan_proofs.load(Ordering::Acquire)
+    }
+
+    /// Record that a sweep is owed. Survives until a traversal finishes.
+    fn mark_orphan_sweep_pending(&self) {
+        self.orphan_sweep_pending.store(true, Ordering::Release);
     }
 
     fn record(&self, deleted_messages: usize) {
@@ -601,6 +612,13 @@ pub async fn gc_expired_aliases(
     budget: AliasGcBudget,
 ) -> Result<AliasGcOutcome, AliasGcFailure> {
     let mut outcome = gc_canonical_candidates(db, now, &budget).await?;
+    // Record the trigger before any early return. A reclaimed canonical row is
+    // exactly when a cross-node append can be orphaned, and a canonical phase
+    // that commits deletions but runs out of budget would otherwise lose that
+    // signal: the retry gets fresh pass-local counters reading zero.
+    if outcome.deleted_messages > 0 {
+        budget.progress.mark_orphan_sweep_pending();
+    }
     if !outcome.completed {
         return Ok(outcome);
     }
@@ -617,7 +635,7 @@ pub async fn gc_expired_aliases(
     // code. Sweeping on every pass would add a transaction to every maintenance
     // cycle for work that is almost always absent, and the ledger is not
     // load-bearing -- nothing waits on an orphan being collected.
-    if !should_sweep_orphans(&budget, outcome.deleted_messages).await {
+    if !should_sweep_orphans(&budget).await {
         return Ok(outcome);
     }
     //
@@ -668,7 +686,14 @@ pub async fn gc_expired_aliases(
         outcome.deleted_orphan_proofs += deleted;
         match step {
             OrphanSweepStep::Advanced { .. } => {}
-            OrphanSweepStep::Finished { .. } => return Ok(outcome),
+            OrphanSweepStep::Finished { .. } => {
+                budget
+                    .progress
+                    .orphan_sweep_pending
+                    .store(false, Ordering::Release);
+                *budget.progress.orphan_swept_at.lock().await = Some(Instant::now());
+                return Ok(outcome);
+            }
             OrphanSweepStep::BudgetExpired { .. } => {
                 outcome.completed = false;
                 return Ok(outcome);
@@ -700,20 +725,27 @@ enum OrphanSweepStep {
 const ORPHAN_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(300);
 
 /// Whether this pass should examine the append ledger at all.
-async fn should_sweep_orphans(budget: &AliasGcBudget, deleted_messages: usize) -> bool {
+///
+/// The answer is deliberately sticky. A pass that is admitted but ends before
+/// the traversal finishes leaves the sweep owed, and the retry cannot re-derive
+/// that from its own fresh counters, so the flag -- not this pass's state --
+/// decides.
+async fn should_sweep_orphans(budget: &AliasGcBudget) -> bool {
+    if budget.progress.orphan_sweep_pending.load(Ordering::Acquire) {
+        return true;
+    }
     // Mid-traversal always continues: leaving a cursor parked would defeat the
     // paging that keeps each window bounded.
     if budget.progress.orphan_cursor.lock().await.is_some() {
+        budget.progress.mark_orphan_sweep_pending();
         return true;
     }
-    // A reclaimed canonical row is exactly when a new orphan can appear.
-    if deleted_messages > 0 {
-        return true;
-    }
-    let mut swept_at = budget.progress.orphan_swept_at.lock().await;
+    let swept_at = budget.progress.orphan_swept_at.lock().await;
     let due = swept_at.is_none_or(|at| at.elapsed() >= ORPHAN_SWEEP_INTERVAL);
     if due {
-        *swept_at = Some(Instant::now());
+        // Arm, do not consume: the interval restarts when a traversal FINISHES,
+        // so a pass that dies early does not silently buy another five minutes.
+        budget.progress.mark_orphan_sweep_pending();
     }
     due
 }
@@ -1976,21 +2008,67 @@ mod tests {
     async fn orphan_sweep_gate_admits_only_passes_that_can_find_something() {
         let budget = gc_budget();
         // A fresh process has never swept, so the first pass is due even idle.
-        assert!(should_sweep_orphans(&budget, 0).await);
-        // Having just swept, an idle pass is not worth a transaction.
-        assert!(!should_sweep_orphans(&budget, 0).await);
-        // Reclaiming a canonical row is exactly when an in-flight cross-node
-        // append can be orphaned, so that pass sweeps regardless of the interval.
-        assert!(should_sweep_orphans(&budget, 1).await);
+        assert!(should_sweep_orphans(&budget).await);
+        // Being admitted ARMS the sweep; it stays owed until a traversal
+        // finishes, so a retry after an interrupted pass is still admitted.
+        assert!(should_sweep_orphans(&budget).await);
+        // Finishing a traversal is what clears it and restarts the interval.
+        budget
+            .progress
+            .orphan_sweep_pending
+            .store(false, Ordering::Release);
+        *budget.progress.orphan_swept_at.lock().await = Some(Instant::now());
+        assert!(!should_sweep_orphans(&budget).await);
+        // A reclaimed canonical row re-arms it regardless of the interval.
+        budget.progress.mark_orphan_sweep_pending();
+        assert!(should_sweep_orphans(&budget).await);
+
         // Mid-traversal always continues: parking a cursor would defeat the
         // paging that keeps each window bounded.
-        *budget.progress.orphan_cursor.lock().await = Some(SmIngressAppendKey {
+        let mid = gc_budget();
+        *mid.progress.orphan_swept_at.lock().await = Some(Instant::now());
+        *mid.progress.orphan_cursor.lock().await = Some(SmIngressAppendKey {
             message_key: MessageKey::new(),
             kind: SmIngressReceiptKind::from_storage(3),
             semantic_identity_hash: [7; 32],
             resource: "gc@example.test/resource".parse().expect("resource"),
         });
-        assert!(should_sweep_orphans(&budget, 0).await);
+        assert!(should_sweep_orphans(&mid).await);
+    }
+
+    #[tokio::test]
+    async fn an_owed_sweep_survives_a_pass_that_never_reached_the_ledger() {
+        let budget = gc_budget();
+        // Admit a pass, then end it before the traversal finished.
+        assert!(should_sweep_orphans(&budget).await);
+        // A production retry carries fresh pass-local counters over the same
+        // shared state, so nothing in the retry itself says a sweep is owed.
+        let retry = budget.fresh_progress_pass();
+        assert_eq!(retry.progress.committed_orphan_proofs(), 0);
+        assert!(retry.progress.orphan_cursor.lock().await.is_none());
+        // It is still owed, so the retry sweeps rather than waiting out the
+        // interval with orphans already on the floor.
+        assert!(should_sweep_orphans(&retry).await);
+    }
+
+    #[tokio::test]
+    async fn a_deletion_arms_the_sweep_even_when_its_pass_runs_out_of_budget() {
+        let budget = gc_budget();
+        // Consume the startup allowance so only the deletion can arm it.
+        assert!(should_sweep_orphans(&budget).await);
+        budget
+            .progress
+            .orphan_sweep_pending
+            .store(false, Ordering::Release);
+        *budget.progress.orphan_swept_at.lock().await = Some(Instant::now());
+        assert!(!should_sweep_orphans(&budget).await);
+
+        // A canonical phase that reclaims rows and then runs out of budget marks
+        // the sweep owed before returning, because its retry cannot see the
+        // deletion in its own fresh counters.
+        budget.progress.mark_orphan_sweep_pending();
+        let retry = budget.fresh_progress_pass();
+        assert!(should_sweep_orphans(&retry).await);
     }
 
     async fn orphan_gc_failure_does_not_fail_the_pass(db: &Database) {
