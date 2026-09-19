@@ -265,6 +265,84 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
     );
 }
 
+/// Issue #1789: the socket node queues the frame's obligation on the live outbound
+/// entry, bound to the frame's resource and unverified. This is the only place the
+/// identity crosses from the wire into the queue a detach drain later reads.
+#[tokio::test]
+async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
+    use crate::ingress::identity::IngressAppendObligationRef;
+    use crate::ingress::EffectReceiptKey;
+    use crate::ingress_substrate::EffectReceiptKind;
+    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, mut rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            Arc::clone(&owner),
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration_id = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .expect("socket registration")
+        .registration_id;
+    let obligation = IngressAppendObligationRef {
+        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
+        sender_bare: sender_full().to_bare(),
+        receipt: EffectReceiptKey {
+            kind: EffectReceiptKind::from_storage(IngressEffectKind::RouteDirect.storage_tag()),
+            semantic_identity_hash: [89; 32],
+        },
+        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    };
+
+    let reply = bridge
+        .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
+            frame: RemoteResourceOutboundFrame {
+                jid: target.clone(),
+                registration_id,
+                stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                    target.clone(),
+                ))))),
+                kind: DeliveryKind::PeerStanza,
+                ingress_append: Some(obligation.clone()),
+            },
+            trace: RelayTraceContext::default(),
+        })
+        .await;
+
+    assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
+    let outbound = rx.recv().await.expect("socket receives relayed frame");
+    assert_eq!(
+        outbound.ingress_append,
+        Some(obligation.into_relayed_for(target))
+    );
+}
+
 /// Issue #1789: the frame to a registered remote socket carries the executor's
 /// ingress obligation, bound to the stanza's sender, so the socket node can key a
 /// later detach drain. Only an append-eligible message obligation crosses the wire.

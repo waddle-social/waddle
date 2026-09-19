@@ -11,33 +11,58 @@ use waddle_xmpp::stream_management::{
     SmDrainedAppendTicket, SmIngressAppendKey, SmKeyedAppendOutcome, SmRelayedAppendObligation,
 };
 
-/// Authorize the relayed claim against canonical ingress state.
+/// Canonical-read health across one drain.
 ///
-/// Failure degrades to an unkeyed drain (decision recorded on #1789): the origin was
-/// already told `Delivered`, so refusing the entry would turn a canonical-read outage
-/// into silent loss. At-least-once survives; only the dedupe key is lost.
-pub(super) async fn authorize(
-    state: &WebSocketState,
-    stanza: &Stanza,
-    obligation: Option<SmRelayedAppendObligation>,
-) -> Option<SmRelayedAppendObligation> {
-    let obligation = obligation?;
-    match crate::ingress::append_authority::check_canonical_authority(
-        state.deps.app_state.db_pool.global(),
-        stanza,
-        obligation.key.message_key,
-        &obligation.sender_bare,
-        obligation.key.kind.to_storage(),
-    )
-    .await
-    {
-        Ok(()) => Some(obligation),
-        Err(reason) => {
-            crate::ingress::append_authority::record_degraded_to_unkeyed(
-                &reason,
+/// Authorization is a serial read per keyed frame, bounded at 250 ms, and it runs
+/// before the detached session is stored — so until the drain ends the client's
+/// `<resume/>` finds nothing. One indeterminate read therefore ends authorization for
+/// the rest of the drain: a full queue against a browned-out database would otherwise
+/// hold the detach for a minute to protect a dedupe key it cannot obtain anyway.
+#[derive(Default)]
+pub(super) struct DrainAuthority {
+    canonical_reads_indeterminate: bool,
+}
+
+impl DrainAuthority {
+    /// Authorize the relayed claim against canonical ingress state.
+    ///
+    /// Failure degrades to an unkeyed drain (decision recorded on #1789): the origin
+    /// was already told `Delivered`, so refusing the entry would turn a canonical-read
+    /// outage into silent loss. At-least-once survives; only the dedupe key is lost.
+    pub(super) async fn authorize(
+        &mut self,
+        state: &WebSocketState,
+        stanza: &Stanza,
+        obligation: Option<SmRelayedAppendObligation>,
+    ) -> Option<SmRelayedAppendObligation> {
+        use crate::ingress::append_authority::{
+            check_canonical_authority, record_degraded_to_unkeyed, AppendAuthorityRejection,
+        };
+        use waddle_xmpp::telemetry::attributes::IngressAppendAuthorizationFailure;
+
+        let obligation = obligation?;
+        let outcome = if self.canonical_reads_indeterminate {
+            Err(AppendAuthorityRejection::ServicesUnavailable)
+        } else {
+            check_canonical_authority(
+                state.deps.app_state.db_pool.global(),
+                stanza,
+                obligation.key.message_key,
                 &obligation.sender_bare,
-            );
-            None
+                obligation.key.kind.to_storage(),
+            )
+            .await
+        };
+        match outcome {
+            Ok(()) => Some(obligation),
+            Err(reason) => {
+                self.canonical_reads_indeterminate |= matches!(
+                    reason.failure_class(),
+                    IngressAppendAuthorizationFailure::Indeterminate
+                );
+                record_degraded_to_unkeyed(&reason, &obligation.sender_bare);
+                None
+            }
         }
     }
 }

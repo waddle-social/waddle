@@ -102,6 +102,7 @@ pub(super) async fn drain_outbound_into_replay(
     let principal = authenticated_session.map(super::ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal);
     let mut sm_borrow: Option<&mut XmppStateMachine> = state_machine;
+    let mut authority = super::drain_append::DrainAuthority::default();
     while let Ok(mut outbound_stanza) = outbound_rx.try_recv() {
         // Codex P2 review on PR #361: when this is a pending_delivery
         // flush replay, preserve the row's original_receipt_at instead
@@ -115,12 +116,13 @@ pub(super) async fn drain_outbound_into_replay(
         let pending_row_id = outbound_stanza.pending_row_id.clone();
         // Authorized here, at the append decision, and nowhere earlier: a frame
         // written live never pays the canonical read (issue #1789, #1790).
-        let mut ingress_append = super::drain_append::authorize(
-            state,
-            &outbound_stanza.stanza,
-            outbound_stanza.ingress_append.take(),
-        )
-        .await;
+        let mut ingress_append = authority
+            .authorize(
+                state,
+                &outbound_stanza.stanza,
+                outbound_stanza.ingress_append.take(),
+            )
+            .await;
         let receipt_at = ingress_append
             .as_ref()
             .and_then(|obligation| obligation.received_at)

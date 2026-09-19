@@ -33,7 +33,7 @@ impl AppendAuthorityRejection {
     /// about the peer, `Indeterminate` is a statement about this node's own
     /// ability to read canonical state, and only the latter silently widens the
     /// duplicate window while it persists.
-    fn failure_class(&self) -> IngressAppendAuthorizationFailure {
+    pub(crate) fn failure_class(&self) -> IngressAppendAuthorizationFailure {
         match self {
             Self::IneligibleKind
             | Self::NotMessage

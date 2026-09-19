@@ -240,8 +240,50 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
 }
 
+/// A relayed `PeerStanza` runs the recipient pass inside the drain, so the queued
+/// bytes differ from the relayed stanza. The obligation still keys exactly the one
+/// frame the pass emits, and a repeat is dropped uncounted.
+async fn peer_stanza_frames_are_keyed_after_the_recipient_pass(fixture: IngressFixture) {
+    let mut socket = detaching_socket(fixture).await;
+    socket.conn.ensure_state_machine(
+        "example.com",
+        &socket.state.deps.protocol.dispatcher,
+        socket.recipient.clone(),
+        false,
+        Blocklist::empty(),
+    );
+    let (stanza, obligation) = committed_obligation(&socket).await;
+    for _ in 0..2 {
+        socket
+            .tx
+            .send(
+                OutboundStanza::peer_stanza(stanza.clone()).with_ingress_append(obligation.clone()),
+            )
+            .await
+            .expect("socket node queue acceptance");
+    }
+
+    let detached = detach(&mut socket).await;
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(
+        detached.outbound_count, 1,
+        "the duplicate was never counted"
+    );
+    assert!(
+        detached.unacked_stanzas[0]
+            .stanza_xml
+            .contains("by='juliet@example.com'"),
+        "the drained frame is the recipient pass's output: {}",
+        detached.unacked_stanzas[0].stanza_xml
+    );
+    assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
+}
+
+// `$schema` stays short: the fixture appends a uuid to it for the Postgres schema
+// name, and Postgres truncates identifiers at 63 bytes — a long label pushes the
+// uuid off the end and makes reruns collide.
 macro_rules! paired {
-    ($case:ident, $sqlite:ident, $postgres:ident) => {
+    ($case:ident, $schema:literal, $sqlite:ident, $postgres:ident) => {
         #[tokio::test]
         async fn $sqlite() {
             $case(IngressFixture::sqlite().await).await;
@@ -249,7 +291,7 @@ macro_rules! paired {
 
         #[tokio::test]
         async fn $postgres() {
-            if let Some(fixture) = IngressFixture::postgres(stringify!($case)).await {
+            if let Some(fixture) = IngressFixture::postgres($schema).await {
                 $case(fixture).await;
             }
         }
@@ -258,21 +300,31 @@ macro_rules! paired {
 
 paired!(
     recovery_after_drain_finds_the_proof,
+    "drain_recovery",
     sqlite_recovery_after_drain_finds_the_proof,
     postgres_recovery_after_drain_finds_the_proof
 );
 paired!(
     duplicate_frames_in_one_queue_drain_once,
+    "drain_dup",
     sqlite_duplicate_frames_in_one_queue_drain_once,
     postgres_duplicate_frames_in_one_queue_drain_once
 );
 paired!(
     unauthorized_obligation_drains_unkeyed,
+    "drain_unauth",
     sqlite_unauthorized_obligation_drains_unkeyed,
     postgres_unauthorized_obligation_drains_unkeyed
 );
 paired!(
     late_frames_are_keyed_into_the_detached_stream,
+    "drain_late",
     sqlite_late_frames_are_keyed_into_the_detached_stream,
     postgres_late_frames_are_keyed_into_the_detached_stream
+);
+paired!(
+    peer_stanza_frames_are_keyed_after_the_recipient_pass,
+    "drain_peer",
+    sqlite_peer_stanza_frames_are_keyed_after_the_recipient_pass,
+    postgres_peer_stanza_frames_are_keyed_after_the_recipient_pass
 );

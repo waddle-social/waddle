@@ -968,11 +968,12 @@ async fn cleanup_connection_shutdown_inner(
                     unproven,
                 }) => {
                     if !unproven.is_empty() {
-                        // A racing keyed writer won between the drain's ledger read
-                        // and this store. The entries stay queued, unkeyed.
+                        // Either a racing keyed writer won between the drain's
+                        // ledger read and this store, or the store was skipped for
+                        // an in-flight resume claim. No proof exists either way.
                         warn!(
                             count = unproven.len(),
-                            "drained ingress obligations lost the ledger race; entries kept unkeyed"
+                            "drained ingress obligations were not proven with the session store; at-least-once"
                         );
                     }
                     // Issue #1097: sessions the registry displaced to make

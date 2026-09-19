@@ -1389,6 +1389,15 @@ time. What stays at-least-once on this path:
 - a keyed writer that wins the ledger between the drain's read and the session
   store keeps both entries: the drained one already holds a counted sequence, so
   only its proof is withheld (`drained ingress obligations lost the ledger race`);
+- one indeterminate canonical read (timeout or read failure) ends authorization
+  for the rest of that drain: the reads are serial and run before the detached
+  session is stored, so a full queue against a browned-out database would
+  otherwise hold the detach — and the client's `<resume/>` — for up to a minute;
+- a detach that diverts to terminal recovery or is refused for a missing principal
+  promotes the drained queue without proofs;
+- a re-executed `PeerStanza` runs the recipient pass before the ledger is read, so
+  its archive write and received carbons repeat even though the frame is then
+  dropped. "Exactly once" here means the replay-queue entry and the ledger row;
 - a frame that *was* written live but is unacknowledged at detach sits in the
   connection-local queue with no proof. That is the #1760 family, not the drain;
 - an old peer answers the v2 frame with `UnknownMessage`: a no-effect failure that
