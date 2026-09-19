@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::ingress::append_authority::{
-    check_canonical_authority, record_degraded_to_unkeyed, AppendAuthorityRejection,
+    check_canonical_sender, check_stanza_binding, record_degraded_to_unkeyed,
+    AppendAuthorityRejection,
 };
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::server::routes::interpret::SmIngressAppendContext;
@@ -38,12 +39,15 @@ async fn check_authority(
         .web_socket_state
         .upgrade()
         .ok_or(AppendAuthorityRejection::ServicesUnavailable)?;
-    check_canonical_authority(
-        state.deps.app_state.db_pool.global(),
+    check_stanza_binding(
         stanza,
-        obligation.message_key,
         &obligation.sender_bare,
         obligation.receipt.kind.to_storage(),
+    )?;
+    check_canonical_sender(
+        state.deps.app_state.db_pool.global(),
+        obligation.message_key,
+        &obligation.sender_bare,
     )
     .await
 }

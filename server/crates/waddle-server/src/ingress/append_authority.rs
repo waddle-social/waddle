@@ -16,6 +16,8 @@ const AUTHORIZATION_READ_TIMEOUT: Duration = Duration::from_millis(250);
 pub(crate) enum AppendAuthorityRejection {
     IneligibleKind,
     NotMessage,
+    /// Only the clustering receivers hold a validated sender claim to compare.
+    #[cfg(feature = "clustering")]
     SenderClaimMismatch,
     StanzaSenderMismatch,
     ServicesUnavailable,
@@ -37,10 +39,11 @@ impl AppendAuthorityRejection {
         match self {
             Self::IneligibleKind
             | Self::NotMessage
-            | Self::SenderClaimMismatch
             | Self::StanzaSenderMismatch
             | Self::CanonicalSenderMissing
             | Self::CanonicalSenderMismatch => IngressAppendAuthorizationFailure::Unauthorized,
+            #[cfg(feature = "clustering")]
+            Self::SenderClaimMismatch => IngressAppendAuthorizationFailure::Unauthorized,
             Self::ServicesUnavailable | Self::CanonicalReadFailed | Self::CanonicalReadTimedOut => {
                 IngressAppendAuthorizationFailure::Indeterminate
             }
@@ -95,18 +98,6 @@ pub(crate) async fn check_canonical_sender(
         return Err(AppendAuthorityRejection::CanonicalSenderMismatch);
     }
     Ok(())
-}
-
-/// The canonical ingress row must exist and name the sender the stanza carries.
-pub(crate) async fn check_canonical_authority(
-    db: &crate::db::Database,
-    stanza: &Stanza,
-    message_key: MessageKey,
-    sender_bare: &jid::BareJid,
-    receipt_kind_storage_tag: i32,
-) -> Result<(), AppendAuthorityRejection> {
-    check_stanza_binding(stanza, sender_bare, receipt_kind_storage_tag)?;
-    check_canonical_sender(db, message_key, sender_bare).await
 }
 
 /// Record that a relayed obligation degraded to unkeyed delivery.
