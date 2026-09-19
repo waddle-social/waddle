@@ -9,7 +9,12 @@ impl OrderedRelayDeliveryBridge {
         ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Result<(), OrderedRelayNackReason> {
         if let Some(outcome) = self
-            .try_deliver_registered_remote_resource(target, stanza, DeliveryKind::PeerStanza)
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                DeliveryKind::PeerStanza,
+                ingress_append_context,
+            )
             .await
         {
             return match outcome {
@@ -215,7 +220,12 @@ pub(in super::super) async fn deliver_direct_or_registered_remote_resource(
             .as_ref()
         {
             if let Some(outcome) = bridge
-                .try_deliver_registered_remote_resource(target, stanza, DeliveryKind::DirectFrame)
+                .try_deliver_registered_remote_resource(
+                    target,
+                    stanza,
+                    DeliveryKind::DirectFrame,
+                    None,
+                )
                 .await
             {
                 return outcome;

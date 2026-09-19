@@ -265,6 +265,73 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
     );
 }
 
+/// Issue #1789: the frame to a registered remote socket carries the executor's
+/// ingress obligation, bound to the stanza's sender, so the socket node can key a
+/// later detach drain. Only an append-eligible message obligation crosses the wire.
+#[test]
+fn registered_remote_frame_carries_the_executors_ingress_obligation() {
+    use super::super::delivery::remote_socket::remote_resource_frame;
+    use crate::ingress::EffectReceiptKey;
+    use crate::ingress_substrate::EffectReceiptKind;
+    use crate::server::routes::interpret::SmIngressAppendContext;
+    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+
+    let context = |kind: IngressEffectKind| SmIngressAppendContext {
+        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
+        receipt: EffectReceiptKey {
+            kind: EffectReceiptKind::from_storage(kind.storage_tag()),
+            semantic_identity_hash: [89; 32],
+        },
+        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    };
+    let registration_id = RemoteResourceRegistrationId::fresh();
+    let target = target_full();
+    let mut message = Message::new(Some(jid::Jid::from(target.clone())));
+    message.from = Some(sender_full().into());
+    let message = Stanza::Message(message);
+    let direct = context(IngressEffectKind::RouteDirect);
+
+    let frame = remote_resource_frame(
+        &target,
+        registration_id,
+        &message,
+        DeliveryKind::PeerStanza,
+        Some(&direct),
+    );
+    let obligation = frame.ingress_append.expect("obligation crosses the wire");
+    assert_eq!(obligation.message_key, direct.message_key);
+    assert_eq!(obligation.receipt, direct.receipt);
+    assert_eq!(obligation.received_at, direct.received_at);
+    assert_eq!(obligation.sender_bare, sender_full().to_bare());
+
+    let unkeyed = |stanza: &Stanza, context: Option<&SmIngressAppendContext>| {
+        remote_resource_frame(
+            &target,
+            registration_id,
+            stanza,
+            DeliveryKind::PeerStanza,
+            context,
+        )
+        .ingress_append
+    };
+    assert_eq!(unkeyed(&message, None), None, "no obligation, no key");
+    assert_eq!(
+        unkeyed(
+            &message,
+            Some(&context(IngressEffectKind::ArchiveAuthoritative))
+        ),
+        None,
+        "only recorded routes allocate keyed appends"
+    );
+    let mut anonymous = Message::new(Some(jid::Jid::from(target.clone())));
+    anonymous.from = None;
+    assert_eq!(
+        unkeyed(&Stanza::Message(anonymous), Some(&direct)),
+        None,
+        "an obligation cannot be bound without a sender"
+    );
+}
+
 #[tokio::test]
 async fn remote_socket_write_accepted_waits_for_writer_handoff() {
     let services = Arc::new(
@@ -1023,6 +1090,7 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
             &target,
             &Stanza::Message(Message::new(Some(jid::Jid::from(target.clone())))),
             DeliveryKind::PeerStanza,
+            None,
         )
         .await;
 

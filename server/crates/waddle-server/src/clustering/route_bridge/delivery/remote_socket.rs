@@ -31,6 +31,7 @@ impl OrderedRelayDeliveryBridge {
         target: &jid::FullJid,
         stanza: &Stanza,
         kind: DeliveryKind,
+        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Option<FullJidDeliveryOutcome> {
         let registration = {
             let registrations = self.remote_owner_resources.lock().await;
@@ -41,6 +42,7 @@ impl OrderedRelayDeliveryBridge {
             stanza,
             kind,
             &registration,
+            ingress_append_context,
         )
         .await
     }
@@ -142,6 +144,7 @@ impl OrderedRelayDeliveryBridge {
                         &target,
                         &stanza.0,
                         DeliveryKind::PeerStanza,
+                        ingress_append_context.as_ref(),
                     )
                     .await
                 {
@@ -423,19 +426,20 @@ impl OrderedRelayDeliveryBridge {
         stanza: &Stanza,
         kind: DeliveryKind,
         registration: &RemoteOwnerRegistration,
+        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Option<FullJidDeliveryOutcome> {
         let mut handle =
             RelayHandle::new(registration.socket_node.clone(), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
         match handle
             .deliver_remote_resource_frame(RelayDeliverRemoteResourceFrame {
-                frame: RemoteResourceOutboundFrame {
-                    jid: target.clone(),
-                    registration_id: registration.registration_id,
-                    stanza: RemoteStanza(stanza.clone()),
+                frame: remote_resource_frame(
+                    target,
+                    registration.registration_id,
+                    stanza,
                     kind,
-                    ingress_append: None,
-                },
+                    ingress_append_context,
+                ),
                 trace: RelayTraceContext::default(),
             })
             .await
@@ -596,5 +600,26 @@ pub(crate) fn classify_write_accepted_status(
         RelayRemoteResourceWriteAcceptedStatus::Unavailable => {
             RegisteredRemoteWriteAcceptedDelivery::Absent
         }
+    }
+}
+
+/// The owner-to-socket frame. It carries the recorded ingress obligation so the socket
+/// node can key a later detach drain (issue #1789); the socket node authorizes it there.
+pub(in super::super) fn remote_resource_frame(
+    target: &jid::FullJid,
+    registration_id: RemoteResourceRegistrationId,
+    stanza: &Stanza,
+    kind: DeliveryKind,
+    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+) -> RemoteResourceOutboundFrame {
+    RemoteResourceOutboundFrame {
+        jid: target.clone(),
+        registration_id,
+        stanza: RemoteStanza(stanza.clone()),
+        kind,
+        ingress_append: crate::ingress::identity::IngressAppendObligationRef::for_message(
+            ingress_append_context,
+            stanza,
+        ),
     }
 }

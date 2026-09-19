@@ -199,6 +199,45 @@ async fn unauthorized_obligation_drains_unkeyed(fixture: IngressFixture) {
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 0);
 }
 
+/// The second detach drain: a frame lands after the detached session is stored but
+/// before the registry unregisters the socket. It is keyed at the connection's own
+/// sequence, in one write with its proof, and a repeat is dropped uncounted.
+async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture) {
+    use super::super::replay::{drain_outbound_into_replay, PendingRowDrainPolicy};
+
+    let mut socket = detaching_socket(fixture).await;
+    let (stanza, obligation) = committed_obligation(&socket).await;
+    detach(&mut socket).await;
+
+    for _ in 0..2 {
+        let (late_tx, mut late_rx) = mpsc::channel::<OutboundStanza>(1);
+        late_tx
+            .send(OutboundStanza::new(stanza.clone()).with_ingress_append(obligation.clone()))
+            .await
+            .expect("late frame");
+        drain_outbound_into_replay(
+            socket.state.as_ref(),
+            None,
+            &mut socket.conn.sm_state,
+            None,
+            &mut late_rx,
+            Some(STREAM),
+            PendingRowDrainPolicy::PreserveForReplay,
+            &mut Vec::new(),
+        )
+        .await;
+    }
+
+    let detached = socket.sm.peek_session(STREAM).await.unwrap().unwrap();
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(detached.outbound_count, 1);
+    assert_eq!(
+        socket.conn.sm_state.outbound_count, 1,
+        "the connection-local counter stays aligned with the detached stream"
+    );
+    assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
+}
+
 macro_rules! paired {
     ($case:ident, $sqlite:ident, $postgres:ident) => {
         #[tokio::test]
@@ -229,4 +268,9 @@ paired!(
     unauthorized_obligation_drains_unkeyed,
     sqlite_unauthorized_obligation_drains_unkeyed,
     postgres_unauthorized_obligation_drains_unkeyed
+);
+paired!(
+    late_frames_are_keyed_into_the_detached_stream,
+    sqlite_late_frames_are_keyed_into_the_detached_stream,
+    postgres_late_frames_are_keyed_into_the_detached_stream
 );

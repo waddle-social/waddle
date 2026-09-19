@@ -73,6 +73,19 @@ impl IngressAppendObligationRef {
         }
     }
 
+    /// Bind a recorded obligation to the message that discharges it. `None` unless the
+    /// stanza is a message with a sender and the recorded route allocates keyed appends.
+    pub fn for_message(
+        context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        stanza: &waddle_xmpp::Stanza,
+    ) -> Option<Self> {
+        let waddle_xmpp::Stanza::Message(message) = stanza else {
+            return None;
+        };
+        let sender = message.from.as_ref()?.to_bare();
+        Some(Self::from_context(context?, sender)).filter(Self::kind_is_append_eligible)
+    }
+
     pub fn into_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {
         crate::server::routes::interpret::SmIngressAppendContext {
             message_key: self.message_key,

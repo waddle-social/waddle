@@ -75,6 +75,7 @@ pub(super) async fn route_full_jid_iq(
                 &target,
                 &stanza,
                 waddle_xmpp::registry::DeliveryKind::PeerStanza,
+                None,
             )
             .await
         {
