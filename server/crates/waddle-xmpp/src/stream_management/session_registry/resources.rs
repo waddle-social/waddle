@@ -429,10 +429,11 @@ impl InMemorySmSessionRegistry {
         self: &Arc<Self>,
         stream_id: &str,
         sequence: u32,
-        stanza_xml: String,
+        stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
         key: crate::stream_management::SmIngressAppendKey,
     ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
+        let stanza_xml = Self::stanza_to_replay_xml(stanza);
         use crate::stream_management::SmKeyedAppendOutcome;
         let supersedes = match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { accepting_stream } => {

@@ -18,9 +18,24 @@ use waddle_xmpp::stream_management::{
 /// `<resume/>` finds nothing. One indeterminate read therefore ends authorization for
 /// the rest of the drain: a full queue against a browned-out database would otherwise
 /// hold the detach for a minute to protect a dedupe key it cannot obtain anyway.
-#[derive(Default)]
 pub(super) struct DrainAuthority {
     canonical_reads_indeterminate: bool,
+    /// Healthy reads are serial too. Past this point the rest of the drain is unkeyed.
+    deadline: tokio::time::Instant,
+}
+
+/// Total time one drain may spend authorizing. It bounds the detach — and with it
+/// the client's ability to resume and a graceful restart's drain — independently of
+/// queue depth and of how slow a merely degraded database is.
+const DRAIN_AUTHORIZATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Default for DrainAuthority {
+    fn default() -> Self {
+        Self {
+            canonical_reads_indeterminate: false,
+            deadline: tokio::time::Instant::now() + DRAIN_AUTHORIZATION_BUDGET,
+        }
+    }
 }
 
 impl DrainAuthority {
@@ -41,18 +56,19 @@ impl DrainAuthority {
         use waddle_xmpp::telemetry::attributes::IngressAppendAuthorizationFailure;
 
         let obligation = obligation?;
-        let outcome = if self.canonical_reads_indeterminate {
-            Err(AppendAuthorityRejection::ServicesUnavailable)
-        } else {
-            check_canonical_authority(
-                state.deps.app_state.db_pool.global(),
-                stanza,
-                obligation.key.message_key,
-                &obligation.sender_bare,
-                obligation.key.kind.to_storage(),
-            )
-            .await
-        };
+        let outcome =
+            if self.canonical_reads_indeterminate || tokio::time::Instant::now() >= self.deadline {
+                Err(AppendAuthorityRejection::ServicesUnavailable)
+            } else {
+                check_canonical_authority(
+                    state.deps.app_state.db_pool.global(),
+                    stanza,
+                    obligation.key.message_key,
+                    &obligation.sender_bare,
+                    obligation.key.kind.to_storage(),
+                )
+                .await
+            };
         match outcome {
             Ok(()) => Some(obligation),
             Err(reason) => {
@@ -65,6 +81,15 @@ impl DrainAuthority {
             }
         }
     }
+}
+
+/// Parse a recipient-pass wire frame back into the typed message it carries.
+/// Only messages hold append obligations; anything else drains unkeyed.
+pub(super) fn parse_message_frame(xml: &str) -> Option<Stanza> {
+    let element: minidom::Element = xml.parse().ok()?;
+    xmpp_parsers::message::Message::try_from(element)
+        .ok()
+        .map(Stanza::Message)
 }
 
 pub(super) enum Claim {
@@ -82,7 +107,7 @@ pub(super) async fn claim(
     state: &WebSocketState,
     detached_stream_id: Option<&str>,
     sequence: u32,
-    xml: &str,
+    stanza: &Stanza,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     key: SmIngressAppendKey,
     drained_appends: &[DrainedAppend],
@@ -110,7 +135,7 @@ pub(super) async fn claim(
         .record_keyed_outbound_for_detached_stream_at(
             stream_id,
             sequence,
-            xml.to_owned(),
+            stanza,
             original_receipt_at,
             key,
         )

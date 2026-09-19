@@ -279,6 +279,53 @@ async fn peer_stanza_frames_are_keyed_after_the_recipient_pass(fixture: IngressF
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
 }
 
+/// The first drain runs while the socket is still registered, and each keyed frame
+/// awaits a canonical read. A producer that refills the queue faster than those reads
+/// complete must not be able to hold the detach open: the drain takes the backlog it
+/// found and leaves later arrivals to the post-unregister drain.
+async fn first_drain_is_bounded_by_the_backlog_it_found(fixture: IngressFixture) {
+    use super::super::replay::{drain_outbound_into_replay, PendingRowDrainPolicy};
+
+    let mut socket = detaching_socket(fixture).await;
+    let (stanza, obligation) = committed_obligation(&socket).await;
+    let frame = move || OutboundStanza::new(stanza.clone()).with_ingress_append(obligation.clone());
+    for _ in 0..3 {
+        socket.tx.send(frame()).await.expect("initial backlog");
+    }
+    let producer = tokio::spawn({
+        let tx = socket.tx.clone();
+        async move {
+            while tx.send(frame()).await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        drain_outbound_into_replay(
+            socket.state.as_ref(),
+            None,
+            &mut socket.conn.sm_state,
+            None,
+            &mut socket.rx,
+            super::super::replay::ReplayDrainSink {
+                detached_stream_id: None,
+                pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
+                drained_appends: &mut Vec::new(),
+            },
+        ),
+    )
+    .await
+    .expect("a refilling producer must not hold the first drain open");
+    producer.abort();
+
+    assert!(
+        !socket.rx.is_empty(),
+        "frames that arrived during the drain wait for the post-unregister drain"
+    );
+}
+
 // `$schema` stays short: the fixture appends a uuid to it for the Postgres schema
 // name, and Postgres truncates identifiers at 63 bytes — a long label pushes the
 // uuid off the end and makes reruns collide.
@@ -327,4 +374,10 @@ paired!(
     "drain_peer",
     sqlite_peer_stanza_frames_are_keyed_after_the_recipient_pass,
     postgres_peer_stanza_frames_are_keyed_after_the_recipient_pass
+);
+paired!(
+    first_drain_is_bounded_by_the_backlog_it_found,
+    "drain_bound",
+    sqlite_first_drain_is_bounded_by_the_backlog_it_found,
+    postgres_first_drain_is_bounded_by_the_backlog_it_found
 );

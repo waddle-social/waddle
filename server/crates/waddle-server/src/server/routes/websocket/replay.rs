@@ -71,7 +71,13 @@ struct DrainedFrame {
     xml: String,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
-    ingress_append: Option<waddle_xmpp::stream_management::SmIngressAppendKey>,
+    ingress_append: Option<KeyedFrame>,
+}
+
+/// A frame's authorized obligation and the typed stanza the keyed registry records.
+struct KeyedFrame {
+    key: waddle_xmpp::stream_management::SmIngressAppendKey,
+    stanza: Stanza,
 }
 
 /// Drain `outbound_rx` of all immediately-available
@@ -103,7 +109,18 @@ pub(super) async fn drain_outbound_into_replay(
     let deps = build_interpret_deps(state, principal);
     let mut sm_borrow: Option<&mut XmppStateMachine> = state_machine;
     let mut authority = super::drain_append::DrainAuthority::default();
-    while let Ok(mut outbound_stanza) = outbound_rx.try_recv() {
+    // Before the detached session exists the socket is still registered and the
+    // channel still open, and a keyed frame awaits a canonical read. Take only the
+    // backlog found here: a producer refilling the queue faster than those reads
+    // complete would otherwise hold the detach open indefinitely, with the session
+    // unresumable and a graceful restart stuck in its drain. Later arrivals belong
+    // to the second drain, which runs after the receiver is closed.
+    let mut remaining = sink.detached_stream_id.is_none().then(|| outbound_rx.len());
+    while remaining.map_or(true, |remaining| remaining > 0) {
+        let Ok(mut outbound_stanza) = outbound_rx.try_recv() else {
+            break;
+        };
+        remaining = remaining.map(|remaining| remaining - 1);
         // Codex P2 review on PR #361: when this is a pending_delivery
         // flush replay, preserve the row's original_receipt_at instead
         // of stamping `Utc::now()` at drain time. Otherwise a flush
@@ -138,7 +155,10 @@ pub(super) async fn drain_outbound_into_replay(
                         xml,
                         original_receipt_at: receipt_at,
                         pending_row_id,
-                        ingress_append: ingress_append.take().map(|obligation| obligation.key),
+                        ingress_append: ingress_append.take().map(|obligation| KeyedFrame {
+                            key: obligation.key,
+                            stanza: outbound_stanza.stanza.clone(),
+                        }),
                     },
                 )
                 .await;
@@ -161,6 +181,14 @@ pub(super) async fn drain_outbound_into_replay(
                 let mut row_id_for_first = pending_row_id.clone();
                 for xml in drive.frames {
                     let row_for_this = row_id_for_first.take();
+                    // The recipient pass emits wire frames; the keyed registry
+                    // boundary is typed, so the frame is parsed back exactly once.
+                    let keyed = ingress_append.take().and_then(|obligation| {
+                        super::drain_append::parse_message_frame(&xml).map(|stanza| KeyedFrame {
+                            key: obligation.key,
+                            stanza,
+                        })
+                    });
                     // The recipient pass may emit several frames; the obligation
                     // stands for the first, as the pending row does.
                     record_drained_xml(
@@ -171,7 +199,7 @@ pub(super) async fn drain_outbound_into_replay(
                             xml,
                             original_receipt_at: receipt_at,
                             pending_row_id: row_for_this,
-                            ingress_append: ingress_append.take().map(|obligation| obligation.key),
+                            ingress_append: keyed,
                         },
                     )
                     .await;
@@ -420,13 +448,13 @@ async fn record_drained_xml(
     // withholding the entry would leave a sequence the client can never
     // acknowledge (XEP-0198 §5).
     let keyed = match ingress_append {
-        Some(key) => {
+        Some(KeyedFrame { key, stanza }) => {
             let next_sequence = sm_state.outbound_count.wrapping_add(1);
             match super::drain_append::claim(
                 state,
                 detached_stream_id,
                 next_sequence,
-                &xml,
+                &stanza,
                 original_receipt_at,
                 key,
                 drained_appends,

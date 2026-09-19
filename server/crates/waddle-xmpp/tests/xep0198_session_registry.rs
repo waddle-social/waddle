@@ -1773,7 +1773,7 @@ async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
         .record_keyed_outbound_for_detached_stream_at(
             "stream-keyed-drain",
             12,
-            queued_stanza_xml("drained", "once"),
+            &chat_stanza(&resource, "once"),
             chrono::Utc::now(),
             key.clone(),
         )
@@ -1790,7 +1790,7 @@ async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
         .record_keyed_outbound_for_detached_stream_at(
             "stream-keyed-drain",
             13,
-            queued_stanza_xml("drained", "once"),
+            &chat_stanza(&resource, "once"),
             chrono::Utc::now(),
             key,
         )
@@ -1830,9 +1830,7 @@ fn drained_entry(sequence: u32) -> waddle_xmpp::stream_management::DetachedUnack
     waddle_xmpp::stream_management::DetachedUnackedStanza {
         ingress_receipts: Vec::new(),
         sequence,
-        stanza_xml: format!(
-            "<message xmlns='jabber:client' id='m{sequence}'><body>drained</body></message>"
-        ),
+        stanza_xml: queued_stanza_xml(&format!("m{sequence}"), "drained"),
         original_receipt_at: chrono::Utc::now(),
     }
 }
