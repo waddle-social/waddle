@@ -74,6 +74,16 @@ bun test && bun run lint
   - Prefer deleting dead code, wiring unused code into the exercised path, or
     narrowing visibility over suppressing warnings.
 
+- Merge-gate test hard rule (server/):
+  - The lane that gates the image publish is the cuenv `test` task:
+    `cargo nextest run --workspace --all-targets --locked --profile ci`, with
+    default features. It runs on every server pull request and on `main` from
+    the same task definition in `server/env.cue`; never drop it from one
+    pipeline while the other still runs it.
+  - Verify locally with that exact invocation, **without** `--all-features`.
+    An `--all-features` run (what `nixTest` and clippy build) is a different
+    configuration with a different test set and does not predict this lane.
+
 ## Code Style
 
 - TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions.
