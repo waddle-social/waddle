@@ -1383,6 +1383,12 @@ gap-covered proofs, so a retained entry's proof can outlive its payload and
 suppress recovery with a false `AlreadyAppended`. This is not lifecycle-safe
 exactly-once delivery.
 
+**OPEN orphan-proof residue.** A cross-node ledger writer can insert after its
+canonical parent was reclaimed. GC deletes proofs only for canonical keys it
+is reclaiming, and `sm_ingress_appends` has no foreign key, so such a row is
+never collected. The orphan append-proof sweep is removed and tracked for a
+re-land behind proper validation.
+
 Earlier committed progress survives restart and is excluded from later
 decisions. Progress writes and the final aggregate receipt share one
 epoch-attested transaction under the canonical message lock. Lock contention

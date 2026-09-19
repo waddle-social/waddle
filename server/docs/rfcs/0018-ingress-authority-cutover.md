@@ -338,6 +338,11 @@ The remaining limits are explicit:
 - **Still at-least-once:** failed receiver-side authorization degrades to an
   unkeyed append, with a warning and counter. Delivery never fails because
   this check failed; availability does not depend on authorization succeeding.
+- **OPEN orphan-proof residue:** a cross-node ledger writer can insert after
+  its canonical parent was reclaimed. GC deletes proofs only for canonical
+  keys it is reclaiming, and `sm_ingress_appends` has no foreign key, so such
+  a row is never collected. The orphan append-proof sweep is removed and
+  tracked for a re-land behind proper validation.
 - Proof and resource progress commit in two transactions: the ledger row
   with the SM snapshot, the progress row afterwards under the canonical lock.
   A retry between them reads `AlreadyAppended`. The #1760 custody limitation
