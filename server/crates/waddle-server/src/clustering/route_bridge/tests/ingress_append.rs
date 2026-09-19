@@ -511,11 +511,11 @@ async fn postgres_forwarded_obligation_survives_intermediate_hop() {
 }
 
 #[tokio::test]
-async fn sqlite_live_recipient_skips_ingress_append_authorization() {
+async fn sqlite_live_recipient_delivery_writes_no_append_ledger_row() {
     ingress_append_authority(IngressFixture::sqlite().await, false, false, true).await;
 }
 #[tokio::test]
-async fn postgres_live_recipient_skips_ingress_append_authorization() {
+async fn postgres_live_recipient_delivery_writes_no_append_ledger_row() {
     if let Some(fixture) = IngressFixture::postgres("live_recipient_append_auth").await {
         ingress_append_authority(fixture, false, false, true).await;
     }

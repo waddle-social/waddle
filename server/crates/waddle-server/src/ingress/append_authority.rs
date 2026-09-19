@@ -94,9 +94,11 @@ pub(crate) fn record_degraded_to_unkeyed(
     reason: &AppendAuthorityRejection,
     sender_bare: &jid::BareJid,
 ) {
-    // The peer-fault class is rare and worth a line each; the indeterminate class
-    // repeats for the length of a canonical-read outage, where the counter is
-    // already the alerting surface.
+    // An `Indeterminate` rejection is correlated with a database problem
+    // and fires once per relayed message, so warning on it would flood
+    // the logs for the length of an outage. The counter below is the
+    // alerting surface for that class; keep the log for the peer-fault
+    // class, which should be rare and is worth a line each.
     match reason.failure_class() {
         IngressAppendAuthorizationFailure::Unauthorized => tracing::warn!(
             ?reason,
@@ -106,7 +108,8 @@ pub(crate) fn record_degraded_to_unkeyed(
         IngressAppendAuthorizationFailure::Indeterminate => tracing::debug!(
             ?reason,
             sender = %sender_bare,
-            "relay append identity undecidable; continuing with unkeyed delivery"
+            "relay append identity could not be authorized; continuing with \
+             unkeyed delivery"
         ),
     }
     waddle_xmpp::counter_add!(

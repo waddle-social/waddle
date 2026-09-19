@@ -1,14 +1,6 @@
 //! Periodic ingress maintenance scheduling and bounded retention collection.
 
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use futures::FutureExt;
@@ -23,8 +15,7 @@ use crate::ingress_substrate::{
 use crate::ingress_uow::IngressUnitOfWork;
 
 use super::maintenance::{
-    run_maintenance_pass, run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
-    MaintenanceOutcome,
+    run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome,
 };
 
 use super::recovery_environment::RecoveryBinding;
@@ -212,34 +203,22 @@ impl RetentionGcCoordinator {
         binding: RecoveryBinding,
     ) -> Self {
         let cursor = MaintenanceCursor::default();
-        let startup = Arc::new(AtomicBool::new(true));
         Self {
             trigger: Arc::new(Notify::new()),
             run: Arc::new(move || {
                 let database = database.clone();
                 let uow = uow.clone();
                 let cursor = cursor.clone();
-                let startup = startup.clone();
                 let environment = binding.environment();
                 Box::pin(async move {
-                    if startup.swap(false, Ordering::SeqCst) {
-                        run_maintenance_pass(
-                            &database,
-                            &uow,
-                            MaintenanceBudget::DEFAULT,
-                            environment,
-                        )
-                        .await
-                    } else {
-                        run_maintenance_pass_with_cursor(
-                            &database,
-                            &uow,
-                            MaintenanceBudget::DEFAULT,
-                            &cursor,
-                            environment,
-                        )
-                        .await
-                    }
+                    run_maintenance_pass_with_cursor(
+                        &database,
+                        &uow,
+                        MaintenanceBudget::DEFAULT,
+                        &cursor,
+                        environment,
+                    )
+                    .await
                 })
             }),
             partial_retry_delay: RETENTION_GC_PARTIAL_RETRY_DELAY,
@@ -255,8 +234,8 @@ impl RetentionGcCoordinator {
 pub(crate) async fn run_retention_gc_with_budget(
     database: &Database,
     budget: RetentionGcBudget,
+    progress: AliasGcProgress,
 ) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
-    let progress = AliasGcProgress::default();
     let result = tokio::time::timeout(
         budget.hard_deadline,
         gc_expired_aliases(
@@ -294,6 +273,7 @@ pub(crate) async fn run_retention_gc_with_budget(
 
 #[cfg(test)]
 mod tests {
+    use super::super::maintenance::run_maintenance_pass;
     use super::*;
     use crate::db::MigrationRunner;
     use crate::ingress_substrate::{record_message, terminalize_message};
@@ -390,7 +370,12 @@ mod tests {
         transaction.commit().await.expect("commit canonical row");
 
         assert_eq!(
-            run_retention_gc_with_budget(&database, RetentionGcBudget::DEFAULT).await,
+            run_retention_gc_with_budget(
+                &database,
+                RetentionGcBudget::DEFAULT,
+                AliasGcProgress::default()
+            )
+            .await,
             IngressGcOutcome::Completed
         );
         let connection = database.guard().await.expect("read GC result");
