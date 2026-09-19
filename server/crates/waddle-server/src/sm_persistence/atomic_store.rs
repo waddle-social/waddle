@@ -6,7 +6,7 @@ pub(super) async fn store_session_atomic(
     session: PersistedSession,
     unacked: Vec<PersistedUnackedStanza>,
 ) -> Result<(), SmPersistenceError> {
-    store_session_atomic_inner(storage, None, session, unacked, None)
+    store_session_atomic_inner(storage, None, session, unacked, Ledger::Untouched)
         .await
         .map(|_| ())
 }
@@ -17,9 +17,38 @@ pub(super) async fn store_session_atomic_with_principal(
     session: PersistedSession,
     unacked: Vec<PersistedUnackedStanza>,
 ) -> Result<(), SmPersistenceError> {
-    store_session_atomic_inner(storage, Some(principal), session, unacked, None)
-        .await
-        .map(|_| ())
+    store_session_atomic_with_principal_and_ingress_appends(
+        storage,
+        principal,
+        session,
+        unacked,
+        Vec::new(),
+    )
+    .await
+    .map(drop)
+}
+
+pub(super) async fn store_session_atomic_with_principal_and_ingress_appends(
+    storage: &DatabaseSmPersistence,
+    principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,
+    session: PersistedSession,
+    unacked: Vec<PersistedUnackedStanza>,
+    appends: Vec<PersistedIngressAppend>,
+) -> Result<Vec<waddle_xmpp::stream_management::SmIngressAppendKey>, SmPersistenceError> {
+    match store_session_atomic_inner(
+        storage,
+        Some(principal),
+        session,
+        unacked,
+        Ledger::Drained(appends),
+    )
+    .await?
+    {
+        StoreOutcome::Committed { withheld } => Ok(withheld),
+        StoreOutcome::ObligationAlreadyAllocated { .. } => Err(SmPersistenceError::Other(
+            "a drained batch never aborts on a ledger conflict".into(),
+        )),
+    }
 }
 
 pub(super) async fn store_session_atomic_with_ingress_append(
@@ -28,7 +57,34 @@ pub(super) async fn store_session_atomic_with_ingress_append(
     unacked: Vec<PersistedUnackedStanza>,
     append: PersistedIngressAppend,
 ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
-    store_session_atomic_inner(storage, None, session, unacked, Some(append)).await
+    Ok(
+        match store_session_atomic_inner(storage, None, session, unacked, Ledger::Exclusive(append))
+            .await?
+        {
+            StoreOutcome::Committed { .. } => KeyedSnapshotOutcome::Committed,
+            StoreOutcome::ObligationAlreadyAllocated { accepting_stream } => {
+                KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream }
+            }
+        },
+    )
+}
+
+/// How a snapshot write touches the ingress allocation ledger.
+enum Ledger {
+    Untouched,
+    /// One obligation gates the whole write: a conflict commits nothing.
+    Exclusive(PersistedIngressAppend),
+    /// Drained entries already hold counted sequences: a conflict withholds only its proof.
+    Drained(Vec<PersistedIngressAppend>),
+}
+
+enum StoreOutcome {
+    Committed {
+        withheld: Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
+    },
+    ObligationAlreadyAllocated {
+        accepting_stream: SmSessionId,
+    },
 }
 
 async fn store_session_atomic_inner(
@@ -36,8 +92,8 @@ async fn store_session_atomic_inner(
     principal: Option<&waddle_xmpp::auth::AuthenticatedPrincipalRef>,
     session: PersistedSession,
     unacked: Vec<PersistedUnackedStanza>,
-    append: Option<PersistedIngressAppend>,
-) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+    ledger: Ledger,
+) -> Result<StoreOutcome, SmPersistenceError> {
     let lock = storage.lock_for(&session.stream_id);
     let _guard = lock.lock().await;
 
@@ -162,7 +218,13 @@ async fn store_session_atomic_inner(
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     }
 
-    if let Some(append) = append {
+    let mut withheld = Vec::new();
+    if let Ledger::Drained(appends) = &ledger {
+        withheld = ingress_append::insert_or_withhold(&mut tx, appends)
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    }
+    if let Ledger::Exclusive(append) = ledger {
         match ingress_append::insert(&mut tx, &append).await {
             Ok(true) => {}
             Ok(false) => {
@@ -178,7 +240,7 @@ async fn store_session_atomic_inner(
                             "superseded ingress append vanished after rollback".into(),
                         )
                     })?;
-                return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                return Ok(StoreOutcome::ObligationAlreadyAllocated {
                     accepting_stream: winner.accepting_stream,
                 });
             }
@@ -195,7 +257,7 @@ async fn store_session_atomic_inner(
                                 "ingress append conflict winner missing after rollback".into(),
                             )
                         })?;
-                    return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                    return Ok(StoreOutcome::ObligationAlreadyAllocated {
                         accepting_stream: winner.accepting_stream,
                     });
                 }
@@ -207,5 +269,5 @@ async fn store_session_atomic_inner(
     tx.commit()
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    Ok(KeyedSnapshotOutcome::Committed)
+    Ok(StoreOutcome::Committed { withheld })
 }

@@ -1233,7 +1233,12 @@ async fn deliver_registered_remote_resource(
             .ordered_relay_delivery_bridge
             .as_ref()?;
         bridge
-            .try_deliver_registered_remote_resource(target, stanza, kind)
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                kind,
+                deps.ingress_append_context.as_ref(),
+            )
             .await
     }
     #[cfg(not(feature = "clustering"))]

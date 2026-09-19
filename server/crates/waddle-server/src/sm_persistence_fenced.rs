@@ -1147,6 +1147,23 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
+        self.store_session_atomic_with_principal_and_ingress_appends(
+            principal,
+            session,
+            unacked,
+            Vec::new(),
+        )
+        .await
+        .map(drop)
+    }
+
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        appends: Vec<PersistedIngressAppend>,
+    ) -> Result<Vec<waddle_xmpp::stream_management::SmIngressAppendKey>, SmPersistenceError> {
         let stream_id = session.stream_id.clone();
         let fence = self.claim_fence_for(&stream_id).await?;
         let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
@@ -1244,10 +1261,13 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         }
+        let withheld = crate::sm_persistence::ingress_append::insert_or_withhold(&mut tx, &appends)
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.commit()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        Ok(())
+        Ok(withheld)
     }
 
     async fn record_promotion_failure(

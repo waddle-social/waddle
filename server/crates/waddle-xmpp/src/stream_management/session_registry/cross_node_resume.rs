@@ -1409,6 +1409,23 @@ mod tests {
                 .await
         }
 
+        async fn store_session_atomic_with_principal_and_ingress_appends(
+            &self,
+            principal: &crate::auth::AuthenticatedPrincipalRef,
+            session: crate::stream_management::persistence::PersistedSession,
+            unacked: Vec<crate::stream_management::persistence::PersistedUnackedStanza>,
+            appends: Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        ) -> Result<
+            Vec<crate::stream_management::SmIngressAppendKey>,
+            crate::stream_management::persistence::SmPersistenceError,
+        > {
+            self.inner
+                .store_session_atomic_with_principal_and_ingress_appends(
+                    principal, session, unacked, appends,
+                )
+                .await
+        }
+
         async fn get_ingress_append(
             &self,
             key: &crate::stream_management::SmIngressAppendKey,

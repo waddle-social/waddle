@@ -777,7 +777,7 @@ pub struct RelayRemoteResourceFrameReply {
     pub status: RelayRemoteResourceFrameStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_frame.v1")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_frame.v2")]
 impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceFrameReply>;
 

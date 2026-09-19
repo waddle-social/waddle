@@ -60,6 +60,46 @@ pub(crate) async fn insert(
     Ok(affected > 0)
 }
 
+/// Write every drained allocation, returning the keys whose proof was withheld.
+///
+/// A drained entry already holds a counted sequence, so a conflict must neither abort
+/// the snapshot nor poison the transaction: a first allocation uses `DO NOTHING`, and a
+/// replacement reuses [`insert`]'s guarded `DO UPDATE`. Zero affected rows is the only
+/// reading of "withheld"; any driver error stays an error.
+pub(crate) async fn insert_or_withhold(
+    tx: &mut Transaction<'_>,
+    appends: &[PersistedIngressAppend],
+) -> Result<Vec<SmIngressAppendKey>, DatabaseError> {
+    let mut withheld = Vec::new();
+    for append in appends {
+        let written = if append.supersedes.is_some() {
+            insert(tx, append).await?
+        } else {
+            tx.execute(
+                "INSERT INTO sm_ingress_appends \
+                 (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (message_key, receipt_kind, semantic_identity_hash, resource) DO NOTHING",
+                crate::db_params![
+                    append.key.message_key.to_storage().to_string(),
+                    i64::from(append.key.kind.to_storage()),
+                    append.key.semantic_identity_hash.to_vec(),
+                    append.key.resource.to_string(),
+                    append.accepting_stream.as_str().to_string(),
+                    i64::from(append.sequence),
+                    append.appended_at.timestamp_millis(),
+                ],
+            )
+            .await?
+                > 0
+        };
+        if !written {
+            withheld.push(append.key.clone());
+        }
+    }
+    Ok(withheld)
+}
+
 /// Match the ledger's primary key, never an unrelated uniqueness/check failure.
 /// SQLite exposes the extended code and failing columns, whereas Postgres exposes
 /// the constraint and table names. Inspect these before flattening the driver error.

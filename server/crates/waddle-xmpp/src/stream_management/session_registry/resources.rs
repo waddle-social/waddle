@@ -391,39 +391,13 @@ impl InMemorySmSessionRegistry {
         original_receipt_at: DateTime<Utc>,
         key: crate::stream_management::SmIngressAppendKey,
     ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
-        use crate::stream_management::{
-            persistence::{KeyedSnapshotOutcome, PersistedIngressAppend},
-            SmKeyedAppendOutcome,
-        };
-        let storage = self
-            .persistence
-            .as_ref()
-            .ok_or(SmRegistryError::StorageUnavailable(
-                super::traits::StorageOutageCause::Backend,
-            ))?;
-        // Proof belongs to the obligation, not the currently bound stream.
-        let mut supersedes = None;
-        if let Some(proof) = storage
-            .get_ingress_append(&key)
-            .await
-            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
-        {
-            match self.void_allocation(storage, &proof).await? {
-                // The allocated payload is still deliverable, or the session it
-                // belonged to was already promoted or expired away.
-                None => {
-                    return Ok(SmKeyedAppendOutcome::AlreadyAppended {
-                        accepting_stream: proof.accepting_stream,
-                    })
-                }
-                // The payload was evicted from the bounded queue, so the proof
-                // stands for a stanza nothing can deliver any more. Suppressing
-                // the retry against it would terminalize a lost message, so this
-                // allocation is replaced — gated on that exact row, so a racing
-                // writer that already replaced it still wins.
-                Some(prior) => supersedes = Some(prior),
+        use crate::stream_management::SmKeyedAppendOutcome;
+        let supersedes = match self.consult_ingress_append_ledger(&key).await? {
+            LedgerDecision::Allocated { accepting_stream } => {
+                return Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
             }
-        }
+            LedgerDecision::Unallocated { supersedes } => supersedes,
+        };
         if key.resource != *jid {
             return Err(SmRegistryError::Internal(
                 "Ingress append resource does not match target JID".to_owned(),
@@ -434,18 +408,134 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
+        let stanza_xml = Self::stanza_to_replay_xml(stanza);
+        self.commit_keyed_detached_entry(stream_id, key, supersedes, move |session| {
+            session.record_detached_outbound(stanza_xml, original_receipt_at);
+            session.unacked_stanzas.last().map(|entry| entry.sequence)
+        })
+        .await
+    }
+
+    /// Key a detach-drained frame at the connection's own sequence (issue #1789).
+    ///
+    /// The drain mirrors the connection-local counter, so unlike
+    /// [`Self::record_keyed_stanza_for_detached_bound_resource`] the sequence is the
+    /// caller's. Call this *before* counting the frame locally: on
+    /// [`SmKeyedAppendOutcome::AlreadyAppended`] the frame must be dropped uncounted,
+    /// because nothing on the drain path reached a wire and the client's `h` can never
+    /// include it. `NoSession` also covers a slot the session cannot take (already
+    /// acknowledged or occupied); nothing was written and no proof exists.
+    pub async fn record_keyed_outbound_for_detached_stream_at(
+        self: &Arc<Self>,
+        stream_id: &str,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+        key: crate::stream_management::SmIngressAppendKey,
+    ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
+        use crate::stream_management::SmKeyedAppendOutcome;
+        let supersedes = match self.consult_ingress_append_ledger(&key).await? {
+            LedgerDecision::Allocated { accepting_stream } => {
+                return Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
+            }
+            LedgerDecision::Unallocated { supersedes } => supersedes,
+        };
+        self.commit_keyed_detached_entry(stream_id.to_owned(), key, supersedes, move |session| {
+            session
+                .record_detached_outbound_at(sequence, stanza_xml, original_receipt_at)
+                .then_some(sequence)
+        })
+        .await
+    }
+
+    /// Read the ledger for a frame about to be drained from a detaching socket.
+    ///
+    /// `None` means the obligation already holds a deliverable allocation: drop the
+    /// frame uncounted. `Some` is unallocated as of this read; bind it to the frame's
+    /// sequence and hand it to [`Self::store_session_with_drained_ingress_appends`].
+    pub async fn reserve_drained_ingress_append(
+        &self,
+        key: crate::stream_management::SmIngressAppendKey,
+    ) -> Result<Option<crate::stream_management::SmDrainedAppendTicket>, SmRegistryError> {
+        Ok(match self.consult_ingress_append_ledger(&key).await? {
+            LedgerDecision::Allocated { .. } => None,
+            LedgerDecision::Unallocated { supersedes } => {
+                Some(crate::stream_management::SmDrainedAppendTicket { key, supersedes })
+            }
+        })
+    }
+
+    /// Proof belongs to the obligation, not the currently bound stream, so the
+    /// ledger is consulted before looking at any detached session.
+    async fn consult_ingress_append_ledger(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<LedgerDecision, SmRegistryError> {
+        let storage = self
+            .persistence
+            .as_ref()
+            .ok_or(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Backend,
+            ))?;
+        let Some(proof) = storage
+            .get_ingress_append(key)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
+        else {
+            return Ok(LedgerDecision::Unallocated { supersedes: None });
+        };
+        Ok(match self.void_allocation(storage, &proof).await? {
+            // The allocated payload is still deliverable, or the session it
+            // belonged to was already promoted or expired away.
+            None => LedgerDecision::Allocated {
+                accepting_stream: proof.accepting_stream,
+            },
+            // The payload was evicted from the bounded queue, so the proof
+            // stands for a stanza nothing can deliver any more. Suppressing
+            // the retry against it would terminalize a lost message, so this
+            // allocation is replaced — gated on that exact row, so a racing
+            // writer that already replaced it still wins.
+            Some(prior) => LedgerDecision::Unallocated {
+                supersedes: Some(prior),
+            },
+        })
+    }
+
+    /// Record one queue entry and its ledger proof in a single transaction.
+    ///
+    /// `record` mutates a clone of the snapshot and returns the sequence it
+    /// allocated, or `None` when it allocated nothing.
+    async fn commit_keyed_detached_entry(
+        self: &Arc<Self>,
+        stream_id: String,
+        key: crate::stream_management::SmIngressAppendKey,
+        supersedes: Option<crate::stream_management::persistence::PriorIngressAllocation>,
+        record: impl FnOnce(&mut super::super::DetachedSession) -> Option<u32>,
+    ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
+        use crate::stream_management::{
+            persistence::{KeyedSnapshotOutcome, PersistedIngressAppend},
+            SmKeyedAppendOutcome,
+        };
+        let storage = self
+            .persistence
+            .as_ref()
+            .ok_or(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Backend,
+            ))?;
         let accepting_stream = SmSessionId::new(stream_id);
         let shard = self.stream_lock(accepting_stream.as_str())?;
         let guard = shard.lock_owned().await;
         self.reconcile_stale_session_locked(&accepting_stream)
             .await?;
         let Some(mut updated) = self.detached_snapshot_matching(&accepting_stream, |session| {
-            !session.is_expired() && session.jid == *jid
+            !session.is_expired() && session.jid == key.resource
         })?
         else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
-        updated.record_detached_outbound(Self::stanza_to_replay_xml(stanza), original_receipt_at);
+        let Some(sequence) = record(&mut updated) else {
+            return Ok(SmKeyedAppendOutcome::NoSession);
+        };
         let persisted = super::persistence_codec::detached_to_persisted(&updated)?;
         let rows = updated
             .unacked_stanzas
@@ -463,13 +553,6 @@ impl InMemorySmSessionRegistry {
         self.mark_snapshot_stale(&accepting_stream)?;
         let registry = Arc::clone(self);
         let storage = Arc::clone(storage);
-        let sequence = updated
-            .unacked_stanzas
-            .last()
-            .map(|entry| entry.sequence)
-            .ok_or_else(|| {
-                SmRegistryError::Internal("keyed append produced no queue entry".to_owned())
-            })?;
         let append = PersistedIngressAppend {
             key,
             accepting_stream: accepting_stream.clone(),
@@ -828,4 +911,14 @@ impl InMemorySmSessionRegistry {
         );
         Ok(states)
     }
+}
+
+/// What the `sm_ingress_appends` ledger says about one obligation.
+enum LedgerDecision {
+    Allocated {
+        accepting_stream: SmSessionId,
+    },
+    Unallocated {
+        supersedes: Option<crate::stream_management::persistence::PriorIngressAllocation>,
+    },
 }

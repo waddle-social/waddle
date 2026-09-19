@@ -37,6 +37,53 @@ pub struct SmIngressAppendKey {
     pub resource: FullJid,
 }
 
+/// An ingress obligation a peer node attached to a frame queued on this node's socket
+/// (issue #1789). It is a *claim*: nothing has checked it against canonical ingress
+/// state. It is authorized only if the frame is later drained into a replay queue,
+/// which is the one place it can be used — a frame written live never reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmRelayedAppendObligation {
+    pub key: SmIngressAppendKey,
+    /// The sender the canonical ingress row must name.
+    pub sender_bare: jid::BareJid,
+    /// The origin's receipt time, for the replayed XEP-0203 delay.
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// An obligation the ledger reported unallocated while a socket's queue was being
+/// drained, before the drained frame has a sequence (issue #1789).
+///
+/// Holding one proves only that the ledger was read; the database constraint still
+/// arbitrates when the proof is written with the session snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmDrainedAppendTicket {
+    pub(crate) key: SmIngressAppendKey,
+    pub(crate) supersedes: Option<super::persistence::PriorIngressAllocation>,
+}
+
+impl SmDrainedAppendTicket {
+    /// Bind the ticket to the sequence the drain counted the frame at.
+    pub fn at(self, sequence: u32) -> SmDrainedIngressAppend {
+        SmDrainedIngressAppend {
+            ticket: self,
+            sequence,
+        }
+    }
+}
+
+/// A drained queue entry and the obligation it discharges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmDrainedIngressAppend {
+    pub(crate) ticket: SmDrainedAppendTicket,
+    pub(crate) sequence: u32,
+}
+
+impl SmDrainedIngressAppend {
+    pub fn key(&self) -> &SmIngressAppendKey {
+        &self.ticket.key
+    }
+}
+
 /// Result of a keyed append attempt.
 ///
 /// There is no "committed but this registry lost the session" success: a snapshot that

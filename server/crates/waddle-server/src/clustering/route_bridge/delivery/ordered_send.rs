@@ -55,19 +55,15 @@ impl OrderedRelayDeliveryBridge {
             ingress_append,
         } = &mut seed.payload
         {
-            *ingress_append = match (&stanza.0, seed.ingress_append_context.as_ref()) {
-                (Stanza::Message(message), Some(context)) if recipient.is_full() => message
-                    .from
-                    .as_ref()
-                    .map(|sender| {
-                        crate::ingress::identity::IngressAppendObligationRef::from_context(
-                            context,
-                            sender.to_bare(),
-                        )
-                    })
-                    .filter(|obligation| obligation.kind_is_append_eligible()),
-                _ => None,
-            };
+            *ingress_append = recipient
+                .is_full()
+                .then(|| {
+                    crate::ingress::identity::IngressAppendObligationRef::for_message(
+                        seed.ingress_append_context.as_ref(),
+                        &stanza.0,
+                    )
+                })
+                .flatten();
         }
         let mut envelope = {
             let mut sender = self.sender_state.lock().await;

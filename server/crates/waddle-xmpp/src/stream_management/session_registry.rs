@@ -27,6 +27,7 @@ pub use cross_node_resume::{
 pub use resources::{DetachedPresenceState, ResumableSessionProbe};
 pub use session::{DetachedSession, DetachedUnackedStanza};
 pub use tombstones::{RecentTombstoneRecord, TOMBSTONE_CLOCK_SKEW_SLACK};
+pub use trait_impl::StoredDetachedSession;
 pub use traits::{
     SmClaimCompletion, SmRegistryError, SmSessionRegistry, TombstoneScrubbedSmEntries,
     TombstoneScrubbedSmEntry,

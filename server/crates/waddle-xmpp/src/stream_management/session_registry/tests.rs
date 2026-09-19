@@ -4482,6 +4482,23 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
         outcome
     }
 
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: crate::stream_management::persistence::PersistedSession,
+        unacked: Vec<crate::stream_management::persistence::PersistedUnackedStanza>,
+        appends: Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+    ) -> Result<
+        Vec<crate::stream_management::SmIngressAppendKey>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_principal_and_ingress_appends(
+                principal, session, unacked, appends,
+            )
+            .await
+    }
+
     async fn get_ingress_append(
         &self,
         key: &crate::stream_management::SmIngressAppendKey,
@@ -6000,6 +6017,23 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
             .await
     }
 
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: crate::stream_management::persistence::PersistedSession,
+        unacked: Vec<crate::stream_management::persistence::PersistedUnackedStanza>,
+        appends: Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+    ) -> Result<
+        Vec<crate::stream_management::SmIngressAppendKey>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_principal_and_ingress_appends(
+                principal, session, unacked, appends,
+            )
+            .await
+    }
+
     async fn get_ingress_append(
         &self,
         key: &crate::stream_management::SmIngressAppendKey,
@@ -6675,6 +6709,23 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
     > {
         self.inner
             .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &crate::auth::AuthenticatedPrincipalRef,
+        session: crate::stream_management::persistence::PersistedSession,
+        unacked: Vec<crate::stream_management::persistence::PersistedUnackedStanza>,
+        appends: Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+    ) -> Result<
+        Vec<crate::stream_management::SmIngressAppendKey>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_principal_and_ingress_appends(
+                principal, session, unacked, appends,
+            )
             .await
     }
 

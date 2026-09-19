@@ -349,6 +349,23 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
             .await
     }
 
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,
+        session: waddle_xmpp::stream_management::persistence::PersistedSession,
+        unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
+        appends: Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_principal_and_ingress_appends(
+                principal, session, unacked, appends,
+            )
+            .await
+    }
+
     async fn get_ingress_append(
         &self,
         key: &waddle_xmpp::stream_management::SmIngressAppendKey,
