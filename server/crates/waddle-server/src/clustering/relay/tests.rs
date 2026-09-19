@@ -16,11 +16,11 @@ use waddle_xmpp::ownership::{
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v10"
+        "waddle.clustering.relay.deliver_ordered.v11"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayRouteRemoteResourceStanza>>::REMOTE_ID,
-        "waddle.clustering.relay.remote_resource_route.v6"
+        "waddle.clustering.relay.remote_resource_route.v7"
     );
 }
 
@@ -268,6 +268,7 @@ pub(super) fn timeout_envelope() -> RemoteStanzaEnvelope {
             epoch: ClaimEpoch(0),
         },
         payload: OrderedRelayPayload::Message {
+            ingress_append: None,
             recipient: jid::Jid::from(target),
             stanza: RemoteStanza(waddle_xmpp::Stanza::Message(message)),
         },

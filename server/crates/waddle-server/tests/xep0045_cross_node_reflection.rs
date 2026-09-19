@@ -86,6 +86,7 @@ fn receiver_reserves_full_jid_groupchat_from_room_entity() {
             sender_claim: room_claim(),
             target_claim: target_claim(),
             payload: OrderedRelayPayload::Message {
+                ingress_append: None,
                 recipient: target.into(),
                 stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
             },
@@ -141,6 +142,7 @@ fn receiver_nacks_groupchat_vouched_by_a_user_claim() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: OrderedRelayPayload::Message {
+            ingress_append: None,
             recipient: target.into(),
             stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
         },
@@ -163,7 +165,10 @@ fn room_stanza_id() -> xmpp_parsers::stanza_id::StanzaId {
 }
 
 fn assert_reflection(envelope: &RemoteStanzaEnvelope, expected: &Message) {
-    let OrderedRelayPayload::Message { recipient, stanza } = &envelope.payload else {
+    let OrderedRelayPayload::Message {
+        recipient, stanza, ..
+    } = &envelope.payload
+    else {
         panic!("expected message payload");
     };
     let waddle_xmpp::Stanza::Message(message) = &stanza.0 else {
@@ -224,6 +229,7 @@ fn receiver_reflects_when_room_ownership_moves_between_nodes() {
             sender_claim: origin_claim,
             target_claim: target_claim(),
             payload: OrderedRelayPayload::Message {
+                ingress_append: None,
                 recipient: target.clone().into(),
                 stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza.clone())),
             },

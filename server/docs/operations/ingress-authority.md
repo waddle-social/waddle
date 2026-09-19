@@ -39,7 +39,7 @@ and `TransportGeneration::Host`; it does not assert a synthetic authenticated
 session. Direct sends use the requester as effective sender, room sends the
 plugin actor. Provider webhooks require a grant for the exact room and cannot
 send direct messages. Remote-owned room sends are refused as typed
-`ExtensionRemoteRoomUnsupported`; the ordered relay stays `deliver_ordered.v10`.
+`ExtensionRemoteRoomUnsupported`; the ordered relay now uses `deliver_ordered.v11`.
 
 V1018 stores grants in `extension_grants`: scope `0` is plugin send authority
 (`room_jid IS NULL`), scope `1` is provider-room authority. Partial unique indexes
@@ -428,11 +428,43 @@ including global V0001 and waddle V1001, which destructively drop and recreate t
 auth, channel and message tables. A deep rollback is therefore data loss, not a
 refused startup. Treat the ledger commit as the rollback floor for this database.
 
-#1758 also bumped three wire versions — `remote_user_side_effect.v3`,
-`remote_resource_route.v6` and `deliver_ordered.v10`. Because the cutover rode
-its own `Recreate`, and because the flip-back rolled two builds of identical
-server code, the first genuine mixed-version window for `deliver_ordered.v10`
-is the next deploy that changes server source.
+#1758 bumped three wire versions — `remote_user_side_effect.v3`,
+`remote_resource_route.v6` and `deliver_ordered.v10`. #1778 now advances
+`remote_resource_route` to `v7` and `deliver_ordered` to `v11` to carry the
+recorded ingress append obligation identity, including through a full-JID
+second hop. Treat the prior `v6`/`v10` endpoints as historical; the current
+endpoints are `remote_resource_route.v7` and `deliver_ordered.v11`.
+
+**#1778 ships as a one-shot `Recreate`, like the #1756 cutover before it.** It
+carries no migration, so the reason is purely the wire bump, and specifically the
+`remote_resource_route.v6 -> v7` half of it.
+
+The versioned-envelope argument that normally licenses a `RollingUpdate` covers
+`deliver_ordered`: an old replica rejects a `v11` envelope pre-handler with
+`UnknownMessage`, the sender synthesizes an `UnsupportedEnvelope` NACK, the
+sequence is rolled back and the channel is kept. Those obligations record no
+receipt, stay non-terminal, and maintenance recovery re-executes them once the
+replicas agree — delayed, not lost.
+
+`remote_resource_route` has no equivalent fallback. `outcome_for_ask_error`
+classifies the same `UnknownMessage` as a definite no-effect: `Dropped` for
+messages and presence, `Unavailable` for IQs. The live IQ, presence and MUC-proxy
+operations that remote-owned connections route through that endpoint are not
+ingress obligations and have no maintenance recovery, so a `v6`/`v7` window would
+lose them outright rather than delay them. That is why the strategy is flipped
+for this deploy and flipped back afterwards.
+
+Operationally:
+
+- Expect a short full-stop restart rather than a rolling one. Every replica is
+  `v11` when it returns, so there is no mixed-version window to ride out.
+- Flip `updateStrategy` back to `RollingUpdate` (maxSurge 1, maxUnavailable 0) in
+  a follow-up PR once the rollout is verified, exactly as #1754, #1765 and #1772
+  did for their cutovers.
+- Verify after the deploy that `waddle.clustering.ingress_append.authorization_failed`
+  is not climbing, particularly `reason="indeterminate"`, which would mean
+  receivers cannot read canonical state and the cross-node duplicate window is
+  open.
 
 **Ledger lifetime.** The obligation owns the proof, not the stream. A successful
 resume deletes the detached snapshot while the logical stream continues, so
@@ -1325,15 +1357,31 @@ allocate the same obligation again. `acknowledged_allocation_is_never_voided_by_
 establishes such a proof is valid; the two voiding rules disagree about it. The
 divergence is the enumeration problem #1760 exists to remove.
 
-**The guarantee covers keyed appends only.** In a clustered *direct* route whose
-remote-resource owner refresh resolves locally against a detached recipient,
-`deliver_local_full_jid_after_target_refresh` passes no append context
-(`clustering/route_bridge/delivery/local.rs`), so that append is unkeyed and a
-failed effect-receipt write can let recovery append the same resource again.
-That residue is tracked by #1778 (carved out of #1760). MUC progress-owned
-occupant copies (#1757) now supply their append context through the same
-fallback, so only direct routes remain unkeyed there; receiver-side cross-node
-appends remain unkeyed (#1778).
+**The guarantee covers keyed appends only.** Recorded direct routes and MUC
+groupchat occupant copies now carry `IngressAppendObligationRef` through
+`deliver_ordered.v11` and the `remote_resource_route.v7` full-JID second hop
+(#1778). Receiver-authorized detached appends use the same `sm_ingress_appends`
+ledger as local delivery. `deliver_local_full_jid_after_target_refresh` accepts
+and forwards the append context (`clustering/route_bridge/delivery/local.rs`).
+The receiver requires `sender_bare` to match the validated sender claim and
+stanza `from`, and a canonical ingress row for `message_key` naming that sender.
+Failed authorization warns and increments
+`waddle.clustering.ingress_append.authorization_failed`, then degrades to an
+unkeyed append; delivery never fails because the check failed.
+That fallback remains at-least-once. So does the registered-remote-socket drain
+(#1789): queue acceptance of a live `remote_resource_frame.v1` carrying no
+obligation identity can precede the origin's receipt. If the socket detaches,
+`server/routes/websocket/replay.rs` drains via unkeyed
+`record_outbound_for_detached_stream_at`, and recovery can allocate a second
+entry. `RegistryFrame` live transport is outside the durable append guarantee;
+side-effect carbons also perform their own unkeyed registry appends
+(`clustering/route_bridge/registration/side_effects.rs`). With no unexpired
+session and no prior proof, no append occurs and the obligation stays unresolved.
+The #1760 custody limitation above is unchanged and now also applies to keyed
+remote deliveries: quarantine deletes the session's queue but retires only
+gap-covered proofs, so a retained entry's proof can outlive its payload and
+suppress recovery with a false `AlreadyAppended`. This is not lifecycle-safe
+exactly-once delivery.
 
 Earlier committed progress survives restart and is excluded from later
 decisions. Progress writes and the final aggregate receipt share one
@@ -1354,12 +1402,13 @@ Reflection is excluded: it is resent on duplicates, carries no aggregate
 receipt, and remains governed by the sender's XEP-0198 stream. Other pending
 obligations, including unsupported inbox pushes, still prevent terminality.
 
-Local MUC detached copies use the MUC receipt key plus occupant resource as
-the append key. The MUC-only relay executor records definite `Delivered` ACKs
-as per-occupant progress, and retains that append context on ownership-refresh
-fallback to local delivery. Declined/uncertain outcomes remain pending.
-Remote receiver appends are still outside this guarantee (#1778); the wire
-version remains `deliver_ordered.v10`.
+Local and receiver-authorized remote MUC detached copies use the MUC receipt
+key plus occupant resource as the append key. The MUC-only relay executor
+records definite `Delivered` ACKs as per-occupant progress, and retains that
+append context on ownership-refresh fallback to local delivery.
+Declined/uncertain outcomes remain pending. `deliver_ordered.v11` and
+`remote_resource_route.v7` carry the obligation identity to the receiver (#1778),
+subject to the keyed-append limits above.
 
 The room-canonical envelope is frozen independently of observer plugins;
 retries preserve `room/nick`, content, room stanza-id and occupant-id. System

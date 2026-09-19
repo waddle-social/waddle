@@ -47,8 +47,28 @@ impl OrderedRelayDeliveryBridge {
 
     pub(in super::super) async fn prepare_remote_delivery(
         &self,
-        seed: RemoteDeliverySeed,
+        mut seed: RemoteDeliverySeed,
     ) -> Result<PreparedRemoteDelivery, RemotePrepareError> {
+        if let OrderedRelayPayload::Message {
+            recipient,
+            stanza,
+            ingress_append,
+        } = &mut seed.payload
+        {
+            *ingress_append = match (&stanza.0, seed.ingress_append_context.as_ref()) {
+                (Stanza::Message(message), Some(context)) if recipient.is_full() => message
+                    .from
+                    .as_ref()
+                    .map(|sender| {
+                        crate::ingress::identity::IngressAppendObligationRef::from_context(
+                            context,
+                            sender.to_bare(),
+                        )
+                    })
+                    .filter(|obligation| obligation.kind_is_append_eligible()),
+                _ => None,
+            };
+        }
         let mut envelope = {
             let mut sender = self.sender_state.lock().await;
             match sender.next_envelope(
@@ -151,6 +171,12 @@ impl OrderedRelayDeliveryBridge {
         owner: &NodeIdentity,
         envelope: RemoteStanzaEnvelope,
     ) -> Result<OrderedRelayReply, RelayAskError> {
+        #[cfg(test)]
+        if let Ok(receiver) =
+            crate::ingress::execute::relay_detached_tests::CROSS_NODE_RECEIVER.try_with(Arc::clone)
+        {
+            return Ok(Box::pin(receiver.deliver(envelope)).await);
+        }
         let mut handle =
             RelayHandle::new(NodeId::new(owner.node_id.clone()), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);

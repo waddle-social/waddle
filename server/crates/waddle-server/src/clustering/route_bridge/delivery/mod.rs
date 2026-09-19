@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) mod channels;
+pub(super) mod ingress_append;
 pub(super) mod local;
 pub(super) mod muc;
 pub(super) mod ordered;

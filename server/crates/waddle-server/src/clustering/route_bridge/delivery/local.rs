@@ -13,10 +13,32 @@ impl OrderedRelayDeliveryBridge {
         };
         validate_claims(&services, envelope).await?;
         match relay_payload_target(envelope)? {
-            RelayPayloadTarget::Full(target, stanza) => self
-                .deliver_reserved_full_jid(&services, target, stanza)
+            RelayPayloadTarget::Full(target, stanza) => {
+                let obligation = match &envelope.payload {
+                    OrderedRelayPayload::Message { ingress_append, .. } => ingress_append.as_ref(),
+                    _ => None,
+                };
+                // Authorize unconditionally. Deciding from a detached-session
+                // probe here is unsound: teardown inserts the detached session
+                // during cleanup, so a resource can be live at the probe and
+                // detached by the time `deliver_peer_to_full` falls back to the
+                // queue, and that append would then be unkeyed (#1790).
+                let ingress_append_context = super::ingress_append::authorize_ingress_append(
+                    &services,
+                    &envelope.sender_claim.entity,
+                    stanza,
+                    obligation,
+                )
+                .await;
+                self.deliver_reserved_full_jid(
+                    &services,
+                    target,
+                    stanza,
+                    ingress_append_context.as_ref(),
+                )
                 .await
-                .map(|()| Vec::new()),
+                .map(|()| Vec::new())
+            }
             RelayPayloadTarget::Bare(target, stanza) => {
                 deliver_reserved_bare_jid(&services, &target, stanza)
                     .await

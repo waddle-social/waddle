@@ -1088,11 +1088,7 @@ pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
                     stanza,
                     origin,
                     call_setup,
-                    deps.ingress_append_context.clone().filter(|context| {
-                        context.receipt.kind.to_storage()
-                            == waddle_xmpp::ingress::IngressEffectKind::RouteMucGroupchat
-                                .storage_tag()
-                    }),
+                    deps.ingress_append_context.clone(),
                 )
                 .await
         }

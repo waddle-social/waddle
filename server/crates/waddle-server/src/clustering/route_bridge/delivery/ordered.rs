@@ -29,6 +29,18 @@ impl OrderedRelayDeliveryBridge {
                         RemoteResourceRouteTarget::FullJid {
                             target: target.clone(),
                             stanza: RemoteStanza(stanza.clone()),
+                            ingress_append: match (stanza, ingress_append_context.as_ref()) {
+                                (Stanza::Message(message), Some(context)) => message
+                                    .from
+                                    .as_ref()
+                                    .map(|sender| {
+                                        crate::ingress::identity::IngressAppendObligationRef::from_context(
+                                            context, sender.to_bare(),
+                                        )
+                                    })
+                                    .filter(|obligation| obligation.kind_is_append_eligible()),
+                                _ => None,
+                            },
                         },
                         stanza,
                         origin,

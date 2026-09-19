@@ -98,6 +98,7 @@ fn message_payload_to(id: &str, recipient: &str) -> OrderedRelayPayload {
     stanza.id = Some(xmpp_parsers::message::Id(id.to_string()));
     stanza.bodies.insert(Lang::new(), format!("payload {id}"));
     OrderedRelayPayload::Message {
+        ingress_append: None,
         recipient: jid::Jid::from_str(recipient).expect("jid"),
         stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
     }
@@ -188,6 +189,7 @@ fn muji_initiate_stanza(action: xmpp_parsers::jingle::Action, room: &str) -> Rem
     )))
 }
 
+mod ingress_append;
 mod muc_validation;
 mod receiver;
 mod sender;

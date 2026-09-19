@@ -333,6 +333,7 @@ fn receiver_nacks_stanza_kind_mismatch_as_parse_failure() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: OrderedRelayPayload::Message {
+            ingress_append: None,
             recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
             stanza: presence_stanza(),
         },

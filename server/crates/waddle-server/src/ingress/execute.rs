@@ -1340,4 +1340,4 @@ mod detached_fault_tests;
 
 #[cfg(test)]
 #[path = "execute_relay_detached_tests.rs"]
-mod relay_detached_tests;
+pub(crate) mod relay_detached_tests;

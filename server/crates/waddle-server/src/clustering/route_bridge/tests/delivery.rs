@@ -1130,6 +1130,7 @@ async fn remote_full_jid_route_queues_detached_delivery() {
                 registration_id,
                 socket_generation,
                 target: RemoteResourceRouteTarget::FullJid {
+                    ingress_append: None,
                     target: target_full(),
                     stanza: RemoteStanza(Stanza::Message(message)),
                 },

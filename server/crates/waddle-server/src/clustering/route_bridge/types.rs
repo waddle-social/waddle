@@ -227,6 +227,7 @@ pub enum RemoteResourceRouteTarget {
     FullJid {
         target: jid::FullJid,
         stanza: RemoteStanza,
+        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
     },
     BareJid {
         target: jid::BareJid,
@@ -263,7 +264,7 @@ pub(super) struct RouteOutcomeLog {
 
 pub(super) fn route_outcome_log(target: &RemoteResourceRouteTarget) -> RouteOutcomeLog {
     match target {
-        RemoteResourceRouteTarget::FullJid { target, stanza } => RouteOutcomeLog {
+        RemoteResourceRouteTarget::FullJid { target, stanza, .. } => RouteOutcomeLog {
             kind: "full-JID",
             entity: target.to_string(),
             message_id: stanza_message_id(&stanza.0).to_owned(),

@@ -305,6 +305,28 @@ async fn xep0198_wrapped_wire_position_is_fresh_postgres() {
 #[path = "ingress_cases/detached_progress_support.rs"]
 pub mod detached_progress_support;
 
+#[cfg(feature = "clustering")]
+#[path = "ingress_cases/cross_node_keyed_append.rs"]
+mod cross_node_keyed_append;
+
+/// XEP-0198 §5: distinct relay sequences retain one durable replay allocation.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn sqlite_xep0198_cross_node_keyed_append_distinct_sequences() {
+    cross_node_keyed_append::distinct_sequences_share_durable_append(
+        IngressFixture::sqlite().await,
+    )
+    .await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_xep0198_cross_node_keyed_append_distinct_sequences() {
+    if let Some(fixture) = IngressFixture::postgres("xep0198_cross_node_keyed").await {
+        cross_node_keyed_append::distinct_sequences_share_durable_append(fixture).await;
+    }
+}
+
 /// XEP-0198 §5: a committed detached append survives restart without being
 /// appended again when another resource's aggregate obligation is retried.
 #[tokio::test]

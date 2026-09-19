@@ -462,7 +462,8 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // the origin claim epoch in the channel identity.
 // v10: remove capture-only detached stream identities from side-effect and
 // remote-resource replies; companion endpoint versions are v3 and v6 (#1756).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v10")]
+// v11: carry the recorded ingress append obligation on full-JID message payloads (#1778).
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v11")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -715,7 +716,8 @@ pub struct RelayRouteRemoteResourceStanzaReply {
 // v4 adds origin receipt confirmation for reply frames (#1657).
 // v5 adds durable owner reply identities for SM replay (#1657).
 // v6 removes capture-only detached stream identities from the reply (#1756).
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v6")]
+// v7: carry the recorded ingress append obligation on full-JID route targets (#1778).
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v7")]
 impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
 

@@ -134,11 +134,11 @@ impl AllowlistStore for StaticAllowlist {
     }
 }
 
-pub(super) fn origin_identity() -> NodeIdentity {
+pub(crate) fn origin_identity() -> NodeIdentity {
     NodeIdentity::new("origin-node", "origin-epoch")
 }
 
-pub(super) fn receiver_identity() -> NodeIdentity {
+pub(crate) fn receiver_identity() -> NodeIdentity {
     NodeIdentity::new("receiver-node", "receiver-epoch")
 }
 
@@ -196,6 +196,7 @@ fn message_payload() -> OrderedRelayPayload {
         .bodies
         .insert(Lang::new(), "hello from remote".to_string());
     OrderedRelayPayload::Message {
+        ingress_append: None,
         recipient: jid::Jid::from(full),
         stanza: RemoteStanza(Stanza::Message(message)),
     }
@@ -340,6 +341,7 @@ async fn services_with_claims_and_blocking(
 }
 
 pub(crate) mod delivery;
+mod ingress_append;
 pub(crate) mod muc_refresh;
 mod nack_channels;
 mod reassert;
