@@ -472,6 +472,9 @@ fn sqlite_url_query_requests_memory(database_url: &str) -> bool {
 }
 
 #[cfg(test)]
+mod cancelled_begin_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

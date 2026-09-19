@@ -2,6 +2,10 @@ use super::super::frame::{handle_xmpp_frame, settle_inbound_dispatch};
 use super::super::frame_backstop::InboundDisposition;
 use super::super::state::WsConnState;
 use super::*;
+// Its only use sits in a clustering-gated branch, so a default-feature build
+// sees it unused. Predates this work (#1786); invisible because every other
+// check runs with `--all-features`.
+#[cfg(feature = "clustering")]
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::pending_delivery::SmSessionId;
 
