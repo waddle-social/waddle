@@ -611,8 +611,8 @@ pub async fn gc_expired_aliases(
         // cleanup of rows nothing is waiting on, so a scan timeout or a
         // transient database error reports the pass incomplete -- it retries --
         // rather than dragging unrelated recovery work down with it.
-        let deleted = match gc_orphan_proof_batch(db, &budget).await {
-            Ok(deleted) => deleted,
+        let step = match gc_orphan_proof_batch(db, &budget).await {
+            Ok(step) => step,
             Err(error) => {
                 tracing::warn!(%error, "ingress orphan proof sweep failed; pass stays incomplete");
                 waddle_xmpp::counter_add!(
@@ -626,16 +626,41 @@ pub async fn gc_expired_aliases(
                 return Ok(outcome);
             }
         };
+        let deleted = match step {
+            OrphanSweepStep::Advanced { deleted }
+            | OrphanSweepStep::Finished { deleted }
+            | OrphanSweepStep::BudgetExpired { deleted } => deleted,
+        };
         budget
             .progress
             .orphan_proofs
             .fetch_add(deleted, Ordering::AcqRel);
         outcome.deleted_orphan_proofs += deleted;
-        // A reset cursor means the short window ended the traversal.
-        if budget.progress.orphan_cursor.lock().await.is_none() {
-            return Ok(outcome);
+        match step {
+            OrphanSweepStep::Advanced { .. } => {}
+            OrphanSweepStep::Finished { .. } => return Ok(outcome),
+            OrphanSweepStep::BudgetExpired { .. } => {
+                outcome.completed = false;
+                return Ok(outcome);
+            }
         }
     }
+}
+
+/// Outcome of examining one bounded orphan-sweep window.
+///
+/// The cursor alone cannot express this: it is `None` both when a short window
+/// ended the traversal and when the budget expired before the first window
+/// advanced it, and treating the second as completion would report a pass that
+/// examined nothing as complete.
+#[derive(Debug)]
+enum OrphanSweepStep {
+    /// A full window was examined; the cursor advanced past it.
+    Advanced { deleted: usize },
+    /// A short window ended the traversal; the cursor reset to the start.
+    Finished { deleted: usize },
+    /// The cooperative budget expired with the traversal unfinished.
+    BudgetExpired { deleted: usize },
 }
 
 #[cfg(test)]
@@ -648,7 +673,7 @@ tokio::task_local! {
 async fn gc_orphan_proof_batch(
     db: &Database,
     budget: &AliasGcBudget,
-) -> Result<usize, AliasGcError> {
+) -> Result<OrphanSweepStep, AliasGcError> {
     #[cfg(test)]
     if FAIL_ORPHAN_SWEEP.try_with(|fail| *fail).unwrap_or(false) {
         return Err(AliasGcError::Substrate(IngressSubstrateError::Database {
@@ -660,7 +685,7 @@ async fn gc_orphan_proof_batch(
     let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
     install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
     if Instant::now() >= budget.deadline {
-        return Ok(0);
+        return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
     }
     let mut rows = if let Some(after) = cursor.as_ref() {
         tx.query(
@@ -753,14 +778,15 @@ async fn gc_orphan_proof_batch(
     tx.commit().await.map_err(gc_error_from_database)?;
     // Cursor advancement and the caller's accounting immediately follow commit
     // without an intervening suspension point.
-    if finished_window {
-        *cursor = if window.len() == GC_BATCH_LIMIT {
-            window.last().map(|(key, _)| key.clone())
-        } else {
-            None
-        };
+    if !finished_window {
+        return Ok(OrphanSweepStep::BudgetExpired { deleted });
     }
-    Ok(deleted)
+    if window.len() == GC_BATCH_LIMIT {
+        *cursor = window.last().map(|(key, _)| key.clone());
+        return Ok(OrphanSweepStep::Advanced { deleted });
+    }
+    *cursor = None;
+    Ok(OrphanSweepStep::Finished { deleted })
 }
 
 async fn gc_canonical_candidates(
@@ -1660,10 +1686,10 @@ mod tests {
         // instead of proof rows, and force a second sweep batch.
         seed_gc_proofs(db, MessageKey::new(), GC_BATCH_LIMIT + 1).await;
         let budget = gc_budget();
-        assert_eq!(
+        assert!(matches!(
             gc_orphan_proof_batch(db, &budget).await.expect("batch"),
-            GC_BATCH_LIMIT
-        );
+            OrphanSweepStep::Advanced { deleted } if deleted == GC_BATCH_LIMIT
+        ));
         assert_eq!(gc_proof_count(db).await, 1);
         let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
             .await
@@ -1722,12 +1748,12 @@ mod tests {
             deadline: Instant::now(),
             ..gc_budget()
         };
-        assert_eq!(
+        assert!(matches!(
             gc_orphan_proof_batch(db, &budget)
                 .await
                 .expect("expired batch"),
-            0
-        );
+            OrphanSweepStep::BudgetExpired { deleted: 0 }
+        ));
         let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
             .await
             .expect("GC");
@@ -1813,10 +1839,10 @@ mod tests {
         // A filter-limited scan would instead examine the whole table looking
         // for matches, which is what could never finish under the scan timeout.
         for page in 0..3 {
-            let deleted = gc_orphan_proof_batch(db, &budget)
+            let step = gc_orphan_proof_batch(db, &budget)
                 .await
                 .expect("healthy window");
-            assert_eq!(deleted, 0);
+            assert!(matches!(step, OrphanSweepStep::Advanced { deleted: 0 }));
             assert_eq!(gc_proof_count(db).await, healthy_count as i64 + 1);
             let position = budget.progress.orphan_cursor.lock().await.clone();
             let key = position.as_ref().expect("full window retains cursor");
@@ -1828,10 +1854,10 @@ mod tests {
                 )
             );
         }
-        let deleted = gc_orphan_proof_batch(db, &budget)
+        let step = gc_orphan_proof_batch(db, &budget)
             .await
             .expect("late orphan window");
-        assert_eq!(deleted, 1);
+        assert!(matches!(step, OrphanSweepStep::Finished { deleted: 1 }));
         assert_eq!(gc_proof_count(db).await, healthy_count as i64);
 
         // One pass drains the whole traversal within its budget rather than a
@@ -1849,6 +1875,26 @@ mod tests {
         assert!(outcome.completed);
         assert_eq!(drained.progress.committed_orphan_proofs(), 1);
         assert_eq!(gc_proof_count(db).await, healthy_count as i64);
+    }
+
+    async fn orphan_gc_expired_first_window_is_not_traversal_completion(db: &Database) {
+        seed_healthy_gc_proofs(db, GC_BATCH_LIMIT).await;
+        let budget = AliasGcBudget {
+            deadline: Instant::now(),
+            ..gc_budget()
+        };
+        // The cursor is `None` here both because nothing ran and because a short
+        // window would have reset it. Only the step distinguishes them, and
+        // reporting completion would cost the coordinator its prompt partial
+        // continuation, leaving reclamation to the next periodic tick.
+        let step = gc_orphan_proof_batch(db, &budget)
+            .await
+            .expect("expired budget is not an error");
+        assert!(matches!(
+            step,
+            OrphanSweepStep::BudgetExpired { deleted: 0 }
+        ));
+        assert!(budget.progress.orphan_cursor.lock().await.is_none());
     }
 
     async fn orphan_gc_failure_does_not_fail_the_pass(db: &Database) {
@@ -1911,6 +1957,24 @@ mod tests {
             return;
         };
         orphan_gc_advances_across_healthy_windows(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_expired_first_window_is_not_traversal_completion() {
+        let db = Database::in_memory("orphan-gc-expired-first")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_expired_first_window_is_not_traversal_completion(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_expired_first_window_is_not_traversal_completion() {
+        let Some(fixture) = Fixture::open("orphan_expired_first").await else {
+            return;
+        };
+        orphan_gc_expired_first_window_is_not_traversal_completion(&fixture.db).await;
         fixture.close().await;
     }
 
