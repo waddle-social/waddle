@@ -152,6 +152,20 @@ pub struct AliasGcProgress {
     messages: Arc<AtomicUsize>,
     orphan_proofs: Arc<AtomicUsize>,
     orphan_cursor: Arc<tokio::sync::Mutex<Option<SmIngressAppendKey>>>,
+    /// When the orphan sweep last ran, shared across passes with the cursor.
+    /// `None` until the first sweep, so a fresh process sweeps once promptly.
+    orphan_swept_at: Arc<tokio::sync::Mutex<Option<Instant>>>,
+}
+
+impl AliasGcBudget {
+    /// A new pass over the same shared traversal and sweep schedule.
+    #[cfg(test)]
+    fn fresh_progress_pass(&self) -> Self {
+        Self {
+            progress: self.progress.fresh_pass(),
+            ..self.clone()
+        }
+    }
 }
 
 impl AliasGcProgress {
@@ -159,6 +173,7 @@ impl AliasGcProgress {
     pub(crate) fn fresh_pass(&self) -> Self {
         Self {
             orphan_cursor: self.orphan_cursor.clone(),
+            orphan_swept_at: self.orphan_swept_at.clone(),
             ..Self::default()
         }
     }
@@ -591,6 +606,17 @@ pub async fn gc_expired_aliases(
     // rows: a filter-limited scan of healthy proofs can repeatedly hit the scan
     // timeout without ever advancing to an orphan later in retained history.
     //
+    // Only sweep when it can plausibly find something. An orphan appears when a
+    // canonical row is reclaimed while a cross-node append for it is still in
+    // flight, so a pass that reclaimed nothing has created no new ones; the
+    // interval still catches those in-flight races and anything predating this
+    // code. Sweeping on every pass would add a transaction to every maintenance
+    // cycle for work that is almost always absent, and the ledger is not
+    // load-bearing -- nothing waits on an orphan being collected.
+    if !should_sweep_orphans(&budget, outcome.deleted_messages).await {
+        return Ok(outcome);
+    }
+    //
     // Drain as many windows as the cooperative budget allows rather than one per
     // pass. A mid-traversal pass reports `Partial`, and the coordinator answers
     // that with its doubling failure backoff (to 30s) while consuming coalesced
@@ -661,6 +687,31 @@ enum OrphanSweepStep {
     Finished { deleted: usize },
     /// The cooperative budget expired with the traversal unfinished.
     BudgetExpired { deleted: usize },
+}
+
+/// How long the sweep may go unrun when canonical collection is reclaiming
+/// nothing. Orphans are rare and nothing waits on them, so this trades
+/// reclamation latency for keeping ordinary maintenance passes free of an extra
+/// transaction.
+const ORPHAN_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(300);
+
+/// Whether this pass should examine the append ledger at all.
+async fn should_sweep_orphans(budget: &AliasGcBudget, deleted_messages: usize) -> bool {
+    // Mid-traversal always continues: leaving a cursor parked would defeat the
+    // paging that keeps each window bounded.
+    if budget.progress.orphan_cursor.lock().await.is_some() {
+        return true;
+    }
+    // A reclaimed canonical row is exactly when a new orphan can appear.
+    if deleted_messages > 0 {
+        return true;
+    }
+    let mut swept_at = budget.progress.orphan_swept_at.lock().await;
+    let due = swept_at.is_none_or(|at| at.elapsed() >= ORPHAN_SWEEP_INTERVAL);
+    if due {
+        *swept_at = Some(Instant::now());
+    }
+    due
 }
 
 #[cfg(test)]
@@ -1897,6 +1948,47 @@ mod tests {
         assert!(budget.progress.orphan_cursor.lock().await.is_none());
     }
 
+    async fn orphan_sweep_is_skipped_when_it_cannot_find_anything(db: &Database) {
+        // First pass sweeps: a fresh process has never swept, so it is due.
+        let budget = gc_budget();
+        let first = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("first pass sweeps");
+        assert!(first.completed);
+
+        // An orphan appears after that sweep, with no canonical row reclaimed.
+        seed_gc_proofs(db, MessageKey::new(), 1).await;
+        let quiet = gc_expired_aliases(db, timestamp(7), budget.fresh_progress_pass())
+            .await
+            .expect("quiet pass");
+        assert!(quiet.completed);
+        assert_eq!(quiet.deleted_orphan_proofs, 0);
+        // Deliberate: nothing waits on an orphan, so an idle pass does not pay a
+        // transaction to look for one. The interval reclaims it later.
+        assert_eq!(gc_proof_count(db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_gate_admits_only_passes_that_can_find_something() {
+        let budget = gc_budget();
+        // A fresh process has never swept, so the first pass is due even idle.
+        assert!(should_sweep_orphans(&budget, 0).await);
+        // Having just swept, an idle pass is not worth a transaction.
+        assert!(!should_sweep_orphans(&budget, 0).await);
+        // Reclaiming a canonical row is exactly when an in-flight cross-node
+        // append can be orphaned, so that pass sweeps regardless of the interval.
+        assert!(should_sweep_orphans(&budget, 1).await);
+        // Mid-traversal always continues: parking a cursor would defeat the
+        // paging that keeps each window bounded.
+        *budget.progress.orphan_cursor.lock().await = Some(SmIngressAppendKey {
+            message_key: MessageKey::new(),
+            kind: SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [7; 32],
+            resource: "gc@example.test/resource".parse().expect("resource"),
+        });
+        assert!(should_sweep_orphans(&budget, 0).await);
+    }
+
     async fn orphan_gc_failure_does_not_fail_the_pass(db: &Database) {
         let healthy = GC_BATCH_LIMIT * 2;
         seed_healthy_gc_proofs(db, healthy).await;
@@ -1976,6 +2068,15 @@ mod tests {
         };
         orphan_gc_expired_first_window_is_not_traversal_completion(&fixture.db).await;
         fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_sweep_is_skipped_when_it_cannot_find_anything() {
+        let db = Database::in_memory("orphan-gate-skip")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_sweep_is_skipped_when_it_cannot_find_anything(&db).await;
     }
 
     #[tokio::test]
