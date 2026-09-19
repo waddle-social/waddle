@@ -339,6 +339,12 @@ impl OrderedRelayDeliveryBridge {
             pending_row_id: None,
             pending_row_original_receipt_at: None,
             write_acceptance: None,
+            // Queued unverified: only a detach drain ever reads it, and it
+            // authorizes there (issue #1789).
+            ingress_append: msg
+                .frame
+                .ingress_append
+                .map(|obligation| obligation.into_relayed_for(msg.frame.jid.clone())),
         };
         let outcome = services.connection_registry.try_send_outbound_if_owner(
             &msg.frame.jid,

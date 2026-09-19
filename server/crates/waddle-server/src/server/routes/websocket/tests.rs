@@ -47,6 +47,7 @@ mod dispatch;
 mod frame_parsing;
 mod ingress_authority;
 mod iq;
+mod keyed_detach_drain;
 mod messages;
 mod misc;
 mod muc;

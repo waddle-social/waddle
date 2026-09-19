@@ -37,6 +37,19 @@ pub struct SmIngressAppendKey {
     pub resource: FullJid,
 }
 
+/// An ingress obligation a peer node attached to a frame queued on this node's socket
+/// (issue #1789). It is a *claim*: nothing has checked it against canonical ingress
+/// state. It is authorized only if the frame is later drained into a replay queue,
+/// which is the one place it can be used — a frame written live never reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmRelayedAppendObligation {
+    pub key: SmIngressAppendKey,
+    /// The sender the canonical ingress row must name.
+    pub sender_bare: jid::BareJid,
+    /// The origin's receipt time, for the replayed XEP-0203 delay.
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// An obligation the ledger reported unallocated while a socket's queue was being
 /// drained, before the drained frame has a sequence (issue #1789).
 ///
@@ -63,6 +76,12 @@ impl SmDrainedAppendTicket {
 pub struct SmDrainedIngressAppend {
     pub(crate) ticket: SmDrainedAppendTicket,
     pub(crate) sequence: u32,
+}
+
+impl SmDrainedIngressAppend {
+    pub fn key(&self) -> &SmIngressAppendKey {
+        &self.ticket.key
+    }
 }
 
 /// Result of a keyed append attempt.

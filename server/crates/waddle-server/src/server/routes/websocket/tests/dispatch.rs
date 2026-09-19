@@ -172,6 +172,7 @@ async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
         &mut rx,
         None,
         super::super::replay::PendingRowDrainPolicy::PreserveForReplay,
+        &mut Vec::new(),
     )
     .await;
 
@@ -233,6 +234,7 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
         &mut rx,
         None,
         super::super::replay::PendingRowDrainPolicy::PreserveForReplay,
+        &mut Vec::new(),
     )
     .await;
 

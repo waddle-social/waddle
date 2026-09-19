@@ -824,6 +824,9 @@ async fn cleanup_connection_shutdown_inner(
 
         let carbons_enabled = conn.carbons_enabled;
         let presence_available = entry.is_presence_available();
+        // Obligations drained before the detached session exists; the session
+        // store below proves them in the same write (issue #1789).
+        let mut drained_appends = Vec::new();
         if !conn.sm_recovery_required {
             // First detach drain: snapshot whatever's already in the
             // channel into the unacked queue. No detached_stream_id yet
@@ -836,6 +839,7 @@ async fn cleanup_connection_shutdown_inner(
                 outbound_rx,
                 None,
                 PendingRowDrainPolicy::PreserveForReplay,
+                &mut drained_appends,
             )
             .await;
         }
@@ -947,10 +951,28 @@ async fn cleanup_connection_shutdown_inner(
                 .deps
                 .protocol
                 .sm_session_registry
-                .store_session_with_principal(detached, principal)
+                .store_session_with_drained_ingress_appends(
+                    detached,
+                    principal,
+                    drained_appends
+                        .into_iter()
+                        .map(|drained| drained.0)
+                        .collect(),
+                )
                 .await
             {
-                Ok(displaced) => {
+                Ok(waddle_xmpp::stream_management::StoredDetachedSession {
+                    displaced,
+                    unproven,
+                }) => {
+                    if !unproven.is_empty() {
+                        // A racing keyed writer won between the drain's ledger read
+                        // and this store. The entries stay queued, unkeyed.
+                        warn!(
+                            count = unproven.len(),
+                            "drained ingress obligations lost the ledger race; entries kept unkeyed"
+                        );
+                    }
                     // Issue #1097: sessions the registry displaced to make
                     // room (max_sessions overflow, or a stale detached
                     // stream for this same JID) carry unacked queues that
@@ -1086,6 +1108,9 @@ async fn cleanup_connection_shutdown_inner(
                         outbound_rx,
                         Some(&stream_id),
                         PendingRowDrainPolicy::PreserveForReplay,
+                        // The detached stream exists, so keyed entries commit
+                        // with their proof directly; nothing is deferred.
+                        &mut Vec::new(),
                     )
                     .await;
                     if force_detach_origin.is_some_and(force_detach_requires_actor_unregister) {
