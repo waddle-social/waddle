@@ -1388,7 +1388,9 @@ time. What stays at-least-once on this path:
   told `Delivered`, so refusing the entry would be silent loss;
 - a keyed writer that wins the ledger between the drain's read and the session
   store keeps both entries: the drained one already holds a counted sequence, so
-  only its proof is withheld (`drained ingress obligations lost the ledger race`);
+  only its proof is withheld. A session store skipped for an in-flight resume
+  claim proves nothing either. Both log `drained ingress obligations were not
+  proven with the session store; at-least-once`;
 - one indeterminate canonical read (timeout or read failure) ends authorization
   for the rest of that drain: the reads are serial and run before the detached
   session is stored, so a full queue against a browned-out database would
