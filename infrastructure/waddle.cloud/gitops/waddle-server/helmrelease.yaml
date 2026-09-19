@@ -32,27 +32,31 @@ spec:
     # it must never change across upgrades or rollbacks.
     deployment:
       uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
-    # Zero-downtime rollouts (ADR-0017 Phase 4). Safe under mixed
-    # versions because the ordered-relay envelope message id is
-    # versioned (deliver_ordered.vN, #1597/#1600): an old replica
-    # rejects a newer envelope pre-handler and the sender rolls back
-    # the sequence instead of poisoning the shared channel. Any
-    # envelope or reply-type change MUST bump the version (see
-    # server/CLAUDE.md) — that invariant is what keeps this strategy
-    # sound.
+    # Zero-downtime rollouts (ADR-0017 Phase 4) are the steady state, safe under
+    # mixed versions because the ordered-relay envelope message id is versioned
+    # (deliver_ordered.vN, #1597/#1600): an old replica rejects a newer envelope
+    # pre-handler and the sender rolls back the sequence instead of poisoning the
+    # shared channel. Any envelope or reply-type change MUST bump the version (see
+    # server/CLAUDE.md) — that invariant is what keeps that strategy sound.
     #
-    # The #1778 remote_resource_route.v7 cutover (PR #1788) was the fifth
-    # one-shot Recreate, after the #1657 V1012, #1739-#1743 V1014, #1756
-    # V1015/V1016 and #1770 archive_seq cutovers; this restores the steady
-    # state. That endpoint needed a full stop because, unlike deliver_ordered,
-    # it has no UnsupportedEnvelope fallback: a v6/v7 window would have dropped
-    # live IQ, presence and MUC-proxy operations outright rather than delaying
-    # them. With every replica on v7 that window is closed.
+    # RE-APPLIED one-shot Recreate for the #1778 remote_resource_route.v7 cutover.
+    # The cutover (PR #1788) set this, but its flip-back (PR #1791) merged twelve
+    # minutes later, before any v7 image had been built — #1788's server build was
+    # cancelled by the newer commit, so the FIRST v7 image is the one building from
+    # the flip-back commit. Rolling that image out under RollingUpdate would create
+    # the exact v6/v7 window the cutover exists to prevent.
+    #
+    # `remote_resource_route` has no `UnsupportedEnvelope` fallback:
+    # `outcome_for_ask_error` classifies the `UnknownMessage` as a definite
+    # no-effect, `Dropped` for messages and presence and `Unavailable` for IQs. The
+    # live IQ, presence and MUC-proxy operations that remote-owned connections route
+    # through it are not ingress obligations, so maintenance recovery does not cover
+    # them: a mixed window loses them outright rather than delaying them.
+    #
+    # Flip back to RollingUpdate (maxSurge 1, maxUnavailable 0) only AFTER a v7
+    # image has actually rolled.
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
