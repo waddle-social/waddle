@@ -470,6 +470,29 @@ enum TransactionInner<'a> {
     Postgres(sqlx::Transaction<'a, sqlx::Postgres>),
 }
 
+/// Take SQLite's write lock on a task of its own, so the caller's timeout
+/// cannot cancel the acquisition part-way.
+///
+/// sqlx issues a custom `BEGIN` in two awaits (the statement, then a handle
+/// check) and builds the `Transaction` only after both. A caller cancelled in
+/// between returns the connection to the pool with the write transaction
+/// still open and nothing left to roll it back: every other connection then
+/// waits out `busy_timeout` and fails with `database is locked`. Run to
+/// completion here, an abandoned acquisition still yields a `Transaction`,
+/// whose drop rolls it back.
+async fn begin_sqlite_immediate(
+    pool: SqlitePool,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, DatabaseError> {
+    use tracing::Instrument;
+    let acquisition = async move { pool.begin_with("BEGIN IMMEDIATE").await };
+    match tokio::spawn(acquisition.in_current_span()).await {
+        Ok(transaction) => Ok(transaction?),
+        Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+        // The runtime is shutting down and dropped the acquisition.
+        Err(_) => Err(DatabaseError::Internal(sqlx::Error::PoolClosed)),
+    }
+}
+
 impl<'a> Transaction<'a> {
     /// SQL dialect of the connection held by this transaction.
     pub fn driver(&self) -> DatabaseDriver {
@@ -507,7 +530,7 @@ impl<'a> Transaction<'a> {
     ) -> Result<Self, DatabaseError> {
         let inner = match backend {
             DatabaseBackend::Sqlite(pool) => {
-                TransactionInner::Sqlite(pool.begin_with("BEGIN IMMEDIATE").await?)
+                TransactionInner::Sqlite(begin_sqlite_immediate(pool.clone()).await?)
             }
             DatabaseBackend::Postgres(pool) => TransactionInner::Postgres(pool.begin().await?),
         };
