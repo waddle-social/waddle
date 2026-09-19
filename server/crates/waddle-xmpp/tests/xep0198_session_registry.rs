@@ -1707,3 +1707,74 @@ async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
         .expect("live inventory")
         .is_empty());
 }
+
+fn drain_obligation(resource: &FullJid) -> SmIngressAppendKey {
+    SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(3),
+        semantic_identity_hash: [9; 32],
+        resource: resource.clone(),
+    }
+}
+
+/// Issue #1789: a frame queued on a live socket carries its origin's ingress
+/// obligation. When the socket detaches unwritten, the drain records it at the
+/// connection's next sequence. Doing that twice for one obligation must
+/// allocate once, and the duplicate must not move the outbound counter —
+/// nothing on this path reached a wire, so the client's `h` never counts it.
+#[tokio::test]
+async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::SmKeyedAppendOutcome;
+
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new())),
+    );
+    let session = detached_session("stream-keyed-drain", "alice@example.com/laptop");
+    let resource = session.jid.clone();
+    registry.store_session(session).await.expect("store");
+    let key = drain_obligation(&resource);
+
+    let first = registry
+        .record_keyed_outbound_for_detached_stream_at(
+            "stream-keyed-drain",
+            12,
+            queued_stanza_xml("drained", "once"),
+            chrono::Utc::now(),
+            key.clone(),
+        )
+        .await
+        .expect("first drain record");
+    assert_eq!(
+        first,
+        SmKeyedAppendOutcome::Appended {
+            accepting_stream: SmSessionId::new("stream-keyed-drain")
+        }
+    );
+
+    let second = registry
+        .record_keyed_outbound_for_detached_stream_at(
+            "stream-keyed-drain",
+            13,
+            queued_stanza_xml("drained", "once"),
+            chrono::Utc::now(),
+            key,
+        )
+        .await
+        .expect("duplicate drain record");
+    assert_eq!(
+        second,
+        SmKeyedAppendOutcome::AlreadyAppended {
+            accepting_stream: SmSessionId::new("stream-keyed-drain")
+        }
+    );
+
+    let claimed = registry
+        .claim_session("stream-keyed-drain")
+        .await
+        .expect("claim")
+        .expect("present");
+    let sequences: Vec<u32> = claimed.unacked_stanzas.iter().map(|e| e.sequence).collect();
+    assert_eq!(sequences, vec![12], "the obligation holds exactly one queue entry");
+    assert_eq!(claimed.outbound_count, 12, "a duplicate is never counted");
+}
