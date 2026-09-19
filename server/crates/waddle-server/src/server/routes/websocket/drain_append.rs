@@ -157,13 +157,29 @@ pub(super) fn bind_live(
     }
 }
 
-/// Parse a recipient-pass wire frame back into the typed message it carries.
-/// Only messages hold append obligations; anything else drains unkeyed.
-pub(super) fn parse_message_frame(xml: &str) -> Option<Stanza> {
-    let element: minidom::Element = xml.parse().ok()?;
-    xmpp_parsers::message::Message::try_from(element)
+/// Bind an authorized obligation to the frame the recipient pass emitted.
+///
+/// That frame is wire XML, and the keyed registry boundary is typed, so it is parsed
+/// back exactly once. Only messages hold append obligations; a frame that is not one
+/// drains unkeyed, counted like every other degrade.
+pub(super) fn key_recipient_pass_frame(
+    xml: &str,
+    obligation: SmRelayedAppendObligation,
+) -> Option<(SmIngressAppendKey, Stanza)> {
+    let message = xml
+        .parse::<minidom::Element>()
         .ok()
-        .map(Stanza::Message)
+        .and_then(|element| xmpp_parsers::message::Message::try_from(element).ok());
+    match message {
+        Some(message) => Some((obligation.key, Stanza::Message(message))),
+        None => {
+            crate::ingress::append_authority::record_degraded_to_unkeyed(
+                &crate::ingress::append_authority::AppendAuthorityRejection::NotMessage,
+                &obligation.sender_bare,
+            );
+            None
+        }
+    }
 }
 
 pub(super) enum Claim {

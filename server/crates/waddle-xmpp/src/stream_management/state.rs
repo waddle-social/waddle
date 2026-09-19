@@ -274,7 +274,6 @@ impl StreamManagementState {
         self.ack_request_cadence()
     }
 
-    /// Attach receipt obligations to the most recently recorded replay entry.
     /// Keep a relayed ingress obligation with the recovery-owned entry at `sequence`
     /// (issue #1789). A no-op when that entry is already gone.
     pub fn attach_ingress_append(
@@ -291,6 +290,7 @@ impl StreamManagementState {
         self.unacked_queue.ingress_appends()
     }
 
+    /// Attach receipt obligations to the most recently recorded replay entry.
     pub fn attach_ingress_receipts(&mut self, receipts: Vec<super::SmIngressFrameReceipt>) {
         self.unacked_queue.attach_ingress_receipts(receipts);
     }

@@ -184,13 +184,9 @@ pub(super) async fn drain_outbound_into_replay(
                     // The recipient pass emits wire frames; the keyed registry
                     // boundary is typed, so the frame is parsed back exactly once.
                     let keyed = ingress_append.take().and_then(|obligation| {
-                        super::drain_append::parse_message_frame(&xml).map(|stanza| KeyedFrame {
-                            key: obligation.key,
-                            stanza,
-                        })
+                        super::drain_append::key_recipient_pass_frame(&xml, obligation)
+                            .map(|(key, stanza)| KeyedFrame { key, stanza })
                     });
-                    // The recipient pass may emit several frames; the obligation
-                    // stands for the first, as the pending row does.
                     record_drained_xml(
                         state,
                         sm_state,
