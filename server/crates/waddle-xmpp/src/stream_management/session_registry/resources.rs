@@ -448,6 +448,23 @@ impl InMemorySmSessionRegistry {
         .await
     }
 
+    /// Read the ledger for a frame about to be drained from a detaching socket.
+    ///
+    /// `None` means the obligation already holds a deliverable allocation: drop the
+    /// frame uncounted. `Some` is unallocated as of this read; bind it to the frame's
+    /// sequence and hand it to [`Self::store_session_with_drained_ingress_appends`].
+    pub async fn reserve_drained_ingress_append(
+        &self,
+        key: crate::stream_management::SmIngressAppendKey,
+    ) -> Result<Option<crate::stream_management::SmDrainedAppendTicket>, SmRegistryError> {
+        Ok(match self.consult_ingress_append_ledger(&key).await? {
+            LedgerDecision::Allocated { .. } => None,
+            LedgerDecision::Unallocated { supersedes } => {
+                Some(crate::stream_management::SmDrainedAppendTicket { key, supersedes })
+            }
+        })
+    }
+
     /// Proof belongs to the obligation, not the currently bound stream, so the
     /// ledger is consulted before looking at any detached session.
     async fn consult_ingress_append_ledger(

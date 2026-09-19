@@ -460,6 +460,27 @@ pub trait SmPersistenceStorage: Send + Sync {
         append: PersistedIngressAppend,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError>;
 
+    /// Atomically persist a detached snapshot, its principal, its complete unacked queue,
+    /// and the ledger proof for every drained entry that discharges an ingress obligation
+    /// (issue #1789: frames drained from a detaching socket before the session exists).
+    ///
+    /// Unlike [`Self::store_session_atomic_with_ingress_append`], a ledger conflict does
+    /// **not** abort the write. Every entry already holds a sequence the connection
+    /// counted, so dropping one would leave a stanza the client can never acknowledge.
+    /// The conflicting proof is withheld instead — the entry stays, unkeyed — and its key
+    /// is returned. An implementation MUST NOT let a conflict poison the transaction
+    /// (`ON CONFLICT DO NOTHING`, not a caught constraint error), and MUST NOT withhold a
+    /// proof for any other reason: those are errors.
+    ///
+    /// No default implementation, for the reason given on the single-append variant.
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        appends: Vec<PersistedIngressAppend>,
+    ) -> Result<Vec<crate::stream_management::SmIngressAppendKey>, SmPersistenceError>;
+
     /// Look up durable proof for one ingress obligation, across every stream.
     ///
     /// Consulted before any session work, which is what makes resume and rebind safe: proof
@@ -706,15 +727,54 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
+        self.store_session_atomic_with_principal_and_ingress_appends(
+            principal,
+            session,
+            unacked,
+            Vec::new(),
+        )
+        .await
+        .map(drop)
+    }
+
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        appends: Vec<PersistedIngressAppend>,
+    ) -> Result<Vec<crate::stream_management::SmIngressAppendKey>, SmPersistenceError> {
         let stream_id = session.stream_id.clone();
         let mut guard = self
             .inner
             .lock()
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let mut withheld = Vec::new();
+        for append in appends {
+            let existing = guard
+                .ingress_appends
+                .iter()
+                .position(|existing| existing.key == append.key);
+            match existing {
+                None => guard.ingress_appends.push(append),
+                Some(index) => {
+                    let standing = &guard.ingress_appends[index];
+                    let superseded = append.supersedes.as_ref().is_some_and(|prior| {
+                        prior.accepting_stream == standing.accepting_stream
+                            && prior.sequence == standing.sequence
+                    });
+                    if superseded {
+                        guard.ingress_appends[index] = append;
+                    } else {
+                        withheld.push(append.key);
+                    }
+                }
+            }
+        }
         guard.sessions.insert(stream_id.clone(), session);
         guard.unacked.insert(stream_id.clone(), unacked);
         guard.principals.insert(stream_id, principal.clone());
-        Ok(())
+        Ok(withheld)
     }
 
     async fn get_session_principal(

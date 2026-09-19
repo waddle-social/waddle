@@ -37,6 +37,34 @@ pub struct SmIngressAppendKey {
     pub resource: FullJid,
 }
 
+/// An obligation the ledger reported unallocated while a socket's queue was being
+/// drained, before the drained frame has a sequence (issue #1789).
+///
+/// Holding one proves only that the ledger was read; the database constraint still
+/// arbitrates when the proof is written with the session snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmDrainedAppendTicket {
+    pub(crate) key: SmIngressAppendKey,
+    pub(crate) supersedes: Option<super::persistence::PriorIngressAllocation>,
+}
+
+impl SmDrainedAppendTicket {
+    /// Bind the ticket to the sequence the drain counted the frame at.
+    pub fn at(self, sequence: u32) -> SmDrainedIngressAppend {
+        SmDrainedIngressAppend {
+            ticket: self,
+            sequence,
+        }
+    }
+}
+
+/// A drained queue entry and the obligation it discharges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmDrainedIngressAppend {
+    pub(crate) ticket: SmDrainedAppendTicket,
+    pub(crate) sequence: u32,
+}
+
 /// Result of a keyed append attempt.
 ///
 /// There is no "committed but this registry lost the session" success: a snapshot that
