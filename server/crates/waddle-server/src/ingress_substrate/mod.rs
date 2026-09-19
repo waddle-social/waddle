@@ -31,6 +31,7 @@ use waddle_xmpp::ingress::{
     NormalizedTargetStorage, ProtocolEpoch, SemanticDigest, SmIngressId, StoredAlias,
     WireHandledCount,
 };
+use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
@@ -150,9 +151,18 @@ pub struct AliasGcBudget {
 pub struct AliasGcProgress {
     messages: Arc<AtomicUsize>,
     orphan_proofs: Arc<AtomicUsize>,
+    orphan_cursor: Arc<tokio::sync::Mutex<Option<SmIngressAppendKey>>>,
 }
 
 impl AliasGcProgress {
+    /// Start fresh accounting while retaining the traversal position across passes.
+    pub(crate) fn fresh_pass(&self) -> Self {
+        Self {
+            orphan_cursor: self.orphan_cursor.clone(),
+            ..Self::default()
+        }
+    }
+
     pub fn committed(&self) -> usize {
         self.messages.load(Ordering::Acquire)
     }
@@ -577,63 +587,139 @@ pub async fn gc_expired_aliases(
     }
     // A cross-node ledger writer can insert after its canonical parent was
     // reclaimed: authorization and append are separate transactions. Sweep
-    // independently so those late proofs (and pre-existing orphans) are found
-    // even though no canonical candidate remains to drive their reclamation.
-    loop {
-        if Instant::now() >= budget.deadline {
-            outcome.completed = false;
-            return Ok(outcome);
-        }
-        let deleted = gc_orphan_proof_batch(db, &budget)
-            .await
-            .map_err(|error| AliasGcFailure {
-                deleted_messages: outcome.deleted_messages,
-                deleted_orphan_proofs: outcome.deleted_orphan_proofs,
-                error,
-            })?;
-        budget
-            .progress
-            .orphan_proofs
-            .fetch_add(deleted, Ordering::AcqRel);
-        outcome.deleted_orphan_proofs += deleted;
-        if Instant::now() >= budget.deadline {
-            outcome.completed = false;
-            return Ok(outcome);
-        }
-        if deleted < GC_BATCH_LIMIT {
-            return Ok(outcome);
-        }
+    // independently to reclaim those late proofs. Cursor-page the examined
+    // rows: a filter-limited scan of healthy proofs can repeatedly hit the scan
+    // timeout without ever advancing to an orphan later in retained history.
+    if Instant::now() >= budget.deadline {
+        outcome.completed = false;
+        return Ok(outcome);
     }
+    let deleted = gc_orphan_proof_batch(db, &budget)
+        .await
+        .map_err(|error| AliasGcFailure {
+            deleted_messages: outcome.deleted_messages,
+            deleted_orphan_proofs: outcome.deleted_orphan_proofs,
+            error,
+        })?;
+    budget
+        .progress
+        .orphan_proofs
+        .fetch_add(deleted, Ordering::AcqRel);
+    outcome.deleted_orphan_proofs += deleted;
+    outcome.completed =
+        Instant::now() < budget.deadline && budget.progress.orphan_cursor.lock().await.is_none();
+    Ok(outcome)
 }
 
 async fn gc_orphan_proof_batch(
     db: &Database,
     budget: &AliasGcBudget,
 ) -> Result<usize, AliasGcError> {
+    // Serialize windows sharing a traversal so a slower pass cannot rewind it.
+    let mut cursor = budget.progress.orphan_cursor.lock().await;
     let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
-    // This statement scans retained history, just like expired_candidates.
     install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
-    // Connection acquisition and timeout installation may consume the budget.
     if Instant::now() >= budget.deadline {
         return Ok(0);
     }
-    let deleted = tx
-        .execute(
+    let mut rows = if let Some(after) = cursor.as_ref() {
+        tx.query(
             dialect_sql(
                 tx.driver(),
-                GC_DELETE_ORPHAN_PROOFS_POSTGRES,
-                GC_DELETE_ORPHAN_PROOFS_SQLITE,
+                GC_ORPHAN_WINDOW_AFTER_POSTGRES,
+                GC_ORPHAN_WINDOW_AFTER_SQLITE,
+            ),
+            crate::db_params![
+                after.message_key.to_storage().to_string(),
+                i64::from(after.kind.to_storage()),
+                after.semantic_identity_hash.to_vec(),
+                after.resource.to_string(),
+                GC_BATCH_LIMIT as i64,
+            ],
+        )
+        .await
+    } else {
+        tx.query(
+            dialect_sql(
+                tx.driver(),
+                GC_ORPHAN_WINDOW_POSTGRES,
+                GC_ORPHAN_WINDOW_SQLITE,
             ),
             crate::db_params![GC_BATCH_LIMIT as i64],
         )
         .await
-        .map_err(gc_error_from_database)?;
-    let deleted = usize::try_from(deleted).map_err(|_| {
-        AliasGcError::Substrate(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        })
-    })?;
+    }
+    .map_err(gc_error_from_database)?;
+    let mut window = Vec::new();
+    while let Some(row) = rows.next().await.map_err(gc_error_from_database)? {
+        let message_key: String = row.get(0).map_err(gc_error_from_database)?;
+        let kind: i64 = row.get(1).map_err(gc_error_from_database)?;
+        let hash: Vec<u8> = row.get(2).map_err(gc_error_from_database)?;
+        let resource: String = row.get(3).map_err(gc_error_from_database)?;
+        let key = SmIngressAppendKey {
+            message_key: message_key
+                .parse::<Uuid>()
+                .map(MessageKey::from_storage)
+                .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)?,
+            kind: SmIngressReceiptKind::from_storage(
+                i32::try_from(kind).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?,
+            ),
+            semantic_identity_hash: hash
+                .try_into()
+                .map_err(|_| IngressSubstrateError::InvalidStoredDigest)?,
+            resource: resource
+                .parse()
+                .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?,
+        };
+        let orphan: bool = row.get(4).map_err(gc_error_from_database)?;
+        window.push((key, orphan));
+    }
+    drop(rows);
+    install_gc_timeouts(&mut tx, budget, budget.statement_timeout).await?;
+    let mut deleted = 0;
+    let mut finished_window = true;
+    for (key, orphan) in &window {
+        if Instant::now() >= budget.deadline {
+            // Keep committed deletions useful even when the cooperative budget
+            // cannot drain a whole window. Retry the remaining window next pass.
+            finished_window = false;
+            break;
+        }
+        if !orphan {
+            continue;
+        }
+        let affected = tx
+            .execute(
+                dialect_sql(
+                    tx.driver(),
+                    GC_DELETE_ORPHAN_PROOFS_POSTGRES,
+                    GC_DELETE_ORPHAN_PROOFS_SQLITE,
+                ),
+                crate::db_params![
+                    key.message_key.to_storage().to_string(),
+                    i64::from(key.kind.to_storage()),
+                    key.semantic_identity_hash.to_vec(),
+                    key.resource.to_string(),
+                ],
+            )
+            .await
+            .map_err(gc_error_from_database)?;
+        deleted += usize::try_from(affected).map_err(|_| {
+            AliasGcError::Substrate(IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            })
+        })?;
+    }
     tx.commit().await.map_err(gc_error_from_database)?;
+    // Cursor advancement and the caller's accounting immediately follow commit
+    // without an intervening suspension point.
+    if finished_window {
+        *cursor = if window.len() == GC_BATCH_LIMIT {
+            window.last().map(|(key, _)| key.clone())
+        } else {
+            None
+        };
+    }
     Ok(deleted)
 }
 
@@ -1302,27 +1388,57 @@ const GC_DELETE_INGRESS_APPENDS_POSTGRES: &str =
     r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
 const GC_DELETE_INGRESS_APPENDS_SQLITE: &str =
     r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
+const GC_ORPHAN_WINDOW_POSTGRES: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
+        ) AS orphan
+    FROM sm_ingress_appends a
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
+const GC_ORPHAN_WINDOW_SQLITE: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
+        ) AS orphan
+    FROM sm_ingress_appends a
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
+const GC_ORPHAN_WINDOW_AFTER_POSTGRES: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
+        ) AS orphan
+    FROM sm_ingress_appends a
+    WHERE (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
+const GC_ORPHAN_WINDOW_AFTER_SQLITE: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
+        ) AS orphan
+    FROM sm_ingress_appends a
+    WHERE (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
 const GC_DELETE_ORPHAN_PROOFS_POSTGRES: &str = r#"
     DELETE FROM sm_ingress_appends
-    WHERE (message_key, receipt_kind, semantic_identity_hash, resource) IN (
-        SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
-        FROM sm_ingress_appends a
-        WHERE NOT EXISTS (
-            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
-        )
-        LIMIT ?
-    )
+    WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?
+      AND NOT EXISTS (
+          SELECT 1 FROM ingress_messages m WHERE m.message_key = sm_ingress_appends.message_key::uuid
+      )
 "#;
 const GC_DELETE_ORPHAN_PROOFS_SQLITE: &str = r#"
     DELETE FROM sm_ingress_appends
-    WHERE (message_key, receipt_kind, semantic_identity_hash, resource) IN (
-        SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
-        FROM sm_ingress_appends a
-        WHERE NOT EXISTS (
-            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
-        )
-        LIMIT ?
-    )
+    WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?
+      AND NOT EXISTS (
+          SELECT 1 FROM ingress_messages m WHERE m.message_key = sm_ingress_appends.message_key
+      )
 "#;
 const GC_DELETE_DELIVERIES_SQLITE: &str = r#"DELETE FROM ingress_deliveries WHERE message_key = ?"#;
 const GC_DELETE_MESSAGE_POSTGRES: &str = r#"
@@ -1479,7 +1595,7 @@ mod tests {
         for index in 0..count {
             tx.execute(
                 "INSERT INTO sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                crate::db_params![key.to_storage().to_string(), 1i64, vec![7u8; 32], format!("resource-{index}"), "retired-stream", 1i64, 0i64],
+                crate::db_params![key.to_storage().to_string(), 1i64, vec![7u8; 32], format!("gc@example.test/resource-{index:04}"), "retired-stream", 1i64, 0i64],
             ).await.expect("seed proof");
         }
         tx.commit().await.expect("commit proofs");
@@ -1632,6 +1748,127 @@ mod tests {
             return;
         };
         orphan_gc_expired_budget_preserves_proofs(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    async fn seed_healthy_gc_proofs(db: &Database, count: usize) -> MessageKey {
+        let key = MessageKey::from_storage(Uuid::from_u128(1));
+        let mut tx = db.begin_immediate().await.expect("begin healthy parent");
+        record_message(&mut tx, key, &digest(1), None)
+            .await
+            .expect("healthy parent");
+        tx.commit().await.expect("commit healthy parent");
+        seed_gc_proofs(db, key, count).await;
+        key
+    }
+
+    async fn orphan_gc_advances_across_healthy_windows(db: &Database) {
+        let healthy_count = GC_BATCH_LIMIT * 3;
+        seed_healthy_gc_proofs(db, healthy_count).await;
+        let late = MessageKey::from_storage(Uuid::from_u128(u128::MAX));
+        seed_gc_proofs(db, late, 1).await;
+        let mut budget = gc_budget();
+        // A filter-limited scan would delete the late orphan in the first pass.
+        // Three empty-deletion passes prove that the examined window, rather
+        // than just its orphan matches, is bounded and traversal is retained.
+        for page in 0..3 {
+            budget.progress = budget.progress.fresh_pass();
+            let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+                .await
+                .expect("healthy window");
+            assert_eq!(outcome.deleted_messages, 0);
+            assert_eq!(outcome.deleted_orphan_proofs, 0);
+            assert!(!outcome.completed);
+            assert_eq!(gc_proof_count(db).await, healthy_count as i64 + 1);
+            let position = budget.progress.orphan_cursor.lock().await.clone();
+            let expired = AliasGcBudget {
+                deadline: Instant::now(),
+                ..budget.clone()
+            };
+            let stopped = gc_expired_aliases(db, timestamp(7), expired)
+                .await
+                .expect("expired pass");
+            assert_eq!(stopped.deleted_orphan_proofs, 0);
+            assert!(!stopped.completed);
+            assert_eq!(*budget.progress.orphan_cursor.lock().await, position);
+            let key = position.as_ref().expect("full window retains cursor");
+            assert_eq!(
+                key.resource.to_string(),
+                format!(
+                    "gc@example.test/resource-{:04}",
+                    (page + 1) * GC_BATCH_LIMIT - 1
+                )
+            );
+        }
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("late orphan window");
+        assert_eq!(outcome.deleted_messages, 0);
+        assert_eq!(outcome.deleted_orphan_proofs, 1);
+        assert!(outcome.completed);
+        assert_eq!(budget.progress.committed_orphan_proofs(), 1);
+        assert_eq!(gc_proof_count(db).await, healthy_count as i64);
+    }
+
+    async fn orphan_gc_wraps_after_healthy_traversal(db: &Database) {
+        let healthy_count = GC_BATCH_LIMIT * 2;
+        seed_healthy_gc_proofs(db, healthy_count).await;
+        let mut budget = gc_budget();
+        for _ in 0..2 {
+            budget.progress = budget.progress.fresh_pass();
+            let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+                .await
+                .expect("full healthy window");
+            assert!(!outcome.completed);
+            assert_eq!(outcome.deleted_orphan_proofs, 0);
+        }
+        // Exactly N rows in the last nonempty window needs a final empty
+        // window to observe the end and reset the traversal.
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("end of traversal");
+        assert!(outcome.completed);
+        assert_eq!(outcome.deleted_orphan_proofs, 0);
+        let early = MessageKey::from_storage(Uuid::nil());
+        seed_gc_proofs(db, early, 1).await;
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("wrapped traversal");
+        assert_eq!(outcome.deleted_orphan_proofs, 1);
+        assert_eq!(outcome.deleted_messages, 0);
+        assert!(!outcome.completed);
+        assert_eq!(gc_proof_count(db).await, healthy_count as i64);
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_advances_across_healthy_windows() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_advances_across_healthy_windows(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_advances_across_healthy_windows() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_advances_across_healthy_windows(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_wraps_after_healthy_traversal() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_wraps_after_healthy_traversal(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_wraps_after_healthy_traversal() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_wraps_after_healthy_traversal(&fixture.db).await;
         fixture.close().await;
     }
 

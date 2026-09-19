@@ -55,11 +55,24 @@ pub(super) async fn authorize_ingress_append(
     match check_authority(services, validated_sender, stanza, obligation).await {
         Ok(()) => Some(obligation.clone().into_context()),
         Err(reason) => {
-            tracing::warn!(
-                ?reason,
-                sender = %obligation.sender_bare,
-                "relay append identity unauthorized; continuing with unkeyed delivery"
-            );
+            // An `Indeterminate` rejection is correlated with a database problem
+            // and fires once per relayed message, so warning on it would flood
+            // the logs for the length of an outage. The counter below is the
+            // alerting surface for that class; keep the log for the peer-fault
+            // class, which should be rare and is worth a line each.
+            match reason.failure_class() {
+                IngressAppendAuthorizationFailure::Unauthorized => tracing::warn!(
+                    ?reason,
+                    sender = %obligation.sender_bare,
+                    "relay append identity unauthorized; continuing with unkeyed delivery"
+                ),
+                IngressAppendAuthorizationFailure::Indeterminate => tracing::debug!(
+                    ?reason,
+                    sender = %obligation.sender_bare,
+                    "relay append identity could not be authorized; continuing with \
+                     unkeyed delivery"
+                ),
+            }
             waddle_xmpp::counter_add!(
                 "waddle.clustering.ingress_append.authorization_failed",
                 "{obligation}",
