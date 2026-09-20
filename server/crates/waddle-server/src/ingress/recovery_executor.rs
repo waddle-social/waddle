@@ -111,7 +111,12 @@ pub(super) async fn recover_row(
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
-        classification = classify_report(&report);
+        // Downgrade only: a settlement probe that could not gather its
+        // evidence already made this attempt inconclusive, and an evaluable
+        // effect report must not restore the stall streak it suspended.
+        if classify_report(&report) == AttemptClassification::Inconclusive {
+            classification = AttemptClassification::Inconclusive;
+        }
         // Frames belong to the sender's connection, which no longer exists
         // during recovery. A warning reply an observer produced cannot be
         // delivered; retrying every tick would only re-invoke the plugin.
