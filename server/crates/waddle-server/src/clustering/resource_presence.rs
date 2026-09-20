@@ -47,11 +47,6 @@ const RESOURCE_PRESENCE_ASK_TIMEOUT: Duration = Duration::from_secs(1);
 const RESOURCE_PRESENCE_MAILBOX_TIMEOUT: Duration = Duration::from_millis(250);
 const RESOURCE_PRESENCE_REPLY_TIMEOUT: Duration = Duration::from_millis(750);
 
-/// Whole-fan-out budget: the membership read plus every peer ask, which run
-/// concurrently. Half a second over one peer's own budget, so a single slow
-/// peer still resolves inside it rather than being cut off by it.
-pub const PEER_PRESENCE_FANOUT_BUDGET: Duration = Duration::from_millis(1_500);
-
 /// Page bound on the membership read. Waddle runs two replicas; a cluster that
 /// somehow shows more unexpired rows than this is a control plane nobody
 /// should be evicting occupants on, so a full page is treated as "the
@@ -81,34 +76,44 @@ pub trait ClusterMembership: Send + Sync {
 }
 
 /// Whether the cluster proved that no OTHER node can reach the resource.
+///
+/// `PresentOnAPeer` and `Unproven` are kept apart on purpose: the first is a
+/// STABLE fact about the cluster as it is right now (a peer is holding that
+/// socket and will deliver to it), the second is a FAILURE TO READ. Callers
+/// classify a recovery attempt differently on each — see
+/// `ingress::recovery_reachability::ResourceReachability`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerResourceReachability {
     /// The membership read succeeded and every peer in it answered `Absent`
     /// (including the degenerate single-node case: no peers to ask). The only
     /// outcome that permits an eviction.
     AbsentOnEveryPeer,
-    /// Some peer answered `Present`, some ask failed, the membership read
-    /// failed or was truncated, or the fan-out budget elapsed.
-    NotProven,
+    /// Some peer answered `Present`: it is holding that exact resource.
+    PresentOnAPeer,
+    /// An ask failed, the membership read failed or was truncated, or the
+    /// fan-out budget elapsed.
+    Unproven,
 }
 
-/// Ask every unexpired peer about `target`, concurrently, inside one bounded
-/// budget. Fails closed on every error path.
+/// Ask every unexpired peer about `target`, concurrently, inside `budget`.
+/// Fails closed on every error path.
+///
+/// `budget` covers the membership read plus every ask, which run
+/// concurrently. It is the CALLER's policy, because the two callers run under
+/// very different deadlines: ghost repair runs outside the per-row execution
+/// deadline and can afford to wait out a slow peer, while the departed-copy
+/// settlement runs inside it and must leave time for the rebuild.
 pub async fn peer_resource_reachability(
     membership: &dyn ClusterMembership,
     asker: &dyn ResourcePresenceAsker,
     target: &FullJid,
+    budget: Duration,
 ) -> PeerResourceReachability {
-    match tokio::time::timeout(
-        PEER_PRESENCE_FANOUT_BUDGET,
-        fan_out(membership, asker, target),
-    )
-    .await
-    {
+    match tokio::time::timeout(budget, fan_out(membership, asker, target)).await {
         Ok(reachability) => reachability,
         Err(_elapsed) => {
-            tracing::debug!(%target, "resource-presence fan-out exceeded its budget");
-            PeerResourceReachability::NotProven
+            tracing::debug!(%target, ?budget, "resource-presence fan-out exceeded its budget");
+            PeerResourceReachability::Unproven
         }
     }
 }
@@ -122,7 +127,7 @@ async fn fan_out(
         Ok(peers) => peers,
         Err(error) => {
             tracing::debug!(%target, %error, "resource-presence probe could not read the cluster membership");
-            return PeerResourceReachability::NotProven;
+            return PeerResourceReachability::Unproven;
         }
     };
     // No other node exists, so nothing else can be holding the socket.
@@ -142,7 +147,7 @@ async fn fan_out(
                     peer = %peer.node_id,
                     "a cluster peer still knows the resource"
                 );
-                return PeerResourceReachability::NotProven;
+                return PeerResourceReachability::PresentOnAPeer;
             }
             Err(error) => {
                 tracing::debug!(
@@ -151,7 +156,7 @@ async fn fan_out(
                     %error,
                     "resource-presence probe could not ask a cluster peer about the resource"
                 );
-                return PeerResourceReachability::NotProven;
+                return PeerResourceReachability::Unproven;
             }
         }
     }

@@ -353,14 +353,34 @@ impl crate::clustering::resource_presence::ResourcePresenceAsker for ScriptedRes
 }
 
 /// The cluster's unexpired peers, or a membership read that cannot answer.
+/// Counts its reads so a caller can assert the membership was never consulted.
 struct ScriptedMembership {
     peers: Vec<NodeIdentity>,
     readable: bool,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ScriptedMembership {
+    fn new(
+        peers: Vec<NodeIdentity>,
+        readable: bool,
+    ) -> (Arc<Self>, Arc<std::sync::atomic::AtomicUsize>) {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Arc::new(Self {
+                peers,
+                readable,
+                reads: Arc::clone(&reads),
+            }),
+            reads,
+        )
+    }
 }
 
 #[async_trait::async_trait]
 impl crate::clustering::resource_presence::ClusterMembership for ScriptedMembership {
     async fn peers(&self) -> Result<Vec<NodeIdentity>, waddle_xmpp::ownership::ClaimError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.readable {
             Ok(self.peers.clone())
         } else {
@@ -443,10 +463,10 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
                 ghost: occupant.clone(),
                 asked: Arc::clone(&asked),
             })),
-            cluster_membership: Some(Arc::new(ScriptedMembership {
-                peers: peers.clone(),
-                readable: case != ElsewhereCase::MembershipUnreadable,
-            })),
+            cluster_membership: Some(
+                ScriptedMembership::new(peers.clone(), case != ElsewhereCase::MembershipUnreadable)
+                    .0,
+            ),
             ..Default::default()
         },
         sm.clone(),
@@ -686,4 +706,276 @@ async fn postgres_muc_recovery_destination_owner_settles_local_copy() {
     if let Some(f) = IngressFixture::postgres("muc_recovery_destination").await {
         owned_recovery(f, true).await;
     }
+}
+
+/// What the cluster says about a frozen occupant the ROOM no longer lists —
+/// the departed-copy settlement's side of #1803 (R2-1).
+///
+/// Settling drops the copy permanently, so it needs the same every-peer proof
+/// the eviction does. The shape that makes this load-bearing is a room-host
+/// restart: the new incarnation has a valid claim fence and an EMPTY roster,
+/// holds no registered-remote mirror for a peer's socket, and reads `Absent`
+/// from the resumable-session probe for a live ATTACHED one. Every local
+/// signal says "gone" about a user who is simply connected to the other
+/// replica.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepartedElsewhere {
+    /// A peer holds the socket. The room host cannot deliver the copy itself
+    /// (the mirror is not even installed here), but the peer's own
+    /// maintenance pass can and does — see
+    /// `muc_recovery_destination_owner_settles_local_copy`. So the copy stays
+    /// owed rather than being dropped.
+    PeerHoldsTheSocket,
+    /// Every unexpired peer denies the resource and this node knows nothing
+    /// about it either: nothing anywhere can ever take the copy.
+    AbsentOnEveryPeer,
+    /// The membership read cannot answer, so the set of nodes that would have
+    /// to deny the resource is unknown. Fail closed.
+    MembershipUnreadable,
+    /// The occupant is still SEATED. The roster decides that alone: nothing
+    /// else may be consulted, which is both correct and what keeps the
+    /// per-occupant `sm_sessions` read off the `recover_row` hot path.
+    StillSeated,
+}
+
+/// One scripted peer answer for the settlement fan-out.
+struct DepartedPeers {
+    case: DepartedElsewhere,
+    socket_host: NodeIdentity,
+    asked: Arc<std::sync::Mutex<Vec<(NodeIdentity, jid::FullJid)>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::clustering::resource_presence::ResourcePresenceAsker for DepartedPeers {
+    async fn resource_presence(
+        &self,
+        peer: &NodeIdentity,
+        target: &jid::FullJid,
+    ) -> Result<
+        crate::clustering::relay::RelayResourcePresenceReply,
+        crate::clustering::relay::RelayAskError,
+    > {
+        use crate::clustering::relay::RelayResourcePresenceReply;
+        self.asked
+            .lock()
+            .expect("probe log")
+            .push((peer.clone(), target.clone()));
+        match self.case {
+            DepartedElsewhere::PeerHoldsTheSocket if peer == &self.socket_host => {
+                Ok(RelayResourcePresenceReply::Present)
+            }
+            _ => Ok(RelayResourcePresenceReply::Absent),
+        }
+    }
+}
+
+async fn departed_occupant_cluster_recovery(f: IngressFixture, case: DepartedElsewhere) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before = metrics
+        .counter_sum("ingress.maintenance.departed_occupant_copies", &[])
+        .unwrap_or(0);
+    let sm = persistent_sm(&f).await;
+    let planning_state = state_for(&f, sm.clone()).await;
+    let occupant: jid::FullJid = "foreign@example.com/phone".parse().expect("occupant");
+    let submission = planned_room(
+        &f,
+        &planning_state,
+        Case::Lost,
+        std::slice::from_ref(&occupant),
+    )
+    .await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("room fanout intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+
+    let local = NodeIdentity::new("recovering-node", "local-epoch");
+    let socket_node = NodeIdentity::new("socket-node", "foreign-epoch");
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (membership, membership_reads) = ScriptedMembership::new(
+        vec![socket_node.clone()],
+        case != DepartedElsewhere::MembershipUnreadable,
+    );
+    let claims = Arc::new(InProcessClaimStore::new());
+    let state = socket_tests::create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
+            node_identity: Some(SharedNodeIdentity::new(local.clone())),
+            ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+            resource_presence: Some(Arc::new(DepartedPeers {
+                case,
+                socket_host: socket_node.clone(),
+                asked: Arc::clone(&asked),
+            })),
+            cluster_membership: Some(membership),
+            ..Default::default()
+        },
+        sm.clone(),
+    )
+    .await;
+    wire_for_test(
+        &bridge,
+        &state,
+        claims as Arc<dyn ClaimStore>,
+        SharedNodeIdentity::new(local),
+    )
+    .await;
+    // The recovering node authoritatively hosts the room. Only `StillSeated`
+    // joins the occupant: every other case models the post-restart incarnation
+    // whose roster is empty.
+    let room: jid::BareJid = "recovery@muc.example.com".parse().expect("room");
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "recovery".into(),
+            channel_id: "recovery".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room");
+    if case == DepartedElsewhere::StillSeated {
+        actor
+            .ask(Join {
+                nick: "foreign".into(),
+                real_jid: occupant.clone(),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+    assert!(
+        !state
+            .deps
+            .protocol
+            .connection_registry
+            .is_connected(&occupant),
+        "the room host holds no socket and no mirror for the occupant"
+    );
+
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    assert_eq!(
+        pass(&f, &env, &MaintenanceCursor::default()).await,
+        MaintenanceOutcome::Complete
+    );
+
+    let settled = case == DepartedElsewhere::AbsentOnEveryPeer;
+    let mut tx = f.uow.begin().await.expect("inspect recovered row");
+    assert_eq!(
+        DeliveryProgressRepository::load(&mut tx, key, &receipt)
+            .await
+            .expect("delivery progress"),
+        if settled {
+            vec![occupant.clone()]
+        } else {
+            vec![]
+        },
+        "a copy is dropped only when EVERY peer denies the resource"
+    );
+    assert_eq!(
+        CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"),
+        settled
+    );
+    tx.commit().await.expect("read commit");
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.maintenance.departed_occupant_copies", &[])
+            .unwrap_or(0),
+        before + u64::from(settled)
+    );
+    let asked = asked.lock().expect("probe log").clone();
+    let reads = membership_reads.load(std::sync::atomic::Ordering::SeqCst);
+    match case {
+        // The roster is asked FIRST, so a seated occupant short-circuits
+        // before the resumable-session read and before the cluster is
+        // consulted at all.
+        DepartedElsewhere::StillSeated => {
+            assert_eq!(reads, 0, "a seated occupant needs no membership read");
+            assert!(
+                asked.is_empty(),
+                "a seated occupant needs no peer ask: {asked:?}"
+            );
+        }
+        DepartedElsewhere::MembershipUnreadable => {
+            assert_eq!(reads, 1, "the membership read was attempted");
+            assert!(
+                asked.is_empty(),
+                "no peer may be asked without a membership answer: {asked:?}"
+            );
+        }
+        _ => {
+            assert!(
+                asked
+                    .iter()
+                    .all(|(node, jid)| node == &socket_node && jid == &occupant),
+                "every peer is asked about the EXACT full JID: {asked:?}"
+            );
+            assert!(
+                !asked.is_empty(),
+                "the cluster must be asked before a copy is dropped"
+            );
+        }
+    }
+    f.close().await;
+}
+
+/// THE R2-1 REGRESSION: the room host restarted, so its roster is empty and it
+/// knows nothing about the occupant — but the occupant has a LIVE socket on the
+/// other replica, which delivers the copy in its own maintenance pass. Dropping
+/// it here would lose a message for a connected user.
+#[tokio::test]
+async fn sqlite_departed_occupant_with_a_peer_socket_keeps_its_copy_owed() {
+    departed_occupant_cluster_recovery(
+        IngressFixture::sqlite().await,
+        DepartedElsewhere::PeerHoldsTheSocket,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_departed_occupant_absent_on_every_peer_settles() {
+    departed_occupant_cluster_recovery(
+        IngressFixture::sqlite().await,
+        DepartedElsewhere::AbsentOnEveryPeer,
+    )
+    .await;
+}
+
+/// An unknown cluster is not an empty one.
+#[tokio::test]
+async fn sqlite_departed_occupant_keeps_its_copy_when_the_membership_read_fails() {
+    departed_occupant_cluster_recovery(
+        IngressFixture::sqlite().await,
+        DepartedElsewhere::MembershipUnreadable,
+    )
+    .await;
+}
+
+/// Ordering: the roster answer alone decides a SEATED occupant, so neither the
+/// per-occupant `sm_sessions` probe nor the cross-node fan-out runs for it.
+#[tokio::test]
+async fn sqlite_seated_occupant_is_decided_by_the_roster_alone() {
+    departed_occupant_cluster_recovery(
+        IngressFixture::sqlite().await,
+        DepartedElsewhere::StillSeated,
+    )
+    .await;
 }

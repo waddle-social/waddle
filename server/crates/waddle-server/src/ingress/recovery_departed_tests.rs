@@ -549,4 +549,150 @@ mod fenced_authority {
     async fn sqlite_unfenced_room_incarnation_settles_nothing() {
         fenced_departed_recovery(IngressFixture::sqlite().await, FenceCase::NoFence).await;
     }
+
+    /// #1803 F2, in-transaction half (R2-2): the settlement asserts the EXACT
+    /// room claim under `FOR SHARE` inside its own transaction, so a steal
+    /// that commits between the roster probe and the write rolls the
+    /// settlement back instead of dropping a copy for an occupant who joined
+    /// on the new owner.
+    ///
+    /// Postgres-only by construction: `assert_room_claim` needs a unit of work
+    /// opened with a bound node identity, and
+    /// `IngressUnitOfWork::open_with_node_identity` refuses any other driver.
+    async fn clustered_settlement_asserts_the_room_claim(
+        mut f: IngressFixture,
+        steal_the_claim: bool,
+    ) {
+        use crate::server::routes::interpret::effects::{self, Effect};
+        use waddle_xmpp::muc::room_actor::RestoreDurableRoomState;
+
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let before = metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0);
+        let sm = persistent_sm(&f).await;
+        let planning_state = state_for(&f, sm.clone()).await;
+        let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
+        let room: jid::BareJid = "recovery@muc.example.com".parse().expect("room");
+        // Seeds the real `clustering_claims` row AND reopens the fixture's
+        // unit of work with that node identity bound.
+        let room_fence = f.room_fence(&room).await;
+        let mut submission = planned_room(
+            &f,
+            &planning_state,
+            Case::Lost,
+            std::slice::from_ref(&ghost),
+        )
+        .await;
+        // A clustered unit of work refuses an unfenced room commit, so the
+        // plan has to carry the same fence the settlement will re-assert.
+        if let effects::RoomExecutionPath::Local { fence, .. } = &mut submission.plan.room_execution
+        {
+            *fence = effects::room::RoomFenceRequirement::Guarded(room_fence.clone());
+        }
+        for planned in &mut submission.plan.plan {
+            if let Effect::Durable(effects::DurableEffect::Room(
+                effects::room::DurableRoomEffect::ArchiveGroupchat { fence, .. },
+            )) = &mut planned.effect
+            {
+                *fence = effects::room::RoomFenceRequirement::Guarded(room_fence.clone());
+            }
+        }
+        let muc = submission
+            .plan
+            .intents
+            .iter()
+            .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+            .cloned()
+            .expect("room fanout intent");
+        let receipt = receipt_key(&muc).expect("MUC receipt");
+        let decision = commit_submission(&f.uow, &submission, 1)
+            .await
+            .expect("room commit");
+        let key = decision.message_key.expect("key");
+        settle_non_delivery_effects(&f, &planning_state, &decision).await;
+
+        // The recovering incarnation hosts the room, carries the same fence,
+        // and the store agrees it is current — so ONLY the in-transaction
+        // assertion can still stop the settlement.
+        let store = Arc::new(FenceProofStore(FenceCase::Current));
+        let state = socket_tests::create_test_websocket_state_with_clustering(
+            crate::clustering::ClusteringHandles {
+                muc_durable_store: Some(store.clone()),
+                ..Default::default()
+            },
+            sm.clone(),
+        )
+        .await;
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "recovery".into(),
+                channel_id: "recovery".into(),
+                config: Default::default(),
+            })
+            .await
+            .expect("room");
+        actor
+            .ask(RestoreDurableRoomState {
+                store: store.clone() as Arc<dyn waddle_xmpp::muc::durable::MucDurableStore>,
+                claim_fence: room_fence.clone(),
+            })
+            .await
+            .expect("install the durable room store");
+        if steal_the_claim {
+            // Another node won the room between the roster probe and the
+            // write. The actor has not noticed and still serves its roster.
+            f.execute(
+                "UPDATE clustering_claims SET claim_epoch = claim_epoch + 1 WHERE entity = ?",
+                crate::db_params![format!("room_actor:{room}")],
+            )
+            .await;
+        }
+
+        let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+        assert_eq!(
+            pass(&f, &env, &MaintenanceCursor::default()).await,
+            MaintenanceOutcome::Complete
+        );
+
+        let settled = !steal_the_claim;
+        let mut tx = f.uow.begin().await.expect("inspect recovered row");
+        assert_eq!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("delivery progress"),
+            if settled { vec![ghost.clone()] } else { vec![] },
+            "a settlement that lost the claim rolls back and drops nothing"
+        );
+        assert_eq!(
+            CanonicalMessageRepository::is_terminal(&mut tx, key)
+                .await
+                .expect("terminal"),
+            settled
+        );
+        tx.commit().await.expect("read commit");
+        assert_eq!(
+            metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0),
+            before + u64::from(settled)
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_clustered_settlement_commits_under_a_matching_room_claim() {
+        if let Some(f) = IngressFixture::postgres("settle_fenced_ok").await {
+            clustered_settlement_asserts_the_room_claim(f, false).await;
+        }
+    }
+
+    /// The probe-to-commit TOCTOU: the store still vouched for the fence when
+    /// the roster was read, and the claim moved before the write landed.
+    #[tokio::test]
+    async fn postgres_clustered_settlement_rolls_back_when_the_room_claim_moves() {
+        if let Some(f) = IngressFixture::postgres("settle_fenced_stolen").await {
+            clustered_settlement_asserts_the_room_claim(f, true).await;
+        }
+    }
 }

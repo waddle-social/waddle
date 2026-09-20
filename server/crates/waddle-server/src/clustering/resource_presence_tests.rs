@@ -7,6 +7,9 @@ fn target() -> FullJid {
     "juliet@example.test/web-1803".parse().expect("full jid")
 }
 
+/// Generous enough that only a deliberately hanging peer can exceed it.
+const TEST_BUDGET: Duration = Duration::from_millis(1_500);
+
 fn node(id: &str) -> NodeIdentity {
     NodeIdentity::new(id, "epoch")
 }
@@ -76,7 +79,7 @@ async fn no_peers_proves_absence_without_asking() {
     let membership = StaticMembership(Ok(Vec::new()));
     let asker = ScriptedPeers::new(Vec::new());
     assert_eq!(
-        peer_resource_reachability(&membership, &asker, &target()).await,
+        peer_resource_reachability(&membership, &asker, &target(), TEST_BUDGET).await,
         PeerResourceReachability::AbsentOnEveryPeer
     );
     assert!(asker.asked().is_empty());
@@ -92,7 +95,7 @@ async fn every_peer_absent_proves_absence() {
         ("c", RelayResourcePresenceReply::Absent),
     ]);
     assert_eq!(
-        peer_resource_reachability(&membership, &asker, &target()).await,
+        peer_resource_reachability(&membership, &asker, &target(), TEST_BUDGET).await,
         PeerResourceReachability::AbsentOnEveryPeer
     );
     let asked = asker.asked();
@@ -113,8 +116,9 @@ async fn one_peer_present_leaves_absence_unproven() {
         ("c", RelayResourcePresenceReply::Present),
     ]);
     assert_eq!(
-        peer_resource_reachability(&membership, &asker, &target()).await,
-        PeerResourceReachability::NotProven
+        peer_resource_reachability(&membership, &asker, &target(), TEST_BUDGET).await,
+        PeerResourceReachability::PresentOnAPeer,
+        "a peer holding the socket is a stable fact, not a failed read"
     );
 }
 
@@ -125,8 +129,8 @@ async fn a_failing_peer_ask_leaves_absence_unproven() {
     let membership = StaticMembership(Ok(vec![node("b"), node("unreachable")]));
     let asker = ScriptedPeers::new(vec![("b", RelayResourcePresenceReply::Absent)]);
     assert_eq!(
-        peer_resource_reachability(&membership, &asker, &target()).await,
-        PeerResourceReachability::NotProven
+        peer_resource_reachability(&membership, &asker, &target(), TEST_BUDGET).await,
+        PeerResourceReachability::Unproven
     );
 }
 
@@ -137,8 +141,8 @@ async fn an_unreadable_membership_leaves_absence_unproven() {
     let membership = StaticMembership(Err(()));
     let asker = ScriptedPeers::new(vec![("b", RelayResourcePresenceReply::Absent)]);
     assert_eq!(
-        peer_resource_reachability(&membership, &asker, &target()).await,
-        PeerResourceReachability::NotProven
+        peer_resource_reachability(&membership, &asker, &target(), TEST_BUDGET).await,
+        PeerResourceReachability::Unproven
     );
     assert!(
         asker.asked().is_empty(),
@@ -165,8 +169,8 @@ async fn a_hanging_peer_is_bounded_by_the_fanout_budget() {
 
     let membership = StaticMembership(Ok(vec![node("b")]));
     assert_eq!(
-        peer_resource_reachability(&membership, &Hangs, &target()).await,
-        PeerResourceReachability::NotProven
+        peer_resource_reachability(&membership, &Hangs, &target(), TEST_BUDGET).await,
+        PeerResourceReachability::Unproven
     );
 }
 

@@ -924,15 +924,36 @@ Two properties bound that settlement, because it permanently drops a copy:
   the write rolls the settlement back rather than dropping a copy for an
   occupant who joined on the new owner. `Ok(false)` leaves the copy owed;
   a store that cannot answer makes the attempt inconclusive.
-- **A copy is never settled for an occupant this node can still reach
-  (#1803).** Rosters are memory-only, so after a room-host restart every
-  frozen pre-restart occupant reads "absent from the roster". An occupant with
-  a live entry in this node's connection registry, or a resumable XEP-0198
-  session in its memory or the shared durable store (including a probe that
-  cannot answer), is skipped by the settlement and falls through to the
-  ordinary rebuild, which delivers or queues its copy in the same pass. The
-  row still terminalizes — it just does not terminalize by dropping a
-  message.
+- **A copy is never settled for an occupant ANY node can still reach
+  (#1803).** Rosters are memory-only, so after a room-host restart the new
+  incarnation has a valid claim fence and an EMPTY roster, holds no
+  registered-remote mirror for a peer's socket, and reads `Absent` from the
+  resumable-session probe for a live attached one — every local signal says
+  "gone" about a user who is simply connected to the other replica. A
+  roster-absent occupant is therefore only settled once it is absent from this
+  node's own state (connection registry, actor tree, and a resumable XEP-0198
+  session in memory or the shared durable store) AND every unexpired cluster
+  peer has denied the exact full JID — the same fan-out the ghost eviction
+  runs, on a tighter 500 ms budget because the settlement runs inside the
+  per-row recovery deadline.
+
+  Where the copy is then delivered depends on who holds the socket. A socket
+  or resumable session on the room host itself: the ordinary rebuild delivers
+  or queues it in the same pass. A socket on a PEER: the room host never
+  delivers it — `is_connected` is true for the registered-remote mirror, but
+  local full-JID delivery only writes to locally hosted sockets — and the
+  replica that actually holds the socket delivers the copy in ITS own
+  maintenance pass. The room host's job is only to not drop it first.
+
+  The roster is read FIRST, so a still-seated occupant costs one actor ask and
+  nothing else: no per-occupant `sm_sessions` read and no cross-node fan-out
+  on the recovery hot path.
+
+  **Rollout note:** because a peer that predates
+  `waddle.clustering.relay.resource_presence.v1` answers `UnknownMessage`,
+  which fails closed, departed-copy settlement is also suspended for the
+  duration of a rolling update. Legacy `route_muc` rows only start draining
+  once BOTH replicas run the new image.
 
 ### Ghost-occupant eviction (#1803)
 
@@ -1013,7 +1034,9 @@ that answers `Present` or cannot be asked at all (an old replica's
 fan-out exceeding its budget, a room this node does not authoritatively host,
 a room whose exact claim fence the durable store no longer holds, a room probe
 that does not answer, and a recovery environment with no WebSocket state to
-run the sweep with. Consequently a `route_muc` backlog with
+run the sweep with. The same fan-out guards the departed-copy settlement, so
+both irreversible decisions rest on one shared answer and cannot drift apart.
+Consequently a `route_muc` backlog with
 `unrecoverable_obligations{reason="no_durable_progress"}` ticking while
 `muc.ghost_occupants.evicted` stays flat means the occupants are still
 reachable somewhere (or a probe cannot answer) — not that the eviction is
@@ -1210,10 +1233,12 @@ no longer lists the occupant (see "Ghost-occupant eviction (#1803)" and
 `ingress.maintenance.departed_occupant_copies`), so the backlog drains after
 the #1803 rollout without the scale-to-zero window below. After that rollout,
 verify `max by (kind) (cnpg_waddle_ingress_nonterminal_messages)` for
-`route_muc` falls to zero and the counter accounts for the drop. Note that
-settlement now covers only occupants this node cannot reach at all; a frozen
-occupant that still has a resumable session here has its copy DELIVERED by the
-rebuild instead, which terminalizes the row just the same. The procedure
+`route_muc` falls to zero and the counter accounts for the drop. Two caveats:
+settlement now covers only occupants NO node can reach — a frozen occupant
+that still has a resumable session on either replica has its copy delivered
+(by whichever replica holds the socket) rather than dropped, which
+terminalizes the row just the same — and nothing drains until both replicas
+run the new image, since an old peer's `UnknownMessage` fails closed. The procedure
 below remains for rows that settlement cannot reach, such as a room no node
 hosts any more.
 

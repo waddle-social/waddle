@@ -23,12 +23,26 @@
 //! that commits in between rolls the settlement back instead of dropping a
 //! copy for an occupant who joined on the new owner.
 //!
-//! A settlement is also never used for an occupant this node can still reach
-//! itself. Rosters are memory-only, so after a room-host restart every frozen
-//! pre-restart occupant reads "absent from the roster" — settling on that
-//! would permanently drop copies for users sitting right here. Such an
-//! occupant falls through to the ordinary rebuild, which delivers or queues
-//! its copy in the same pass.
+//! A settlement is also never used for an occupant ANY node can still reach.
+//! Rosters are memory-only, so after a room-host restart the new incarnation
+//! has a valid fence and an EMPTY roster, holds no registered-remote mirror
+//! for a peer's socket, and reads `Absent` from the resumable-session probe
+//! for a live attached one — every local signal says "gone" about a user who
+//! is simply connected to the other replica. Settling on that would
+//! permanently drop the copy. So a roster-absent occupant must additionally
+//! be absent from this node's own state AND denied by every unexpired
+//! cluster peer before its copy is dropped.
+//!
+//! Where such a copy is then delivered depends on who holds the socket:
+//!
+//! - A socket or resumable session on THIS node: the ordinary rebuild in this
+//!   same pass delivers or queues it.
+//! - A socket on a PEER: the room host never delivers it — `is_connected` is
+//!   true for the registered-remote mirror, but `deliver_direct_to_full_locally`
+//!   only writes to locally hosted sockets. The replica that actually holds
+//!   the socket delivers the copy in ITS own maintenance pass (the
+//!   `muc_recovery_destination_owner_settles_local_copy` shape). The room
+//!   host's job is simply not to drop it first.
 
 use std::time::Duration;
 
@@ -41,7 +55,6 @@ use waddle_xmpp::{
         room_actor::{GetOccupantByJid, RoomActor},
         room_registry_actor::{GetRoom, RoomRegistryActor},
     },
-    stream_management::ResumableSessionProbe,
 };
 
 use crate::{
@@ -49,7 +62,7 @@ use crate::{
     server::routes::interpret::Deps,
 };
 
-use super::{recovery_executor::AttemptClassification, RouteProgress};
+use super::{recovery_executor::AttemptClassification, recovery_reachability, RouteProgress};
 
 /// Bounded budget for one room probe, matching the statement budget every
 /// recovery transaction runs under. A slower answer is not proof of absence.
@@ -111,16 +124,51 @@ pub(super) async fn settle_departed_occupants(
         };
         let mut departed = Vec::new();
         for occupant in owed {
+            // The roster comes FIRST. A seated occupant is owed its copy
+            // whatever the cluster says, so asking anything else about it
+            // would only spend the row deadline — and the SM probe is a
+            // full-table read of `sm_sessions` per occupant on this hot path.
+            match occupancy(actor, &occupant).await {
+                Occupancy::Present => continue,
+                Occupancy::Unknown => {
+                    settlement.classification = AttemptClassification::Inconclusive;
+                    continue;
+                }
+                Occupancy::Absent => {}
+            }
             // H1: a roster answer never settles a copy for somebody this node
-            // itself can still hand it to — the rebuild delivers or queues it
-            // in this same pass instead.
-            if locally_reachable(deps, &occupant).await {
+            // itself can still hand it to.
+            if recovery_reachability::locally_reachable(deps, &occupant).await {
                 continue;
             }
-            match occupancy(actor, &occupant).await {
-                Occupancy::Present => {}
-                Occupancy::Absent => departed.push(occupant),
-                Occupancy::Unknown => {
+            // R2-1: nor for somebody a PEER can hand it to. After a room-host
+            // restart the new incarnation has a valid fence and an EMPTY
+            // roster, holds no mirror for a peer's socket, and the SM probe
+            // is `Absent` for a live attached one — every local signal says
+            // "gone" about a user who is simply connected to the other
+            // replica, whose own maintenance pass would deliver the copy.
+            match recovery_reachability::reachable_elsewhere(
+                deps,
+                &occupant,
+                recovery_reachability::SETTLEMENT_FANOUT_BUDGET,
+            )
+            .await
+            {
+                recovery_reachability::ResourceReachability::AbsentEverywhere => {
+                    departed.push(occupant)
+                }
+                // A peer is holding that socket. That is a STABLE fact, not a
+                // failed read: re-running this attempt answers the same until
+                // the socket goes away, and the peer delivers the copy in its
+                // own pass. Keeping the attempt Evaluable is deliberate — a
+                // row whose only obstacle is a stable fact must still be able
+                // to accumulate its stall streak and reach ghost repair,
+                // which is the path that resolves a resource nothing can
+                // actually deliver to.
+                recovery_reachability::ResourceReachability::Reachable => {}
+                // A read failed or the budget elapsed. Transient, and the row
+                // must not be parked on evidence this attempt never gathered.
+                recovery_reachability::ResourceReachability::Unproven => {
                     settlement.classification = AttemptClassification::Inconclusive;
                 }
             }
@@ -322,22 +370,6 @@ async fn proven_fence(
     _room: &BareJid,
 ) -> RoomAuthority {
     RoomAuthority::Local { actor, fence: None }
-}
-
-/// Whether THIS node can still hand the occupant its copy itself, in which
-/// case the roster's "absent" must not settle (H1). A missing SM registry
-/// cannot prove anything, so it also counts as reachable.
-async fn locally_reachable(deps: &Deps<'_>, occupant: &FullJid) -> bool {
-    if deps.connection_registry.is_connected(occupant) {
-        return true;
-    }
-    let Some(sm) = deps.sm_session_registry else {
-        return true;
-    };
-    match sm.probe_resumable_session_for_full_jid(occupant).await {
-        ResumableSessionProbe::Present | ResumableSessionProbe::Failed => true,
-        ResumableSessionProbe::Absent => false,
-    }
 }
 
 enum Occupancy {

@@ -47,7 +47,6 @@ use waddle_xmpp::{
     muc::room_actor::{
         GetOccupantSessionGeneration, LeaveAttemptId, LeaveSessionSelector, RoomActor,
     },
-    stream_management::ResumableSessionProbe,
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
 
@@ -64,7 +63,7 @@ use crate::{
 
 use super::{
     recovery_departed::{self, RoomAuthority},
-    RouteProgress,
+    recovery_reachability, RouteProgress,
 };
 
 /// Test seam for the window the generation pin exists to close: everything
@@ -218,93 +217,23 @@ async fn abandoned_occupancy(
     enter_probe_window(key, occupant).await;
     #[cfg(not(test))]
     let _ = key;
-    if deps.connection_registry.is_connected(occupant) {
+    if recovery_reachability::locally_reachable(deps, occupant).await {
         return None;
     }
-    // Checks this node's memory AND the shared durable store, so a session
-    // resume-stolen by another node still counts as resumable.
-    let sm = deps.sm_session_registry?;
-    match sm.probe_resumable_session_for_full_jid(occupant).await {
-        ResumableSessionProbe::Absent => {}
-        ResumableSessionProbe::Present | ResumableSessionProbe::Failed => return None,
-    }
-    if reachable_on_another_node(deps, occupant).await {
+    // Ghost repair runs after the row was already classified as stalled, so
+    // it takes the generous fan-out budget; anything short of "nothing
+    // anywhere holds this resource" leaves the occupant seated.
+    if recovery_reachability::reachable_elsewhere(
+        deps,
+        occupant,
+        recovery_reachability::GHOST_FANOUT_BUDGET,
+    )
+    .await
+        != recovery_reachability::ResourceReachability::AbsentEverywhere
+    {
         return None;
     }
     Some(generation)
-}
-
-/// Whether some other node can still reach this exact full JID. An
-/// indeterminate read answers `true`: an eviction is not reversible.
-async fn reachable_on_another_node(deps: &Deps<'_>, occupant: &FullJid) -> bool {
-    registered_resource(deps, occupant).await || reachable_on_a_peer(deps, occupant).await
-}
-
-/// Whether the authoritative actor tree lists this exact resource. That covers
-/// a live local socket and the registered-remote mirror a clustered peer
-/// installs for a socket it hosts. The non-degrading lookup is deliberate: the
-/// routing variant reports an unanswered actor as "no resources", which is the
-/// right default for a route and the wrong one for an eviction.
-async fn registered_resource(deps: &Deps<'_>, occupant: &FullJid) -> bool {
-    let Some(registry) = deps.user_registry else {
-        return true;
-    };
-    match waddle_xmpp::registry::try_get_resources_for_user(registry, &occupant.to_bare()).await {
-        Ok(resources) => resources.contains(occupant),
-        Err(error) => {
-            tracing::debug!(%occupant, %error, "ghost probe could not read the user's resources");
-            true
-        }
-    }
-}
-
-/// Whether any OTHER cluster node can still reach this exact RESOURCE.
-///
-/// The question is asked of every peer the control plane has not
-/// committed-expired, never of an ownership claim. A claim is per account and
-/// is routing authority, not socket liveness: in the production shape the
-/// room is hosted here while the user's claim sits elsewhere because a
-/// healthy `web-<uuid>` resource lives there, and a second, abandoned
-/// resource pins this row forever (#1803) — but in the symmetric failure the
-/// claim's owner is exactly what died, leaving a LIVE socket on a peer that
-/// no claim row names. Only that peer knows about it, so only that peer can
-/// be asked.
-///
-/// Every indeterminate outcome answers `true`, because an eviction is not
-/// reversible: a membership read that errors or is truncated, any per-peer
-/// `Err` (an old peer answering `UnknownMessage` mid-rolling-update, a
-/// timeout, a transport or decode failure), a `Present` from any peer, the
-/// fan-out budget elapsing, and a half-wired set of handles all leave the
-/// occupant seated.
-#[cfg(feature = "clustering")]
-async fn reachable_on_a_peer(deps: &Deps<'_>, occupant: &FullJid) -> bool {
-    use crate::clustering::resource_presence::{
-        peer_resource_reachability, PeerResourceReachability,
-    };
-
-    let Some(state) = deps.web_socket_state else {
-        return true;
-    };
-    let handles = &state.deps.app_state.clustering_claims;
-    let (membership, asker) = match (&handles.cluster_membership, &handles.resource_presence) {
-        // No clustering is configured at all, so this node is the whole
-        // cluster and there is no peer that could hold the socket.
-        (None, None) => return false,
-        (Some(membership), Some(asker)) => (membership, asker),
-        // Half-wired: the question cannot be asked, so absence is unproven.
-        _ => return true,
-    };
-    match peer_resource_reachability(membership.as_ref(), asker.as_ref(), occupant).await {
-        PeerResourceReachability::AbsentOnEveryPeer => false,
-        PeerResourceReachability::NotProven => true,
-    }
-}
-
-/// Cluster peers exist only behind the `clustering` feature; without it this
-/// node is the only one there is.
-#[cfg(not(feature = "clustering"))]
-async fn reachable_on_a_peer(_deps: &Deps<'_>, _occupant: &FullJid) -> bool {
-    false
 }
 
 /// Remove the occupancy through the one full-JID leave sweep every other
