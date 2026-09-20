@@ -131,7 +131,7 @@
                 cargo nextest list "''${nextest_args[@]}" -E "$(cat "$archive_output/whole.filter")" \
                   --message-format json > "$out/whole-$partition.json"
                 cargo nextest list "''${nextest_args[@]}" -E "$(cat "$archive_output/shared.filter")" \
-                  --partition "count:$partition/4" --message-format json > "$out/shared-$partition.json"
+                  --partition "hash:$partition/4" --message-format json > "$out/shared-$partition.json"
                 cp "$out/whole-$partition.json" "$archive_output/whole-inventory.json"
                 cp "$out/shared-$partition.json" "$archive_output/shared-inventory.json"
                 coverage_inventories+=("$out/whole-$partition.json" "$out/shared-$partition.json")
@@ -207,14 +207,14 @@
                   --target-dir-remap "$extracted/target" --build-dir-remap "$extracted/target"
                   --workspace-remap "$PWD")
                 cargo nextest list "''${reused_args[@]}" -E "$shared_filter" \
-                  --partition "count:${toString partition}/4" --message-format json > "$out/shared-inventory.json"
+                  --partition "hash:${toString partition}/4" --message-format json > "$out/shared-inventory.json"
                 ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
                   ${archiveOutput}/shared-inventory.json "$out/shared-inventory.json" \
                   > "$out/shared-coverage.json"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   cargo nextest run "''${reused_args[@]}" -E "$whole_filter"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  cargo nextest run "''${reused_args[@]}" -E "$shared_filter" --partition "count:${toString partition}/4"
+                  cargo nextest run "''${reused_args[@]}" -E "$shared_filter" --partition "hash:${toString partition}/4"
                 runHook postCheck
               '';
             });

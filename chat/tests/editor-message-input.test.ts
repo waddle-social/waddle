@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Editor } from "@tiptap/core";
 import { createChatEditorExtensions } from "../src/lib/editor/chat-editor-extensions";
 import { chatKeymapPluginKey, isChatSubmitBoundary } from "../src/lib/editor/chat-keymap";
@@ -63,6 +63,24 @@ function dispatchTextInput(editor: Editor, text: string) {
 }
 
 describe("message input editor", () => {
+  let originalNavigator: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    // Tiptap's keyboard shortcuts inspect browser platform information even
+    // when the editor runs without a DOM. Own that fixture instead of relying
+    // on whichever navigator a previously executed test left behind.
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { platform: "Linux x86_64", userAgent: "chat-editor-test" },
+    });
+  });
+
+  afterEach(() => {
+    if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+    else Reflect.deleteProperty(globalThis, "navigator");
+  });
+
   test("uses Enter to send normal paragraphs", () => {
     let submitted: Record<string, unknown> | undefined;
     const editor = createEditor(

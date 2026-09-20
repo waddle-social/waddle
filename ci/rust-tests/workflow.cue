@@ -131,8 +131,10 @@ workflow: {
 		}
 		for shard in _shards {
 			(shard.name): {
-				name:      shard.name
-				"runs-on": "namespace-profile-linux-x86"
+				name: shard.name
+				// Keep the measured 8 CPU / 16 GB shape and prioritize the
+				// critical test path when runner capacity is constrained.
+				"runs-on": "nscloud-ubuntu-24.04-amd64-8x16;job.priority=1"
 				needs: ["nixTestArchive-builder"]
 				"timeout-minutes": 30
 				steps: list.Concat([_setupSteps, [

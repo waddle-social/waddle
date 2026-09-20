@@ -8,7 +8,7 @@ The input is an unfiltered `cargo nextest list --message-format json` inventory.
 Its binary paths must still exist. The output directory receives plan.json and
 partition-N.filter for each archive's owned and shared binaries, and
 partition-N.whole.filter for only its owned binaries. shared.filter selects the
-shared binaries, whose execution must use nextest --partition count:N/COUNT.
+shared binaries, whose execution uses nextest --partition hash:N/COUNT.
 Nonshared binaries are assigned exactly once, including empty and ignored-only
 binaries. plan.json records unique source bytes, replicated shared bytes, and
 each archive's members and bytes. Check the actual whole and shared inventories

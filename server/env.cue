@@ -66,7 +66,7 @@ schema.#Project & {
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
-		c.#CuenvRelease,
+		wc.#CuenvRelease,
 		c.#OnePassword,
 		schema.#Contributor & {
 			id: "flakehub"
@@ -237,17 +237,29 @@ schema.#Project & {
 			args: ["-c", #"""
 					set -euo pipefail
 					cd ..
-					projects="$(
-					  cuenv info --json |
-					    bun -e 'const info = JSON.parse(await Bun.stdin.text()); if (!Array.isArray(info.projects) || info.projects.length === 0) throw new Error("cuenv info returned no projects"); for (const project of info.projects) { if (typeof project.path !== "string" || project.path.length === 0 || project.path.includes("\n")) throw new Error("cuenv info returned an invalid project path"); console.log(project.path); }'
-					)"
+					# Discovery must not omit projects when CUE evaluation fails.
+					# cuenv 0.55 info returns success with partial discovery.
+					project_files="$(mktemp)"
+					trap 'rm -f "$project_files"' EXIT
+					git ls-files -z -- ':(glob)**/env.cue' > "$project_files"
+					test -s "$project_files"
+					# Local lock checks preserve siblings, so reject deleted-project entries too.
+					PROJECT_FILES="$project_files" bun -e 'const files = (await Bun.file(process.env.PROJECT_FILES).text()).split("\0").filter(Boolean); const paths = new Set(files.map(file => file === "env.cue" ? "." : file.slice(0, -8))); const lock = Bun.TOML.parse(await Bun.file("cuenv.lock").text()); for (const path of Object.keys(lock.runtimes ?? {})) if (!paths.has(path)) throw new Error(`Runtime lock references untracked project: ${path}`);'
 					overall_status=0
-					while IFS= read -r project; do
-					  if ! cuenv sync ci --check -p "${project}"; then
+					while IFS= read -r -d '' file; do
+					  [[ "$file" != env.cue ]] || continue
+					  project="$(dirname "$file")"
+					  if ! cuenv sync ci --check -p "$project"; then
 					    overall_status=1
 					  fi
-					done <<< "${projects}"
+					  if ! cuenv sync lock --check -p "$project"; then
+					    overall_status=1
+					  fi
+					done < "$project_files"
 					if ! bash scripts/sync-rust-tests.sh --check; then
+					  overall_status=1
+					fi
+					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
 					exit "${overall_status}"
@@ -256,9 +268,12 @@ schema.#Project & {
 				"**/env.cue",
 				"deployment.cue",
 				"../.github/workflows/hestia-cache-gc.yml",
-				"../ci/contributors/nix.cue",
+				"../ci/contributors/*.cue",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",
+				"../ci/cache-benchmark/**",
+				"../scripts/*cache-benchmark*",
+				"../.github/workflows/waddle-ci-cache-benchmark.yml",
 				"../.github/workflows/waddle-server-*.yml",
 				"../cue.mod/module.cue",
 			]
@@ -277,6 +292,7 @@ schema.#Project & {
 				"../cuenv.lock",
 				"../.rules.cue",
 				"../.gitignore",
+				"../ci/contributors/*.cue",
 			]
 		}
 

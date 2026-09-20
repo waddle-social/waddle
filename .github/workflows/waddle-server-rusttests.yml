@@ -7,13 +7,15 @@ name: waddle-server-rustTests
     paths:
       - .github/workflows/hestia-cache-gc.yml
       - .github/workflows/hestia-cache-gc.yml/**
+      - .github/workflows/waddle-ci-cache-benchmark.yml
+      - .github/workflows/waddle-ci-cache-benchmark.yml/**
       - .github/workflows/waddle-server-*.yml
       - .github/workflows/waddle-server-rusttests.yml
       - apps/apple/**/Tests/**
       - apps/apple/Waddle/RustClient/Generated/**
       - chat/tests/**
-      - ci/contributors/nix.cue
-      - ci/contributors/nix.cue/**
+      - ci/cache-benchmark/**
+      - ci/contributors/*.cue
       - ci/rust-tests/**
       - cue.mod/**
       - cue.mod/module.cue
@@ -40,6 +42,7 @@ name: waddle-server-rustTests
       - infrastructure/waddle.cloud/gitops/waddle-server/**
       - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
       - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
+      - scripts/*cache-benchmark*
       - scripts/ci-timings.py
       - scripts/ci-timings.py/**
       - scripts/sync-rust-tests.sh
@@ -101,7 +104,7 @@ permissions:
 jobs:
   nixTestShard1:
     name: nixTestShard1
-    runs-on: namespace-profile-linux-x86
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16;job.priority=1
     needs:
       - nixTestArchive-builder
     timeout-minutes: 30
@@ -159,7 +162,7 @@ jobs:
         working-directory: server
   nixTestShard2:
     name: nixTestShard2
-    runs-on: namespace-profile-linux-x86
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16;job.priority=1
     needs:
       - nixTestArchive-builder
     timeout-minutes: 30
@@ -217,7 +220,7 @@ jobs:
         working-directory: server
   nixTestShard3:
     name: nixTestShard3
-    runs-on: namespace-profile-linux-x86
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16;job.priority=1
     needs:
       - nixTestArchive-builder
     timeout-minutes: 30
@@ -275,7 +278,7 @@ jobs:
         working-directory: server
   nixTestShard4:
     name: nixTestShard4
-    runs-on: namespace-profile-linux-x86
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16;job.priority=1
     needs:
       - nixTestArchive-builder
     timeout-minutes: 30

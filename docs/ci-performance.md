@@ -149,7 +149,7 @@ The replacement test path compiles once and assigns most whole test binaries to
 four groups balanced by executable size. The server library and cluster end-to-end
 binary are included in every archive so their slow, database-serialized tests can
 still be partitioned across four independent databases. Each worker runs its
-unique binaries, then its count partition of the two shared binaries, reusing one
+unique binaries, then its hash partition of the two shared binaries, reusing one
 extraction. Inventory checks prove the selected tests cover the original inventory
 without overlap; binary overlap is allowed only for those two explicit IDs.
 Native nextest binary filters create
@@ -311,3 +311,63 @@ simultaneous Namespace allocation becomes 64 CPU / 128 GB. Account limits remain
 unverified. CodeQL's original GitHub-hosted four-thread scan used approximately
 14.6 GB, but its new eight-thread completion time is still an experiment and must
 fit the full 15-minute gate without changing query coverage.
+
+## Hybrid archive trial: `02c406d3`
+
+The [changed-source Rust trial](https://github.com/waddle-social/waddle/actions/runs/35508451230)
+finished in **16m57s**, with one failing test; the goal remains unmet. This was a
+real workspace rebuild, not an archive cache hit. Compilation took **180.65s**
+with the two archive-only optimization overrides, compared with 478.3s before.
+The builder started nine seconds after the workflow event and finished in 6m43s.
+Four archives were approximately 1.95 GB each; raw uploads took 48 seconds total.
+Hestia's drain took 4.18s, with no archive outputs uploaded, and FlakeHub's post
+step took 1.11s. The visible cgroup lifetime peak was 60.88 GiB with no memory
+events; this is not compiler-phase RSS and does not justify more Cargo jobs.
+
+| Worker | Archive download | Unique-binary tests | Shared-binary tests | Result |
+| --- | ---: | ---: | ---: | --- |
+| 1 | 3m06s | 17.222s | 261.454s | Passed |
+| 2 | 2m37s | 35.991s | 84.860s | Passed |
+| 3 | 2m45s | 20.976s | 112.817s | One failed test |
+| 4 | 3m13s | 10.286s | 147.133s | Passed |
+
+All 10,645 selected tests executed; 10,644 passed. The janitor cancellation test
+raced an outer one-second deadline against an intended one-second terminal
+cleanup attempt. Its correction uses paused Tokio time and checks both the
+cleanup duration and cancellation bound. Chat also exposed an editor test's
+dependence on a different test leaving `navigator` installed; its fixture now
+owns and restores that global. Neither correction changes production behavior.
+
+The root drift gate caught cuenv setup rewriting the lock from incomplete
+project discovery. Setup must preserve runtime locks, and explicit project
+checks must fail on evaluation errors. The previously green discovery-based
+drift lane is insufficient evidence because cuenv 0.55 can silently omit failed
+projects. Setup now synchronizes only root VCS dependencies, and the drift gate
+checks each tracked project explicitly. Local generation and its consistency
+check passed using a scratch-only copy of cuenv with its evaluation timeout
+extended from 10 to 60 seconds. The original binary and CI's 0.55.0 pin are
+unchanged; the corrected live checks with that original tool remain required.
+
+The next trial uses nextest's native hash partitioning for the two shared
+binaries. Applying the pinned algorithm to this run's measured test durations
+estimates serial database/cluster work at 164/161/176/104 seconds, versus
+261/85/113/147 seconds with count partitioning. These are scheduling estimates,
+not measured future runtimes. Four workers keep 8 CPU / 16 GB and receive
+[scheduling priority](https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering)
+to reduce the delayed fourth worker. Inventory equality and complete coverage
+remain mandatory.
+
+Other observed workflows finished within 15 minutes: CodeQL 9m51s, server
+validation 8m24s, XMPP server compliance 11m18s, smaller XMPP checks 5m46s,
+Android PR 10m45s, Android device checks 7m30s and Apple 3m27s. Root sync and chat
+failed, so these timings do not establish an all-green result. Measurements run
+from workflow creation to last job completion; event delivery and later check
+reporting are not included.
+
+[Reference-project review](ci-reference-projects.md) separates Deno/Warp's Cargo
+artifact caching from Union's source-scoped package builds. The
+[cache qualification](ci-cache-benchmarks.md) tests existing services on identical
+outputs without allowing compilation. Provider qualification runs after ordinary
+CI and is experimental measurement, not a new required production gate or proof
+of changed-code latency. The archive itself is included to test whether direct
+Nix substitution can improve the remaining Actions download bottleneck.
