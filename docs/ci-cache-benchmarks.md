@@ -69,6 +69,55 @@ that retry, remove the PR trigger and retain
 manual dispatch so cumulative PR diffs do not repeatedly schedule this long
 serial diagnostic workflow.
 
+## Second measured qualification: 2026-09-20
+
+[Run 35513007420](https://github.com/waddle-social/waddle/actions/runs/35513007420)
+finished at 14:07:23 UTC on head `cabddd0021504ce69cd8d587540b253505eaba17`.
+The [report](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106090643520)
+retains every probe, including the Namespace setup failure. The same immutable
+archive and no-build restrictions were used; full payload hashing had not yet
+been added.
+
+| Existing provider | Check-deps restore | Archive restore | Whole job | Result |
+|---|---:|---:|---:|---|
+| [FH + Hestia 2](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086009398) | 15.566s | 30.673s | 105s | Complete; Hestia still reported an evicted pack |
+| [FH only](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086009450) | 10.415s | 12.207s | 75s | Complete |
+| [Hestia 2 only](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086009449) | Miss/error | Miss | 57s | Incomplete |
+| [Hestia 3 only, before seeding](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086009396) | Miss | Miss | 45s | Unpopulated, not a throughput result |
+| [FH + Hestia 3](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086009443) | 9.962s | 11.026s | 73s | Complete |
+
+| Provider | Seed evidence | Fresh-runner warm evidence | Classification |
+|---|---|---|---|
+| Namespace | [15s; retained volume found, 7.1 GB used](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086811754), but stale receipt skipped fresh-host daemon installation | [42s](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106089533710); both mounted paths absent and all three outputs missed | Integration and population remain unqualified; focused retry below |
+| cache-nix | [93s](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086811609); corrected snapshot actually saved, 17s post step | [107s](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106089533803); 4,015,662,037-byte snapshot restored, all three outputs locally valid | Successful seed and fresh restore; snapshot survived the intervening Magic seed |
+| Magic GHA | [1,189s](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086811627), including 895s post-save | [68s](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106089533802); all three outputs failed, HTTP 418 / GHA `ResourceExhausted` rate limit again | Unqualified; successful upload does not imply usable restoration |
+| Explicitly seeded Hestia 3 | [107s](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106090058462); all outputs registered, explicit drain 27.502s, manifest `m3#1` | [140s](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106090318370); dependencies 51.952s, vendor local 0.024s, archive 44.044s, all successful | Successful seed and isolated fresh restore, with FlakeHub excluded |
+
+The successful Hestia 3 warm job establishes real seeded availability; the
+earlier unpopulated miss is not its performance result. FlakeHub was faster in
+these serial samples, but this is not repeated controlled end-to-end evidence.
+Snapshot's near-zero per-path validity probes follow its full setup restore and
+must not replace its 107-second whole-job cost. Namespace still needs the
+single focused recovery test; no broad provider rerun is planned.
+
+## Focused Namespace recovery: 2026-09-20
+
+[Run 35516047870](https://github.com/waddle-social/waddle/actions/runs/35516047870)
+at `9a0c1c84eb7f9a047589b760eabd2dfb9eabe65b` ran only the Namespace pair.
+The [26-second seed](https://github.com/waddle-social/waddle/actions/runs/35516047870/job/106093973554)
+found both retained cache paths (767 MB used), preserved the receipt, completed
+fresh-host installation and connected to its daemon. The installer's earlier
+best-effort FlakeHub login had raced the stale socket and failed with connection
+refused. All three restores consequently received HTTP 401; no archive payload
+read or hash was produced. This proves host recovery, not a seeded cache or a
+fast restore. The [43-second warm job](https://github.com/waddle-social/waddle/actions/runs/35516047870/job/106094051662)
+landed without either cached path and missed all three outputs. Its hash
+comparison therefore remained unverified. The report completed at 14:33:58 UTC.
+The next focused retry repeats the installer's supported OIDC
+login only for the seed, after bounded daemon readiness, with a 60-second command
+deadline and a hard failure if authentication does not succeed. Tokens and
+authentication state are not printed, deleted or copied into reports.
+
 ## Qualification workflow
 
 `ci/cache-benchmark/workflow.cue` generates

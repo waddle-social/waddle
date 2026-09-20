@@ -112,6 +112,9 @@ jobs:
           done
           echo "::error::Namespace Nix daemon did not become ready."
           exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -227,6 +230,9 @@ jobs:
           done
           echo "::error::Namespace Nix daemon did not become ready."
           exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -342,6 +348,9 @@ jobs:
           done
           echo "::error::Namespace Nix daemon did not become ready."
           exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -463,6 +472,9 @@ jobs:
           done
           echo "::error::Namespace Nix daemon did not become ready."
           exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -585,6 +597,9 @@ jobs:
           done
           echo "::error::Namespace Nix daemon did not become ready."
           exit 1
+      - name: Authenticate Namespace seed after daemon readiness
+        if: ${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}
+        run: timeout 60s /usr/local/bin/determinate-nixd login github-action
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569

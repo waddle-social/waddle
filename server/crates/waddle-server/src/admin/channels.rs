@@ -7410,17 +7410,32 @@ mod group_dm_durable_reconciliation_tests {
             "handler proceeds with catalog work after reconciling the committed config"
         );
 
-        let coordinates = *durable_store
-            .coordinates
+        // Recovery activates the restored room at a newer, effect-free
+        // revision. Its config coordinates still identify the rename row.
+        let coordinates = durable_store
+            .states
             .lock()
-            .expect("coordinates lock")
+            .expect("states lock")
             .get(&room_jid)
-            .expect("committed coordinates");
+            .expect("committed room state")
+            .config_coordinates
+            .expect("committed config coordinates");
         let key = crate::room_effect_outbox::RoomEffectKey {
-            lifecycle: coordinates.0,
-            revision: RoomRevision::from_stored(coordinates.1).expect("revision"),
+            lifecycle: coordinates.lifecycle,
+            revision: coordinates.revision,
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
         };
+        assert!(
+            websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("find committed config effect")
+                .is_some(),
+            "the reconciled config commit retains its exact effect row"
+        );
         // Arming runs asynchronously after the handler returns. Wait before
         // capturing the one-shot drain's clock so the committed row is due.
         wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;

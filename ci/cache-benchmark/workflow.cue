@@ -144,6 +144,13 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 				"""
 		},
 		{
+			name: "Authenticate Namespace seed after daemon readiness"
+			if: "${{ matrix.variant == 'namespace' && matrix.provider == 'fh' }}"
+			// The installer's best-effort login can race a retained socket.
+			// Use its same supported OIDC command after readiness, fail closed.
+			run: "timeout 60s /usr/local/bin/determinate-nixd login github-action"
+		},
+		{
 			name: "Restore or seed isolated Nix store snapshot"
 			if: "${{ matrix.variant == 'cache-nix' }}"
 			uses: _snapshot

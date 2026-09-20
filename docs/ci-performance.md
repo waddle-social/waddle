@@ -448,9 +448,33 @@ The failed test was
 Its one-second recipient wait expired after it spawned a single outbox drain.
 The handler schedules arming asynchronously, while that drain captures a fixed
 eligibility timestamp and exits when no row is due. It can therefore run before
-arming completes and never deliver the row. The correction waits for the exact
-committed row using the existing one-second readiness helper before taking the
-drain timestamp. Recipient timeout, write acknowledgement and exactly-once
-assertions remain intact. A complete corrected run is still required before
-accepting the performance result. The previously corrected janitor test passed
-in 0.011s.
+arming completes and never deliver the row. The initial correction added the
+existing one-second readiness helper before taking the drain timestamp, but
+selected the fixture's latest mutation coordinates. The next trial below
+exposed why these are not necessarily the committed config coordinates.
+Recipient timeout, write acknowledgement and exactly-once assertions remain
+intact. The previously corrected janitor test passed in 0.011s.
+
+## Changed-source readiness trial: `9a0c1c84`
+
+The [Rust workflow](https://github.com/waddle-social/waddle/actions/runs/35516047908)
+finished in **13m04s**, and every ordinary workflow completed within **13m07s**
+of the earliest event. Nine workflows passed; Rust and
+[XMPP server compliance](https://github.com/waddle-social/waddle/actions/runs/35516047854)
+failed the same group-DM test at the new readiness barrier. This is not goal
+acceptance. All 10,645 selected all-features test identities remained unchanged;
+10,644 passed and one failed. XMPP server ran all 4,119 tests, with 4,118 passing.
+
+The builder took 7m12s, including 192.26s of actual changed-source compilation:
+225 dirty workspace units and 1,134 fresh dependency units. All four workers
+restored through the binary cache in 45–49s and skipped raw fallback. Their
+preparation took 24.47–28.77s, including extraction; the slowest shared test
+phase took 165.71s. The final gate took four seconds.
+
+Recovery commits an effect-free `Activate` mutation after the config commit.
+The fixture's general coordinates therefore advance beyond the config
+reservation. Waiting on that later revision selects a nonexistent outbox row,
+which explains the readiness timeout in both configurations. The corrected
+test must select the recorded `config_coordinates`, assert that exact row
+exists, then await arming before capturing the drain clock. A new complete run
+must validate that correction; no timeout expansion or test retry is justified.
