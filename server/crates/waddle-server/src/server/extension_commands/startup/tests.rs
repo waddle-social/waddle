@@ -23,11 +23,13 @@ fn config(can_send: bool, rooms: &[&str]) -> ExtensionConfig {
             provider_room_grants: rooms.iter().map(|room| (*room).to_owned()).collect(),
             config_secret_files: Default::default(),
             local_path: Some(
-                concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../waddle-extensions/tests/fixtures/message_hook.wat"
+                std::path::PathBuf::from(
+                    std::env::var_os("CARGO_MANIFEST_DIR")
+                        .expect("test runner sets CARGO_MANIFEST_DIR"),
                 )
-                .into(),
+                .join("../waddle-extensions/tests/fixtures/message_hook.wat")
+                .to_string_lossy()
+                .into_owned(),
             ),
         }],
         ..ExtensionConfig::default()

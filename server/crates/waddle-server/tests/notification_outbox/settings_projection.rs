@@ -53,8 +53,10 @@ async fn effective_setting_uses_xep0492_default_by_conversation_kind() {
 
 #[tokio::test]
 async fn projection_store_persists_file_backing() {
-    let artifacts =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!(
         "notification-settings-projection-{}.db",

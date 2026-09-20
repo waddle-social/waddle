@@ -76,7 +76,9 @@ fn directory_target_has_tests(dir: &Path) -> bool {
 
 #[test]
 fn every_numbered_xep_module_has_a_dedicated_test_suite() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    );
     let xep_src_dir = manifest_dir.join("src/xep");
     let waddle_xmpp_tests = manifest_dir.join("tests");
     let waddle_server_tests = manifest_dir.join("../waddle-server/tests");

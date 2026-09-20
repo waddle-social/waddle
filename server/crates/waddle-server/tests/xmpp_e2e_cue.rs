@@ -842,7 +842,10 @@ struct ScenarioContext {
 #[tokio::test]
 async fn cue_scenarios_run_over_websocket() -> Result<()> {
     let _serial = TEST_SERIAL.lock().await;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
+    let root = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("tests/xmpp_e2e_scenarios");
     let mut scenarios = Vec::new();
     for scenario_file in discover_scenario_files(&root)? {
         let scenario = load_scenario_from_file(&root, &scenario_file)
@@ -860,7 +863,10 @@ async fn cue_scenarios_run_over_websocket() -> Result<()> {
 
 #[test]
 fn cue_scenario_xep_tags_are_known_and_evidence_backed() -> Result<()> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
+    let root = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("tests/xmpp_e2e_scenarios");
     let known = known_cue_xep_tags()?;
     let mut unknown = Vec::new();
     let mut missing_evidence = Vec::new();
@@ -935,7 +941,10 @@ fn implemented_xep_modules_have_explicit_coverage() -> Result<()> {
 
 #[test]
 fn advertised_features_have_explicit_xep_coverage() -> Result<()> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
+    let root = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("tests/xmpp_e2e_scenarios");
     let cue_features = meaningful_cue_feature_coverage(&root)?;
     let rust_features = meaningful_rust_feature_coverage()?;
     let feature_xeps = ADVERTISED_FEATURE_XEPS
@@ -1626,11 +1635,13 @@ fn feature_exemption_map(
 }
 
 fn server_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("waddle-server lives under server/crates")
-        .to_path_buf()
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .parent()
+    .and_then(Path::parent)
+    .expect("waddle-server lives under server/crates")
+    .to_path_buf()
 }
 
 fn advertised_feature_vars() -> BTreeSet<String> {

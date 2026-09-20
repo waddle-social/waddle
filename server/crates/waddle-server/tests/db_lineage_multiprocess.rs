@@ -228,7 +228,8 @@ async fn assert_liveness(server: &TestServer) {
 /// TestServer's env-driven spawn but observes the clean non-success exit.
 async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>) {
     let status = tokio::task::spawn_blocking(move || {
-        let binary = env!("CARGO_BIN_EXE_waddle-server");
+        let binary = std::env::var_os("CARGO_BIN_EXE_waddle-server")
+            .expect("test runner sets the server binary path");
         let port_file = std::env::temp_dir().join(format!(
             "waddle-lineage-refused-port-{}",
             uuid::Uuid::new_v4()

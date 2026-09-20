@@ -2207,7 +2207,7 @@ mod tests {
         }
 
         let monitoring = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR")).join(
                 "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
             ),
         )

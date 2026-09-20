@@ -28,7 +28,10 @@ fn story_payload(body: &str) -> minidom::Element {
 
 #[tokio::test]
 async fn database_pubsub_storage_persists_file_backing() {
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("pubsub-{}.db", uuid::Uuid::new_v4()));
     let url = format!("sqlite://{}", path.display());
@@ -854,7 +857,10 @@ fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
 
 #[tokio::test]
 async fn database_subscriptions_persist_across_reopen() {
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts");
     let path = artifacts.join(format!("pubsub-sub-{}.db", uuid::Uuid::new_v4()));
     let url = format!("sqlite://{}", path.display());
@@ -894,7 +900,10 @@ async fn database_subscriptions_persist_across_reopen() {
 
 #[tokio::test]
 async fn database_affiliations_persist_across_reopen() {
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts");
     let path = artifacts.join(format!("pubsub-aff-{}.db", uuid::Uuid::new_v4()));
     let url = format!("sqlite://{}", path.display());

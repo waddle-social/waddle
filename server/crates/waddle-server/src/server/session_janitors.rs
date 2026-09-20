@@ -5166,7 +5166,7 @@ async fn sm_rotation_between_hydration_retries_releases_the_exact_old_fence() {
 }
 
 #[cfg(all(test, feature = "clustering"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hung_exact_release_worker_is_cancelled_and_joined() {
     use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
 
@@ -5189,10 +5189,18 @@ async fn hung_exact_release_worker_is_cancelled_and_joined() {
     tokio::time::timeout(Duration::from_secs(1), store.release_started.notified())
         .await
         .expect("release worker started");
+    let shutdown_started = tokio::time::Instant::now();
+    // Terminal shutdown joins the cancelled worker, then gives its captured
+    // release one final bounded attempt. Allow a timer tick beyond that attempt
+    // instead of racing the same deadline with a wall-clock timeout.
+    let shutdown_budget = ORPHANED_ROOM_RELEASE_TIMEOUT + Duration::from_millis(10);
     cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(1), supervisor.shutdown())
+    tokio::time::timeout(shutdown_budget, supervisor.shutdown())
         .await
         .expect("hung exact-release worker must cancel and join");
+    let elapsed = shutdown_started.elapsed();
+    assert!(elapsed >= ORPHANED_ROOM_RELEASE_TIMEOUT);
+    assert!(elapsed <= shutdown_budget);
 }
 
 #[cfg(all(test, feature = "clustering"))]

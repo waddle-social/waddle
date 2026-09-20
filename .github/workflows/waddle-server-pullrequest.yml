@@ -7,13 +7,16 @@ on:
     paths:
     - .github/workflows/hestia-cache-gc.yml
     - .github/workflows/hestia-cache-gc.yml/**
+    - .github/workflows/waddle-ci-cache-benchmark.yml
+    - .github/workflows/waddle-ci-cache-benchmark.yml/**
     - .github/workflows/waddle-server-*.yml
     - .github/workflows/waddle-server-pullrequest.yml
     - apps/apple/**/Tests/**
     - apps/apple/Waddle/RustClient/Generated/**
     - chat/tests/**
-    - ci/contributors/nix.cue
-    - ci/contributors/nix.cue/**
+    - ci/cache-benchmark/**
+    - ci/contributors/*.cue
+    - ci/rust-tests/**
     - cue.mod/**
     - cue.mod/module.cue
     - cue.mod/module.cue/**
@@ -39,6 +42,9 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server/**
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
+    - scripts/*cache-benchmark*
+    - scripts/sync-rust-tests.sh
+    - scripts/sync-rust-tests.sh/**
     - server/**/env.cue
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
@@ -78,7 +84,7 @@ permissions:
 jobs:
   checkCiDrift:
     name: checkCiDrift
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -115,7 +121,7 @@ jobs:
         else
           cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
         fi
-        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: checkCiDrift
@@ -128,7 +134,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkSwitchableAlternativeProgram:
     name: checkSwitchableAlternativeProgram
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -165,7 +171,7 @@ jobs:
         else
           cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
         fi
-        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: checkSwitchableAlternativeProgram
@@ -178,7 +184,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkXmppClientFfiBindings:
     name: checkXmppClientFfiBindings
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -215,7 +221,7 @@ jobs:
         else
           cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
         fi
-        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: checkXmppClientFfiBindings
@@ -228,7 +234,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildCi:
     name: nixBuildCi
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -256,39 +262,9 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
-  nixBuildDeps:
-    name: nixBuildDeps
-    runs-on: namespace-profile-linux-x86
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-      with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
-      with:
-        use-gha-cache: disabled
-    - name: Setup Hestia Nix Cache
-      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-      with:
-        drain-timeout: '900'
-        upstream-cache-filter: 'true'
-        version: v2.0.0
-    - name: nixBuildDeps
-      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-check-deps ../#checks.x86_64-linux.waddle-server-cargo-vendor
-      working-directory: server
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REF_TYPE: ${{ github.ref_type }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildExtensionModules:
     name: nixBuildExtensionModules
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -318,7 +294,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildImageStream:
     name: nixBuildImageStream
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -348,7 +324,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixClippy:
     name: nixClippy
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -378,7 +354,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixDoctest:
     name: nixDoctest
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -408,7 +384,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixFmt:
     name: nixFmt
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -436,41 +412,9 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
-  nixTest:
-    name: nixTest
-    runs-on: namespace-profile-linux-x86
-    needs:
-    - nixBuildDeps
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-      with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
-      with:
-        use-gha-cache: disabled
-    - name: Setup Hestia Nix Cache
-      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-      with:
-        drain-timeout: '900'
-        upstream-cache-filter: 'true'
-        version: v2.0.0
-    - name: nixTest
-      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-test
-      working-directory: server
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REF_TYPE: ${{ github.ref_type }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
   renderDeployment:
     name: renderDeployment
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -507,7 +451,7 @@ jobs:
         else
           cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
         fi
-        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: renderDeployment

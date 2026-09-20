@@ -4,7 +4,8 @@ use std::{
 };
 
 fn crate_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"))
+        .join(relative)
 }
 
 fn read(relative: &str) -> String {
