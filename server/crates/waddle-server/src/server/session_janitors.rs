@@ -6591,6 +6591,7 @@ mod orphan_reaper_sweep_tests {
             pod_template_hash: None,
             resume_bridge: None,
             ordered_relay_delivery_bridge: None,
+            resource_presence: None,
             stop_token: None,
             fatal_fence: None,
             resume_handshake_timeout: None,

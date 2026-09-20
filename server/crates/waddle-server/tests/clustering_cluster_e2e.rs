@@ -69,7 +69,9 @@ use waddle_server::clustering::ordered_relay::{
     OrderedRelayReply, OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence,
     RemoteStanzaEnvelope,
 };
-use waddle_server::clustering::relay::{RelayAskError, RelayHandle, RelaySendFailure};
+use waddle_server::clustering::relay::{
+    RelayAskError, RelayHandle, RelayResourcePresenceReply, RelaySendFailure,
+};
 use waddle_server::clustering::swarm;
 use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
@@ -1099,6 +1101,53 @@ async fn cluster_exit_criteria_end_to_end() {
         ),
         "expected ordered relay gap NACK, got {gap_reply:?}"
     );
+
+    // --- #1803: the cross-node resource-presence probe over the real wire.
+    // Node A holds this account's `UserActor` claim and hosts two of its
+    // resources — one local socket and one registered-remote mirror for the
+    // socket on node B — while a third, never-bound resource is exactly the
+    // ghost shape that pinned stalled `route_muc` rows in production. The
+    // claim is per account; the answer must be per resource.
+    assert_eq!(
+        relay_a
+            .resource_presence(ordered_target_full.clone())
+            .await
+            .expect("presence probe to the claim owner"),
+        RelayResourcePresenceReply::Present,
+        "the owner's own local socket is present"
+    );
+    assert_eq!(
+        relay_a
+            .resource_presence(remote_target_full.clone())
+            .await
+            .expect("presence probe for the mirrored resource"),
+        RelayResourcePresenceReply::Present,
+        "a registered-remote mirror on the owner is present"
+    );
+    let ghost_resource: jid::FullJid = format!(
+        "{}/ghost-{}",
+        ordered_target_full.to_bare(),
+        uuid::Uuid::new_v4()
+    )
+    .parse()
+    .expect("ghost full jid");
+    assert_eq!(
+        relay_a
+            .resource_presence(ghost_resource.clone())
+            .await
+            .expect("presence probe for an unknown resource"),
+        RelayResourcePresenceReply::Absent,
+        "the owner must deny a resource it never bound, even while the account is online"
+    );
+    assert_eq!(
+        relay_b
+            .resource_presence(ordered_target_full.clone())
+            .await
+            .expect("presence probe to a non-owner"),
+        RelayResourcePresenceReply::NotOwner,
+        "a node without the account's claim has no authority to answer"
+    );
+
     drop(ordered_target_client);
 
     // (Runs AFTER the ordered-relay protocol legs: the synthetic

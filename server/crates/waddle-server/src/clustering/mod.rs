@@ -71,6 +71,11 @@ pub mod ordered_relay;
 /// builds on the relay message set.
 #[cfg(feature = "clustering")]
 pub mod relay;
+/// The `ResourcePresenceAsker` seam and its `RelayHandle` implementation
+/// (#1803) — the room host's side of the cross-node "does the claim owner
+/// know this exact resource?" probe that gates ghost-occupant eviction.
+#[cfg(feature = "clustering")]
+pub mod resource_presence;
 /// The `RemoteResumeAsker` implementation over `RelayHandle` (ADR-0017
 /// Phase 3 Slice 6) — the resuming node's side of the cross-node XEP-0198
 /// resume live-steal handshake. Public so `server/http.rs` can construct it.
@@ -818,6 +823,14 @@ pub struct ClusteringHandles {
     /// sequence allocator used by origin routing calls.
     #[cfg(feature = "clustering")]
     pub ordered_relay_delivery_bridge: Option<Arc<route_bridge::OrderedRelayDeliveryBridge>>,
+    /// #1803: the seam ghost-occupant eviction asks an account's claim owner
+    /// through — "do you know this exact full JID?". A `UserActor` claim is
+    /// per account, so the claim row alone cannot answer a per-resource
+    /// question; only the owner's own actor tree and SM store can. `None`
+    /// under the same conditions `claim_store` is `None`, and a `None` here
+    /// makes the guard fail closed (the occupant keeps its seat).
+    #[cfg(feature = "clustering")]
+    pub resource_presence: Option<Arc<dyn resource_presence::ResourcePresenceAsker>>,
     /// This node's clustering-scope cancellation token (the same child
     /// token every clustering task races against — see
     /// `clustering_scope_token`'s doc comment). Exposed so a caller outside
@@ -1128,6 +1141,9 @@ pub async fn start_if_enabled(
             pod_template_hash: pod_template_hash.clone(),
             resume_bridge: Some(resume_bridge),
             ordered_relay_delivery_bridge: Some(ordered_relay_delivery_bridge),
+            resource_presence: Some(resource_presence::RelayResourcePresenceAsker::new(
+                clustering_stop.clone(),
+            )),
             stop_token: Some(clustering_stop.clone()),
             fatal_fence: Some(fatal_fence.clone()),
             resume_handshake_timeout: Some(config.resume_handshake.timeout),

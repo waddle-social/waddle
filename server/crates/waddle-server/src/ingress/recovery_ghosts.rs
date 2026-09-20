@@ -40,6 +40,8 @@ use waddle_xmpp::{
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
 
+#[cfg(feature = "clustering")]
+use crate::clustering::relay::RelayResourcePresenceReply;
 use crate::{
     ingress_uow::{
         CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
@@ -193,9 +195,22 @@ async fn registered_resource(deps: &Deps<'_>, occupant: &FullJid) -> bool {
     }
 }
 
-/// Whether a fresh `UserActor` claim for this occupant's account is held by
-/// another node, decided exactly as live routing decides it — plus the one
-/// difference an eviction needs: a claim read that fails is not proof.
+/// Whether another node can still reach this exact RESOURCE.
+///
+/// A `UserActor` claim is per account, the question here is per resource: in
+/// production the room is hosted here while the user's claim sits on another
+/// node because a healthy `web-<uuid>` resource lives there, and a second,
+/// abandoned resource pins this row forever (#1803). Treating the claim alone
+/// as proof of reachability is what let that backlog grow, so a fresh foreign
+/// claim is resolved by asking its owner about the exact full JID; only its
+/// definitive negative makes the occupant evictable.
+///
+/// Every other outcome answers `true`: an eviction is not reversible, so an
+/// unread claim, an unanswered ask, an owner that has since lost the claim,
+/// and a missing asker all leave the occupant seated. That is also what makes
+/// a rolling update safe in both orders — a peer that predates
+/// `waddle.clustering.relay.resource_presence.v1` fails the ask with
+/// `UnknownMessage`, which lands in the same fail-closed arm.
 #[cfg(feature = "clustering")]
 async fn foreign_claim(deps: &Deps<'_>, occupant: &FullJid) -> bool {
     let Some(state) = deps.web_socket_state else {
@@ -210,11 +225,39 @@ async fn foreign_claim(deps: &Deps<'_>, occupant: &FullJid) -> bool {
         waddle_xmpp::ownership::EntityType::UserActor,
         occupant.to_bare().to_string(),
     );
-    match store.current_claim(&entity).await {
-        Ok(Some(claim)) => claim.owner_lease_fresh && claim.owner != identity.current(),
-        Ok(None) => false,
+    let owner = match store.current_claim(&entity).await {
+        Ok(Some(claim)) if claim.owner_lease_fresh && claim.owner != identity.current() => {
+            claim.owner
+        }
+        // Unclaimed, stale-leased, or our own claim: nothing to ask, and
+        // nothing that keeps the resource alive elsewhere.
+        Ok(_) => return false,
         Err(error) => {
             tracing::debug!(%occupant, %error, "ghost probe could not read the ownership claim");
+            return true;
+        }
+    };
+    let Some(asker) = &handles.resource_presence else {
+        return true;
+    };
+    match asker.resource_presence(&owner, occupant).await {
+        Ok(RelayResourcePresenceReply::Absent) => false,
+        Ok(RelayResourcePresenceReply::Present) => true,
+        Ok(RelayResourcePresenceReply::NotOwner) => {
+            tracing::debug!(
+                %occupant,
+                owner = %owner.node_id,
+                "ghost probe reached a node that no longer owns the account's claim"
+            );
+            true
+        }
+        Err(error) => {
+            tracing::debug!(
+                %occupant,
+                owner = %owner.node_id,
+                %error,
+                "ghost probe could not ask the claim owner about the resource"
+            );
             true
         }
     }

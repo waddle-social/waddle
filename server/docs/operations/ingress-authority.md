@@ -188,9 +188,12 @@ query cannot masquerade as healthy receipt completeness.
 that were recorded but never executed; it is not a current queue gauge. Use
 `IngressNonTerminalBacklog` for the canonical row-level view.
 
-`IngressNonTerminalBacklog` warns when any canonical row older than 10 minutes
-remains non-terminal, sustained for another 10m (roughly 20m after creation,
-plus scrape/evaluation delay). Its `kind` is the unreceipted intent family;
+`IngressNonTerminalBacklog` warns when the count of canonical rows older than
+10 minutes that remain non-terminal grew over the last hour
+(`delta(...[1h]) > 0`), sustained for 10m. It fires on growth, not on a
+standing floor (#1803): a parked, operator-accepted residue must not keep the
+alert permanently firing and blind it to new stuck rows. Read the gauge itself
+for the absolute backlog. Its `kind` is the unreceipted intent family;
 `terminalization` means all receipts exist but terminalization itself is
 missing; `none` is the always-zero sentinel and never fires. A row counts once per pending family, even with several intents in
 that family, so summing families can count one row more than once. The 10m
@@ -926,13 +929,38 @@ runs in the same attempt, so a repaired row terminalizes immediately instead
 of waiting out the 15-minute parking cooldown — and is not counted as
 `no_durable_progress`.
 
+A `UserActor` claim is per account, but the question here is per resource. In
+the dominant production shape the room is hosted on one node while the user's
+claim sits on another because a healthy `web-<uuid>` resource lives there, and
+a second, abandoned resource of the same account pins the row forever. A fresh
+foreign claim is therefore not an answer — it is the trigger for one bounded
+(one second overall), strictly read-only ask to that claim owner's relay,
+`waddle.clustering.relay.resource_presence.v1`, naming the exact full JID. The
+owner answers `Present` when its own `UserActor` tree lists that resource (a
+local socket, or a registered-remote mirror it holds for a peer's socket) or
+it has a resumable XEP-0198 session for it, `Absent` when it holds the fresh
+claim and knows none of those, and `NotOwner` when the claim has since moved.
+Only `Absent` makes the occupant evictable. The handler acquires no claim,
+spawns no actor and changes no client-visible state, so a duplicated or
+abandoned ask costs nothing.
+
+That probe is a NEW relay message id, not a change to the ordered-relay
+envelope or its replies, so `deliver_ordered.vN` does not move and **no
+Recreate cutover is required** — an ordinary RollingUpdate is safe in both
+orders. A replica that predates the message answers `UnknownMessage`, which
+the asking node treats exactly like a timeout, a transport failure or a decode
+failure: as "could not prove absence". During the rollout, evictions that need
+a cross-node answer simply do not happen and the rows stay owed; they resume
+once both replicas run the new image.
+
 Every guard fails closed; each of these leaves the occupant seated and the
 copy owed: a live entry for the full JID in this node's connection registry
 (which includes the clustered registered-remote mirror), a resumable XEP-0198
 session in this node's memory OR in the shared durable store (including a read
 of that store that fails), the actor tree still listing the exact resource (or
-failing to answer), a fresh `UserActor` claim held by another node (or a claim
-read that errors), a room this node does not authoritatively host, a room
+failing to answer), a claim read that errors, a fresh foreign claim whose
+owner answers `Present` or `NotOwner` — or cannot be asked at all — a room
+this node does not authoritatively host, a room
 probe that does not answer, and a recovery environment with no WebSocket state
 to run the sweep with. Consequently a `route_muc` backlog with
 `unrecoverable_obligations{reason="no_durable_progress"}` ticking while
@@ -1120,6 +1148,20 @@ COMMIT;
 
 
 ## Repair for legacy route_muc obligations (#1782)
+
+**Decision (#1803, 2026-09-20): no manual repair is planned for this backlog.**
+A read-only review of production found every non-terminal `route_muc` row
+(747 at the time) pinned by a vanished `web-<uuid>` occupant resource that no
+node can ever deliver to. 113 rows carried a body and all 113 were archived in
+room MAM; the other 634 had no archive intent (chat states and markers). Those
+copies are owed to nobody: maintenance settles them once the authoritative room
+no longer lists the occupant (see "Ghost-occupant eviction (#1803)" and
+`ingress.maintenance.departed_occupant_copies`), so the backlog drains after
+the #1803 rollout without the scale-to-zero window below. After that rollout,
+verify `max by (kind) (cnpg_waddle_ingress_nonterminal_messages)` for
+`route_muc` falls to zero and the counter accounts for the drop. The procedure
+below remains for rows that settlement cannot reach, such as a room no node
+hosts any more.
 
 The pre-#1757 legacy backlog was 183 non-terminal rows when #1782 was recorded.
 That count is incident context, not a selection criterion. Stall parking

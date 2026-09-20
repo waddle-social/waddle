@@ -82,6 +82,64 @@ fn remote_resource_frame_v2_carries_the_ingress_obligation() {
     );
 }
 
+/// Issue #1803: the cross-node resource-presence probe is a NEW message id,
+/// not a change to the ordered-relay envelope or its replies, so
+/// `deliver_ordered.vN` must NOT move for it (#1597). The id and the typed
+/// reply shape are pinned here, and an old peer's `UnknownMessage` is a
+/// no-effect codec failure — which the ghost-eviction guard reads as "could
+/// not prove absence", making both orders of a rolling update safe.
+#[test]
+fn resource_presence_is_a_new_message_id_with_a_round_tripping_reply() {
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayResourcePresence>>::REMOTE_ID,
+        "waddle.clustering.relay.resource_presence.v1"
+    );
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
+        "waddle.clustering.relay.deliver_ordered.v11",
+        "a new relay message must not bump the ordered-relay envelope id"
+    );
+
+    let message = RelayResourcePresence {
+        target: "juliet@example.test/web-1803".parse().expect("full jid"),
+        trace: crate::clustering::trace_context::RelayTraceContext::default(),
+    };
+    let decoded: RelayResourcePresence =
+        serde_json::from_slice(&serde_json::to_vec(&message).expect("encode probe"))
+            .expect("decode probe");
+    assert_eq!(decoded.target, message.target);
+
+    for reply in [
+        RelayResourcePresenceReply::Present,
+        RelayResourcePresenceReply::Absent,
+        RelayResourcePresenceReply::NotOwner,
+    ] {
+        assert_eq!(
+            serde_json::from_slice::<RelayResourcePresenceReply>(
+                &serde_json::to_vec(&reply).expect("encode reply")
+            )
+            .expect("decode reply"),
+            reply
+        );
+    }
+
+    let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
+        actor_remote_id: "actor".into(),
+        message_remote_id: "waddle.clustering.relay.resource_presence.v1".into(),
+    });
+    assert!(
+        matches!(
+            old_peer,
+            RelayAskError::Send {
+                failure: RelaySendFailure::Codec,
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+        ),
+        "a peer that predates the probe is a no-effect codec failure: {old_peer:?}"
+    );
+}
+
 #[test]
 fn incomplete_carbons_reply_has_new_remote_message_id() {
     assert_eq!(

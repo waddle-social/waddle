@@ -75,6 +75,7 @@ const MAX_REMOTE_OWNER_REGISTRATION_LOCKS: usize = 4096;
 const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 mod delivery;
+mod presence;
 mod reassert;
 mod registration;
 mod types;
@@ -85,6 +86,7 @@ pub(crate) use delivery::MucProxyRouteAttempt;
 pub(crate) use delivery::{
     MucProxyRouteDecision, OrderedRelayMucProxyOutcome, RegisteredRemoteWriteAcceptedDelivery,
 };
+pub use presence::LocalResourcePresence;
 pub use reassert::LocalMediaGrantReassertion;
 #[cfg(test)]
 pub(crate) use registration::retry_remote_resource_register_test;

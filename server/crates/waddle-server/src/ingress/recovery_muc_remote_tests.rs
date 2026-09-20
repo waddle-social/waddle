@@ -259,20 +259,86 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     f.close().await;
 }
 
-/// How another node still holds the occupant, so evicting its occupancy here
-/// would tear down a seat that is legitimately alive elsewhere.
+/// How another node relates to the occupant, which decides whether evicting
+/// its occupancy here would tear down a seat that is alive elsewhere.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ElsewhereCase {
-    /// A fresh `UserActor` claim owned by a different node.
-    ForeignClaim,
-    /// A registered-remote mirror for the exact full JID.
+    /// A fresh `UserActor` claim owned by a different node, whose owner
+    /// answers the #1803 cross-node resource-presence probe this way.
+    ForeignClaim(OwnerAnswer),
+    /// A registered-remote mirror for the exact full JID, installed here by
+    /// the claim owner. Decided locally, without any probe.
     RegisteredRemote,
+}
+
+/// What the account's claim owner says about the exact ghost RESOURCE.
+///
+/// A `UserActor` claim is per account, so a fresh foreign claim alone proves
+/// only that the USER is online somewhere — which is precisely the production
+/// shape that stalled the backlog (#1803): one healthy `web-<uuid>` resource
+/// keeping the claim alive while a second, abandoned one pins the room's
+/// frozen `route_muc` obligation forever.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnerAnswer {
+    /// The owner's actor tree lists this exact resource, or it holds a
+    /// resumable session for it.
+    Present,
+    /// The owner holds the fresh claim and knows nothing about this exact
+    /// resource: the only authoritative negative.
+    Absent,
+    /// The ask never produced an answer — a peer that predates
+    /// `waddle.clustering.relay.resource_presence.v1` answering
+    /// `UnknownMessage` during a rolling update, a timeout, or a transport
+    /// failure. Fail closed.
+    AskFails,
+}
+
+/// One scripted answer from the account's claim owner, recording exactly who
+/// was asked about which resource.
+struct ScriptedResourcePresence {
+    answer: OwnerAnswer,
+    asked: Arc<std::sync::Mutex<Vec<(NodeIdentity, jid::FullJid)>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::clustering::resource_presence::ResourcePresenceAsker for ScriptedResourcePresence {
+    async fn resource_presence(
+        &self,
+        owner: &NodeIdentity,
+        target: &jid::FullJid,
+    ) -> Result<
+        crate::clustering::relay::RelayResourcePresenceReply,
+        crate::clustering::relay::RelayAskError,
+    > {
+        use crate::clustering::relay::{
+            RelayAskError, RelayResourcePresenceReply, RelaySendEffect, RelaySendFailure,
+        };
+        self.asked
+            .lock()
+            .expect("probe log")
+            .push((owner.clone(), target.clone()));
+        match self.answer {
+            OwnerAnswer::Present => Ok(RelayResourcePresenceReply::Present),
+            OwnerAnswer::Absent => Ok(RelayResourcePresenceReply::Absent),
+            // Exactly what kameo reports for a peer that does not know the
+            // message id: a no-effect codec failure.
+            OwnerAnswer::AskFails => Err(RelayAskError::Send {
+                failure: RelaySendFailure::Codec,
+                effect: RelaySendEffect::NoEffect,
+                message: "peer does not know waddle.clustering.relay.resource_presence.v1"
+                    .to_string(),
+            }),
+        }
+    }
 }
 
 /// XEP-0045 ghost eviction is for occupancies NOTHING can reach. An occupant
 /// another node still owns keeps its seat even once its frozen copy has
-/// stalled long enough to be classified `no_durable_progress`.
-async fn stalled_remote_occupant_keeps_its_seat(f: IngressFixture, case: ElsewhereCase) {
+/// stalled long enough to be classified `no_durable_progress` — but a
+/// resource the claim owner authoritatively does not know is a ghost, even
+/// while its account stays online on that owner.
+async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase) {
+    let evictable = case == ElsewhereCase::ForeignClaim(OwnerAnswer::Absent);
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let before = metrics
         .counter_sum("muc.ghost_occupants.evicted", &[])
@@ -299,7 +365,7 @@ async fn stalled_remote_occupant_keeps_its_seat(f: IngressFixture, case: Elsewhe
     // The registered-remote mirror is installed by the claim OWNER, so that
     // case leaves the claim here and isolates the resource-lookup guard.
     let owner = match case {
-        ElsewhereCase::ForeignClaim => NodeIdentity::new("socket-node", "foreign-epoch"),
+        ElsewhereCase::ForeignClaim(_) => NodeIdentity::new("socket-node", "foreign-epoch"),
         ElsewhereCase::RegisteredRemote => local.clone(),
     };
     claims.acquire(&entity, &owner).await.expect("claim");
@@ -307,11 +373,22 @@ async fn stalled_remote_occupant_keeps_its_seat(f: IngressFixture, case: Elsewhe
         tokio_util::sync::CancellationToken::new(),
         &crate::config::ClusteringMessagingConfig::default(),
     );
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // The registered-remote case must be decided locally, so any probe at all
+    // there would be a bug: it gets an asker that never answers positively.
+    let scripted_answer = match case {
+        ElsewhereCase::ForeignClaim(answer) => answer,
+        ElsewhereCase::RegisteredRemote => OwnerAnswer::Absent,
+    };
     let state = socket_tests::create_test_websocket_state_with_clustering(
         ClusteringHandles {
             claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
             node_identity: Some(SharedNodeIdentity::new(local.clone())),
             ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+            resource_presence: Some(Arc::new(ScriptedResourcePresence {
+                answer: scripted_answer,
+                asked: Arc::clone(&asked),
+            })),
             ..Default::default()
         },
         sm.clone(),
@@ -366,7 +443,7 @@ async fn stalled_remote_occupant_keeps_its_seat(f: IngressFixture, case: Elsewhe
         .connection_registry
         .is_connected(&occupant);
     match case {
-        ElsewhereCase::ForeignClaim => assert!(
+        ElsewhereCase::ForeignClaim(_) => assert!(
             !locally_registered,
             "no local entry: the ownership claim must be what decides"
         ),
@@ -394,7 +471,7 @@ async fn stalled_remote_occupant_keeps_its_seat(f: IngressFixture, case: Elsewhe
         assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
         cursor.wait_for_recovery_accounting().await;
     }
-    assert!(
+    assert_eq!(
         actor
             .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
                 jid: occupant.clone()
@@ -402,34 +479,83 @@ async fn stalled_remote_occupant_keeps_its_seat(f: IngressFixture, case: Elsewhe
             .await
             .expect("occupancy probe")
             .is_some(),
-        "an occupancy another node owns is never evicted"
+        !evictable,
+        "only a resource the claim owner authoritatively denies is evicted"
     );
     assert_eq!(
         metrics
             .counter_sum("muc.ghost_occupants.evicted", &[])
             .unwrap_or(0),
-        before
+        before + u64::from(evictable)
     );
     let mut tx = f.uow.begin().await.expect("inspect pending row");
-    assert!(!CanonicalMessageRepository::is_terminal(&mut tx, key)
-        .await
-        .expect("terminal"));
+    assert_eq!(
+        CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"),
+        evictable,
+        "an evicted ghost releases the frozen copy and the row terminalizes"
+    );
     tx.commit().await.expect("read commit");
+    let asked = asked.lock().expect("probe log").clone();
+    match case {
+        ElsewhereCase::ForeignClaim(_) => {
+            assert!(
+                !asked.is_empty(),
+                "a fresh foreign claim must be resolved by asking its owner"
+            );
+            assert!(
+                asked
+                    .iter()
+                    .all(|(node, jid)| node == &owner && jid == &occupant),
+                "the owner must be asked about the EXACT full JID: {asked:?}"
+            );
+        }
+        ElsewhereCase::RegisteredRemote => assert!(
+            asked.is_empty(),
+            "a locally mirrored resource needs no cross-node ask: {asked:?}"
+        ),
+    }
     f.close().await;
 }
 
 #[tokio::test]
 async fn sqlite_stalled_remote_owned_occupant_keeps_its_seat() {
-    stalled_remote_occupant_keeps_its_seat(
+    stalled_remote_occupant_recovery(
         IngressFixture::sqlite().await,
-        ElsewhereCase::ForeignClaim,
+        ElsewhereCase::ForeignClaim(OwnerAnswer::Present),
+    )
+    .await;
+}
+
+/// Rolling-deploy safety: a claim owner that cannot answer the probe (an
+/// older peer answering `UnknownMessage`, a timeout, a transport failure)
+/// leaves absence unproven, so the occupant keeps its seat.
+#[tokio::test]
+async fn sqlite_stalled_remote_owned_occupant_keeps_its_seat_when_the_probe_fails() {
+    stalled_remote_occupant_recovery(
+        IngressFixture::sqlite().await,
+        ElsewhereCase::ForeignClaim(OwnerAnswer::AskFails),
+    )
+    .await;
+}
+
+/// The dominant production shape (#1803): the room is hosted here, the user's
+/// `UserActor` claim is fresh on another node — because a healthy sibling
+/// resource keeps it there — and the ghost resource pinning this row is one
+/// the owner does not know. The per-account claim must not vouch for it.
+#[tokio::test]
+async fn sqlite_stalled_ghost_resource_of_a_live_remote_user_is_evicted() {
+    stalled_remote_occupant_recovery(
+        IngressFixture::sqlite().await,
+        ElsewhereCase::ForeignClaim(OwnerAnswer::Absent),
     )
     .await;
 }
 
 #[tokio::test]
 async fn sqlite_stalled_registered_remote_occupant_keeps_its_seat() {
-    stalled_remote_occupant_keeps_its_seat(
+    stalled_remote_occupant_recovery(
         IngressFixture::sqlite().await,
         ElsewhereCase::RegisteredRemote,
     )

@@ -344,4 +344,5 @@ pub(crate) mod delivery;
 mod ingress_append;
 pub(crate) mod muc_refresh;
 mod nack_channels;
+mod presence;
 mod reassert;
