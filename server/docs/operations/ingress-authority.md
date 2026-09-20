@@ -189,8 +189,11 @@ that were recorded but never executed; it is not a current queue gauge. Use
 `IngressNonTerminalBacklog` for the canonical row-level view.
 
 `IngressNonTerminalBacklog` warns when the count of canonical rows older than
-10 minutes that remain non-terminal grew over the last hour
-(`delta(...[1h]) > 0`), sustained for 10m. It fires on growth, not on a
+10 minutes that remain non-terminal is higher than it was an hour ago,
+sustained for 10m. The comparison aggregates per kind before comparing and
+treats a kind with no series an hour ago as zero, because an empty backlog
+emits no family rows: the first stuck rows of a kind fire, and a primary
+failover that re-labels the series neither fires nor hides growth. It fires on growth, not on a
 standing floor (#1803): a parked, operator-accepted residue must not keep the
 alert permanently firing and blind it to new stuck rows. Read the gauge itself
 for the absolute backlog. Its `kind` is the unreceipted intent family;

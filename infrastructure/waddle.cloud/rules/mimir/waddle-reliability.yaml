@@ -263,7 +263,7 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
             summary: 'Unresolved effects from live ingress executions increased in the last hour. Repair and stream-retirement attributions are excluded; inspect ingress_effects_unresolved_total with phase="maintenance_recovery", phase="maintenance_terminalization", or phase="stream_retirement" for those paths. See IngressNonTerminalBacklog for the canonical row-level view and ingress_maintenance_unrecoverable_obligations_total for recovery classifications.'
         - alert: IngressNonTerminalBacklog
-          expr: max by (kind) (delta(cnpg_waddle_ingress_nonterminal_messages[1h])) > 0
+          expr: max by (kind) (cnpg_waddle_ingress_nonterminal_messages{kind!="none"}) > (max by (kind) (cnpg_waddle_ingress_nonterminal_messages offset 1h) or max by (kind) (cnpg_waddle_ingress_nonterminal_messages) * 0)
           for: 10m
           labels:
             severity: warning
