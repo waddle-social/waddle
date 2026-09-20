@@ -427,7 +427,9 @@ schema.#Project & {
 			args: ["-c", #"""
 				set -euo pipefail
 				expected="$(nix eval --raw ../#waddle-server-test-archive.shard1.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 1
+				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 1
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-1
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
@@ -440,7 +442,9 @@ schema.#Project & {
 			args: ["-c", #"""
 				set -euo pipefail
 				expected="$(nix eval --raw ../#waddle-server-test-archive.shard2.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 2
+				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 2
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-2
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
@@ -453,7 +457,9 @@ schema.#Project & {
 			args: ["-c", #"""
 				set -euo pipefail
 				expected="$(nix eval --raw ../#waddle-server-test-archive.shard3.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 3
+				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 3
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-3
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
@@ -466,7 +472,9 @@ schema.#Project & {
 			args: ["-c", #"""
 				set -euo pipefail
 				expected="$(nix eval --raw ../#waddle-server-test-archive.shard4.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 4
+				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 4
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-4
 				"""#]
 			inputs: tasks.nixTestArchive.inputs

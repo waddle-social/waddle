@@ -31,6 +31,16 @@ class CacheBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "required fh"):
             benchmark.provider_urls("fh", ["https://cache.nixos.org"])
 
+    def test_flakehub_edge_is_allowed_without_allowing_arbitrary_hosts(self):
+        edge = "https://edge.cache.flakehub.com?priority=10"
+        unrelated = ["https://other.cache.flakehub.com", "https://edge.cache.flakehub.com.example.org",
+                     "http://edge.cache.flakehub.com", "https://unrelated.example/cache"]
+        self.assertEqual(benchmark.provider_urls("fh", [edge, *unrelated]),
+                         ["https://cache.nixos.org", edge])
+        self.assertEqual(benchmark.provider_urls("namespace", [edge]), ["https://cache.nixos.org"])
+        with self.assertRaisesRegex(ValueError, "required fh"):
+            benchmark.provider_urls("fh", unrelated)
+
     def test_credential_urls_never_enter_commands_or_reports(self):
         with self.assertRaisesRegex(ValueError, "credential-bearing"):
             benchmark.provider_urls("fh", ["https://secret:password@cache.flakehub.com"])
@@ -83,6 +93,52 @@ class CacheBenchmarkTests(unittest.TestCase):
             self.assertFalse(rows[0]["eligible_for_cache_selection"])
             self.assertIn("unverified", rows[0]["cache_post_status"])
             self.assertEqual(rows[0]["job_seconds_including_cache_post"], 120)
+
+    def test_hestia_seed_requires_acknowledgement_and_committed_manifest(self):
+        scenarios = [
+            ("hestia hook: daemon did not accept the paths\n", 0, "", 1),
+            ("hestia hook: registered 3 path(s), 3 buffered for upload\n", 1, "timed out\n", 1),
+            ("hestia hook: registered 3 path(s), 3 buffered for upload\n", 0, "no stats\n", 1),
+            ("hestia hook: registered 3 path(s), 3 buffered for upload\n", 0,
+             "hestia drain: pushed 3 paths; manifest m3#7\n", 0),
+        ]
+        for hook_log, drain_code, drain_log, expected_code in scenarios:
+            with self.subTest(hook=hook_log, drain=drain_log), tempfile.TemporaryDirectory() as output:
+                paths = [{"name": name, "path": "/nix/store/" + chr(97 + i) * 32 + "-fixture", "success": True}
+                         for i, name in enumerate([*benchmark.TARGETS, "trial-shard1-archive"])]
+                benchmark.write_json(Path(output) / "result.json", {"complete": True, "paths": paths})
+                calls = []
+
+                def fake_command(args, **kwargs):
+                    calls.append(args)
+                    if args[1] == "hook":
+                        self.assertEqual(kwargs["timeout"], 15)
+                        return subprocess.CompletedProcess(args, 0, "", hook_log)
+                    self.assertEqual(args[1], "drain")
+                    self.assertEqual(args[-2:], ["--timeout", "300"])
+                    self.assertEqual(kwargs["timeout"], 310)
+                    return subprocess.CompletedProcess(args, drain_code, "", drain_log)
+
+                with patch.object(benchmark, "command", side_effect=fake_command), \
+                        patch.dict(benchmark.os.environ, {"HESTIA_BIN": "hestia", "HESTIA_SOCKET": "/tmp/hook.sock",
+                                                        "GITHUB_OUTPUT": str(Path(output) / "outputs")}), \
+                        patch("builtins.print"):
+                    self.assertEqual(benchmark.seed_hestia(types.SimpleNamespace(output=output)), expected_code)
+                result = json.loads((Path(output) / "hestia-seed.json").read_text())
+                self.assertEqual(result["success"], expected_code == 0)
+                if expected_code == 0:
+                    self.assertEqual(result["manifest_version"], 7)
+                    self.assertEqual((Path(output) / "outputs").read_text(), "manifest-version=7\n")
+                    self.assertIn("unverified", result["cache_save"])
+                elif "did not accept" in hook_log:
+                    self.assertEqual(len(calls), 1)
+
+    def test_hestia_seed_refuses_incomplete_restore(self):
+        with tempfile.TemporaryDirectory() as output:
+            benchmark.write_json(Path(output) / "result.json", {"complete": False, "paths": []})
+            with patch.object(benchmark, "command") as run, patch("builtins.print"):
+                self.assertEqual(benchmark.seed_hestia(types.SimpleNamespace(output=output)), 1)
+                run.assert_not_called()
 
     def test_gate_waits_for_active_ci_and_a_quiet_interval(self):
         clock = [0]

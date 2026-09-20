@@ -7,6 +7,7 @@ listed in multiple shards. Every selected test must still occur exactly once.
 """
 
 import argparse
+import gzip
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -21,7 +22,10 @@ class Inventory:
 
 
 def inventory(path):
-    document = json.loads(Path(path).read_text())
+    path = Path(path)
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as stream:
+        document = json.load(stream)
     binaries = {}
     listed = set()
     cases = {}

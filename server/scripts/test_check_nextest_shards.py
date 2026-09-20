@@ -1,4 +1,5 @@
 import copy
+import gzip
 import json
 from pathlib import Path
 import subprocess
@@ -79,6 +80,17 @@ class ShardInventoryTests(unittest.TestCase):
             path.write_text(json.dumps(document))
             paths.append(path)
         return check(paths[0], paths[1:], count=2)
+
+    def test_compressed_partition_retains_all_coverage_checks(self):
+        expected = self.root / "expected.json.gz"
+        expected.write_bytes(gzip.compress(json.dumps(self.first).encode(), mtime=0))
+        actual = self.write("actual", self.archived(self.first))
+        plain = self.write("expected", self.first)
+        self.assertEqual(check_partition(expected, actual), check_partition(plain, actual))
+        changed = self.archived(self.first)
+        changed["rust-suites"]["server"]["testcases"]["same_name"]["ignored"] = True
+        with self.assertRaisesRegex(ValueError, "partition identities"):
+            check_partition(expected, self.write("changed", changed))
 
     def test_complete_union_preserves_ignored_and_duplicate_names_across_binaries(self):
         result = self.run_check()

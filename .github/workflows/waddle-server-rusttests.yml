@@ -134,8 +134,30 @@ jobs:
           name: nixTestArchive-1-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
+      - name: Restore and verify archive from binary caches
+        id: archive-cache
+        shell: bash
+        working-directory: server
+        env:
+          METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
+        run: |-
+          set -euo pipefail
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion; no Nix operation attempted" >&2
+            exit 1
+          fi
+          bash scripts/nextest-archive-transfer.sh validate .ci/nextest-archive/builder 1
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard1.outPath)"
+          if bash scripts/nextest-archive-transfer.sh cache "$expected" .ci/nextest-archive/builder 1; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then exit "$status"; fi
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download raw test archive
         id: archive-payload
+        if: ${{ steps.archive-cache.outputs.hit == 'false' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: archive-1.nar
@@ -147,17 +169,27 @@ jobs:
         env:
           METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
           PAYLOAD_DOWNLOAD: ${{ steps.archive-payload.outputs.download-path }}
+          CACHE_HIT: ${{ steps.archive-cache.outputs.hit }}
         run: |-
-          if [[ -z "$METADATA_DOWNLOAD" || -z "$PAYLOAD_DOWNLOAD" ]]; then
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion" >&2
+            exit 1
+          fi
+          if [[ "$CACHE_HIT" == true ]]; then exit 0; fi
+          if [[ "$CACHE_HIT" != false || -z "$PAYLOAD_DOWNLOAD" ]]; then
             echo "Artifact download exited without reporting completion; no Nix import attempted" >&2
             exit 1
           fi
       - name: Run test shard
         shell: bash
+        env:
+          ARCHIVE_TRANSFER_MODE: ${{ steps.archive-cache.outputs.hit == 'true' && 'verify' || 'import' }}
         run: |-
           set -euo pipefail
           expected="$(nix eval --raw ../#waddle-server-test-archive.shard1.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 1
+          transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+          case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+          bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 1
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-1
         working-directory: server
   nixTestShard2:
@@ -192,8 +224,30 @@ jobs:
           name: nixTestArchive-2-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
+      - name: Restore and verify archive from binary caches
+        id: archive-cache
+        shell: bash
+        working-directory: server
+        env:
+          METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
+        run: |-
+          set -euo pipefail
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion; no Nix operation attempted" >&2
+            exit 1
+          fi
+          bash scripts/nextest-archive-transfer.sh validate .ci/nextest-archive/builder 2
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard2.outPath)"
+          if bash scripts/nextest-archive-transfer.sh cache "$expected" .ci/nextest-archive/builder 2; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then exit "$status"; fi
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download raw test archive
         id: archive-payload
+        if: ${{ steps.archive-cache.outputs.hit == 'false' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: archive-2.nar
@@ -205,17 +259,27 @@ jobs:
         env:
           METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
           PAYLOAD_DOWNLOAD: ${{ steps.archive-payload.outputs.download-path }}
+          CACHE_HIT: ${{ steps.archive-cache.outputs.hit }}
         run: |-
-          if [[ -z "$METADATA_DOWNLOAD" || -z "$PAYLOAD_DOWNLOAD" ]]; then
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion" >&2
+            exit 1
+          fi
+          if [[ "$CACHE_HIT" == true ]]; then exit 0; fi
+          if [[ "$CACHE_HIT" != false || -z "$PAYLOAD_DOWNLOAD" ]]; then
             echo "Artifact download exited without reporting completion; no Nix import attempted" >&2
             exit 1
           fi
       - name: Run test shard
         shell: bash
+        env:
+          ARCHIVE_TRANSFER_MODE: ${{ steps.archive-cache.outputs.hit == 'true' && 'verify' || 'import' }}
         run: |-
           set -euo pipefail
           expected="$(nix eval --raw ../#waddle-server-test-archive.shard2.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 2
+          transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+          case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+          bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 2
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-2
         working-directory: server
   nixTestShard3:
@@ -250,8 +314,30 @@ jobs:
           name: nixTestArchive-3-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
+      - name: Restore and verify archive from binary caches
+        id: archive-cache
+        shell: bash
+        working-directory: server
+        env:
+          METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
+        run: |-
+          set -euo pipefail
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion; no Nix operation attempted" >&2
+            exit 1
+          fi
+          bash scripts/nextest-archive-transfer.sh validate .ci/nextest-archive/builder 3
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard3.outPath)"
+          if bash scripts/nextest-archive-transfer.sh cache "$expected" .ci/nextest-archive/builder 3; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then exit "$status"; fi
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download raw test archive
         id: archive-payload
+        if: ${{ steps.archive-cache.outputs.hit == 'false' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: archive-3.nar
@@ -263,17 +349,27 @@ jobs:
         env:
           METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
           PAYLOAD_DOWNLOAD: ${{ steps.archive-payload.outputs.download-path }}
+          CACHE_HIT: ${{ steps.archive-cache.outputs.hit }}
         run: |-
-          if [[ -z "$METADATA_DOWNLOAD" || -z "$PAYLOAD_DOWNLOAD" ]]; then
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion" >&2
+            exit 1
+          fi
+          if [[ "$CACHE_HIT" == true ]]; then exit 0; fi
+          if [[ "$CACHE_HIT" != false || -z "$PAYLOAD_DOWNLOAD" ]]; then
             echo "Artifact download exited without reporting completion; no Nix import attempted" >&2
             exit 1
           fi
       - name: Run test shard
         shell: bash
+        env:
+          ARCHIVE_TRANSFER_MODE: ${{ steps.archive-cache.outputs.hit == 'true' && 'verify' || 'import' }}
         run: |-
           set -euo pipefail
           expected="$(nix eval --raw ../#waddle-server-test-archive.shard3.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 3
+          transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+          case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+          bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 3
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-3
         working-directory: server
   nixTestShard4:
@@ -308,8 +404,30 @@ jobs:
           name: nixTestArchive-4-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
+      - name: Restore and verify archive from binary caches
+        id: archive-cache
+        shell: bash
+        working-directory: server
+        env:
+          METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
+        run: |-
+          set -euo pipefail
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion; no Nix operation attempted" >&2
+            exit 1
+          fi
+          bash scripts/nextest-archive-transfer.sh validate .ci/nextest-archive/builder 4
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard4.outPath)"
+          if bash scripts/nextest-archive-transfer.sh cache "$expected" .ci/nextest-archive/builder 4; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then exit "$status"; fi
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download raw test archive
         id: archive-payload
+        if: ${{ steps.archive-cache.outputs.hit == 'false' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: archive-4.nar
@@ -321,17 +439,27 @@ jobs:
         env:
           METADATA_DOWNLOAD: ${{ steps.archive-metadata.outputs.download-path }}
           PAYLOAD_DOWNLOAD: ${{ steps.archive-payload.outputs.download-path }}
+          CACHE_HIT: ${{ steps.archive-cache.outputs.hit }}
         run: |-
-          if [[ -z "$METADATA_DOWNLOAD" || -z "$PAYLOAD_DOWNLOAD" ]]; then
+          if [[ -z "$METADATA_DOWNLOAD" ]]; then
+            echo "Metadata download exited without reporting completion" >&2
+            exit 1
+          fi
+          if [[ "$CACHE_HIT" == true ]]; then exit 0; fi
+          if [[ "$CACHE_HIT" != false || -z "$PAYLOAD_DOWNLOAD" ]]; then
             echo "Artifact download exited without reporting completion; no Nix import attempted" >&2
             exit 1
           fi
       - name: Run test shard
         shell: bash
+        env:
+          ARCHIVE_TRANSFER_MODE: ${{ steps.archive-cache.outputs.hit == 'true' && 'verify' || 'import' }}
         run: |-
           set -euo pipefail
           expected="$(nix eval --raw ../#waddle-server-test-archive.shard4.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 4
+          transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
+          case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
+          bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 4
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-4
         working-directory: server
   nixTestArchive-builder:
@@ -414,6 +542,7 @@ jobs:
           path: |-
             server/.ci/nextest-archive/shard-1/archive-path
             server/.ci/nextest-archive/shard-1/archive-references
+            server/.ci/nextest-archive/shard-1/archive-content-checksums
             server/.ci/nextest-archive/shard-1/archive-checksums
           if-no-files-found: error
           include-hidden-files: true
@@ -424,6 +553,7 @@ jobs:
           path: |-
             server/.ci/nextest-archive/shard-2/archive-path
             server/.ci/nextest-archive/shard-2/archive-references
+            server/.ci/nextest-archive/shard-2/archive-content-checksums
             server/.ci/nextest-archive/shard-2/archive-checksums
           if-no-files-found: error
           include-hidden-files: true
@@ -434,6 +564,7 @@ jobs:
           path: |-
             server/.ci/nextest-archive/shard-3/archive-path
             server/.ci/nextest-archive/shard-3/archive-references
+            server/.ci/nextest-archive/shard-3/archive-content-checksums
             server/.ci/nextest-archive/shard-3/archive-checksums
           if-no-files-found: error
           include-hidden-files: true
@@ -444,6 +575,7 @@ jobs:
           path: |-
             server/.ci/nextest-archive/shard-4/archive-path
             server/.ci/nextest-archive/shard-4/archive-references
+            server/.ci/nextest-archive/shard-4/archive-content-checksums
             server/.ci/nextest-archive/shard-4/archive-checksums
           if-no-files-found: error
           include-hidden-files: true

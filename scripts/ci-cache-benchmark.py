@@ -23,6 +23,9 @@ TARGETS = {
 # today's flake. Hestia intentionally excludes archives, so its miss is useful.
 ARCHIVE_SOURCE_SHA = "02c406d38d31976c4c5bed78cfddc0763e460330"
 ARCHIVE_PATH = "/nix/store/rbb1dwfaldnawr2pnsb5263hgw2pqf9k-waddle-server-test-archive-0.1.0-shard1"
+# FlakeHub's origin and edge endpoints are both observed in the pinned CI
+# setup. Keep an exact host allowlist, not a FlakeHub wildcard.
+FLAKEHUB_CACHE_HOSTS = {"cache.flakehub.com", "edge.cache.flakehub.com"}
 PROVIDERS = {
     "fh-h2": ("fh", "hestia"),
     "fh": ("fh",),
@@ -59,7 +62,7 @@ def provider_urls(provider, configured):
             parsed = urlparse(value)
             if parsed.username or parsed.password:
                 raise ValueError("credential-bearing substituter URLs are unsupported")
-            if kind == "fh" and parsed.scheme == "https" and parsed.hostname == "cache.flakehub.com":
+            if kind == "fh" and parsed.scheme == "https" and parsed.hostname in FLAKEHUB_CACHE_HOSTS:
                 matches.append(value)
             elif kind in ("hestia", "magic") and parsed.scheme == "http":
                 port = 37516 if kind == "hestia" else 37515
@@ -162,6 +165,54 @@ def api_json(endpoint):
         return json.load(response)
 
 
+def seed_hestia(args):
+    """Register only successfully restored outputs, then explicitly drain."""
+    directory = Path(args.output)
+    report = {"schema": 1, "variant": "h3-seeded", "phase": "seed", "success": False,
+              "cache_save": "unverified until fresh-runner warm restoration"}
+    started = time.monotonic()
+    try:
+        restored = json.loads((directory / "result.json").read_text())
+        expected = set(TARGETS) | {"trial-shard1-archive"}
+        paths = restored["paths"]
+        if (not restored["complete"] or len(paths) != len(expected)
+                or {p["name"] for p in paths} != expected or not all(p["success"] for p in paths)):
+            raise ValueError("all three exact outputs must restore before Hestia seeding")
+        outputs = [p["path"] for p in paths]
+        if any(not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", p) for p in outputs):
+            raise ValueError("unexpected seed output path")
+        binary, socket = os.environ["HESTIA_BIN"], os.environ["HESTIA_SOCKET"]
+        hook = command([binary, "hook", "--socket", socket, *outputs], timeout=15)
+        hook_log = hook.stdout + hook.stderr
+        (directory / "hestia-hook.log").write_text(hook_log)
+        # The supported hook intentionally exits zero even on daemon errors.
+        acknowledgement = rf"^hestia hook: registered {len(outputs)} path\(s\), \d+ buffered for upload$"
+        if hook.returncode or not re.search(acknowledgement, hook_log, re.MULTILINE):
+            raise ValueError("Hestia did not acknowledge every seed output")
+        report["registered_paths"] = outputs
+        drain_started = time.monotonic()
+        drain = command([binary, "drain", "--socket", socket, "--timeout", "300"], timeout=310)
+        report["drain_seconds"] = round(time.monotonic() - drain_started, 3)
+        report["drain_exit_code"] = drain.returncode
+        drain_log = drain.stdout + drain.stderr
+        (directory / "hestia-drain.log").write_text(drain_log)
+        manifest = re.search(r"; manifest m3#([1-9][0-9]*)", drain_log)
+        if drain.returncode or not manifest or re.search(r"\b(?:invalid|FAILED)\b", drain_log):
+            raise ValueError("Hestia seed upload did not report a successful manifest commit")
+        report["manifest_version"] = int(manifest.group(1))
+        report["success"] = True
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+                stream.write(f"manifest-version={report['manifest_version']}\n")
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+        report["error"] = str(error)
+    finally:
+        report["seconds"] = round(time.monotonic() - started, 3)
+        write_json(directory / "hestia-seed.json", report)
+        print(json.dumps(report, indent=2))
+    return 0 if report["success"] else 1
+
+
 def api_collection(endpoint, key):
     items = []
     separator = "&" if "?" in endpoint else "?"
@@ -240,7 +291,7 @@ def summarize(args):
         lines.append("| " + " | ".join("unknown" if v is None else str(v) for v in values) + " |")
     lines.extend(["", "## Exact archive transfer", "",
                   f"Archive from `{ARCHIVE_SOURCE_SHA}`: `{ARCHIVE_PATH}`.", "",
-                  "Original Actions payload: 1,950,935,616 NAR bytes. Hestia deliberately excludes this output.", "",
+                  "Original Actions payload: 1,950,935,616 NAR bytes. Production Hestia excludes this output; the explicit H3 seed pair registers it.", "",
                   "| Phase | Cache | Archive outcome | Restore (s) | Closure NAR bytes |",
                   "|---|---|---|---:|---:|"])
     for row in rows:
@@ -273,12 +324,16 @@ def main():
     probe.add_argument("--variant", required=True)
     probe.add_argument("--phase", choices=("existing", "seed", "warm"), required=True)
     probe.add_argument("--output", required=True)
+    seed = sub.add_parser("seed-hestia")
+    seed.add_argument("--output", required=True)
     summary = sub.add_parser("summarize")
     summary.add_argument("--input", required=True)
     summary.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.command == "wait-for-ci":
         return wait_for_ci(args)
+    if args.command == "seed-hestia":
+        return seed_hestia(args)
     if args.command == "mark":
         write_json(Path(args.output) / "started.json", {"monotonic": time.monotonic(),
                    "utc": datetime.now(timezone.utc).isoformat(), "network_rx_bytes": received_bytes()})

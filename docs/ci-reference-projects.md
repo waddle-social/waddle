@@ -93,6 +93,25 @@ explains why an unrelated crate comment also invalidates XMPP checks. Nix caches
 derivations; a cache provider cannot repair overly broad derivation inputs.
 This experiment establishes invalidation behavior, not rebuild duration.
 
+A second isolated prototype on `f7525e51` narrowed the XMPP workspace to four
+local crates while preserving their full directories, extension/WIT inputs,
+infrastructure fixtures and sibling server-test fixtures. Ten evaluation probes
+showed that unrelated ecdysis source, manifest and dev-dependency-feature edits
+left both XMPP check derivations and their dependency artifact unchanged.
+Relevant XMPP source/manifests, nextest configuration, WIT and fixture edits
+still invalidated the checks. Adding ecdysis as an XMPP dev dependency expanded
+the closure to five crates and invalidated it. The complete archive remained
+the unchanged control when introducing the prototype.
+
+Offline `cargo metadata --no-deps --locked` preserved all 95 XMPP targets and
+declared dependencies/features, but does not establish resolved feature or
+compiled-test parity. The prototype is not ready to ship: the original nextest
+configuration refers to the excluded server package and fails to parse against
+the smaller workspace. Those filters, test groups and profiles were deliberately
+left intact for this experiment. No Waddle compilation or timing improvement is
+claimed. This demonstrates why Union's approach is worth testing and why copying
+only its source filter is insufficient.
+
 The earlier [changed-source compilation](https://github.com/waddle-social/waddle/actions/runs/35504814800/job/106062722062)
 reported 1,134 fresh units and 225 dirty units. All 224 units with nonzero compile
 time in its Cargo timing data belonged to Waddle workspace packages. Third-party

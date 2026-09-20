@@ -331,7 +331,10 @@ events; this is not compiler-phase RSS and does not justify more Cargo jobs.
 | 3 | 2m45s | 20.976s | 112.817s | One failed test |
 | 4 | 3m13s | 10.286s | 147.133s | Passed |
 
-All 10,645 selected tests executed; 10,644 passed. The janitor cancellation test
+All 10,645 selected tests executed; 10,644 passed. The 24-test increase from the
+preceding trial came from upstream commit `b341e180` entering the PR merge
+checkout; exact test-identity comparison found 24 additions and zero removals.
+The janitor cancellation test
 raced an outer one-second deadline against an intended one-second terminal
 cleanup attempt. Its correction uses paused Tokio time and checks both the
 cleanup duration and cancellation bound. Chat also exposed an editor test's
@@ -371,3 +374,43 @@ outputs without allowing compilation. Provider qualification runs after ordinary
 CI and is experimental measurement, not a new required production gate or proof
 of changed-code latency. The archive itself is included to test whether direct
 Nix substitution can improve the remaining Actions download bottleneck.
+
+## First fully green changed-source trial: `f7525e51`
+
+The [Rust workflow](https://github.com/waddle-social/waddle/actions/runs/35510413164)
+passed all 10,645 selected tests and exact inventory checks in **16m26s**.
+All other ordinary workflows were green; the slowest was XMPP server compliance
+at 11m27s. Server validation took 10m59s, CodeQL 9m12s and chat 5m23s.
+Both root synchronization and all six explicit project CI/lock checks passed
+using unmodified cuenv 0.55.0. The goal remains unmet.
+
+Compilation took 185.08s; the builder job took 7m16s. All four workers started
+within 17 seconds of the builder completing. Shared tests took
+163.45/159.90/160.13/104.74 seconds with hash partitioning, reducing the previous
+261-second maximum. The janitor regression passed in 0.014s.
+Archive downloads still took 154–175 seconds, followed by approximately 70–79
+seconds of import, runtime preparation and extraction before tests started.
+The last worker completed at 15m46s; scheduling and completing the aggregate
+gate added another 40 seconds. Cache qualification starts only after this
+ordinary run, so its traffic did not influence these measurements.
+
+The next trial restores each archive through the binary caches first, after
+validating current-run metadata and its independently evaluated output path.
+Local and remote archive builds are disabled. A fixed content manifest binds
+the archive, filters, complete comparison inventories and runtime references;
+cache hits are verified again before tests. Only the pinned client's exact
+missing-output response permits the existing raw Actions fallback. Corruption,
+unexpected paths and other cache errors fail closed. Raw fallback uploads remain
+available, and new metrics expose restore, export and checksum costs.
+
+Workers now use a no-compiler derivation and direct nextest execution, retaining
+the same source/fixtures, environment and PostgreSQL setup/cleanup. Comparison
+inventories are losslessly gzipped to avoid turning incidental metadata paths
+into Nix runtime references; all ELF runtime roots remain unchanged. Four native
+fixture workers passed with compiler/Cargo/Go/protoc commands blocked, including
+helper execution and all eight inventory comparisons. These changes still need
+the full four-worker live trial. The new producer manifest changes the archive
+derivation. On a complete-output miss, its dependency-only Cargo artifact should
+require real workspace compilation again; confirm that in the live Cargo
+timings. This is an archive-derivation rebuild with unchanged Rust source, not
+a changed-crate or cold-dependency trial.

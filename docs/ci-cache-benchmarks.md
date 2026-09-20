@@ -13,6 +13,60 @@ in a shared derivation. Changing a source file can therefore invalidate several
 checks while the third-party dependency artifact remains reusable. Moving that
 artifact to another provider does not change the derivation's source inputs.
 
+## First measured qualification: 2026-09-20
+
+[Run 35510413179](https://github.com/waddle-social/waddle/actions/runs/35510413179)
+completed all 11 original measurements at head `f7525e518882e2c2e7c5e04c68ee9f028d2b1ef5`
+(checkout merge SHA `342f441c114fca63035c2aec40de92bb76043aa0`). No Waddle build
+was permitted. The [final report job](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106083435842)
+contains the joined timings and links to the result artifacts.
+
+| Existing provider | Check-deps restore | Exact archive restore | Whole job | Result |
+|---|---:|---:|---:|---|
+| [FH + Hestia 2](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106079467291) | 26.586s | 43.958s | 127s | Complete through FH; Hestia reported an evicted dependency pack |
+| [FH only](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106079467293) | 20.020s | 32.552s | 110s | Complete |
+| [Hestia 2 only](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106079467328) | Miss/error | Miss | 56s | Incomplete; missing pack and deliberately uncached archive |
+| [Hestia 3 only](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106079467282) | Miss | Miss | 43s | No available population; not a throughput result |
+| [FH + Hestia 3](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106079467314) | 24.115s | 31.421s | 111s | Complete through FH; Hestia pushed no paths |
+
+All successful archive probes started without the archive locally. Their
+logical closure was 4,602,486,504 NAR bytes; the check-deps closure was
+2,084,331,232 bytes. Vendor was already present after the dependency restore,
+so its near-zero probe time is not an independent download measurement.
+The FH + Hestia 2 archive log explicitly records the exact archive copied from
+`https://cache.flakehub.com`. FlakeHub therefore captured it independently of
+Hestia's archive exclusion. The 31–44s archive restores justify an end-to-end
+FlakeHub transport trial against the previous 157–193s Actions downloads.
+These probes were serial; the production trial must measure four concurrent
+shards and must not assume identical throughput.
+
+| New provider | Seed job | Cache-save evidence | Fresh-runner warm job | Warm result |
+|---|---:|---|---:|---|
+| Namespace | [102s](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106080433144) | Seed reported both mounted paths cached | [42s](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106083061090) | All three outputs missing; unqualified |
+| cache-nix | [120s](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106080433059) | Save failed after 10s: tar could not read Determinate auth state | [45s](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106083061181) | Cache key absent; all three outputs missing |
+| Magic GHA | [1,002s](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106080432981) | 899s post step; 1,179 individual uploads, including all three outputs | [66s](https://github.com/waddle-social/waddle/actions/runs/35510413179/job/106083061089) | HTTP 418 / GHA `ResourceExhausted` rate limit; substituter disabled, all three outputs failed |
+
+The Namespace seed and warm jobs used the identical resolved tag
+`waddle-ci-benchmark-35510413179` and 20 GB size, with the cache mounted before
+Nix installation. Both setup logs reported the two cache paths missing.
+[Namespace documents onboarding misses](https://namespace.so/docs/architecture/storage/cache-volumes#cache-volume-onboarding)
+when a newly allocated machine lacks the population; that is consistent with
+this result, not a proven diagnosis. The retry reuses the isolated experiment
+tag and disables warm-job commits, avoiding both repeated onboarding resets
+and replacing a useful seed with an empty warm store. Prior population remains
+unknown; these retries are not cold-cache tests.
+
+The snapshot failure is a configuration defect, not a provider speed result.
+The corrected paths below exclude authentication state without changing its
+permissions. Magic's successful seed save did not imply a usable warm cache:
+the downloaded per-path logs establish the throttling failure, despite green
+diagnostic jobs. Its warm post took only 1s because store diffing was disabled.
+No new provider qualified in this first run. The next qualification verifies
+the corrected snapshot, repeated Namespace identity, and a real Hestia 3
+seed/warm pair. After that qualification, remove the PR trigger and retain
+manual dispatch so cumulative PR diffs do not repeatedly schedule this long
+serial diagnostic workflow.
+
 ## Qualification workflow
 
 `ci/cache-benchmark/workflow.cue` generates
@@ -41,6 +95,7 @@ not an estimate of normal parallel CI latency.
 | Existing cache | FlakeHub + Hestia 2; FlakeHub; Hestia 2; Hestia 3; FlakeHub + Hestia 3 | Whether current dependency outputs are available, and the cost to restore them |
 | Seed | Namespace `/nix` volume; cache-nix snapshot; Magic GHA cache | Cost of importing existing FlakeHub outputs and saving each new cache |
 | Fresh-runner warm | The same three new caches | Whether a different runner can restore the seeded data without FlakeHub fallback |
+| Explicit Hestia 3 seed, then fresh-runner warm | Hestia 3.0.1 | Upload and restore of the same three outputs, including the archive, after all other warm checks finish |
 
 Every variant restores these exact outputs from the same checkout:
 
@@ -69,12 +124,19 @@ script overrides and then verifies the exact substituter allowlist, excluding
 unselected providers. Authentication stays in the action-configured Nix netrc;
 the script does not print Nix configuration or credentials.
 
-Namespace uses a run-specific cache tag and the default 20 GB volume size.
+Namespace reuses the isolated first-experiment cache tag
+`waddle-ci-benchmark-35510413179` and the default 20 GB volume size.
 `cache:nix` runs before Nix installation. The warm job permits upstream NixOS
 substitution only, so missing Waddle outputs cannot be hidden by a FlakeHub hit.
-Cache-nix similarly uses a run-specific key, disables cache purging, and uses
+Its documented `nscloud-cache-exp-do-not-commit` label prevents warm probes
+from replacing the seeded volume.
+Cache-nix uses a run-specific key, disables cache purging, and uses
 only that exact key on restore. A key miss is subsequently recorded by the
-per-output probes. Neither touches an existing Namespace cache identity
+per-output probes. Its paths input removes the automatic `/nix` root and includes
+only `/nix/store` and `/nix/var/nix/db`, retaining database checkpoint/merge
+handling while excluding `/nix/var/determinate` authentication and sockets.
+A child-only exclusion would still let tar recurse from the included parent.
+Neither touches a production Namespace cache identity
 or intentionally deletes existing GHA caches. GitHub's shared cache quota can
 still evict old entries when these seeds are uploaded, so run this after the
 active performance trial has finished.
@@ -86,6 +148,19 @@ backend rather than an accidental FlakeHub fallback. Existing Hestia rows use
 the cache population already available to the PR. A missing or evicted Hestia
 output is a coverage result; it is not a controlled warm-throughput comparison
 with a freshly seeded provider.
+
+The explicit Hestia 3 pair runs last so its uploads cannot evict another
+provider before that provider's warm check. The seed restores through FlakeHub,
+then uses the pinned release's documented `hestia hook` command to register only
+the three successful outputs. Since the hook returns zero even on failure, the
+helper verifies its acknowledgement before explicitly draining with a 300-second
+deadline. The reported `m3` manifest version is passed to the fresh runner's
+`wait-manifest-version` input. Hestia's upstream filter matches only
+`cache.nixos.org-1`, so it does not exclude FlakeHub-signed Waddle outputs.
+The normal post drain has a further 30-second bound for this seed. Registration
+and a manifest commit still require successful fresh-runner restoration; neither
+alone qualifies the cache. This uses the PR's existing Hestia 3 root rather than
+inventing an unsupported action root-key input.
 
 ## Measurements and interpretation
 
@@ -109,11 +184,17 @@ fresh-runner warm probes before choosing a provider. Unknown timings remain
 unknown. Namespace/snapshot restores happen
 during setup, so compare complete job time and setup-plus-probe time; comparing
 only the final `nix build` command would incorrectly make an already-restored
-store appear free. The seed cost remains visible alongside warm results.
+store appear free. Nix validity and path metadata do not force every cached
+volume block to be read: lazy Namespace volume materialization can defer I/O
+until archive extraction or compilation. A real workload must measure that cost.
+The seed cost remains visible alongside warm results. The Magic action exposes
+no run-specific cache-version input, so its prior GHA population is unknown;
+its seed must not be described as a proven empty-cache measurement.
 
 The first run is qualification, not a statistical ranking. Whole-run reruns
-reuse the run-specific seed identity; the per-path local-presence fields expose
-that warm state rather than labelling it a new cold cache. Repeat eligible
+reuse seed identities, and Namespace keeps its experiment identity across runs;
+the per-path local-presence fields expose that state rather than labelling it
+a new cold cache. Repeat eligible
 providers on the same inputs before selecting one; record the actual runner,
 cache population and eviction outcomes. Do not count a no-change complete
 output-cache hit as evidence for the 15-minute changed-code goal.

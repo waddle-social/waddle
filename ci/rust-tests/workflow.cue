@@ -107,6 +107,7 @@ workflow: {
 						path:                   """
 							server/.ci/nextest-archive/shard-\(shard.number)/archive-path
 							server/.ci/nextest-archive/shard-\(shard.number)/archive-references
+							server/.ci/nextest-archive/shard-\(shard.number)/archive-content-checksums
 							server/.ci/nextest-archive/shard-\(shard.number)/archive-checksums
 							"""
 						"if-no-files-found":    "error"
@@ -151,8 +152,32 @@ workflow: {
 						}
 					},
 					{
+						name:                "Restore and verify archive from binary caches"
+						id:                  "archive-cache"
+						shell:               "bash"
+						"working-directory": "server"
+						env: METADATA_DOWNLOAD: "${{ steps.archive-metadata.outputs.download-path }}"
+						run: """
+							set -euo pipefail
+							if [[ -z "$METADATA_DOWNLOAD" ]]; then
+							  echo "Metadata download exited without reporting completion; no Nix operation attempted" >&2
+							  exit 1
+							fi
+							bash scripts/nextest-archive-transfer.sh validate .ci/nextest-archive/builder \(shard.number)
+							expected="$(nix eval --raw ../#waddle-server-test-archive.shard\(shard.number).outPath)"
+							if bash scripts/nextest-archive-transfer.sh cache "$expected" .ci/nextest-archive/builder \(shard.number); then
+							  echo "hit=true" >> "$GITHUB_OUTPUT"
+							else
+							  status=$?
+							  if [[ "$status" -ne 2 ]]; then exit "$status"; fi
+							  echo "hit=false" >> "$GITHUB_OUTPUT"
+							fi
+							"""
+					},
+					{
 						name: "Download raw test archive"
 						id:   "archive-payload"
+						if:   "${{ steps.archive-cache.outputs.hit == 'false' }}"
 						uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" // v8.0.1
 						with: {
 							name:              "archive-\(shard.number).nar"
@@ -167,17 +192,24 @@ workflow: {
 						env: {
 							METADATA_DOWNLOAD: "${{ steps.archive-metadata.outputs.download-path }}"
 							PAYLOAD_DOWNLOAD:  "${{ steps.archive-payload.outputs.download-path }}"
+							CACHE_HIT:         "${{ steps.archive-cache.outputs.hit }}"
 						}
 						run: #"""
-							if [[ -z "$METADATA_DOWNLOAD" || -z "$PAYLOAD_DOWNLOAD" ]]; then
+							if [[ -z "$METADATA_DOWNLOAD" ]]; then
+							  echo "Metadata download exited without reporting completion" >&2
+							  exit 1
+							fi
+							if [[ "$CACHE_HIT" == true ]]; then exit 0; fi
+							if [[ "$CACHE_HIT" != false || -z "$PAYLOAD_DOWNLOAD" ]]; then
 							  echo "Artifact download exited without reporting completion; no Nix import attempted" >&2
 							  exit 1
 							fi
 							"""#
 					},
 					{
-						name:                "Run test shard"
-						shell:               "bash"
+						name:  "Run test shard"
+						shell: "bash"
+						env: ARCHIVE_TRANSFER_MODE: "${{ steps.archive-cache.outputs.hit == 'true' && 'verify' || 'import' }}"
 						run:                 shard.task.args[1]
 						"working-directory": "server"
 					},

@@ -1,13 +1,18 @@
 package cachebenchmark
 
-import wc "github.com/waddle-social/waddle/ci/contributors"
+import (
+	"list"
+	wc "github.com/waddle-social/waddle/ci/contributors"
+)
 
 let _nix = wc.#Nix.tasks[0].provider.github
 let _fh = wc.#FlakeHubCache.tasks[0].provider.github
 let _runner = ["nscloud-ubuntu-24.04-amd64-8x16"]
 let _volumeRunner = [
 	"nscloud-ubuntu-24.04-amd64-8x16-with-cache",
-	"nscloud-cache-tag-waddle-ci-benchmark-${{ github.run_id }}",
+	// Keep the first experiment's isolated identity across retries so
+	// Namespace can distribute its population across the fleet. Not cold.
+	"nscloud-cache-tag-waddle-ci-benchmark-35510413179",
 	"nscloud-cache-size-20gb",
 ]
 let _h2 = "Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527"
@@ -20,17 +25,26 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 
 #BenchmarkJob: {
 	_phase: "existing" | "seed" | "warm"
+	_hestiaSeeded: *false | true
 	name: "cache-benchmark/\(_phase)/${{ matrix.variant }}"
 	"runs-on": "${{ matrix.runner }}"
 	"timeout-minutes": 20
 	if _phase == "existing" {needs: ["normal-ci"]}
-	if _phase == "seed" {
+	if _phase == "seed" && !_hestiaSeeded {
 		needs: ["normal-ci", "existing"]
 		if: "${{ !cancelled() && needs.normal-ci.result == 'success' }}"
 	}
-	if _phase == "warm" {
+	if _phase == "warm" && !_hestiaSeeded {
 		needs: ["normal-ci", "seed"]
 		if: "${{ !cancelled() && needs.normal-ci.result == 'success' }}"
+	}
+	if _hestiaSeeded {
+		if: "${{ !cancelled() && needs.normal-ci.result == 'success' }}"
+		if _phase == "seed" {
+			needs: ["normal-ci", "warm"]
+			outputs: "manifest-version": "${{ steps.hestia-seed.outputs.manifest-version }}"
+		}
+		if _phase == "warm" {needs: ["normal-ci", "h3-seed"]}
 	}
 	strategy: {
 		"fail-fast": false
@@ -43,20 +57,29 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 			if _phase == "existing" {variant: "h2", provider: "h2", runner: _runner},
 			if _phase == "existing" {variant: "h3", provider: "h3", runner: _runner},
 			if _phase == "existing" {variant: "fh-h3", provider: "fh-h3", runner: _runner},
-			if _phase != "existing" {
-				variant: "namespace", runner: _volumeRunner
-				if _phase == "seed" {provider: "fh"}
-				if _phase == "warm" {provider: "namespace"}
+			if _phase != "existing" && !_hestiaSeeded {
+				variant: "namespace"
+				if _phase == "seed" {provider: "fh", runner: _volumeRunner}
+				if _phase == "warm" {
+					provider: "namespace"
+					// A miss must not replace a populated seed with an empty store.
+					runner: list.Concat([_volumeRunner, ["nscloud-cache-exp-do-not-commit"]])
+				}
 			},
-			if _phase != "existing" {
+			if _phase != "existing" && !_hestiaSeeded {
 				variant: "cache-nix", runner: _runner
 				if _phase == "seed" {provider: "fh"}
 				if _phase == "warm" {provider: "cache-nix"}
 			},
-			if _phase != "existing" {
+			if _phase != "existing" && !_hestiaSeeded {
 				variant: "magic", runner: _runner
 				if _phase == "seed" {provider: "magic-seed"}
 				if _phase == "warm" {provider: "magic"}
+			},
+			if _hestiaSeeded {
+				variant: "h3-seeded", runner: _runner
+				if _phase == "seed" {provider: "fh"}
+				if _phase == "warm" {provider: "h3"}
 			},
 		]
 	}
@@ -79,6 +102,13 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 			uses: _snapshot
 			with: {
 				"primary-key": "waddle-nix-benchmark-${{ github.run_id }}"
+				// Remove the implicit /nix root before selecting store + database.
+				// A child-only negation would still let tar recurse into auth state.
+				paths: """
+					!/nix
+					/nix/store
+					/nix/var/nix/db
+					"""
 				purge: false
 				save: _phase == "seed"
 			}
@@ -102,13 +132,17 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 		},
 		{
 			name: "Setup Hestia 3"
-			if: "${{ matrix.provider == 'h3' || matrix.provider == 'fh-h3' }}"
+			if: "${{ matrix.provider == 'h3' || matrix.provider == 'fh-h3' || matrix.variant == 'h3-seeded' }}"
 			uses: _h3
 			with: {
 				version: "v3.0.1"
 				listen: "127.0.0.1:37516"
 				"upstream-cache-filter": true
-				"drain-timeout": 300
+				if _hestiaSeeded && _phase == "seed" {"drain-timeout": 30}
+				if !_hestiaSeeded || _phase != "seed" {"drain-timeout": 300}
+				if _hestiaSeeded && _phase == "warm" {
+					"wait-manifest-version": "${{ needs.h3-seed.outputs.manifest-version || '0' }}"
+				}
 			}
 		},
 		{
@@ -140,6 +174,11 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 				fi
 				exit "$status"
 				"""
+		},
+		if _hestiaSeeded && _phase == "seed" {
+			name: "Register and upload the exact Hestia seed outputs"
+			id: "hestia-seed"
+			run: "python3 scripts/ci-cache-benchmark.py seed-hestia --output .ci/cache-benchmark"
 		},
 		{
 			name: "Upload cache measurements"
@@ -190,9 +229,11 @@ workflow: {
 		existing: #BenchmarkJob & {_phase: "existing"}
 		seed: #BenchmarkJob & {_phase: "seed"}
 		warm: #BenchmarkJob & {_phase: "warm"}
+		"h3-seed": #BenchmarkJob & {_phase: "seed", _hestiaSeeded: true}
+		"h3-warm": #BenchmarkJob & {_phase: "warm", _hestiaSeeded: true}
 		summary: {
 			name: "Cache qualification report"
-			needs: ["existing", "seed", "warm"]
+			needs: ["existing", "seed", "warm", "h3-seed", "h3-warm"]
 			if: "${{ !cancelled() }}"
 			"runs-on": "ubuntu-24.04"
 			"timeout-minutes": 5

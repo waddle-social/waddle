@@ -132,8 +132,11 @@
                   --message-format json > "$out/whole-$partition.json"
                 cargo nextest list "''${nextest_args[@]}" -E "$(cat "$archive_output/shared.filter")" \
                   --partition "hash:$partition/4" --message-format json > "$out/shared-$partition.json"
-                cp "$out/whole-$partition.json" "$archive_output/whole-inventory.json"
-                cp "$out/shared-$partition.json" "$archive_output/shared-inventory.json"
+                # Comparison metadata contains compiler/vendor paths, not
+                # runtime roots. Preserve its full contents compressed; ELF
+                # runtime dependencies remain explicit below.
+                ${pkgs.gzip}/bin/gzip -n -c "$out/whole-$partition.json" > "$archive_output/whole-inventory.json.gz"
+                ${pkgs.gzip}/bin/gzip -n -c "$out/shared-$partition.json" > "$archive_output/shared-inventory.json.gz"
                 coverage_inventories+=("$out/whole-$partition.json" "$out/shared-$partition.json")
                 ${pkgs.time}/bin/time -f "WADDLE_CI_METRIC phase=archive shard=$partition elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x" \
                   cargo nextest archive "''${nextest_args[@]}" -E "$filter" \
@@ -164,6 +167,14 @@
                       print
                     }'
                 done | grep -Eo '/nix/store/[a-z0-9]{32}-[^/:[:space:]]+' | sort -u > "$archive_output/runtime-references"
+                # Bind the exact bytes consumed by each worker, regardless of
+                # whether they arrive through a binary cache or raw artifact.
+                content_hash_started=$SECONDS
+                (cd "$archive_output" && ${pkgs.coreutils}/bin/sha256sum \
+                  archive.tar.zst whole.filter shared.filter \
+                  whole-inventory.json.gz shared-inventory.json.gz runtime-references) \
+                  > "$archive_output/archive-content-checksums"
+                echo "WADDLE_CI_METRIC phase=archive_content_hash shard=$partition elapsed_seconds=$((SECONDS - content_hash_started))"
                 wc -c "$archive_output/archive.tar.zst"
               done
               ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} \
@@ -176,14 +187,37 @@
           mkServerTestShard =
             partition:
             let
+              testCheck = self.checks.${system}.waddle-server-test;
               archiveOutput = serverTestArchive.${"shard${toString partition}"};
             in
-            self.checks.${system}.waddle-server-test.overrideAttrs (_: {
+            pkgs.stdenvNoCC.mkDerivation {
+              # Execute compiled archives without inheriting Crane compiler,
+              # vendoring hooks, or development outputs. Retain test fixtures
+              # and the exact database/environment setup from the full lane.
+              inherit (testCheck)
+                version
+                src
+                strictDeps
+                postUnpack
+                preBuild
+                preCheck
+                SSL_CERT_FILE
+                WADDLE_CERTS_EPHEMERAL
+                WADDLE_TEST_FIXED_ACCOUNT_ENABLED
+                WADDLE_TEST_FIXED_ACCOUNT_PASSWORD
+                WADDLE_UPLOAD_DIR
+                RUST_BACKTRACE
+                NEXTEST_SHOW_PROGRESS
+                ;
               pname = "waddle-server-test-shard-${toString partition}";
-              cargoArtifacts = null;
-              cargoVendorDir = null;
-              doInstallCargoArtifacts = false;
-              CARGO_PROFILE = "";
+              nativeBuildInputs = [ pkgs.postgresql_17.out ];
+              dontConfigure = true;
+              doCheck = true;
+              buildPhase = ''
+                runHook preBuild
+                runHook postBuild
+              '';
+              installPhase = ''mkdir -p "$out"'';
               checkPhase = ''
                 runHook preCheck
                 mkdir -p "$out"
@@ -193,11 +227,11 @@
                 shared_filter=$(cat ${archiveOutput}/shared.filter)
                 # Nextest sets runtime manifest/binary paths after remapping.
                 # Nix uses different temporary source roots on each worker.
-                cargo nextest list --profile ci --archive-file ${archiveOutput}/archive.tar.zst \
+                ${pkgs.cargo-nextest}/bin/cargo-nextest nextest list --profile ci --archive-file ${archiveOutput}/archive.tar.zst \
                   --extract-to "$extracted" --workspace-remap "$PWD" \
                   -E "$whole_filter" --message-format json > "$out/whole-inventory.json"
                 ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
-                  ${archiveOutput}/whole-inventory.json "$out/whole-inventory.json" \
+                  ${archiveOutput}/whole-inventory.json.gz "$out/whole-inventory.json" \
                   > "$out/whole-coverage.json"
                 # Both phases reuse one extraction. The two slow binaries are
                 # shared across workers, with disjoint per-test partitions.
@@ -206,18 +240,18 @@
                   --binaries-metadata "$extracted/target/nextest/binaries-metadata.json"
                   --target-dir-remap "$extracted/target" --build-dir-remap "$extracted/target"
                   --workspace-remap "$PWD")
-                cargo nextest list "''${reused_args[@]}" -E "$shared_filter" \
+                ${pkgs.cargo-nextest}/bin/cargo-nextest nextest list "''${reused_args[@]}" -E "$shared_filter" \
                   --partition "hash:${toString partition}/4" --message-format json > "$out/shared-inventory.json"
                 ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
-                  ${archiveOutput}/shared-inventory.json "$out/shared-inventory.json" \
+                  ${archiveOutput}/shared-inventory.json.gz "$out/shared-inventory.json" \
                   > "$out/shared-coverage.json"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  cargo nextest run "''${reused_args[@]}" -E "$whole_filter"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" -E "$whole_filter"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  cargo nextest run "''${reused_args[@]}" -E "$shared_filter" --partition "hash:${toString partition}/4"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" -E "$shared_filter" --partition "hash:${toString partition}/4"
                 runHook postCheck
               '';
-            });
+            };
           serverPackageSrc = lib.fileset.toSource {
             root = ./server;
             fileset =
