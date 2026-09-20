@@ -30,6 +30,10 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	name: "cache-benchmark/\(_phase)/${{ matrix.variant }}"
 	"runs-on": "${{ matrix.runner }}"
 	"timeout-minutes": 20
+	permissions: {
+		contents: "read"
+		if _phase != "warm" {"id-token": "write"}
+	}
 	if _phase == "existing" {
 		needs: ["normal-ci"]
 		if: "${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}"
@@ -88,8 +92,7 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 		]
 		if _phase == "existing" || _hestiaSeeded {matrix: include: _rows}
 		if _phase != "existing" && !_hestiaSeeded {
-			// The full comparison has run twice. PR pushes now exercise only
-			// the repaired Namespace integration, including its fresh warm job.
+			// Permit a focused pair without repeating unrelated cache uploads.
 			_namespaceRows: [for row in _rows if row.variant == "namespace" {row}]
 			matrix: include: "${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.scope == 'all') && '\(json.Marshal(_rows))' || '\(json.Marshal(_namespaceRows))') }}"
 		}
@@ -251,7 +254,6 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 workflow: {
 	name: "waddle-ci-cache-benchmark"
 	on: {
-		pull_request: paths: ["ci/cache-benchmark/**", "scripts/*cache-benchmark*", "docs/ci-cache-benchmarks.md"]
 		workflow_dispatch: inputs: scope: {
 			description: "Compare all providers, or retry only the Namespace seed/warm pair"
 			type: "choice"
@@ -260,13 +262,14 @@ workflow: {
 			options: ["all", "namespace"]
 		}
 	}
-	permissions: {contents: "read", actions: "read", "id-token": "write"}
+	permissions: {}
 	concurrency: {
 		group: "${{ github.workflow }}-${{ github.head_ref || github.ref }}"
 		"cancel-in-progress": true
 	}
 	jobs: {
 		"normal-ci": {
+			permissions: {contents: "read", actions: "read"}
 			name: "Wait for normal CI before cache qualification"
 			"runs-on": "ubuntu-24.04"
 			"timeout-minutes": 65
@@ -292,6 +295,7 @@ workflow: {
 		"h3-seed": #BenchmarkJob & {_phase: "seed", _hestiaSeeded: true}
 		"h3-warm": #BenchmarkJob & {_phase: "warm", _hestiaSeeded: true}
 		summary: {
+			permissions: {contents: "read", actions: "read"}
 			name: "Cache qualification report"
 			needs: ["existing", "seed", "warm", "h3-seed", "h3-warm"]
 			if: "${{ !cancelled() }}"

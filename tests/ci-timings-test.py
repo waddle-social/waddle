@@ -1,9 +1,12 @@
 """Timing-contract regressions: python3 tests/ci-timings-test.py."""
 
 from datetime import datetime, timedelta, timezone
+from contextlib import chdir
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -107,12 +110,53 @@ class TimingContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "jobs.json"
             path.write_text(json.dumps({"total_count": 2, "jobs": [job()]}))
-            with self.assertRaisesRegex(ValueError, "incomplete jobs"):
+            with chdir(directory), self.assertRaisesRegex(ValueError, "incomplete jobs"):
                 CI.read_files([path], "jobs")
 
     def test_attempt_wrapper_carries_provenance_to_raw_jobs(self):
         document = {"run_id": 1, "run_attempt": 2, "jobs": [{"id": 11}]}
         self.assertEqual(CI.records(document, "jobs"), [{"id": 11, "run_id": 1, "run_attempt": 2}])
+
+
+class InputPathTests(unittest.TestCase):
+    def test_offline_cli_reads_nested_records_and_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "recorded").mkdir()
+            (root / "recorded/runs.json").write_text(json.dumps([run()]))
+            (root / "recorded/jobs.json").write_text(json.dumps([job(start=10)]))
+            (root / "dependencies.json").write_text(json.dumps({".github/workflows/CI.yml": {"Build": []}}))
+            result = subprocess.run(
+                [sys.executable, str(Path(CI.__file__).resolve()), "--sha", SHA,
+                 "--runs", "recorded/runs.json", "--jobs", str(root / "recorded/jobs.json"),
+                 "--dependencies", "dependencies.json", "--format", "json"],
+                cwd=root, capture_output=True, text=True, check=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertTrue(report["under_budget"])
+            self.assertEqual(report["workflows"][0]["jobs"][0]["eligible_wait_seconds"], 10)
+
+    def test_parent_absolute_and_symlink_escapes_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "records"
+            root.mkdir()
+            sibling = Path(directory) / "records-other"
+            sibling.mkdir()
+            outside = sibling / "outside.json"
+            outside.write_text('{"secret": "must not be read"}')
+            (root / "link.json").symlink_to(outside)
+            (root / "linked-directory").symlink_to(sibling, target_is_directory=True)
+            with chdir(root):
+                for path in ("../records-other/outside.json", outside, "link.json", "linked-directory/outside.json"):
+                    with self.subTest(path=path), self.assertRaisesRegex(ValueError, "inside the current working directory"):
+                        CI.read_json(path)
+
+    def test_directories_and_fifos_are_rejected_before_read(self):
+        with tempfile.TemporaryDirectory() as directory, chdir(directory):
+            os.mkfifo("pipe.json")
+            for path in (".", "pipe.json"):
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, "regular file"):
+                    CI.read_json(path)
 
 
 if __name__ == "__main__":

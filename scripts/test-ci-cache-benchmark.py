@@ -2,6 +2,7 @@
 """Cache miss and provider-isolation contracts for the CI experiment."""
 
 import importlib.util
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -17,10 +18,72 @@ benchmark = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(benchmark)
 
 
+@contextmanager
+def isolated_workspace(probe=False):
+    with tempfile.TemporaryDirectory() as directory:
+        workspace = Path(directory)
+        root = workspace / ".ci"
+        output = root / "cache-benchmark" if probe else root
+        output.mkdir(parents=True)
+        with patch.object(benchmark, "WORKSPACE_ROOT", workspace):
+            yield output
+
+
 class CacheBenchmarkTests(unittest.TestCase):
+    def test_artifact_locations_reject_cli_traversal_and_symlink_components(self):
+        with isolated_workspace() as root, tempfile.TemporaryDirectory() as outside:
+            for value in [outside, "../outside", ".ci/cache-benchmark/../outside"]:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    benchmark.artifact_directory(value, "probe")
+            for value in [Path(outside) / "result.json", root / ".." / "outside"]:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    benchmark.write_json(value, {})
+            destination = Path(outside) / "private.json"
+            destination.write_text('{"private": true}')
+            (root / "linked").symlink_to(outside, target_is_directory=True)
+            (root / "result.json").symlink_to(destination)
+            for path in [root / "linked" / "private.json", root / "result.json"]:
+                with self.subTest(path=path):
+                    with self.assertRaisesRegex(ValueError, "symlinks"):
+                        benchmark.read_artifact_json(path)
+                    with self.assertRaisesRegex(ValueError, "symlinks"):
+                        benchmark.write_json(path, {})
+            self.assertEqual(destination.read_text(), '{"private": true}')
+
+    def test_ci_root_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            workspace = Path(directory)
+            (workspace / ".ci").symlink_to(outside, target_is_directory=True)
+            with patch.object(benchmark, "WORKSPACE_ROOT", workspace), self.assertRaisesRegex(ValueError, "symlinks"):
+                benchmark.artifact_directory(".ci/cache-benchmark", "probe")
+
+    def test_report_write_does_not_modify_a_preexisting_hardlink_target(self):
+        with isolated_workspace() as root, tempfile.TemporaryDirectory() as outside:
+            destination = Path(outside) / "private.json"
+            destination.write_text("private")
+            report = root / "result.json"
+            report.hardlink_to(destination)
+            benchmark.write_json(report, {"complete": False})
+            self.assertEqual(destination.read_text(), "private")
+            self.assertEqual(benchmark.read_artifact_json(report), {"complete": False})
+
+    def test_report_cannot_redirect_hestia_upload_arguments(self):
+        for injected in ["--help", "/tmp/private", "/nix/store/" + "c" * 32 + "-unrelated"]:
+            with self.subTest(path=injected), isolated_workspace(probe=True) as output:
+                paths = [{"name": name, "path": injected if name == "check-deps" else benchmark.ARCHIVE_PATH,
+                          "success": True} for name in [*benchmark.TARGETS, "trial-shard1-archive"]]
+                benchmark.write_json(output / "result.json", {"complete": True, "paths": paths})
+                def fake_command(args, **_kwargs):
+                    self.assertEqual(args[0:2], ["nix", "eval"])
+                    return subprocess.CompletedProcess(args, 0, "/nix/store/" + "a" * 32 + "-expected", "")
+                with patch.object(benchmark, "command", side_effect=fake_command) as run, patch("builtins.print"):
+                    self.assertEqual(benchmark.seed_hestia(types.SimpleNamespace(output=".ci/cache-benchmark")), 1)
+                self.assertEqual(run.call_count, 2)
+                self.assertIn("exact expected outputs", benchmark.read_artifact_json(output / "hestia-seed.json")["error"])
+
     def test_archive_read_hashes_all_bytes_and_records_separate_cost(self):
         payload = b"archive payload\x00" * 10000
-        with tempfile.TemporaryDirectory() as directory:
+        with isolated_workspace() as directory:
             (Path(directory) / "archive.tar.zst").write_bytes(payload)
             with patch.object(benchmark, "received_bytes", side_effect=[10, 42]):
                 report = benchmark.read_archive(directory)
@@ -30,7 +93,7 @@ class CacheBenchmarkTests(unittest.TestCase):
         self.assertEqual(report["observed_network_rx_bytes"], 32)
 
     def test_timed_out_archive_read_cannot_claim_complete_bytes(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with isolated_workspace() as directory:
             (Path(directory) / "archive.tar.zst").write_bytes(b"payload")
             with patch.object(benchmark, "command", side_effect=subprocess.TimeoutExpired("sha256sum", 180)) as run:
                 report = benchmark.read_archive(directory)
@@ -41,22 +104,22 @@ class CacheBenchmarkTests(unittest.TestCase):
 
     def test_summary_compares_seed_and_warm_payloads(self):
         for warm_digest, expected in [("a" * 64, 0), ("b" * 64, 1)]:
-            with self.subTest(digest=warm_digest), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(digest=warm_digest), isolated_workspace() as directory:
                 root = Path(directory)
                 jobs = []
                 for index, phase in enumerate(["seed", "warm"]):
-                    benchmark.write_json(root / "input" / phase / "result.json", {
+                    benchmark.write_json(root / "cache-results" / phase / "result.json", {
                         "phase": phase, "variant": "namespace", "complete": True,
                         "paths": [{"name": "trial-shard1-archive", "path": benchmark.ARCHIVE_PATH,
                                    "archive_read": {"success": True, "bytes_read": 10,
                                                     "sha256": "a" * 64 if phase == "seed" else warm_digest}}]})
                     jobs.append({"name": f"cache-benchmark/{phase}/namespace", "id": index,
                                  "conclusion": "success", "steps": []})
-                args = types.SimpleNamespace(input=str(root / "input"), output=str(root / "output"))
+                args = types.SimpleNamespace(input=".ci/cache-results", output=".ci/cache-summary")
                 with patch.object(benchmark, "api_collection", return_value=jobs), \
                         patch.dict(benchmark.os.environ, {"GITHUB_RUN_ID": "1"}), patch("builtins.print"):
                     self.assertEqual(benchmark.summarize(args), expected)
-                rows = json.loads((root / "output" / "summary.json").read_text())["rows"]
+                rows = json.loads((root / "cache-summary" / "summary.json").read_text())["rows"]
                 self.assertEqual(rows[1]["complete"], expected == 0)
                 self.assertEqual(rows[1]["archive_seed_warm_comparison"],
                                  "matching seed/warm bytes and SHA256" if expected == 0 else "MISMATCH")
@@ -110,8 +173,8 @@ class CacheBenchmarkTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 1, "", "cannot build with max-jobs=0")
             raise AssertionError(args)
 
-        with tempfile.TemporaryDirectory() as output:
-            args = types.SimpleNamespace(output=output, provider="fh", variant="fh", phase="existing")
+        with isolated_workspace(probe=True) as output:
+            args = types.SimpleNamespace(output=".ci/cache-benchmark", provider="fh", variant="fh", phase="existing")
             with patch.object(benchmark, "command", side_effect=fake_command), patch("builtins.print"):
                 self.assertEqual(benchmark.restore(args), 2)
             report = json.loads((Path(output) / "result.json").read_text())
@@ -120,19 +183,19 @@ class CacheBenchmarkTests(unittest.TestCase):
             self.assertTrue(all(p["outcome"] == "miss-or-error" for p in report["paths"]))
 
     def test_summary_rejects_successful_probe_with_failed_cache_post(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with isolated_workspace() as directory:
             root = Path(directory)
-            benchmark.write_json(root / "input" / "result.json", {
+            benchmark.write_json(root / "cache-results" / "result.json", {
                 "phase": "existing", "variant": "fh", "complete": True})
             jobs = {"total_count": 2, "jobs": [
                 {"name": "cache-benchmark/existing/fh", "id": 1, "conclusion": "failure", "steps": [],
                  "started_at": "2026-09-20T12:00:00Z", "completed_at": "2026-09-20T12:02:00Z"},
                 {"name": "cache-benchmark/existing/h2", "id": 2, "conclusion": "success", "steps": [],
                  "started_at": "2026-09-20T12:02:00Z", "completed_at": "2026-09-20T12:02:05Z"}]}
-            args = types.SimpleNamespace(input=str(root / "input"), output=str(root / "output"))
+            args = types.SimpleNamespace(input=".ci/cache-results", output=".ci/cache-summary")
             with patch.object(benchmark, "api_json", return_value=jobs), patch.dict(benchmark.os.environ, {"GITHUB_RUN_ID": "1"}), patch("builtins.print"):
                 benchmark.summarize(args)
-            rows = json.loads((root / "output" / "summary.json").read_text())["rows"]
+            rows = json.loads((root / "cache-summary" / "summary.json").read_text())["rows"]
             self.assertFalse(rows[0]["complete"])
             self.assertFalse(rows[1]["complete"])
             self.assertFalse(rows[0]["eligible_for_cache_selection"])
@@ -148,13 +211,16 @@ class CacheBenchmarkTests(unittest.TestCase):
              "hestia drain: pushed 3 paths; manifest m3#7\n", 0),
         ]
         for hook_log, drain_code, drain_log, expected_code in scenarios:
-            with self.subTest(hook=hook_log, drain=drain_log), tempfile.TemporaryDirectory() as output:
-                paths = [{"name": name, "path": "/nix/store/" + chr(97 + i) * 32 + "-fixture", "success": True}
+            with self.subTest(hook=hook_log, drain=drain_log), isolated_workspace(probe=True) as output:
+                paths = [{"name": name, "path": benchmark.ARCHIVE_PATH if name == "trial-shard1-archive" else "/nix/store/" + chr(97 + i) * 32 + "-fixture", "success": True}
                          for i, name in enumerate([*benchmark.TARGETS, "trial-shard1-archive"])]
                 benchmark.write_json(Path(output) / "result.json", {"complete": True, "paths": paths})
                 calls = []
 
                 def fake_command(args, **kwargs):
+                    if args[0] == "nix":
+                        index = list(benchmark.TARGETS.values()).index(args[-1][2:-8])
+                        return subprocess.CompletedProcess(args, 0, paths[index]["path"], "")
                     calls.append(args)
                     if args[1] == "hook":
                         self.assertEqual(kwargs["timeout"], 15)
@@ -168,7 +234,7 @@ class CacheBenchmarkTests(unittest.TestCase):
                         patch.dict(benchmark.os.environ, {"HESTIA_BIN": "hestia", "HESTIA_SOCKET": "/tmp/hook.sock",
                                                         "GITHUB_OUTPUT": str(Path(output) / "outputs")}), \
                         patch("builtins.print"):
-                    self.assertEqual(benchmark.seed_hestia(types.SimpleNamespace(output=output)), expected_code)
+                    self.assertEqual(benchmark.seed_hestia(types.SimpleNamespace(output=".ci/cache-benchmark")), expected_code)
                 result = json.loads((Path(output) / "hestia-seed.json").read_text())
                 self.assertEqual(result["success"], expected_code == 0)
                 if expected_code == 0:
@@ -179,10 +245,10 @@ class CacheBenchmarkTests(unittest.TestCase):
                     self.assertEqual(len(calls), 1)
 
     def test_hestia_seed_refuses_incomplete_restore(self):
-        with tempfile.TemporaryDirectory() as output:
+        with isolated_workspace(probe=True) as output:
             benchmark.write_json(Path(output) / "result.json", {"complete": False, "paths": []})
             with patch.object(benchmark, "command") as run, patch("builtins.print"):
-                self.assertEqual(benchmark.seed_hestia(types.SimpleNamespace(output=output)), 1)
+                self.assertEqual(benchmark.seed_hestia(types.SimpleNamespace(output=".ci/cache-benchmark")), 1)
                 run.assert_not_called()
 
     def test_gate_waits_for_active_ci_and_a_quiet_interval(self):

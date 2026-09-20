@@ -58,18 +58,13 @@ workflow: {
 		group:                "${{ github.workflow }}-${{ github.head_ref || github.ref }}"
 		"cancel-in-progress": true
 	}
-	permissions: {
-		contents:        "read"
-		checks:          "write"
-		"pull-requests": "none"
-		packages:        "read"
-		"id-token":      "write"
-	}
+	permissions: {}
 	jobs: {
 		"nixTestArchive-builder": {
 			name:              "nixTestArchive (builder)"
 			"runs-on":         "nscloud-ubuntu-24.04-amd64-32x64;job.priority=1"
 			"timeout-minutes": 60
+			permissions: {contents: "read", "id-token": "write"}
 			steps: list.Concat([_setupSteps, [
 				{
 					name:  "Validate CI helper contracts"
@@ -138,6 +133,7 @@ workflow: {
 				"runs-on": "nscloud-ubuntu-24.04-amd64-8x16;job.priority=1"
 				needs: ["nixTestArchive-builder"]
 				"timeout-minutes": 30
+				permissions: {contents: "read", "id-token": "write"}
 				steps: list.Concat([_setupSteps, [
 					{
 						name: "Download test archive metadata"

@@ -7,6 +7,9 @@ Examples:
 
 API access is read-only; GITHUB_TOKEN is optional for public repositories. Input
 files accept individual records, arrays, or raw workflow_runs/jobs API responses.
+All input files must be regular files inside the current working directory after
+resolving symlinks. To inspect saved reports elsewhere, change to that directory
+and invoke this script by its absolute path. Reports are written only to stdout.
 Combine all pages into one complete response. For reruns, export the attempt-specific jobs endpoint and add
 run_id/run_attempt to its response wrapper if absent from individual jobs.
 
@@ -66,10 +69,21 @@ def records(document, key, inherited=None):
     return [{**inherited, **document}]
 
 
+def read_json(path):
+    """Keep CLI-selected records within the caller's chosen working directory."""
+    root = Path.cwd().resolve()
+    candidate = Path(path).resolve(strict=True)
+    if not candidate.is_relative_to(root):
+        raise ValueError("input file must be inside the current working directory")
+    if not candidate.is_file():
+        raise ValueError("input must be a regular file")
+    return json.loads(candidate.read_text(encoding="utf-8"))
+
+
 def read_files(paths, key):
     result = []
     for path in paths:
-        document = json.loads(Path(path).read_text())
+        document = read_json(path)
         result.extend(records(document, key))
     return result
 
@@ -244,7 +258,7 @@ def main():
         parser.error("--budget-minutes must be positive")
     try:
         runs, jobs = fetch(args.repo, args.sha) if args.repo else (read_files(args.runs, "workflow_runs"), read_files(args.jobs, "jobs"))
-        graph = json.loads(Path(args.dependencies).read_text()) if args.dependencies else None
+        graph = read_json(args.dependencies) if args.dependencies else None
         report = summarize(runs, jobs, args.sha, args.event_time, graph, args.budget_minutes * 60)
         if args.format == "json":
             print(json.dumps(report, indent=2))

@@ -61,13 +61,10 @@ The corrected paths below exclude authentication state without changing its
 permissions. Magic's successful seed save did not imply a usable warm cache:
 the downloaded per-path logs establish the throttling failure, despite green
 diagnostic jobs. Its warm post took only 1s because store diffing was disabled.
-No new provider qualified in this first run. The second qualification verifies
-the corrected snapshot, repeated Namespace identity, and a real Hestia 3
-seed/warm pair. A subsequent focused Namespace retry repairs the fresh-host
-installation defect described below, without repeating every provider. After
-that retry, remove the PR trigger and retain
-manual dispatch so cumulative PR diffs do not repeatedly schedule this long
-serial diagnostic workflow.
+No new provider qualified in this first run. The subsequent runs below tested
+the corrected snapshot, repeated Namespace identity, a real Hestia 3 seed/warm
+pair and Namespace host recovery. Qualification is now manual-only so cumulative
+PR diffs do not repeatedly schedule this long serial diagnostic workflow.
 
 ## Second measured qualification: 2026-09-20
 
@@ -97,8 +94,8 @@ The successful Hestia 3 warm job establishes real seeded availability; the
 earlier unpopulated miss is not its performance result. FlakeHub was faster in
 these serial samples, but this is not repeated controlled end-to-end evidence.
 Snapshot's near-zero per-path validity probes follow its full setup restore and
-must not replace its 107-second whole-job cost. Namespace still needs the
-single focused recovery test; no broad provider rerun is planned.
+must not replace its 107-second whole-job cost. The remaining Namespace tests
+below used only its seed/warm pair, without another broad provider rerun.
 
 ## Focused Namespace recovery: 2026-09-20
 
@@ -113,10 +110,48 @@ read or hash was produced. This proves host recovery, not a seeded cache or a
 fast restore. The [43-second warm job](https://github.com/waddle-social/waddle/actions/runs/35516047870/job/106094051662)
 landed without either cached path and missed all three outputs. Its hash
 comparison therefore remained unverified. The report completed at 14:33:58 UTC.
-The next focused retry repeats the installer's supported OIDC
+The final focused retry repeated the installer's supported OIDC
 login only for the seed, after bounded daemon readiness, with a 60-second command
 deadline and a hard failure if authentication does not succeed. Tokens and
 authentication state are not printed, deleted or copied into reports.
+
+## Final Namespace result and cache decision
+
+[Run 35517101819](https://github.com/waddle-social/waddle/actions/runs/35517101819)
+at `b321fc73b5cf6e6cf98c2a9285db59ed27b3f640` completed its
+[report](https://github.com/waddle-social/waddle/actions/runs/35517101819/job/106096922891)
+at 14:55:09 UTC. The authenticated seed restored all three outputs through
+FlakeHub and reported both volume paths cached. The fresh warm runner again
+landed without either path (44 KB used), and all three outputs missed with only
+the upstream NixOS substituter allowed. The harness completed; Namespace
+availability remains unqualified. No further fleet-warming retry is planned.
+
+| Measurement | [Seed](https://github.com/waddle-social/waddle/actions/runs/35517101819/job/106096614508) | [Fresh warm](https://github.com/waddle-social/waddle/actions/runs/35517101819/job/106096802297) |
+|---|---:|---:|
+| Setup before probe | 32.379s | 24.043s |
+| Dependency restore | 11.653s | Miss |
+| Exact archive restore | 15.021s | Miss |
+| Full archive read | 0.882s; 1,949,923,540 bytes | Not run: archive absent |
+| Setup + probe, including read | 70.301s | 37.734s; incomplete |
+| Post steps, from Actions timestamps | 2s | 2s |
+| Whole job | 80s | 46s; not a speed result |
+
+The seed's archive SHA256 was
+`176821d99b11daad90dba31cff08c952aae882181d7d5b8d2721c62d59dee037`.
+Its read observed 10,693 additional runner-network bytes. This was a full read
+after FlakeHub import; no Namespace warm payload read or matching hash exists.
+Runner network counters also need not expose host-side volume traffic. Full
+payload hashing was added only for these focused Namespace retries, so earlier
+provider samples have no comparable payload-read measurement.
+
+**Decision:** retain the current FlakeHub archive route. It has repeated
+successful restores; these cache experiments establish no better usable
+changed-code CI total. Hestia 3 and the corrected snapshot proved seeded
+availability, without an end-to-end speed win. Magic remains unqualified because
+of repeated rate-limit failures and its 895–899-second post-save cost.
+Namespace's missing warm population does not justify migration. Any future
+provider change needs a controlled changed-code CI trial; this diagnostic
+workflow now runs only by explicit manual dispatch.
 
 ## Qualification workflow
 
@@ -129,9 +164,8 @@ bash scripts/sync-cache-benchmark.sh --check
 python3 scripts/test-ci-cache-benchmark.py
 ```
 
-The workflow runs on changes to its own CUE, scripts or this document, or via
-manual dispatch once GitHub exposes that trigger. PR pushes now select only
-the Namespace seed/warm pair. Manual dispatch offers `scope=all` (the default)
+The workflow runs only through manual dispatch once GitHub exposes that trigger;
+it adds no automatic PR check. Dispatch offers `scope=all` (the default)
 or `scope=namespace`; skipped provider groups do not block the selected pair.
 It is an isolated diagnostic
 workflow, not a replacement test gate. Every cache job uses Namespace Ubuntu
@@ -177,6 +211,14 @@ All variants retain `cache.nixos.org` for ordinary upstream dependencies. The
 script overrides and then verifies the exact substituter allowlist, excluding
 unselected providers. Authentication stays in the action-configured Nix netrc;
 the script does not print Nix configuration or credentials.
+
+The helper accepts only its fixed `.ci/cache-benchmark`, `.ci/cache-results`
+and `.ci/cache-summary` CLI locations. Report reads and writes reject traversal
+and symlink components, and writes replace a private temporary file. Hestia
+upload arguments are freshly evaluated from the fixed target attributes;
+downloaded reports can confirm those paths but cannot select other uploads.
+Workflow permissions are job-scoped: only the gate/report read Actions data,
+and only existing-provider and seed jobs receive OIDC write permission.
 
 Namespace reuses the isolated first-experiment cache tag
 `waddle-ci-benchmark-35510413179` and the default 20 GB volume size.

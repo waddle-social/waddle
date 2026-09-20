@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -18,6 +19,12 @@ from urllib.request import Request, urlopen
 TARGETS = {
     "check-deps": "checks.x86_64-linux.waddle-server-check-deps",
     "vendor": "checks.x86_64-linux.waddle-server-cargo-vendor",
+}
+WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+ARTIFACT_DIRECTORIES = {
+    "probe": ".ci/cache-benchmark",
+    "input": ".ci/cache-results",
+    "summary": ".ci/cache-summary",
 }
 # Exact archive produced by the completed 02c406d3 trial, not an evaluation of
 # today's flake. Hestia intentionally excludes archives, so its miss is useful.
@@ -48,9 +55,60 @@ def received_bytes():
                if p.parents[1].name != "lo")
 
 
+def artifact_path(path):
+    """Confine report I/O to the workspace's real, non-symlink .ci tree."""
+    path = Path(path)
+    if ".." in path.parts:
+        raise ValueError("artifact paths cannot contain parent traversal")
+    root = WORKSPACE_ROOT.resolve()
+    candidate = path if path.is_absolute() else root / path
+    try:
+        parts = candidate.relative_to(root / ".ci").parts
+    except ValueError as error:
+        raise ValueError("artifact path must remain inside the workspace .ci directory") from error
+    current = root / ".ci"
+    for part in (None, *parts):
+        if part is not None:
+            current = current / part
+        if current.is_symlink():
+            raise ValueError("artifact paths cannot contain symlinks")
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(root / ".ci"):
+        raise ValueError("artifact path escaped the workspace .ci directory")
+    return resolved
+
+
+def artifact_directory(value, purpose):
+    # CLI paths select a fixed location; they never become a filesystem path.
+    expected = ARTIFACT_DIRECTORIES[purpose]
+    if value != expected:
+        raise ValueError(f"expected artifact directory {expected}")
+    return artifact_path(expected)
+
+
+def write_artifact(path, contents):
+    destination = artifact_path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Replace a completed private file: never truncate a preexisting inode
+    # that could be hard-linked elsewhere, or follow a raced leaf symlink.
+    descriptor, temporary = tempfile.mkstemp(prefix=".cache-benchmark-", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(contents)
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def read_artifact_json(path):
+    source = artifact_path(path)
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as stream:
+        return json.load(stream)
+
+
 def write_json(path, document):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2) + "\n")
+    write_artifact(path, json.dumps(document, indent=2) + "\n")
 
 
 def provider_urls(provider, configured):
@@ -91,6 +149,18 @@ def path_sizes(path):
     return sum(item["narSize"] for item in entries), len(entries)
 
 
+def target_output(name, attribute):
+    if attribute is None:
+        return ARCHIVE_PATH
+    evaluated = command(["nix", "eval", "--raw", "--no-write-lock-file", f".#{attribute}.outPath"])
+    if evaluated.returncode:
+        raise ValueError(f"could not evaluate {name}; no build attempted")
+    path = evaluated.stdout.strip()
+    if not re.fullmatch(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+", path):
+        raise ValueError("unexpected evaluated store path")
+    return path
+
+
 def read_archive(path):
     """Materialize the complete archive payload, separately from store validity."""
     archive = Path(path) / "archive.tar.zst"
@@ -115,7 +185,7 @@ def read_archive(path):
 
 
 def restore(args):
-    directory = Path(args.output)
+    directory = artifact_directory(args.output, "probe")
     directory.mkdir(parents=True, exist_ok=True)
     report = {"schema": 1, "variant": args.variant, "phase": args.phase,
               "provider": args.provider, "complete": False, "paths": [],
@@ -136,14 +206,7 @@ def restore(args):
         if effective.returncode or set(shlex.split(effective.stdout)) != set(urls):
             raise ValueError("provider isolation did not take effect")
         for name, attr in [*TARGETS.items(), ("trial-shard1-archive", None)]:
-            path = ARCHIVE_PATH
-            if attr is not None:
-                evaluated = command(["nix", "eval", "--raw", "--no-write-lock-file", f".#{attr}.outPath"])
-                if evaluated.returncode:
-                    raise ValueError(f"could not evaluate {name}; no build attempted")
-                path = evaluated.stdout.strip()
-            if not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", path):
-                raise ValueError("unexpected evaluated store path")
+            path = target_output(name, attr)
             present = command(["nix-store", "--check-validity", path]).returncode == 0
             before = received_bytes()
             begin = time.monotonic()
@@ -158,7 +221,7 @@ def restore(args):
                     "observed_network_rx_bytes": received_bytes() - before}
             # Standard Nix build diagnostics contain store paths and source
             # cache hosts, not the credential-bearing configuration or netrc.
-            (directory / f"{name}.log").write_text(result.stderr)
+            write_artifact(directory / f"{name}.log", result.stderr)
             if restored:
                 item["closure_nar_bytes"], item["closure_paths"] = path_sizes(path)
             report["paths"].append(item)
@@ -173,7 +236,7 @@ def restore(args):
         report["probe_seconds"] = round(time.monotonic() - started, 3)
         marker = directory / "started.json"
         if marker.exists():
-            initial = json.loads(marker.read_text())
+            initial = read_artifact_json(marker)
             report["setup_and_probe_seconds"] = round(time.monotonic() - initial["monotonic"], 3)
             report["setup_and_probe_network_rx_bytes"] = received_bytes() - initial["network_rx_bytes"]
         write_json(directory / "result.json", report)
@@ -194,24 +257,28 @@ def api_json(endpoint):
 
 def seed_hestia(args):
     """Register only successfully restored outputs, then explicitly drain."""
-    directory = Path(args.output)
+    directory = artifact_directory(args.output, "probe")
     report = {"schema": 1, "variant": "h3-seeded", "phase": "seed", "success": False,
               "cache_save": "unverified until fresh-runner warm restoration"}
     started = time.monotonic()
     try:
-        restored = json.loads((directory / "result.json").read_text())
+        restored = read_artifact_json(directory / "result.json")
         expected = set(TARGETS) | {"trial-shard1-archive"}
         paths = restored["paths"]
         if (not restored["complete"] or len(paths) != len(expected)
                 or {p["name"] for p in paths} != expected or not all(p["success"] for p in paths)):
             raise ValueError("all three exact outputs must restore before Hestia seeding")
-        outputs = [p["path"] for p in paths]
-        if any(not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", p) for p in outputs):
-            raise ValueError("unexpected seed output path")
+        # Reports can confirm the expected outputs, never choose upload args.
+        # Evaluate only these fixed attributes with builds still prohibited.
+        expected_outputs = {name: target_output(name, attr)
+                            for name, attr in [*TARGETS.items(), ("trial-shard1-archive", None)]}
+        if any(p["path"] != expected_outputs[p["name"]] for p in paths):
+            raise ValueError("seed report does not match the exact expected outputs")
+        outputs = list(expected_outputs.values())
         binary, socket = os.environ["HESTIA_BIN"], os.environ["HESTIA_SOCKET"]
         hook = command([binary, "hook", "--socket", socket, *outputs], timeout=15)
         hook_log = hook.stdout + hook.stderr
-        (directory / "hestia-hook.log").write_text(hook_log)
+        write_artifact(directory / "hestia-hook.log", hook_log)
         # The supported hook intentionally exits zero even on daemon errors.
         acknowledgement = rf"^hestia hook: registered {len(outputs)} path\(s\), \d+ buffered for upload$"
         if hook.returncode or not re.search(acknowledgement, hook_log, re.MULTILINE):
@@ -222,7 +289,7 @@ def seed_hestia(args):
         report["drain_seconds"] = round(time.monotonic() - drain_started, 3)
         report["drain_exit_code"] = drain.returncode
         drain_log = drain.stdout + drain.stderr
-        (directory / "hestia-drain.log").write_text(drain_log)
+        write_artifact(directory / "hestia-drain.log", drain_log)
         manifest = re.search(r"; manifest m3#([1-9][0-9]*)", drain_log)
         if drain.returncode or not manifest or re.search(r"\b(?:invalid|FAILED)\b", drain_log):
             raise ValueError("Hestia seed upload did not report a successful manifest commit")
@@ -281,7 +348,9 @@ def elapsed(start, end):
 
 
 def summarize(args):
-    results = [json.loads(p.read_text()) for p in sorted(Path(args.input).rglob("result.json"))]
+    source = artifact_directory(args.input, "input")
+    output = artifact_directory(args.output, "summary")
+    results = [read_artifact_json(p) for p in sorted(source.rglob("result.json"))]
     jobs = api_collection(f"actions/runs/{os.environ['GITHUB_RUN_ID']}/jobs?filter=latest", "jobs")
     rows = []
     for job in jobs:
@@ -324,7 +393,6 @@ def summarize(args):
                 row["complete"] = False
                 mismatched_payload = True
         row["archive_seed_warm_comparison"] = comparison
-    output = Path(args.output)
     write_json(output / "summary.json", {"schema": 1, "rows": rows})
     lines = ["# Nix cache restore qualification", "",
              "These probes never compile Waddle and do not prove the 15-minute changed-code CI goal.", "",
@@ -354,7 +422,7 @@ def summarize(args):
                   "Payload reads force archive blocks to be read; they measure neither extraction nor compilation. Matching seed/warm hashes establish consistency, not an independently trusted digest.",
                   "Closure NAR bytes are uncompressed logical bytes. Network counters include concurrent traffic; they are not compressed cache payload measurements."])
     markdown = "\n".join(lines) + "\n"
-    (output / "summary.md").write_text(markdown)
+    write_artifact(output / "summary.md", markdown)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
             stream.write(markdown)
@@ -366,7 +434,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     mark = sub.add_parser("mark")
-    mark.add_argument("--output", required=True)
+    mark.add_argument("--output", required=True, choices=[ARTIFACT_DIRECTORIES["probe"]])
     wait = sub.add_parser("wait-for-ci")
     wait.add_argument("--sha", required=True)
     wait.add_argument("--timeout", type=int, default=3600)
@@ -374,19 +442,19 @@ def main():
     probe.add_argument("--provider", choices=PROVIDERS, required=True)
     probe.add_argument("--variant", required=True)
     probe.add_argument("--phase", choices=("existing", "seed", "warm"), required=True)
-    probe.add_argument("--output", required=True)
+    probe.add_argument("--output", required=True, choices=[ARTIFACT_DIRECTORIES["probe"]])
     seed = sub.add_parser("seed-hestia")
-    seed.add_argument("--output", required=True)
+    seed.add_argument("--output", required=True, choices=[ARTIFACT_DIRECTORIES["probe"]])
     summary = sub.add_parser("summarize")
-    summary.add_argument("--input", required=True)
-    summary.add_argument("--output", required=True)
+    summary.add_argument("--input", required=True, choices=[ARTIFACT_DIRECTORIES["input"]])
+    summary.add_argument("--output", required=True, choices=[ARTIFACT_DIRECTORIES["summary"]])
     args = parser.parse_args()
     if args.command == "wait-for-ci":
         return wait_for_ci(args)
     if args.command == "seed-hestia":
         return seed_hestia(args)
     if args.command == "mark":
-        write_json(Path(args.output) / "started.json", {"monotonic": time.monotonic(),
+        write_json(artifact_directory(args.output, "probe") / "started.json", {"monotonic": time.monotonic(),
                    "utc": datetime.now(timezone.utc).isoformat(), "network_rx_bytes": received_bytes()})
         return 0
     return restore(args) if args.command == "restore" else summarize(args)

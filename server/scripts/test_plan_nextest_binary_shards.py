@@ -1,11 +1,16 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from plan_nextest_binary_shards import binary_filter, plan
+from plan_nextest_binary_shards import binary_filter, plan, write_plan
+
+
+SCRIPT = Path(__file__).with_name("plan_nextest_binary_shards.py").resolve()
 
 
 class BinaryShardPlannerTests(unittest.TestCase):
@@ -13,12 +18,20 @@ class BinaryShardPlannerTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
+        self.target = self.root / "target"
+        self.target.mkdir()
         self.inventory = self.root / "inventory.json"
+        previous_directory = Path.cwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, previous_directory)
+        environment = patch.dict(os.environ, {"out": str(self.root), "CARGO_TARGET_DIR": str(self.target)})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def write_inventory(self, sizes):
         suites = {}
         for index, (binary_id, size) in enumerate(sizes):
-            path = self.root / f"binary-{index}"
+            path = self.target / f"binary-{index}"
             path.write_bytes(b"\x7fELF" + bytes(size - 4))
             suites[binary_id] = {
                 "binary-id": binary_id,
@@ -112,7 +125,7 @@ class BinaryShardPlannerTests(unittest.TestCase):
         self.write_inventory([(name, 100) for name in ["a", "b", "c", "d"]])
         output = self.root / "output"
         process = subprocess.run(
-            [sys.executable, str(Path(__file__).with_name("plan_nextest_binary_shards.py")), str(self.inventory), str(output)],
+            [sys.executable, str(SCRIPT), str(self.inventory), str(output)],
             capture_output=True, text=True,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
@@ -154,13 +167,113 @@ class BinaryShardPlannerTests(unittest.TestCase):
         self.write_inventory([(name, 100) for name in "abcdef"])
         output = self.root / "output"
         process = subprocess.run(
-            [sys.executable, str(Path(__file__).with_name("plan_nextest_binary_shards.py")), str(self.inventory), str(output),
+            [sys.executable, str(SCRIPT), str(self.inventory), str(output),
              "--shared-binary", "e", "--shared-binary", "f"],
             capture_output=True, text=True,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual((output / "shared.filter").read_text(), "binary_id(=e) | binary_id(=f)\n")
         self.assertEqual(json.loads((output / "plan.json").read_text()), plan(self.inventory, shared_binary_ids=["e", "f"]))
+
+    def test_cli_rejects_inventory_traversal_absolute_escape_and_symlink(self):
+        self.write_inventory([(name, 100) for name in "abcd"])
+        with tempfile.TemporaryDirectory(prefix=self.root.name + "-outside-") as directory:
+            outside = Path(directory) / "inventory.json"
+            outside.write_bytes(self.inventory.read_bytes())
+            link = self.root / "linked-inventory.json"
+            link.symlink_to(outside)
+            for candidate in (outside, Path(os.path.relpath(outside, self.root)), link):
+                with self.subTest(candidate=candidate):
+                    process = subprocess.run(
+                        [sys.executable, str(SCRIPT), str(candidate), "output"],
+                        capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(process.returncode, 0)
+                    self.assertIn("outside the permitted", process.stderr)
+                    self.assertFalse((self.root / "output").exists())
+
+    def test_cli_rejects_output_traversal_absolute_escape_and_symlink(self):
+        self.write_inventory([(name, 100) for name in "abcd"])
+        with tempfile.TemporaryDirectory(prefix=self.root.name + "-outside-") as directory:
+            outside = Path(directory)
+            link = self.root / "linked-output"
+            link.symlink_to(outside, target_is_directory=True)
+            for candidate in (outside, Path(os.path.relpath(outside, self.root)), link):
+                with self.subTest(candidate=candidate):
+                    process = subprocess.run(
+                        [sys.executable, str(SCRIPT), str(self.inventory), str(candidate)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(process.returncode, 0)
+                    self.assertIn("outside the permitted", process.stderr)
+                    self.assertEqual(list(outside.iterdir()), [])
+
+    def test_inventory_cannot_select_external_elf_or_forge_target_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / "binary"
+            outside.write_bytes(b"\x7fELF" + bytes(96))
+            link = self.target / "external-elf"
+            link.symlink_to(outside)
+            for candidate in (outside, Path(os.path.relpath(outside, self.root)), link):
+                document = self.write_inventory([("one", 100)])
+                document["rust-suites"]["one"]["binary-path"] = str(candidate)
+                document["rust-build-meta"] = {"target-directory": directory}
+                self.inventory.write_text(json.dumps(document))
+                with self.subTest(candidate=candidate), self.assertRaisesRegex(ValueError, "outside the permitted"):
+                    plan(self.inventory, 1)
+
+    def test_output_symlink_is_rejected_before_any_plan_files_are_written(self):
+        self.write_inventory([(name, 100) for name in "abcd"])
+        output = self.root / "output"
+        output.mkdir()
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / "untouched"
+            outside.write_text("sentinel")
+            (output / "partition-4.whole.filter").symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "must not be symlinks"):
+                write_plan(plan(self.inventory), output)
+            self.assertEqual(outside.read_text(), "sentinel")
+            self.assertEqual(len(list(output.iterdir())), 1)
+
+    def test_atomic_output_replacement_preserves_external_hardlink(self):
+        self.write_inventory([(name, 100) for name in "abcd"])
+        output = self.root / "nested" / "output"
+        output.mkdir(parents=True)
+        with tempfile.TemporaryDirectory(dir=self.root.parent) as directory:
+            outside = Path(directory) / "untouched"
+            outside.write_text("sentinel")
+            (output / "plan.json").hardlink_to(outside)
+            result = plan(self.inventory)
+            write_plan(result, output)
+            write_plan(result, output)
+            self.assertEqual(outside.read_text(), "sentinel")
+            self.assertEqual(json.loads((output / "plan.json").read_text()), result)
+            self.assertEqual(len(list(output.iterdir())), 10)
+
+    def test_nix_output_root_can_be_separate_from_build_target(self):
+        self.write_inventory([(name, 100) for name in "abcd"])
+        expected = plan(self.inventory)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            inventory = output / "test-inventory.json"
+            inventory.write_bytes(self.inventory.read_bytes())
+            with patch.dict(os.environ, {"out": str(output)}):
+                process = subprocess.run(
+                    [sys.executable, str(SCRIPT), str(inventory), str(output)],
+                    capture_output=True, text=True,
+                )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(json.loads((output / "plan.json").read_text()), expected)
+
+    def test_local_cli_uses_cwd_and_default_target_without_nix_environment(self):
+        self.write_inventory([(name, 100) for name in "abcd"])
+        environment = {key: value for key, value in os.environ.items() if key not in {"out", "CARGO_TARGET_DIR"}}
+        process = subprocess.run(
+            [sys.executable, str(SCRIPT), "inventory.json", "output"],
+            capture_output=True, text=True, env=environment,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(json.loads((self.root / "output" / "plan.json").read_text()), plan(self.inventory))
 
 
 if __name__ == "__main__":

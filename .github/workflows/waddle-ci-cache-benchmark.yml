@@ -3,11 +3,6 @@
 
 name: waddle-ci-cache-benchmark
 "on":
-  pull_request:
-    paths:
-      - ci/cache-benchmark/**
-      - scripts/*cache-benchmark*
-      - docs/ci-cache-benchmarks.md
   workflow_dispatch:
     inputs:
       scope:
@@ -18,15 +13,15 @@ name: waddle-ci-cache-benchmark
         options:
           - all
           - namespace
-permissions:
-  contents: read
-  actions: read
-  id-token: write
+permissions: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
   normal-ci:
+    permissions:
+      contents: read
+      actions: read
     name: Wait for normal CI before cache qualification
     runs-on: ubuntu-24.04
     timeout-minutes: 65
@@ -47,6 +42,9 @@ jobs:
     if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -185,6 +183,9 @@ jobs:
     if: ${{ !cancelled() && needs.normal-ci.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -303,6 +304,8 @@ jobs:
     if: ${{ !cancelled() && needs.normal-ci.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -423,6 +426,9 @@ jobs:
       manifest-version: ${{ steps.hestia-seed.outputs.manifest-version }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -548,6 +554,8 @@ jobs:
     if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -664,6 +672,9 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   summary:
+    permissions:
+      contents: read
+      actions: read
     name: Cache qualification report
     needs:
       - existing

@@ -30,7 +30,7 @@ import "github.com/cuenv/cuenv/schema"
 			else
 			  cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
 			fi
-			curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p .
+			curl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p .
 			"""
 	}]
 }

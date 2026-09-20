@@ -2,6 +2,13 @@
 
 Prepared 20 September 2026. Source baseline: `main` at `c6169598d2426e483c1c7a2c062ca7f1aba352ac`. The initial plan is followed by the implementation and measurement record for PR #1801. Proposed timing budgets are acceptance targets, not measured speedups.
 
+**Latest changed-source result:** `b321fc73` passed all 11 ordinary workflows in
+**12m56s**, including queueing and cache post work. The Rust workflow took
+**12m53s** and all 10,645 selected test identities passed. This is the first
+successful measured trial under 15 minutes; the planned 20-run sample,
+dependency/toolchain stress cases and live main-publication measurement remain
+outstanding. See the final trial record below.
+
 The primary obstacle is the all-features Rust test build. The latest server PR workflow took 55m51s, including 34m16s compiling tests and 10m51s executing them. Rust CodeQL independently took 19m42s. Both must improve to deliver the requested result.
 
 ## What the measurements show
@@ -478,3 +485,50 @@ which explains the readiness timeout in both configurations. The corrected
 test must select the recorded `config_coordinates`, assert that exact row
 exists, then await arming before capturing the drain clock. A new complete run
 must validate that correction; no timeout expansion or test retry is justified.
+
+## First green changed-source trial: `b321fc73`
+
+All **11 ordinary workflows passed in 12m56s**, from the earliest event at
+14:38:22 UTC to the last gate at 14:51:18 UTC. The
+[Rust workflow](https://github.com/waddle-social/waddle/actions/runs/35517101851)
+took **12m53s** from its own event. These durations include queueing, setup,
+archive transfer, all tests and cache post steps. The separate provider
+qualification waited for ordinary CI to finish and is not a required PR check.
+
+The builder took 6m57s, with 184.27s of real workspace compilation, 225 dirty
+units and 1,134 fresh dependency units. No OOM events occurred. All four workers
+restored the current producer's archives through the binary cache in 53–58s;
+raw fallback downloads were skipped. The final gate took four seconds.
+
+All **10,645 selected identities passed**, with zero additions or removals
+against the prior complete inventory; 213 binaries and one ignored test remain.
+[XMPP server compliance](https://github.com/waddle-social/waddle/actions/runs/35517101853)
+also passed all 4,119 tests. The corrected group-DM recovery test passed in
+0.109s with all features and 0.050s in the XMPP configuration. It now selects
+the recorded config coordinates, asserts the exact row exists, and retains the
+original readiness/delivery deadlines, acknowledgement and exactly-one-drain
+assertion. The janitor regression passed in 0.015s.
+
+This establishes a successful changed-source result within both the 13-minute
+working budget and 15-minute hard target. It is not a cold-dependency result or
+evidence that the planned 20 representative runs have already passed. Main
+publication remains unmeasured by this PR trial; no merge or deployment has
+been performed.
+
+## Final PR gate audit
+
+The complete PR check audit also found SonarCloud security findings outside the
+11 ordinary Actions workflows. The remediation confines helper file access to
+the intended report/build directories, rejects traversal and symlink escapes,
+uses atomic report writes, and derives Hestia upload arguments from freshly
+evaluated fixed targets. Installer downloads require HTTPS both initially and
+after redirects. Token permissions are scoped to the jobs that use them; no
+scanner rule or quality gate is disabled. Shard selection and test coverage are
+unchanged. The final commit must pass both Actions and SonarCloud before the PR
+is ready.
+
+The provider qualification workflow is now manual-only. Completed comparisons
+support retaining FlakeHub for archive transfer: Hestia 3 and snapshots proved
+seeded availability, while Namespace's successful authenticated seed was
+followed by another empty warm volume. Detailed setup, restore, full-read and
+post-step evidence is in [ci-cache-benchmarks.md](ci-cache-benchmarks.md).

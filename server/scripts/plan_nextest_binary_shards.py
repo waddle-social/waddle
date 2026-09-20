@@ -13,12 +13,34 @@ Nonshared binaries are assigned exactly once, including empty and ignored-only
 binaries. plan.json records unique source bytes, replicated shared bytes, and
 each archive's members and bytes. Check the actual whole and shared inventories
 with check_nextest_shards.py, passing the same --shared-binary options.
+
+Inventory and output paths must remain within the current working directory or
+the Nix build's explicit `out` directory. ELF paths must remain within
+`CARGO_TARGET_DIR` (default: ./target). These roots come from the build caller,
+not from inventory contents or CLI path arguments.
 """
 
 import argparse
 import json
+import os
 from pathlib import Path
 import stat
+import tempfile
+
+
+def confined_path(value, roots):
+    """Resolve traversal and symlinks before checking trusted caller roots."""
+    path = Path(value).resolve()
+    if not any(path.is_relative_to(root) for root in roots):
+        raise ValueError("path is outside the permitted build directories")
+    return path
+
+
+def build_file_roots():
+    roots = [Path.cwd().resolve()]
+    if os.environ.get("out"):
+        roots.append(Path(os.environ["out"]).resolve())
+    return roots
 
 
 def binary_filter(binary_ids):
@@ -45,7 +67,11 @@ def binary_filter(binary_ids):
 def plan(inventory_path, count=4, shared_binary_ids=()):
     if count < 1:
         raise ValueError("shard count must be positive")
-    document = json.loads(Path(inventory_path).read_text())
+    inventory_path = confined_path(inventory_path, build_file_roots())
+    if not inventory_path.is_file():
+        raise ValueError("inventory must be a regular file")
+    document = json.loads(inventory_path.read_text())
+    target_directory = Path(os.environ.get("CARGO_TARGET_DIR", "target")).resolve()
     binaries = []
     for binary_id, suite in document["rust-suites"].items():
         if suite["binary-id"] != binary_id:
@@ -53,7 +79,7 @@ def plan(inventory_path, count=4, shared_binary_ids=()):
         if suite["status"] != "listed":
             raise ValueError(f"{binary_id}: the full inventory must list every binary")
         binary_filter([binary_id])
-        path = Path(suite["binary-path"])
+        path = confined_path(suite["binary-path"], [target_directory])
         metadata = path.stat()
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError(f"{binary_id}: binary path is not a regular file: {path}")
@@ -103,6 +129,34 @@ def plan(inventory_path, count=4, shared_binary_ids=()):
     }
 
 
+def write_plan(result, directory):
+    directory = confined_path(directory, build_file_roots())
+    directory.mkdir(parents=True, exist_ok=True)
+    files = {"shared.filter": result["shared_filter"] + "\n",
+             "plan.json": json.dumps(result, indent=2) + "\n"}
+    for shard in result["shards"]:
+        files[f"partition-{shard['index']}.filter"] = shard["filter"] + "\n"
+        files[f"partition-{shard['index']}.whole.filter"] = shard["whole_filter"] + "\n"
+    # Validate every destination before writing any files. Atomic replacement
+    # also prevents an existing hard link from overwriting a file elsewhere.
+    paths = {}
+    for name in files:
+        path = directory / name
+        if path.is_symlink():
+            raise ValueError("plan output files must not be symlinks")
+        paths[name] = confined_path(path, [directory])
+    for name, contents in files.items():
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(contents)
+            temporary.replace(paths[name])
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inventory", type=Path)
@@ -112,14 +166,7 @@ def main():
     args = parser.parse_args()
     try:
         result = plan(args.inventory, args.count, args.shared_binary)
-        args.output_directory.mkdir(parents=True, exist_ok=True)
-        for shard in result["shards"]:
-            path = args.output_directory / f"partition-{shard['index']}.filter"
-            path.write_text(shard["filter"] + "\n")
-            path = args.output_directory / f"partition-{shard['index']}.whole.filter"
-            path.write_text(shard["whole_filter"] + "\n")
-        (args.output_directory / "shared.filter").write_text(result["shared_filter"] + "\n")
-        (args.output_directory / "plan.json").write_text(json.dumps(result, indent=2) + "\n")
+        write_plan(result, args.output_directory)
     except (KeyError, TypeError, ValueError, OSError) as error:
         parser.exit(1, f"cannot plan nextest binary shards: {error}\n")
 
