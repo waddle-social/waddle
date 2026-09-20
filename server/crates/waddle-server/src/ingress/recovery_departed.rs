@@ -33,7 +33,7 @@ use super::{recovery_executor::AttemptClassification, RouteProgress};
 
 /// Bounded budget for one room probe, matching the statement budget every
 /// recovery transaction runs under. A slower answer is not proof of absence.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+pub(super) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// What one recovery attempt's departed-occupant settlement discharged.
 pub(super) struct DepartedSettlement {
@@ -123,7 +123,7 @@ pub(super) async fn settle_departed_occupants(
 
 /// Frozen occupants this obligation still owes a copy. Host-owned resources
 /// belong to an extension host rather than a room roster.
-fn owed_occupants(deps: &Deps<'_>, progress: &RouteProgress) -> Vec<FullJid> {
+pub(super) fn owed_occupants(deps: &Deps<'_>, progress: &RouteProgress) -> Vec<FullJid> {
     progress
         .fanout
         .iter()
@@ -135,7 +135,7 @@ fn owed_occupants(deps: &Deps<'_>, progress: &RouteProgress) -> Vec<FullJid> {
 }
 
 /// Whether this node's roster answer for a room is usable.
-enum RoomAuthority {
+pub(super) enum RoomAuthority {
     /// The authoritative local incarnation; its roster decides.
     Local(ActorRef<RoomActor>),
     /// Nothing here can decide the room's occupancy.
@@ -144,7 +144,7 @@ enum RoomAuthority {
     Unreadable,
 }
 
-async fn resolve_authority(
+pub(super) async fn resolve_authority(
     registry: &ActorRef<RoomRegistryActor>,
     deps: &Deps<'_>,
     room: &BareJid,

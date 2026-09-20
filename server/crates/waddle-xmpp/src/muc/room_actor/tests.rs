@@ -6553,6 +6553,67 @@ async fn generation_scoped_leave_applies_to_the_matching_session() {
     ));
 }
 
+/// The ghost-occupant eviction reads presence and the generation it must
+/// target from ONE ask, so a rejoin between two asks cannot make it evict the
+/// replacement: the query always answers with the current seated generation,
+/// and answers `None` once the seat is gone.
+#[tokio::test]
+async fn occupant_session_generation_tracks_the_current_seated_session() {
+    let _guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice-generation-query");
+    let bob = test_full_jid("bob-generation-query");
+    let generation_one = test_session_generation();
+    let generation_two = test_session_generation();
+
+    assert_eq!(
+        actor
+            .ask(super::GetOccupantSessionGeneration { jid: bob })
+            .await
+            .expect("absent occupant"),
+        None,
+        "an entity with no seat has no generation to evict"
+    );
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_one)
+        .await
+        .expect("first join");
+    assert_eq!(
+        actor
+            .ask(super::GetOccupantSessionGeneration { jid: alice.clone() })
+            .await
+            .expect("seated occupant"),
+        Some(generation_one)
+    );
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_two)
+        .await
+        .expect("replacement rejoin");
+    assert_eq!(
+        actor
+            .ask(super::GetOccupantSessionGeneration { jid: alice.clone() })
+            .await
+            .expect("replacement"),
+        Some(generation_two),
+        "a same-full-JID replacement owns the generation an eviction would target"
+    );
+
+    leave_with_attempt_and_session(
+        &actor,
+        alice.clone(),
+        LeaveAttemptId::generate(),
+        LeaveSessionSelector::Generation(generation_two),
+    )
+    .await;
+    assert_eq!(
+        actor
+            .ask(super::GetOccupantSessionGeneration { jid: alice })
+            .await
+            .expect("departed"),
+        None
+    );
+}
+
 #[tokio::test]
 async fn same_full_jid_rejoin_overwrites_the_stored_generation_and_stale_leave_is_superseded() {
     let _guard = crate::telemetry::test_support::acquire().await;

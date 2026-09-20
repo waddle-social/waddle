@@ -147,7 +147,7 @@ async fn departed_recovery(f: IngressFixture, case: DepartedCase) {
 
 /// Leave the row exactly as an interrupted acceptance would: every recorded
 /// obligation but the frozen occupant copies already receipted.
-async fn settle_non_delivery_effects(
+pub(super) async fn settle_non_delivery_effects(
     f: &IngressFixture,
     state: &Arc<WebSocketState>,
     decision: &IngressDecision,
@@ -256,6 +256,12 @@ async fn sqlite_departed_copy_resets_the_maintenance_stall_streak() {
     let live: jid::FullJid = "ben@example.com/phone".parse().expect("live occupant");
     // Neither occupant is reachable, so only the settlement can make progress.
     let resources = vec![ghost.clone(), live.clone()];
+    // The occupant that stays seated keeps a resumable session in the SHARED
+    // DURABLE store and none in this node's memory: its copy is undeliverable
+    // here, but it is not an XEP-0045 ghost, so the streak this test measures
+    // runs to its parking rather than ending in an eviction (#1803).
+    let elsewhere = persistent_sm(&f).await;
+    store_detached(&elsewhere, &live).await;
     let submission = planned_room(&f, &state, Case::Lost, &resources).await;
     let decision = commit_submission(&f.uow, &submission, 1)
         .await

@@ -450,6 +450,9 @@ mod pin;
 #[path = "recovery_departed_tests.rs"]
 mod departed;
 
+#[path = "recovery_ghosts_tests.rs"]
+mod ghosts;
+
 #[cfg(feature = "clustering")]
 #[path = "recovery_muc_remote_tests.rs"]
 mod remote;
@@ -469,6 +472,14 @@ async fn sqlite_muc_occupant_progress_resets_streak_and_parked_copy_recovers_aft
         .into_iter()
         .map(|resource| resource.parse().expect("occupant"))
         .collect();
+    // Both occupants keep a resumable session in the SHARED DURABLE store and
+    // none in this node's memory, so the row stalls on delivery alone: a
+    // seated occupant with no session anywhere would be evicted as an
+    // XEP-0045 ghost (#1803) and the row would never reach its cooldown.
+    let elsewhere = persistent_sm(&fixture).await;
+    for resource in &resources {
+        store_detached(&elsewhere, resource).await;
+    }
     let submission = planned_room(&fixture, &state, Case::Unavailable, &resources).await;
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await

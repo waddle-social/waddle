@@ -575,6 +575,21 @@ pub fn add_ingress_maintenance_departed_occupant_copies(count: u64) {
     );
 }
 
+/// Occupants removed from a room because a stalled `route_muc` obligation
+/// proved their occupancy abandoned (XEP-0045 "Ghost Users").
+///
+/// Not zero-registered — see [`register_reliability_counters`]: every tick is
+/// a cleanup leak that happened upstream, so this reads "did this ever tick"
+/// rather than `> N`.
+pub fn add_muc_ghost_occupants_evicted(count: u64) {
+    crate::counter_add!(
+        "muc.ghost_occupants.evicted",
+        "{occupant}",
+        "MUC occupants evicted because a stalled groupchat obligation proved their occupancy abandoned.",
+        count,
+    );
+}
+
 pub fn increment_ingress_maintenance_unrecoverable_obligations(
     count: u64,
     kind: IngressEffectKind,

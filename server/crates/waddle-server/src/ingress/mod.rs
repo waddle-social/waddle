@@ -26,6 +26,7 @@ mod recovery;
 mod recovery_departed;
 mod recovery_environment;
 mod recovery_executor;
+mod recovery_ghosts;
 mod recovery_rebuild;
 pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
 use recovery_environment::RecoveryBinding;

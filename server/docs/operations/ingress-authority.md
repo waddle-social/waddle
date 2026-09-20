@@ -153,7 +153,8 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
 | `ingress.maintenance.recovered_obligations` | `ingress_maintenance_recovered_obligations_total` | Recovery progress |
 | `ingress.maintenance.unrecoverable_obligations{kind,reason}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported evaluations and stalled recovery classifications; read alongside `IngressNonTerminalBacklog` |
-| `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | XEP-0045 ghost-occupant evictions; not zero-registered, so read it as "did this ever tick" |
+| `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | Frozen groupchat copies settled for occupants the room no longer lists; not zero-registered, so read it as "did this ever tick" |
+| `muc.ghost_occupants.evicted` | `muc_ghost_occupants_evicted_total` | XEP-0045 ghost occupants removed from a room by a stalled groupchat obligation; not zero-registered, and every tick means a cleanup leak happened upstream |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind,phase}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` considers only `phase="live"`; `maintenance_recovery`, `maintenance_terminalization`, and `stream_retirement` remain available for inspection |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
@@ -903,6 +904,43 @@ store) a local incarnation that has lost its claim fence all leave the copy
 owed — so a persistent `route_muc` backlog with this counter flat means the
 rooms are not resolvable on the recovering node, not that the occupants are
 still seated.
+
+### Ghost-occupant eviction (#1803)
+
+`muc.ghost_occupants.evicted` counts occupants that maintenance removed from a
+room, one step beyond settling a departed occupant's copy. It ticks only for a
+row the recovery accounting just classified as stalled — three evaluable
+attempts at least `recovery_stall_sample_interval` apart with unchanged
+evidence, the same condition that emits
+`ingress.maintenance.unrecoverable_obligations{reason="no_durable_progress"}`.
+For such a row, an occupant the authoritative local room still lists but that
+this node can prove nothing can reach is a ghost: XEP-0045 "Ghost Users"
+allows a service to check occupant availability by "XEP-0199 or similar
+methods" and requires it to treat an occupant it finds offline as having sent
+unavailable presence. The removal goes through the same full-JID
+leave sweep as a disconnect, so the §7.14 unavailable broadcast, SFU teardown,
+empty-room eviction and failure retention are unchanged, and it targets the
+occupant's exact occupancy generation, so a same-full-JID session that joined
+meanwhile is classified `Superseded` rather than evicted. The settlement then
+runs in the same attempt, so a repaired row terminalizes immediately instead
+of waiting out the 15-minute parking cooldown — and is not counted as
+`no_durable_progress`.
+
+Every guard fails closed; each of these leaves the occupant seated and the
+copy owed: a live entry for the full JID in this node's connection registry
+(which includes the clustered registered-remote mirror), a resumable XEP-0198
+session in this node's memory OR in the shared durable store (including a read
+of that store that fails), the actor tree still listing the exact resource (or
+failing to answer), a fresh `UserActor` claim held by another node (or a claim
+read that errors), a room this node does not authoritatively host, a room
+probe that does not answer, and a recovery environment with no WebSocket state
+to run the sweep with. Consequently a `route_muc` backlog with
+`unrecoverable_obligations{reason="no_durable_progress"}` ticking while
+`muc.ghost_occupants.evicted` stays flat means the occupants are still
+reachable somewhere (or a probe cannot answer) — not that the eviction is
+broken. A sustained ghost-eviction rate is the signal to chase the upstream
+cleanup leak, not to raise the maintenance budget.
+
 The existing manual repair procedure below remains for unrecoverable families,
 with its explicit reviewed manifest and abandonment semantics.
 

@@ -259,6 +259,183 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     f.close().await;
 }
 
+/// How another node still holds the occupant, so evicting its occupancy here
+/// would tear down a seat that is legitimately alive elsewhere.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ElsewhereCase {
+    /// A fresh `UserActor` claim owned by a different node.
+    ForeignClaim,
+    /// A registered-remote mirror for the exact full JID.
+    RegisteredRemote,
+}
+
+/// XEP-0045 ghost eviction is for occupancies NOTHING can reach. An occupant
+/// another node still owns keeps its seat even once its frozen copy has
+/// stalled long enough to be classified `no_durable_progress`.
+async fn stalled_remote_occupant_keeps_its_seat(f: IngressFixture, case: ElsewhereCase) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before = metrics
+        .counter_sum("muc.ghost_occupants.evicted", &[])
+        .unwrap_or(0);
+    let sm = persistent_sm(&f).await;
+    let planning_state = state_for(&f, sm.clone()).await;
+    let occupant: jid::FullJid = "foreign@example.com/phone".parse().expect("occupant");
+    let submission = planned_room(
+        &f,
+        &planning_state,
+        Case::Lost,
+        std::slice::from_ref(&occupant),
+    )
+    .await;
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+
+    let claims = Arc::new(InProcessClaimStore::new());
+    let local = NodeIdentity::new("recovering-node", "local-epoch");
+    let entity = Entity::new(EntityType::UserActor, occupant.to_bare().to_string());
+    // The registered-remote mirror is installed by the claim OWNER, so that
+    // case leaves the claim here and isolates the resource-lookup guard.
+    let owner = match case {
+        ElsewhereCase::ForeignClaim => NodeIdentity::new("socket-node", "foreign-epoch"),
+        ElsewhereCase::RegisteredRemote => local.clone(),
+    };
+    claims.acquire(&entity, &owner).await.expect("claim");
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    let state = socket_tests::create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
+            node_identity: Some(SharedNodeIdentity::new(local.clone())),
+            ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+            ..Default::default()
+        },
+        sm.clone(),
+    )
+    .await;
+    wire_for_test(
+        &bridge,
+        &state,
+        claims as Arc<dyn ClaimStore>,
+        SharedNodeIdentity::new(local),
+    )
+    .await;
+    if case == ElsewhereCase::RegisteredRemote {
+        assert_eq!(
+            bridge
+                .register_remote_user_resource_on_owner(remote_registration_request(
+                    occupant.clone(),
+                    NodeId::new("socket-node".to_string()),
+                ))
+                .await
+                .status,
+            RelayRemoteResourceRegistrationStatus::Registered,
+        );
+    }
+    // The recovering node authoritatively hosts the room and still lists the
+    // occupant, so only the cross-node guards can keep the seat.
+    let room: jid::BareJid = "recovery@muc.example.com".parse().expect("room");
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "recovery".into(),
+            channel_id: "recovery".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room");
+    actor
+        .ask(Join {
+            nick: "foreign".into(),
+            real_jid: occupant.clone(),
+            role: waddle_xmpp::Role::Participant,
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .expect("join");
+    let locally_registered = state
+        .deps
+        .protocol
+        .connection_registry
+        .is_connected(&occupant);
+    match case {
+        ElsewhereCase::ForeignClaim => assert!(
+            !locally_registered,
+            "no local entry: the ownership claim must be what decides"
+        ),
+        ElsewhereCase::RegisteredRemote => {
+            // The production mirror installs both a non-locally-hosted
+            // connection entry and an actor-tree resource; either one alone
+            // is enough to keep the seat.
+            assert!(locally_registered, "the remote mirror is registered here");
+            assert!(
+                waddle_xmpp::registry::try_get_resources_for_user(
+                    &state.deps.protocol.user_registry,
+                    &occupant.to_bare()
+                )
+                .await
+                .expect("resource lookup")
+                .contains(&occupant),
+                "the actor tree lists the mirrored resource"
+            );
+        }
+    }
+
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let cursor = MaintenanceCursor::default();
+    for _ in 0..3 {
+        assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+        cursor.wait_for_recovery_accounting().await;
+    }
+    assert!(
+        actor
+            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+                jid: occupant.clone()
+            })
+            .await
+            .expect("occupancy probe")
+            .is_some(),
+        "an occupancy another node owns is never evicted"
+    );
+    assert_eq!(
+        metrics
+            .counter_sum("muc.ghost_occupants.evicted", &[])
+            .unwrap_or(0),
+        before
+    );
+    let mut tx = f.uow.begin().await.expect("inspect pending row");
+    assert!(!CanonicalMessageRepository::is_terminal(&mut tx, key)
+        .await
+        .expect("terminal"));
+    tx.commit().await.expect("read commit");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_stalled_remote_owned_occupant_keeps_its_seat() {
+    stalled_remote_occupant_keeps_its_seat(
+        IngressFixture::sqlite().await,
+        ElsewhereCase::ForeignClaim,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_stalled_registered_remote_occupant_keeps_its_seat() {
+    stalled_remote_occupant_keeps_its_seat(
+        IngressFixture::sqlite().await,
+        ElsewhereCase::RegisteredRemote,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn sqlite_muc_recovery_remote_owner_stays_pending_without_relay() {
     owned_recovery(IngressFixture::sqlite().await, false).await;

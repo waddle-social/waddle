@@ -822,15 +822,15 @@ async fn the_sample_interval_measures_attempt_times_not_accounting_times() {
     let inside_the_interval = attempt(2);
     // Both are accounted long after the fact, as a saturated worker would.
     tokio::time::advance(budget.recovery_stall_sample_interval * 5).await;
-    stalled.account(&first, evidence, budget, &mut suppressed);
-    stalled.account(&inside_the_interval, evidence, budget, &mut suppressed);
+    stalled.account_and_park(&first, evidence, budget, &mut suppressed);
+    stalled.account_and_park(&inside_the_interval, evidence, budget, &mut suppressed);
     assert!(
         suppressed.get(key, evidence).is_none(),
         "two attempts inside one interval are a single sample"
     );
 
     let second_sample = attempt(3);
-    stalled.account(&second_sample, evidence, budget, &mut suppressed);
+    stalled.account_and_park(&second_sample, evidence, budget, &mut suppressed);
     assert!(
         suppressed.get(key, evidence).is_none(),
         "two samples are below the threshold"
@@ -838,7 +838,7 @@ async fn the_sample_interval_measures_attempt_times_not_accounting_times() {
 
     tokio::time::advance(budget.recovery_stall_sample_interval).await;
     let third_sample = attempt(4);
-    stalled.account(&third_sample, evidence, budget, &mut suppressed);
+    stalled.account_and_park(&third_sample, evidence, budget, &mut suppressed);
     assert!(
         matches!(
             suppressed.get(key, evidence),
@@ -935,7 +935,7 @@ async fn sqlite_stalled_row_parks_exactly_at_threshold_and_cache_hit_queues_noth
             super::super::recovery_executor::attempt_count(key),
             u64::from(attempt)
         );
-        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
     }
     assert_eq!(
@@ -958,7 +958,7 @@ async fn sqlite_stalled_row_parks_exactly_at_threshold_and_cache_hit_queues_noth
         u64::from(budget.recovery_stall_attempts) + 1
     );
     assert_eq!(cursor.recovery_accounting.lock().expect("queue").len(), 1);
-    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
     cursor.wait_for_recovery_accounting().await;
     fixture.close().await;
 }
@@ -971,24 +971,24 @@ async fn stale_requeued_accounting_cannot_resurrect_a_reset_streak() {
     let budget = immediate_budget();
     for generation in 1..=2 {
         let attempt = accounting_attempt(key, generation);
-        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+        stalled.account_and_park(&attempt, attempt.observed, budget, &mut suppressed);
     }
     let stale = accounting_attempt(key, 3);
     let mut newer = accounting_attempt(key, 4);
     newer.classification = super::AttemptClassification::Inconclusive;
-    stalled.account(&newer, newer.observed, budget, &mut suppressed);
+    stalled.account_and_park(&newer, newer.observed, budget, &mut suppressed);
     let queue = std::sync::Mutex::new(Vec::new());
     requeue_failed_accounting(&queue, vec![stale]);
     for attempt in queue.into_inner().expect("queue") {
-        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+        stalled.account_and_park(&attempt, attempt.observed, budget, &mut suppressed);
     }
     for generation in 5..=6 {
         let attempt = accounting_attempt(key, generation);
-        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+        stalled.account_and_park(&attempt, attempt.observed, budget, &mut suppressed);
         assert_eq!(suppressed.get(key, attempt.observed), None);
     }
     let attempt = accounting_attempt(key, 7);
-    stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+    stalled.account_and_park(&attempt, attempt.observed, budget, &mut suppressed);
     assert!(matches!(
         suppressed.get(key, attempt.observed),
         Some(super::Suppression::StalledUntil(_))
@@ -1007,7 +1007,7 @@ async fn accounting_storage_failure_resets_streak_and_retry_only_credits_progres
             .lock()
             .expect("queue")
             .push(accounting_attempt(key, generation));
-        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
     }
     fixture
@@ -1021,7 +1021,7 @@ async fn accounting_storage_failure_resets_streak_and_retry_only_credits_progres
         .lock()
         .expect("queue")
         .push(accounting_attempt(key, 3));
-    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
     cursor.wait_for_recovery_accounting().await;
     assert_eq!(
         cursor.recovery_accounting.lock().expect("queue")[0].classification,
@@ -1034,7 +1034,7 @@ async fn accounting_storage_failure_resets_streak_and_retry_only_credits_progres
         )
         .await;
     // Read recovery cannot convert the failed observation into a no-progress attempt.
-    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
     cursor.wait_for_recovery_accounting().await;
     for generation in 4..=5 {
         let attempt = accounting_attempt(key, generation);
@@ -1043,7 +1043,7 @@ async fn accounting_storage_failure_resets_streak_and_retry_only_credits_progres
             .lock()
             .expect("queue")
             .push(attempt.clone());
-        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
         assert_eq!(
             cursor
@@ -1072,7 +1072,7 @@ async fn sqlite_replica_progress_rearms_parked_row_and_counts_a_new_episode() {
         .unwrap_or(0);
     for _ in 0..budget.recovery_stall_attempts {
         super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
-        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
     }
     assert_eq!(
@@ -1088,7 +1088,7 @@ async fn sqlite_replica_progress_rearms_parked_row_and_counts_a_new_episode() {
     tokio::time::advance(budget.recovery_stall_cooldown).await;
     tokio::time::resume();
     super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
-    super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+    super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
     cursor.wait_for_recovery_accounting().await;
     assert_eq!(
         metrics.counter_sum("ingress.maintenance.unrecoverable_obligations", &labels),
@@ -1140,7 +1140,7 @@ async fn sqlite_replica_progress_rearms_parked_row_and_counts_a_new_episode() {
     let attempts = super::super::recovery_executor::attempt_count(key);
     for index in 1..=budget.recovery_stall_attempts {
         super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
-        super::spawn_recovery_accounting(&fixture.db, &cursor, budget);
+        super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
         assert_eq!(
             super::super::recovery_executor::attempt_count(key),
@@ -1172,7 +1172,7 @@ async fn accounting_timeout_resets_streak_and_is_requeued_as_inconclusive() {
             .lock()
             .expect("queue")
             .push(accounting_attempt(key, generation));
-        super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+        super::spawn_recovery_accounting(&accounting_db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
     }
     // Occupy the only pool slot so the bounded accounting read must time out.
@@ -1183,7 +1183,7 @@ async fn accounting_timeout_resets_streak_and_is_requeued_as_inconclusive() {
         .expect("queue")
         .push(accounting_attempt(key, 3));
     tokio::time::pause();
-    super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+    super::spawn_recovery_accounting(&accounting_db, &fixture.uow, &cursor, budget, None);
     cursor.wait_for_recovery_accounting().await;
     tokio::time::resume();
     held.commit().await.expect("release connection");
@@ -1191,7 +1191,7 @@ async fn accounting_timeout_resets_streak_and_is_requeued_as_inconclusive() {
         cursor.recovery_accounting.lock().expect("queue")[0].classification,
         super::AttemptClassification::Inconclusive
     );
-    super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+    super::spawn_recovery_accounting(&accounting_db, &fixture.uow, &cursor, budget, None);
     cursor.wait_for_recovery_accounting().await;
     for generation in 4..=5 {
         let attempt = accounting_attempt(key, generation);
@@ -1200,7 +1200,7 @@ async fn accounting_timeout_resets_streak_and_is_requeued_as_inconclusive() {
             .lock()
             .expect("queue")
             .push(attempt.clone());
-        super::spawn_recovery_accounting(&accounting_db, &cursor, budget);
+        super::spawn_recovery_accounting(&accounting_db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
         assert_eq!(
             cursor
@@ -1222,7 +1222,7 @@ async fn newer_inconclusive_attempt_clears_an_older_workers_parking_decision() {
     let mut suppressed = super::UnsupportedRows::default();
     for generation in 1..=3 {
         let attempt = accounting_attempt(key, generation);
-        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+        stalled.account_and_park(&attempt, attempt.observed, budget, &mut suppressed);
     }
     let mut newer = accounting_attempt(key, 4);
     assert!(matches!(
@@ -1231,17 +1231,17 @@ async fn newer_inconclusive_attempt_clears_an_older_workers_parking_decision() {
     ));
     // This attempt began before the older worker installed the suppression.
     newer.classification = super::AttemptClassification::Inconclusive;
-    stalled.account(&newer, newer.observed, budget, &mut suppressed);
+    stalled.account_and_park(&newer, newer.observed, budget, &mut suppressed);
     assert_eq!(suppressed.get(key, newer.observed), None);
     for generation in 5..=6 {
         let attempt = accounting_attempt(key, generation);
-        stalled.account(&attempt, attempt.observed, budget, &mut suppressed);
+        stalled.account_and_park(&attempt, attempt.observed, budget, &mut suppressed);
         assert_eq!(suppressed.get(key, attempt.observed), None);
     }
     // Unsupported suppression retains its existing semantics on uncertainty.
     suppressed.insert(key, newer.observed, super::Suppression::Unsupported);
     newer.generation = 7;
-    stalled.account(&newer, newer.observed, budget, &mut suppressed);
+    stalled.account_and_park(&newer, newer.observed, budget, &mut suppressed);
     assert_eq!(
         suppressed.get(key, newer.observed),
         Some(super::Suppression::Unsupported)

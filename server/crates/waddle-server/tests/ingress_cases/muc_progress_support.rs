@@ -510,6 +510,101 @@ pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
     fixture.close().await;
 }
 
+/// XEP-0045 "Ghost Users": removing an occupant on a delivery-related error is
+/// the ROOM's act, so only the node that can run the room's leave sweep may do
+/// it. A recovery environment without that sweep leaves a seated occupant
+/// seated and its frozen copy owed, however long the obligation stalls —
+/// settling it here would drop a groupchat message the room still owes a live
+/// occupant, and evicting without the sweep would skip the §7.14 broadcast.
+pub async fn seated_ghost_occupant_is_never_evicted(fixture: IngressFixture) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before = metrics
+        .counter_sum("muc.ghost_occupants.evicted", &[])
+        .unwrap_or(0);
+    let sm = detached::registry(&fixture).await;
+    let [a, b, _] = detached::resources();
+    let submission = make_submission(&fixture, false);
+    detached::attach(&sm, &submission.sender).await;
+    let first = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("accept");
+    detached::execute(&fixture, &first, &ConnectionRegistry::new(), &sm).await;
+    // `a` becomes reachable only now, so its copy proves maintenance ran;
+    // `b` is seated with no session anywhere, which is the ghost shape.
+    detached::attach(&sm, &a).await;
+    let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".into(),
+        OccupantIdSecret::new(vec![b'h'; 32]).expect("occupant-id secret"),
+    ));
+    let actor = rooms
+        .ask(CreateRoom {
+            room_jid: room(),
+            waddle_id: "seated-ghost".into(),
+            channel_id: "seated-ghost".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    for (jid, nick) in [(&a, "alice"), (&b, "ben"), (&submission.sender, "romeo")] {
+        actor
+            .ask(Join {
+                nick: nick.into(),
+                real_jid: jid.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+    let authority = fixture.authority().await;
+    let environment: Arc<dyn RecoveryEnvironment> = Arc::new(RoomEnvironment {
+        connections: ConnectionRegistry::new(),
+        sm: sm.clone(),
+        rooms,
+    });
+    authority.bind_recovery_environment(Arc::downgrade(&environment));
+    age_pending_rows(&fixture).await;
+    authority.trigger_maintenance();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while detached::queued(&sm, &a).await.unacked_stanzas.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            authority.trigger_maintenance();
+        }
+    })
+    .await
+    .expect("maintenance recovered the reachable occupant's copy");
+    for _ in 0..3 {
+        authority.trigger_maintenance();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        actor
+            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid { jid: b.clone() })
+            .await
+            .expect("occupancy probe")
+            .is_some(),
+        "XEP-0045: only the room's own node may remove a ghost occupant"
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        0,
+        "the copy an occupant is still owed keeps the row non-terminal"
+    );
+    assert_eq!(
+        metrics
+            .counter_sum("muc.ghost_occupants.evicted", &[])
+            .unwrap_or(0),
+        before
+    );
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
+    drop(environment);
+    drop(authority);
+    drop(sm);
+    fixture.close().await;
+}
+
 async fn age_pending_rows(fixture: &IngressFixture) {
     let sql = match fixture.db.driver() {
         waddle_server::db::DatabaseDriver::Postgres => "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE terminal_at IS NULL",
