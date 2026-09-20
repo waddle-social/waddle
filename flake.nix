@@ -38,6 +38,11 @@
           lib = pkgs.lib;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          testArchiveRustc = pkgs.writeShellScript "waddle-test-archive-rustc" ''
+            # Keep Nix's linker wrapper, including its runtime library paths.
+            export PATH="${lib.makeBinPath [ pkgs.mold ]}:$PATH"
+            exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
+          '';
           testBuilderMemoryGuard = ''
             # MemTotal can exceed a container's cgroup limit. Enforce
             # both when cgroup v2 exposes its memory limit. Allow for
@@ -71,6 +76,12 @@
             checkPhase = ''
               ${testBuilderMemoryGuard}
               runHook preCheck
+              ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                # Cargo fingerprints this wrapper for workspace members only;
+                # cached third-party dependencies retain their existing flags.
+                export RUSTC_WORKSPACE_WRAPPER=${testArchiveRustc}
+                echo "WADDLE_CI_METRIC phase=compile linker=mold version=${pkgs.mold.version}"
+              ''}
               mkdir -p "$out/ci-performance"
               nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests)
               ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
@@ -96,6 +107,21 @@
                 "$out/partition-3.json" "$out/partition-4.json" > "$out/partition-coverage.json"
               ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=archive elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                 cargo nextest archive "''${nextest_args[@]}" --archive-format tar-zst --archive-file "$out/archive.tar.zst"
+              # Repeated static code spans test binaries. Recompress the exact
+              # tar stream with a 128 MiB window, within nextest's decoder
+              # limit, and four workers. Keep the original if it is smaller.
+              archive_original_bytes=$(stat -c %s "$out/archive.tar.zst")
+              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=archive_recompress elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                ${pkgs.bash}/bin/bash -euo pipefail -c '
+                  ${pkgs.zstd}/bin/zstd -dc "$1" | ${pkgs.zstd}/bin/zstd -T4 -3 --long=27 -o "$2"
+                ' _ "$out/archive.tar.zst" "$out/archive-repacked.tar.zst"
+              archive_repacked_bytes=$(stat -c %s "$out/archive-repacked.tar.zst")
+              echo "WADDLE_CI_METRIC phase=archive_recompress original_bytes=$archive_original_bytes repacked_bytes=$archive_repacked_bytes"
+              if [ "$archive_repacked_bytes" -lt "$archive_original_bytes" ]; then
+                mv "$out/archive-repacked.tar.zst" "$out/archive.tar.zst"
+              else
+                rm "$out/archive-repacked.tar.zst"
+              fi
               # Compressed binaries hide their store references from Nix's
               # scanner. Keep each interpreter/RPATH store root explicitly
               # so an output-only NAR transfer can restore its runtime libs.
@@ -104,8 +130,21 @@
                 .["rust-suites"][]["binary-path"],
                 (.["rust-build-meta"]["non-test-binaries"][][] | select(.kind == "bin-exe") | $target + "/" + .path)
               ' "$out/test-inventory.json" | sort -u | while IFS= read -r binary; do
-                ${pkgs.patchelf}/bin/patchelf --print-rpath "$binary"
-                ${pkgs.patchelf}/bin/patchelf --print-interpreter "$binary"
+                # Read ELF headers once instead of loading each large binary
+                # twice. Limit matches to interpreter and runtime search paths.
+                binary_metadata=$(${pkgs.binutils}/bin/readelf --wide --program-headers --dynamic --string-dump=.comment "$binary")
+                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  if ! grep -Eq '] +mold ${lib.escapeRegex pkgs.mold.version}( |$)' <<< "$binary_metadata"; then
+                    echo "Expected mold ${pkgs.mold.version} in archived binary: $binary" >&2
+                    exit 1
+                  fi
+                  echo "WADDLE_CI_METRIC phase=linker_verified linker=mold binary=$binary" >&2
+                ''}
+                printf '%s\n' "$binary_metadata" |
+                  awk '/Requesting program interpreter:/ || /\((RPATH|RUNPATH)\)/ {
+                    sub(/\][[:space:]]*$/, "")
+                    print
+                  }'
               done | grep -Eo '/nix/store/[a-z0-9]{32}-[^/:[:space:]]+' | sort -u > "$out/runtime-references"
               wc -c "$out/archive.tar.zst"
               runHook postCheck
@@ -453,9 +492,9 @@
           );
         in
         {
-          # Exposed so a light CI job can realise nixTest's large inputs (the
-          # ci-test dependency artifacts and the vendored crate sources)
-          # before nixTest runs; see nixBuildDeps in server/env.cue.
+          # Keep reusable dependency artifacts and vendored sources exposed
+          # separately. Validation checks cache only their success output;
+          # no downstream build consumes their full Cargo target directories.
           waddle-server-check-deps = workspaceAllFeaturesArtifacts;
           waddle-server-cargo-vendor = craneLib.vendorCargoDeps { src = serverCheckSrc; };
           waddle-server-fmt = craneLib.cargoFmt {
@@ -467,6 +506,7 @@
           waddle-server-clippy = craneLib.cargoClippy (
             baseArgs
             // {
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
@@ -476,6 +516,7 @@
           waddle-server-test = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
@@ -500,6 +541,7 @@
             testArgs
             // {
               pname = "waddle-server-doctest";
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
@@ -510,6 +552,7 @@
             baseArgs
             // {
               pname = "waddle-server-ci-build";
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci";
               cargoArtifacts = ciServerArtifacts;
               cargoExtraArgs = "--locked --package waddle-server --bin waddle-server --features clustering";
@@ -539,6 +582,7 @@
             testArgs
             // {
               pname = "waddle-server-xmpp-unit-tests";
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
@@ -549,6 +593,7 @@
             serverPostgresTestArgs
             // {
               pname = "waddle-server-xmpp-server-tests";
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
@@ -559,6 +604,7 @@
             serverTestArgs
             // {
               pname = "waddle-server-xmpp-cue-e2e";
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
@@ -569,6 +615,7 @@
             testArgs
             // {
               pname = "waddle-server-xmpp-xep-integration";
+              doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";

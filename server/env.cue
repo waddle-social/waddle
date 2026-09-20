@@ -178,50 +178,7 @@ schema.#Project & {
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
 		}
-		// Compile once on a memory-safe builder; every shard runs in its own
-		// runner so nextest exclusive-test reservations remain machine-wide.
-		rustTests: {
-			when: pullRequest: true
-			mode: "expanded"
-			provider: github: {
-				runner: "namespace-profile-linux-x86"
-				runners: arch: builder: "nscloud-ubuntu-24.04-amd64-32x64;job.priority=1"
-				permissions: {
-					"id-token":      "write"
-					contents:        "read"
-					checks:          "write"
-					packages:        "read"
-					"pull-requests": "none"
-				}
-			}
-			tasks: [
-				{task: _t.nixTestArchive, matrix: arch: ["builder"]},
-				// Empty matrices use cuenv's artifact aggregation jobs:
-				// each waits for the builder and downloads its exact output.
-				// Unlike a test matrix, these preserve the producer dependency.
-				{
-					task: _t.nixTestShard1
-					matrix: {}
-					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
-				},
-				{
-					task: _t.nixTestShard2
-					matrix: {}
-					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
-				},
-				{
-					task: _t.nixTestShard3
-					matrix: {}
-					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
-				},
-				{
-					task: _t.nixTestShard4
-					matrix: {}
-					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
-				},
-				_t.nixTest,
-			]
-		}
+		// Rust archives and shards are generated from ci/rust-tests/workflow.cue.
 		rootSync: {
 			mode: "expanded"
 			when: {
@@ -230,6 +187,7 @@ schema.#Project & {
 				pullRequest:   true
 				manual:        true
 			}
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -247,6 +205,7 @@ schema.#Project & {
 				pullRequest:   true
 				manual:        true
 			}
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -278,6 +237,9 @@ schema.#Project & {
 					    overall_status=1
 					  fi
 					done <<< "${projects}"
+					if ! bash scripts/sync-rust-tests.sh --check; then
+					  overall_status=1
+					fi
 					exit "${overall_status}"
 				"""#]
 			inputs: [
@@ -285,6 +247,8 @@ schema.#Project & {
 				"deployment.cue",
 				"../.github/workflows/hestia-cache-gc.yml",
 				"../ci/contributors/nix.cue",
+				"../ci/rust-tests/**",
+				"../scripts/sync-rust-tests.sh",
 				"../.github/workflows/waddle-server-*.yml",
 				"../cue.mod/module.cue",
 			]
@@ -407,11 +371,15 @@ schema.#Project & {
 				set -euo pipefail
 				archive="$(nix build --print-build-logs --print-out-paths --no-link ../#waddle-server-test-archive)"
 				bash scripts/nextest-archive-transfer.sh export "$archive" .ci/nextest-archive
+				cp "$archive/ci-performance/cargo-timing.html" .ci/nextest-archive/cargo-timing.html
+				cp "$archive/partition-coverage.json" .ci/nextest-archive/partition-coverage.json
 				"""#]
 			// Keep the former combined PR workflow's full trigger coverage.
 			inputs: list.Concat([
 				_nixInputs,
-				["scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py"],
+				["scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py",
+					"scripts/test_nextest_archive_transfer.py", "scripts/test_check_nextest_shards.py",
+					"../scripts/ci-timings.py", "../tests/ci-timings-test.py"],
 				tasks.checkCiDrift.inputs,
 				tasks.checkSwitchableAlternativeProgram.inputs,
 				tasks.checkXmppClientFfiBindings.inputs,
@@ -430,7 +398,7 @@ schema.#Project & {
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-1
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
-			// Cross-job needs/downloads are declared by the pipeline above.
+			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
 			hermetic: false
 		}
 
@@ -443,7 +411,7 @@ schema.#Project & {
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-2
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
-			// Cross-job needs/downloads are declared by the pipeline above.
+			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
 			hermetic: false
 		}
 
@@ -456,7 +424,7 @@ schema.#Project & {
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-3
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
-			// Cross-job needs/downloads are declared by the pipeline above.
+			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
 			hermetic: false
 		}
 
@@ -469,7 +437,7 @@ schema.#Project & {
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-4
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
-			// Cross-job needs/downloads are declared by the pipeline above.
+			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
 			hermetic: false
 		}
 

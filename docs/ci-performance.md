@@ -1,6 +1,6 @@
 # Waddle CI under 15 minutes
 
-Prepared 20 September 2026. Source baseline: `main` at `c6169598d2426e483c1c7a2c062ca7f1aba352ac`. This is an implementation plan, not a change to the repository or runner settings. All proposed timings below are acceptance targets, not measured speedups.
+Prepared 20 September 2026. Source baseline: `main` at `c6169598d2426e483c1c7a2c062ca7f1aba352ac`. The initial plan is followed by the implementation and measurement record for PR #1801. Proposed timing budgets are acceptance targets, not measured speedups.
 
 The primary obstacle is the all-features Rust test build. The latest server PR workflow took 55m51s, including 34m16s compiling tests and 10m51s executing them. Rust CodeQL independently took 19m42s. Both must improve to deliver the requested result.
 
@@ -84,7 +84,7 @@ Build release images and WASM extensions alongside tests, then publish those exa
 
 Narrow Nix source inputs and per-job selection to actual transitive dependencies, retaining manifests, build scripts, fixtures and configuration inputs. Do this after the main bottlenecks are fixed. Hestia and FlakeHub already exist; [their documented coverage excludes ordinary Cargo target directories](https://github.com/waddle-social/waddle/blob/c6169598d2426e483c1c7a2c062ca7f1aba352ac/docs/ci-hestia-cache.md#L14-L18). Cache claims must identify exactly which outputs are reused. Preserve trusted/untrusted cache separation and bind reusable outputs to their complete inputs.
 
-CUE remains authoritative. Regenerate workflows with `cuenv sync ci -A` and verify drift. Preserve Clippy `-D warnings`, dedicated XEP coverage, and the existing CUE version pin.
+CUE remains authoritative. Regenerate workflows with `cuenv sync ci -A` and `bash scripts/sync-rust-tests.sh`, then verify both generators in drift checks. Preserve Clippy `-D warnings`, dedicated XEP coverage, and the existing CUE version pin.
 
 The open [Dagger trial, PR #1800](https://github.com/waddle-social/waddle/pull/1800), should use the same benchmark and coverage contract. Its own plan acknowledges cold Rust builds without persistent caching. An orchestration migration is not a prerequisite for fixing the measured bottlenecks.
 
@@ -133,10 +133,14 @@ with **19m42s** in the baseline. This is one measurement, not a percentile claim
 
 The [Rust pilot](https://github.com/waddle-social/waddle/actions/runs/35501509477)
 exposed **7m14s** of waiting between the dependency-prewarm job finishing and the
-32 CPU / 64 GB test job starting. Observed Namespace overlap reached 64 vCPU;
+32 CPU / 64 GB test job starting. Its compilation finished in **8m34s**,
+versus **34m16s** in the baseline; the measured compiler phase including nextest
+setup took 516 seconds, with an 11.3 GiB largest-process RSS.
+Observed Namespace overlap reached 64 vCPU;
 that supports resource contention as a cause, but does not establish the account's
 configured quota. The compiler now starts directly, at higher scheduling priority.
-Lightweight PR validation uses GitHub runners; four test workers use the existing
+PR validation, root synchronization and XMPP conformance use GitHub runners;
+four test workers use the existing
 8 CPU / 16 GB profile. The new compiler's memory guard requires at least 56 GiB
 available on a nominal 64 GB worker. The ordinary Nix check remains at one Cargo
 job for smaller machines.
@@ -150,14 +154,77 @@ unchanged nextest scheduling restrictions. Runtime fixture and executable paths
 replace embedded builder paths in tests. Doctests and the distinct XMPP feature
 configurations retain their existing jobs.
 
-CUE generates the builder as a single matrix variant for its larger runner, and
-four artifact-aggregation jobs for test execution. This is intentional: cuenv
-0.55.0's ordinary matrix jobs do not preserve producer dependencies. The final
-`nixTest` job depends on all four workers. It is not an always-reporting required
-status check; do not install it as branch protection without implementing that
-separate gate and merge-queue event support.
+The Rust workflow is generated directly from `ci/rust-tests/workflow.cue`, which
+imports the task commands from `server/env.cue` and the shared Nix/cache setup.
+cuenv 0.55.0's matrix generation neither preserves ordinary dependencies nor
+exposes artifact compression, and its task wrapper loads the complete development
+shell. The focused generator runs the same Nix tasks directly, uploads the large NAR directly without an additional ZIP layer, and retains
+every previous path trigger. The metadata travels separately; workers verify the
+NAR checksum and expected output before importing it.
+Run `bash scripts/sync-rust-tests.sh` after changing those inputs; `checkCiDrift`
+checks this generator alongside cuenv. The final `nixTest` gate always reports and
+requires the archive and all four workers to succeed. Merge-queue triggers remain
+a prerequisite before installing it as a required status check.
 
 Main starts release-image and WASM builds alongside validation. Publishing uses
 the same Nix image and five WASM outputs after every validation gate succeeds.
 FlakeHub substitution on the publication worker still needs a live main run;
 a cache miss may rebuild those outputs, so no publication timing claim is made.
+
+The superseded single-job pilot also failed the concurrent extension groupchat
+PostgreSQL test's terminal-receipt assertion. Its 32-CPU runner raised nextest's
+default test concurrency from 8 to 32 against one database. The archive workers
+restore the baseline 8-CPU concurrency with separate databases. The failure's
+cause remains unproven: source review ruled out shared-schema interference and
+the response-timeout explanation. An unverified test synchronization change was
+reverted. The terminal-receipt assertion, PostgreSQL grouping and production
+behavior remain unchanged; retain this failure in the pilot record and investigate
+missing receipts if it recurs on the 8-CPU workers.
+
+Validation-only Nix checks no longer export Cargo target directories. Their
+commands and dependency artifacts are unchanged; release, WASM, archive and shard
+outputs retain their exact store identities. In the changed-source trial, the
+XMPP server check passed all 4102 tests but then uploaded 3.3 GiB and spent 81 seconds
+in Hestia/FlakeHub post-job cache work. These target exports have no downstream
+consumer. Removing them preserves cached check results while avoiding that
+unnecessary upload; savings still require a live comparison.
+
+The changed-source archive trial compiled with **rustc/Cargo 1.98.1**, the latest
+stable release listed by the Rust project on 20 September 2026. The repository
+already pins it. A compiled probe using the same Nix compiler and GCC wrapper
+confirmed LLD 22.1.8 is selected; no flag disables the faster linker. Those gains
+are already in the baseline, so no Rust version bump is needed. See the
+[1.98.1 announcement](https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/).
+The trial's compile phase took 513 seconds. The visible cgroup lifetime peak was
+61.5 GiB with no OOM events; this includes cache and setup memory and is not compiler
+RSS. It does not justify increasing Cargo parallelism yet.
+
+The [archive producer](https://github.com/waddle-social/waddle/actions/runs/35502717093/job/106057270776)
+waited 5m13s to start, compiled tests in 8m32s, produced a 7.18 GB compressed archive,
+and spent 4m09s uploading it. The producer job took 17 minutes before workers could
+start. That trial misses the target; the remaining work must reduce scheduling,
+archive size/transfer and execution overhead, not count a cache hit as a solution.
+
+One worker in that trial reported a successful artifact download but received an
+incomplete file set; the other downloads stalled. This matches the open upstream
+[download-artifact ZIP failure](https://github.com/actions/download-artifact/issues/454).
+The next trial uses the supported raw-file artifact mode with explicit SHA-256
+verification. No test retries or assertions were weakened.
+
+The next archive trial also measures lossless long-range Zstandard compression
+with a 128 MiB window, retaining the smaller of the original and recompressed
+archives. Repeated code across statically linked test binaries may benefit from
+that window; this is a hypothesis until the live byte/time comparison is available.
+The tar contents, symbols, line tables, feature selection and test identities are
+unchanged. A larger 512 MiB window was rejected because pinned nextest cannot
+decode it without a different extraction path.
+
+At David's suggestion, the next compiler experiment compares the pinned Nix
+`mold` 2.42.0 package against bundled LLD. A workspace-only rustc wrapper explicitly
+selects Nix-wrapped mold and participates in Cargo fingerprints, retaining cached
+third-party dependencies. Every archived ELF must identify the pinned mold
+version, and runtime library paths are verified before transfer. Acceptance uses
+the full changed-source compile
+phase, the unchanged test inventories and all passing workers. Published linker
+benchmarks are motivation, not Waddle measurements. The experiment keeps release
+packaging and its separate validation intact.

@@ -14,6 +14,7 @@ on:
     - chat/tests/**
     - ci/contributors/nix.cue
     - ci/contributors/nix.cue/**
+    - ci/rust-tests/**
     - cue.mod/**
     - cue.mod/module.cue
     - cue.mod/module.cue/**
@@ -39,6 +40,8 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server/**
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
+    - scripts/sync-rust-tests.sh
+    - scripts/sync-rust-tests.sh/**
     - server/**/env.cue
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
