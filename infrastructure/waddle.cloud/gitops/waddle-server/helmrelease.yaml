@@ -39,33 +39,26 @@ spec:
     # shared channel. Any envelope or reply-type change MUST bump the version (see
     # server/CLAUDE.md) — that invariant is what keeps that strategy sound.
     #
-    # RE-APPLIED one-shot Recreate for the #1778 remote_resource_route.v7 cutover.
-    # The cutover (PR #1788) set this, but its flip-back (PR #1791) merged twelve
-    # minutes later, before any v7 image had been built — #1788's server build was
-    # cancelled by the newer commit, so the FIRST v7 image is the one building from
-    # the flip-back commit. Rolling that image out under RollingUpdate would create
-    # the exact v6/v7 window the cutover exists to prevent.
+    # The #1778 `remote_resource_route.v7` cutover (PR #1788, re-applied by PR #1792)
+    # and the #1789 `remote_resource_frame.v2` bump (PR #1794) shared the sixth
+    # one-shot Recreate, after the #1657 V1012, #1739-#1743 V1014, #1756
+    # V1015/V1016 and #1770 archive_seq cutovers; this restores the steady state.
+    # Neither endpoint has an `UnsupportedEnvelope` fallback, unlike
+    # `deliver_ordered`: a mixed window would have dropped live IQ, presence,
+    # MUC-proxy operations, roster pushes, blocklist pushes and MUC destroy
+    # notifications outright rather than delaying them, because none of those are
+    # ingress obligations that maintenance recovery re-executes. With every replica
+    # on v7 and v2 that window is closed.
     #
-    # `remote_resource_route` has no `UnsupportedEnvelope` fallback:
-    # `outcome_for_ask_error` classifies the `UnknownMessage` as a definite
-    # no-effect, `Dropped` for messages and presence and `Unavailable` for IQs. The
-    # live IQ, presence and MUC-proxy operations that remote-owned connections route
-    # through it are not ingress obligations, so maintenance recovery does not cover
-    # them: a mixed window loses them outright rather than delaying them.
-    #
-    # The same one-shot Recreate also carries the #1789
-    # `remote_resource_frame.v1 -> v2` bump (PR #1794). That endpoint has no
-    # `UnsupportedEnvelope` fallback either: across a v1/v2 window every
-    # owner-to-socket frame fails `UnknownMessage`. Executor deliveries come back
-    # `MaybeCommitted` and recovery retries them, but roster pushes, blocklist
-    # pushes and MUC destroy notifications are not ingress obligations and would
-    # be dropped for the length of the rollout.
-    #
-    # Flip back to RollingUpdate (maxSurge 1, maxUnavailable 0) only AFTER an image
-    # carrying BOTH remote_resource_route.v7 and remote_resource_frame.v2 has
-    # actually rolled.
+    # Lesson recorded from #1791: a flip-back must merge only AFTER the image that
+    # carries the bump has actually rolled. Merging it earlier cancels that image's
+    # build, and the first image carrying the bump then rolls out under
+    # RollingUpdate — the exact mixed window the cutover exists to prevent.
     updateStrategy:
-      type: Recreate
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
