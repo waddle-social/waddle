@@ -13,10 +13,10 @@ import (
 // existing CUE definitions while generating this focused workflow directly.
 let _archiveTask = server.tasks.nixTestArchive
 let _shards = [
-	{name: "nixTestShard1", task: server.tasks.nixTestShard1},
-	{name: "nixTestShard2", task: server.tasks.nixTestShard2},
-	{name: "nixTestShard3", task: server.tasks.nixTestShard3},
-	{name: "nixTestShard4", task: server.tasks.nixTestShard4},
+	{number: 1, name: "nixTestShard1", task: server.tasks.nixTestShard1},
+	{number: 2, name: "nixTestShard2", task: server.tasks.nixTestShard2},
+	{number: 3, name: "nixTestShard3", task: server.tasks.nixTestShard3},
+	{number: 4, name: "nixTestShard4", task: server.tasks.nixTestShard4},
 ]
 
 // Retain the old workflow's task inputs and cuenv's implicit schema/module
@@ -78,6 +78,8 @@ workflow: {
 						python3 tests/ci-timings-test.py
 						python3 server/scripts/test_check_nextest_shards.py
 						python3 server/scripts/test_nextest_archive_transfer.py
+						python3 server/scripts/test_build_nextest_archive.py
+						python3 server/scripts/test_plan_nextest_binary_shards.py
 						"""
 				},
 				{
@@ -86,29 +88,40 @@ workflow: {
 					run:                 _archiveTask.args[1]
 					"working-directory": "server"
 				},
-				{
-					name: "Upload raw test archive"
-					uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7.0.1; Node 24, runner >= 2.327.1
+				for shard in _shards {
+					name: "Upload raw test archive \(shard.number)"
+					uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7.0.1
 					with: {
-						// Raw uploads use the file basename as their artifact name.
-						// Avoid wrapping the already-compressed multi-GB NAR in ZIP.
+						// Raw artifact names are their unique file basenames.
 						archive:                false
-						path:                   "server/.ci/nextest-archive/archive.nar"
+						path:                   "server/.ci/nextest-archive/shard-\(shard.number)/archive-\(shard.number).nar"
+						"if-no-files-found":    "error"
+						"include-hidden-files": true
+					}
+				},
+				for shard in _shards {
+					name: "Upload test archive \(shard.number) metadata"
+					uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7.0.1
+					with: {
+						name:                   "nixTestArchive-\(shard.number)-metadata"
+						path:                   """
+							server/.ci/nextest-archive/shard-\(shard.number)/archive-path
+							server/.ci/nextest-archive/shard-\(shard.number)/archive-references
+							server/.ci/nextest-archive/shard-\(shard.number)/archive-checksums
+							"""
 						"if-no-files-found":    "error"
 						"include-hidden-files": true
 					}
 				},
 				{
-					name: "Upload test archive metadata"
+					name: "Upload compiler and coverage diagnostics"
 					uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7.0.1
 					with: {
-						name: "nixTestArchive-metadata"
+						name: "nixTestArchive-diagnostics"
 						path: """
-							server/.ci/nextest-archive/archive-path
-							server/.ci/nextest-archive/archive-references
-							server/.ci/nextest-archive/archive-checksums
 							server/.ci/nextest-archive/cargo-timing.html
 							server/.ci/nextest-archive/partition-coverage.json
+							server/.ci/nextest-archive/plan.json
 							"""
 						"if-no-files-found":    "error"
 						"include-hidden-files": true
@@ -130,7 +143,7 @@ workflow: {
 						with: {
 							// Omitting run-id and github-token restricts this to the
 							// current workflow run's immutable producer artifact.
-							name:              "nixTestArchive-metadata"
+							name:              "nixTestArchive-\(shard.number)-metadata"
 							path:              "server/.ci/nextest-archive/builder"
 							"digest-mismatch": "error"
 						}
@@ -140,7 +153,7 @@ workflow: {
 						id:   "archive-payload"
 						uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" // v8.0.1
 						with: {
-							name:              "archive.nar"
+							name:              "archive-\(shard.number).nar"
 							path:              "server/.ci/nextest-archive/builder"
 							"skip-decompress": true
 							"digest-mismatch": "error"

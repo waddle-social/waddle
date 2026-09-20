@@ -7,6 +7,12 @@ set -euo pipefail
 mode="${1:?expected export or import}"
 expected="${2:?expected archive store path}"
 directory="${3:?expected transfer directory}"
+partition="${4:?expected shard number}"
+if [[ ! "$partition" =~ ^[1-4]$ ]]; then
+  echo "invalid test shard: $partition" >&2
+  exit 1
+fi
+payload="archive-${partition}.nar"
 
 if [[ ! "$expected" =~ ^/nix/store/[a-z0-9]{32}-[^/]+$ ]]; then
   echo "invalid expected archive store path: $expected" >&2
@@ -19,27 +25,27 @@ case "$mode" in
     mkdir -p "$directory"
     printf '%s\n' "$expected" > "$directory/archive-path"
     nix-store --query --references "$expected" > "$directory/archive-references"
-    nix-store --export "$expected" > "$directory/archive.nar"
+    nix-store --export "$expected" > "$directory/$payload"
     # Keep the large NAR as a raw artifact; a separate small artifact carries
     # this manifest and metadata. Bind all three files before publication.
-    (cd "$directory" && sha256sum archive-path archive-references archive.nar) > "$directory/archive-checksums"
-    wc -c "$expected/archive.tar.zst" "$directory/archive.nar"
+    (cd "$directory" && sha256sum archive-path archive-references "$payload") > "$directory/archive-checksums"
+    wc -c "$expected/archive.tar.zst" "$directory/$payload"
     ;;
   import)
     # Download actions can report success after a partial transfer. Reject a
     # missing, truncated, or mixed artifact before invoking Nix at all. A
     # reference list can legitimately be empty, but the file must exist.
-    for file in archive-path archive-references archive.nar archive-checksums; do
+    for file in archive-path archive-references "$payload" archive-checksums; do
       if [[ ! -f "$directory/$file" ]]; then
         echo "missing archive transfer file: $directory/$file" >&2
         exit 1
       fi
     done
-    if [[ ! -s "$directory/archive.nar" ]]; then
-      echo "empty archive transfer payload: $directory/archive.nar" >&2
+    if [[ ! -s "$directory/$payload" ]]; then
+      echo "empty archive transfer payload: $directory/$payload" >&2
       exit 1
     fi
-    if ! (cd "$directory" && sha256sum archive-path archive-references archive.nar) | cmp -s "$directory/archive-checksums" -; then
+    if ! (cd "$directory" && sha256sum archive-path archive-references "$payload") | cmp -s "$directory/archive-checksums" -; then
       echo "archive transfer checksum mismatch; no Nix import attempted" >&2
       exit 1
     fi
@@ -59,7 +65,7 @@ case "$mode" in
         nix-store --realise --option max-jobs 0 "$reference" >/dev/null
       fi
     done
-    imported="$(nix-store --import < "$directory/archive.nar")"
+    imported="$(nix-store --import < "$directory/$payload")"
     test "$imported" = "$expected"
     test -s "$expected/archive.tar.zst"
     ;;

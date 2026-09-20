@@ -68,14 +68,22 @@ name: waddle-server-rustTests
       - server/rust-toolchain.toml/**
       - server/schema/**
       - server/scripts/**
+      - server/scripts/build-nextest-archive.sh
+      - server/scripts/build-nextest-archive.sh/**
       - server/scripts/check_nextest_shards.py
       - server/scripts/check_nextest_shards.py/**
       - server/scripts/nextest-archive-transfer.sh
       - server/scripts/nextest-archive-transfer.sh/**
+      - server/scripts/plan_nextest_binary_shards.py
+      - server/scripts/plan_nextest_binary_shards.py/**
+      - server/scripts/test_build_nextest_archive.py
+      - server/scripts/test_build_nextest_archive.py/**
       - server/scripts/test_check_nextest_shards.py
       - server/scripts/test_check_nextest_shards.py/**
       - server/scripts/test_nextest_archive_transfer.py
       - server/scripts/test_nextest_archive_transfer.py/**
+      - server/scripts/test_plan_nextest_binary_shards.py
+      - server/scripts/test_plan_nextest_binary_shards.py/**
       - server/wit/**
       - tests/**
       - tests/ci-timings-test.py
@@ -120,14 +128,14 @@ jobs:
         id: archive-metadata
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: nixTestArchive-metadata
+          name: nixTestArchive-1-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
       - name: Download raw test archive
         id: archive-payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: archive.nar
+          name: archive-1.nar
           path: server/.ci/nextest-archive/builder
           skip-decompress: true
           digest-mismatch: error
@@ -145,8 +153,8 @@ jobs:
         shell: bash
         run: |-
           set -euo pipefail
-          expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard1.outPath)"
+          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 1
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-1
         working-directory: server
   nixTestShard2:
@@ -178,14 +186,14 @@ jobs:
         id: archive-metadata
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: nixTestArchive-metadata
+          name: nixTestArchive-2-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
       - name: Download raw test archive
         id: archive-payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: archive.nar
+          name: archive-2.nar
           path: server/.ci/nextest-archive/builder
           skip-decompress: true
           digest-mismatch: error
@@ -203,8 +211,8 @@ jobs:
         shell: bash
         run: |-
           set -euo pipefail
-          expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard2.outPath)"
+          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 2
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-2
         working-directory: server
   nixTestShard3:
@@ -236,14 +244,14 @@ jobs:
         id: archive-metadata
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: nixTestArchive-metadata
+          name: nixTestArchive-3-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
       - name: Download raw test archive
         id: archive-payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: archive.nar
+          name: archive-3.nar
           path: server/.ci/nextest-archive/builder
           skip-decompress: true
           digest-mismatch: error
@@ -261,8 +269,8 @@ jobs:
         shell: bash
         run: |-
           set -euo pipefail
-          expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard3.outPath)"
+          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 3
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-3
         working-directory: server
   nixTestShard4:
@@ -294,14 +302,14 @@ jobs:
         id: archive-metadata
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: nixTestArchive-metadata
+          name: nixTestArchive-4-metadata
           path: server/.ci/nextest-archive/builder
           digest-mismatch: error
       - name: Download raw test archive
         id: archive-payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: archive.nar
+          name: archive-4.nar
           path: server/.ci/nextest-archive/builder
           skip-decompress: true
           digest-mismatch: error
@@ -319,8 +327,8 @@ jobs:
         shell: bash
         run: |-
           set -euo pipefail
-          expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+          expected="$(nix eval --raw ../#waddle-server-test-archive.shard4.outPath)"
+          bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 4
           nix build --print-build-logs --no-link ../#waddle-server-test-shard-4
         working-directory: server
   nixTestArchive-builder:
@@ -352,32 +360,98 @@ jobs:
           python3 tests/ci-timings-test.py
           python3 server/scripts/test_check_nextest_shards.py
           python3 server/scripts/test_nextest_archive_transfer.py
+          python3 server/scripts/test_build_nextest_archive.py
+          python3 server/scripts/test_plan_nextest_binary_shards.py
       - name: Compile and export test archive
         shell: bash
         run: |-
           set -euo pipefail
-          archive="$(nix build --print-build-logs --print-out-paths --no-link ../#waddle-server-test-archive)"
-          bash scripts/nextest-archive-transfer.sh export "$archive" .ci/nextest-archive
+          archive="$(bash scripts/build-nextest-archive.sh)"
+          mkdir -p .ci/nextest-archive
+          for partition in 1 2 3 4; do
+            output="$(nix eval --raw "../#waddle-server-test-archive.shard${partition}.outPath")"
+            bash scripts/nextest-archive-transfer.sh export "$output" ".ci/nextest-archive/shard-${partition}" "$partition"
+          done
           cp "$archive/ci-performance/cargo-timing.html" .ci/nextest-archive/cargo-timing.html
           cp "$archive/partition-coverage.json" .ci/nextest-archive/partition-coverage.json
+          cp "$archive/plan.json" .ci/nextest-archive/plan.json
         working-directory: server
-      - name: Upload raw test archive
+      - name: Upload raw test archive 1
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           archive: false
-          path: server/.ci/nextest-archive/archive.nar
+          path: server/.ci/nextest-archive/shard-1/archive-1.nar
           if-no-files-found: error
           include-hidden-files: true
-      - name: Upload test archive metadata
+      - name: Upload raw test archive 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: nixTestArchive-metadata
+          archive: false
+          path: server/.ci/nextest-archive/shard-2/archive-2.nar
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload raw test archive 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          archive: false
+          path: server/.ci/nextest-archive/shard-3/archive-3.nar
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload raw test archive 4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          archive: false
+          path: server/.ci/nextest-archive/shard-4/archive-4.nar
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload test archive 1 metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nixTestArchive-1-metadata
           path: |-
-            server/.ci/nextest-archive/archive-path
-            server/.ci/nextest-archive/archive-references
-            server/.ci/nextest-archive/archive-checksums
+            server/.ci/nextest-archive/shard-1/archive-path
+            server/.ci/nextest-archive/shard-1/archive-references
+            server/.ci/nextest-archive/shard-1/archive-checksums
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload test archive 2 metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nixTestArchive-2-metadata
+          path: |-
+            server/.ci/nextest-archive/shard-2/archive-path
+            server/.ci/nextest-archive/shard-2/archive-references
+            server/.ci/nextest-archive/shard-2/archive-checksums
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload test archive 3 metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nixTestArchive-3-metadata
+          path: |-
+            server/.ci/nextest-archive/shard-3/archive-path
+            server/.ci/nextest-archive/shard-3/archive-references
+            server/.ci/nextest-archive/shard-3/archive-checksums
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload test archive 4 metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nixTestArchive-4-metadata
+          path: |-
+            server/.ci/nextest-archive/shard-4/archive-path
+            server/.ci/nextest-archive/shard-4/archive-references
+            server/.ci/nextest-archive/shard-4/archive-checksums
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload compiler and coverage diagnostics
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nixTestArchive-diagnostics
+          path: |-
             server/.ci/nextest-archive/cargo-timing.html
             server/.ci/nextest-archive/partition-coverage.json
+            server/.ci/nextest-archive/plan.json
           if-no-files-found: error
           include-hidden-files: true
   nixTest:

@@ -215,9 +215,19 @@ schema.#Project & {
 			}
 			tasks: [
 				_t.nixXmppUnitTests,
-				_t.nixXmppServerTests,
 				_t.nixXmppXepIntegration,
 			]
+		}
+		xmppServerCompliance: {
+			// The measured source compile is 4m13 on Namespace versus
+			// 12m47 on GitHub's standard runner. Keep this heavy lane here.
+			mode: "expanded"
+			when: ci.pipelines.xmppCompliance.when
+			provider: github: {
+				runner:      "namespace-profile-linux-x86"
+				permissions: ci.pipelines.xmppCompliance.provider.github.permissions
+			}
+			tasks: [_t.nixXmppServerTests]
 		}
 	}
 
@@ -369,15 +379,22 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 				set -euo pipefail
-				archive="$(nix build --print-build-logs --print-out-paths --no-link ../#waddle-server-test-archive)"
-				bash scripts/nextest-archive-transfer.sh export "$archive" .ci/nextest-archive
+				archive="$(bash scripts/build-nextest-archive.sh)"
+				mkdir -p .ci/nextest-archive
+				for partition in 1 2 3 4; do
+				  output="$(nix eval --raw "../#waddle-server-test-archive.shard${partition}.outPath")"
+				  bash scripts/nextest-archive-transfer.sh export "$output" ".ci/nextest-archive/shard-${partition}" "$partition"
+				done
 				cp "$archive/ci-performance/cargo-timing.html" .ci/nextest-archive/cargo-timing.html
 				cp "$archive/partition-coverage.json" .ci/nextest-archive/partition-coverage.json
+				cp "$archive/plan.json" .ci/nextest-archive/plan.json
 				"""#]
 			// Keep the former combined PR workflow's full trigger coverage.
 			inputs: list.Concat([
 				_nixInputs,
-				["scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py",
+				["scripts/build-nextest-archive.sh", "scripts/test_build_nextest_archive.py",
+					"scripts/plan_nextest_binary_shards.py", "scripts/test_plan_nextest_binary_shards.py",
+					"scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py",
 					"scripts/test_nextest_archive_transfer.py", "scripts/test_check_nextest_shards.py",
 					"../scripts/ci-timings.py", "../tests/ci-timings-test.py"],
 				tasks.checkCiDrift.inputs,
@@ -393,8 +410,8 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				expected="$(nix eval --raw ../#waddle-server-test-archive.shard1.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 1
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-1
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
@@ -406,8 +423,8 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				expected="$(nix eval --raw ../#waddle-server-test-archive.shard2.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 2
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-2
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
@@ -419,8 +436,8 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				expected="$(nix eval --raw ../#waddle-server-test-archive.shard3.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 3
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-3
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
@@ -432,8 +449,8 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
-				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				expected="$(nix eval --raw ../#waddle-server-test-archive.shard4.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder 4
 				nix build --print-build-logs --no-link ../#waddle-server-test-shard-4
 				"""#]
 			inputs: tasks.nixTestArchive.inputs
@@ -1177,7 +1194,8 @@ schema.#Project & {
 		nixXmppUnitTests: schema.#Task & {
 			command: "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-unit-tests"]
-			inputs: _nixInputs
+			// Preserve the former combined compliance workflow's triggers.
+			inputs: list.Concat([_nixInputs, _chartInputs])
 		}
 
 		nixXmppServerTests: schema.#Task & {
@@ -1189,7 +1207,7 @@ schema.#Project & {
 		nixXmppXepIntegration: schema.#Task & {
 			command: "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-xep-integration"]
-			inputs: _nixInputs
+			inputs: list.Concat([_nixInputs, _chartInputs])
 		}
 
 		xmppUnitTests: _nextestTask & {

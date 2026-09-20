@@ -139,16 +139,24 @@ setup took 516 seconds, with an 11.3 GiB largest-process RSS.
 Observed Namespace overlap reached 64 vCPU;
 that supports resource contention as a cause, but does not establish the account's
 configured quota. The compiler now starts directly, at higher scheduling priority.
-PR validation, root synchronization and XMPP conformance use GitHub runners;
-four test workers use the existing
+PR validation, root synchronization and the smaller XMPP lanes use GitHub runners;
+the heavy XMPP server lane and four test workers use the existing
 8 CPU / 16 GB profile. The new compiler's memory guard requires at least 56 GiB
 available on a nominal 64 GB worker. The ordinary Nix check remains at one Cargo
 job for smaller machines.
 
-The replacement test path compiles once, proves that four nextest partitions
-cover the original inventory without overlap, and transfers the exact Nix archive
-output as a GitHub artifact. Its explicit runtime-library references remain in the
-Nix closure. Each worker verifies the expected store path, imports the archive,
+The replacement test path compiles once and assigns most whole test binaries to
+four groups balanced by executable size. The server library and cluster end-to-end
+binary are included in every archive so their slow, database-serialized tests can
+still be partitioned across four independent databases. Each worker runs its
+unique binaries, then its count partition of the two shared binaries, reusing one
+extraction. Inventory checks prove the selected tests cover the original inventory
+without overlap; binary overlap is allowed only for those two explicit IDs.
+Native nextest binary filters create
+four separate archives without rebuilding. Each archive is a separate output
+of the same Nix derivation and a separate raw GitHub artifact; a worker downloads
+only its own output. Explicit runtime-library references remain in each output's
+Nix closure. Each worker verifies the expected store path, imports its archive,
 checks its partition's inventory, and runs with its own PostgreSQL instance and
 unchanged nextest scheduling restrictions. Runtime fixture and executable paths
 replace embedded builder paths in tests. Doctests and the distinct XMPP feature
@@ -158,7 +166,7 @@ The Rust workflow is generated directly from `ci/rust-tests/workflow.cue`, which
 imports the task commands from `server/env.cue` and the shared Nix/cache setup.
 cuenv 0.55.0's matrix generation neither preserves ordinary dependencies nor
 exposes artifact compression, and its task wrapper loads the complete development
-shell. The focused generator runs the same Nix tasks directly, uploads the large NAR directly without an additional ZIP layer, and retains
+shell. The focused generator runs the same Nix tasks directly, uploads the shard NARs without an additional ZIP layer, and retains
 every previous path trigger. The metadata travels separately; workers verify the
 NAR checksum and expected output before importing it.
 Run `bash scripts/sync-rust-tests.sh` after changing those inputs; `checkCiDrift`
@@ -183,7 +191,7 @@ missing receipts if it recurs on the 8-CPU workers.
 
 Validation-only Nix checks no longer export Cargo target directories. Their
 commands and dependency artifacts are unchanged; release, WASM, archive and shard
-outputs retain their exact store identities. In the changed-source trial, the
+outputs keep their required contents. In the changed-source trial, the
 XMPP server check passed all 4102 tests but then uploaded 3.3 GiB and spent 81 seconds
 in Hestia/FlakeHub post-job cache work. These target exports have no downstream
 consumer. Removing them preserves cached check results while avoiding that
@@ -206,20 +214,20 @@ start. That trial misses the target; the remaining work must reduce scheduling,
 archive size/transfer and execution overhead, not count a cache hit as a solution.
 
 One worker in that trial reported a successful artifact download but received an
-incomplete file set; the other downloads stalled. This matches the open upstream
+incomplete file set; the other downloads took about ten minutes but eventually
+completed. This matches the open upstream
 [download-artifact ZIP failure](https://github.com/actions/download-artifact/issues/454).
 The next trial uses the supported raw-file artifact mode with explicit SHA-256
 verification. No test retries or assertions were weakened.
 
-The next archive trial also measures lossless long-range Zstandard compression
-with a 128 MiB window, retaining the smaller of the original and recompressed
-archives. Repeated code across statically linked test binaries may benefit from
-that window; this is a hypothesis until the live byte/time comparison is available.
-The tar contents, symbols, line tables, feature selection and test identities are
-unchanged. A larger 512 MiB window was rejected because pinned nextest cannot
-decode it without a different extraction path.
+The archive trial measured lossless long-range Zstandard compression with a
+128 MiB window. Recompression took 67.62 seconds to reduce 7,260,878,677 bytes
+to 6,528,387,293 bytes, only 10.1%. Remove this extra pass: its observed cost
+exceeds the expected transfer saving at the measured upload rates. Keep
+nextest's native archive compression. A larger 512 MiB window was rejected
+because pinned nextest cannot decode it without a different extraction path.
 
-At David's suggestion, the next compiler experiment compares the pinned Nix
+At David's suggestion, the compiler experiment compares the pinned Nix
 `mold` 2.42.0 package against bundled LLD. A workspace-only rustc wrapper explicitly
 selects Nix-wrapped mold and participates in Cargo fingerprints, retaining cached
 third-party dependencies. Every archived ELF must identify the pinned mold
@@ -228,3 +236,78 @@ the full changed-source compile
 phase, the unchanged test inventories and all passing workers. Published linker
 benchmarks are motivation, not Waddle measurements. The experiment keeps release
 packaging and its separate validation intact.
+
+The [mold producer](https://github.com/waddle-social/waddle/actions/runs/35504814800/job/106062722062)
+compiled in 478.3 seconds versus the previous LLD trial's 512 seconds, about 7%
+faster. This is one comparison, not a sustained performance claim. Cargo reports
+1,134 fresh dependency units and 225 compiled units; the archive contains the
+same 213 test binaries, 10,621 selected tests and one ignored test. All archived
+ELF executables identify mold. Raw NAR upload took 44 seconds versus the earlier
+ZIP upload's 249 seconds. The builder still took 14m21 after starting, plus its
+6m20 queue wait; the complete workflow remains above target.
+
+Cargo's timing report identifies the server library test binary at 352 seconds
+and the ordinary server library at 231 seconds, including 165 seconds of code
+generation. The next experiment applies named, archive-only `opt-level=0`
+overrides to `waddle-server` and `waddle-xmpp`; third-party dependency settings,
+release profiles, line tables and test selection remain unchanged. Acceptance
+still requires complete passing tests and measured end-to-end latency.
+
+Three workers in that first archive trial subsequently passed: shard 2 ran 2,684
+tests in 91 seconds, shard 3 ran 2,630 in 135 seconds, and shard 4 ran 2,573 in
+154 seconds. Extraction took 49–56 seconds. Shard 1 did not execute because its
+download was incomplete, so this remains a failed run with incomplete coverage.
+See [shard 2](https://github.com/waddle-social/waddle/actions/runs/35502717093/job/106059873574),
+[shard 3](https://github.com/waddle-social/waddle/actions/runs/35502717093/job/106059873481),
+and [shard 4](https://github.com/waddle-social/waddle/actions/runs/35502717093/job/106059873478).
+
+The next run, at `536c6784`, again waited 6m20 for the archive builder. Move
+chat's PR job to GitHub's Ubuntu runner to release another shared Namespace
+slot; its main deployment runner stays unchanged. The account's actual
+concurrency entitlement has not been verified, so this is a measured queue
+reduction experiment rather than a guaranteed capacity fix.
+
+That run also exposed a missing system CA bundle in the GitHub runner's Nix
+test sandbox. The exact Rust certificate loader found zero roots without an
+explicit bundle and 121 roots with the pinned `cacert` bundle. Set
+`SSL_CERT_FILE` in the shared test environment, including shard and XMPP jobs;
+certificate verification stays enabled and dependency-cache identities are
+unchanged. Full CI validation of this correction is pending.
+
+Keep the archive out of the duplicate binary-cache upload: its first upload
+took another 57 seconds for 7.1 GiB after the Actions artifact had already been
+published. A command-scoped post-build hook filters only the exact archive
+output and delegates all dependency outputs to the existing hook. Four focused
+tests and a real Nix dependency/archive build verify this behavior. Cache
+restores, dependency uploads and global Nix configuration remain in place.
+This filters Hestia only: FlakeHub independently watches Nix store events and
+has no supported per-path exclusion in the pinned version. In the mold trial,
+Hestia took 87.7 seconds and the following FlakeHub drain waited another 52
+seconds for the archive. Removing one duplicate upload reduces cache pressure;
+the subsequent trial must measure how much critical-path time it actually saves.
+
+The shared 6.54 GB archive still took 9m31–9m43 to download in three raw-transfer
+workers; eliminating ZIP improved upload time but did not fix download latency.
+All four workers ultimately passed all 10,621 selected tests, but the workflow
+completed at 11:04:58 after starting at 10:20:57: 44m01, above target.
+
+The next revision emits four filtered archives instead of sending the entire
+archive to every worker. Pure whole-binary partitioning was rejected before CI:
+observed server-library PostgreSQL-group tests account for about 391 seconds of
+serialized execution, and cluster end-to-end tests another 177 seconds of
+whole-machine reservations. Keeping each on only one worker would undo test
+parallelism. Share those two binaries and partition their tests, while placing
+the remaining binaries uniquely by size. Actual test duration and transfer
+balance must be measured in CI. Coverage checks include ignored and zero-test binaries, not just the count
+of selected tests. The transfer manifest binds each uniquely named shard payload
+to its exact Nix output before any import.
+
+The GitHub-hosted XMPP server lane regressed from 4m13 compilation to 12m47,
+after another 5m25 of input restoration. Return that lane to Namespace in a
+separate CUE-generated pipeline; unit and XEP lanes stay on GitHub. Trial CodeQL
+with 8 CPU / 16 GB, eight threads and 14,336 MB instead of the successful
+16 CPU / 32 GB configuration. Together with moving chat's PR lane, the known
+simultaneous Namespace allocation becomes 64 CPU / 128 GB. Account limits remain
+unverified. CodeQL's original GitHub-hosted four-thread scan used approximately
+14.6 GB, but its new eight-thread completion time is still an experiment and must
+fit the full 15-minute gate without changing query coverage.

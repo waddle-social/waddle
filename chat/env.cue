@@ -94,6 +94,9 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
+			// Keep the shared Namespace pool available for Rust compilation
+			// and Android jobs that require the larger runner profiles.
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				contents:   "read"
 				"id-token": "write"

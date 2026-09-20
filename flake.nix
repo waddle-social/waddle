@@ -68,8 +68,18 @@
           # jobs so nextest's whole-machine reservations remain meaningful.
           serverTestArchive = self.checks.${system}.waddle-server-test.overrideAttrs (old: {
             pname = "waddle-server-test-archive";
+            outputs = [
+              "out"
+              "shard1"
+              "shard2"
+              "shard3"
+              "shard4"
+            ];
             CARGO_BUILD_JOBS = "4";
             doInstallCargoArtifacts = false;
+            # Metadata lives in out; it contains no runtime libraries. Avoid
+            # stdenv adding out/lib to every shard's executable RPATH.
+            NIX_NO_SELF_RPATH = "1";
             # Compilation and test listing do not require a live database.
             preCheck = "";
             nativeBuildInputs = lib.filter (input: input != pkgs.postgresql_17) old.nativeBuildInputs;
@@ -83,7 +93,13 @@
                 echo "WADDLE_CI_METRIC phase=compile linker=mold version=${pkgs.mold.version}"
               ''}
               mkdir -p "$out/ci-performance"
-              nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests)
+              # Keep third-party dependencies and production profiles unchanged.
+              # Cargo tracks these overrides explicitly for the two largest
+              # workspace crates; every build/list/archive call shares them.
+              nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests
+                --config profile.ci-test.package.waddle-server.opt-level=0
+                --config profile.ci-test.package.waddle-xmpp.opt-level=0)
+              echo "WADDLE_CI_METRIC phase=compile waddle_server_opt_level=0 waddle_xmpp_opt_level=0 dependency_profile_unchanged=true"
               ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   cargo nextest run "''${nextest_args[@]}" --no-run --timings
                 # This is the visible cgroup's lifetime peak, which can
@@ -98,60 +114,70 @@
                 fi
               cp "''${CARGO_TARGET_DIR:-target}/cargo-timings/cargo-timing.html" "$out/ci-performance/cargo-timing.html"
               cargo nextest list "''${nextest_args[@]}" --message-format json > "$out/test-inventory.json"
+              ${pkgs.python3}/bin/python3 ${./server/scripts/plan_nextest_binary_shards.py} \
+                "$out/test-inventory.json" "$out" --count 4 \
+                --shared-binary waddle-server --shared-binary waddle-server::clustering_cluster_e2e
+              archive_outputs=("$shard1" "$shard2" "$shard3" "$shard4")
+              coverage_inventories=()
+              set -o pipefail
               for partition in 1 2 3 4; do
-                cargo nextest list "''${nextest_args[@]}" --partition "count:$partition/4" \
+                archive_output="''${archive_outputs[$((partition - 1))]}"
+                mkdir -p "$archive_output"
+                filter=$(cat "$out/partition-$partition.filter")
+                cargo nextest list "''${nextest_args[@]}" -E "$filter" \
                   --message-format json > "$out/partition-$partition.json"
+                cp "$out/partition-$partition.whole.filter" "$archive_output/whole.filter"
+                cp "$out/shared.filter" "$archive_output/shared.filter"
+                cargo nextest list "''${nextest_args[@]}" -E "$(cat "$archive_output/whole.filter")" \
+                  --message-format json > "$out/whole-$partition.json"
+                cargo nextest list "''${nextest_args[@]}" -E "$(cat "$archive_output/shared.filter")" \
+                  --partition "count:$partition/4" --message-format json > "$out/shared-$partition.json"
+                cp "$out/whole-$partition.json" "$archive_output/whole-inventory.json"
+                cp "$out/shared-$partition.json" "$archive_output/shared-inventory.json"
+                coverage_inventories+=("$out/whole-$partition.json" "$out/shared-$partition.json")
+                ${pkgs.time}/bin/time -f "WADDLE_CI_METRIC phase=archive shard=$partition elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x" \
+                  cargo nextest archive "''${nextest_args[@]}" -E "$filter" \
+                    --archive-format tar-zst --archive-file "$archive_output/archive.tar.zst"
+                # Mirror nextest's native binary filtering when retaining Nix
+                # runtime roots: selected test binaries and their packages'
+                # executable helpers. Compressed ELFs hide these references.
+                ${pkgs.jq}/bin/jq -r --arg target "''${CARGO_TARGET_DIR:-target}" '
+                  . as $inventory |
+                  [.["rust-suites"][] | select(.status == "listed")] as $suites |
+                  ($suites[] | .["binary-path"]),
+                  ($suites | map(.["package-id"]) | unique[] as $package |
+                    $inventory["rust-build-meta"]["non-test-binaries"][$package][]? |
+                    select(.kind == "bin-exe") | $target + "/" + .path)
+                ' "$out/partition-$partition.json" | sort -u | while IFS= read -r binary; do
+                  # Read headers and linker identity without loading whole ELFs.
+                  binary_metadata=$(${pkgs.binutils}/bin/readelf --wide --program-headers --dynamic --string-dump=.comment "$binary")
+                  ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                    if ! grep -Eq '] +mold ${lib.escapeRegex pkgs.mold.version}( |$)' <<< "$binary_metadata"; then
+                      echo "Expected mold ${pkgs.mold.version} in archived binary: $binary" >&2
+                      exit 1
+                    fi
+                    echo "WADDLE_CI_METRIC phase=linker_verified linker=mold shard=$partition binary=$binary" >&2
+                  ''}
+                  printf '%s\n' "$binary_metadata" |
+                    awk '/Requesting program interpreter:/ || /\((RPATH|RUNPATH)\)/ {
+                      sub(/\][[:space:]]*$/, "")
+                      print
+                    }'
+                done | grep -Eo '/nix/store/[a-z0-9]{32}-[^/:[:space:]]+' | sort -u > "$archive_output/runtime-references"
+                wc -c "$archive_output/archive.tar.zst"
               done
               ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} \
-                "$out/test-inventory.json" "$out/partition-1.json" "$out/partition-2.json" \
-                "$out/partition-3.json" "$out/partition-4.json" > "$out/partition-coverage.json"
-              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=archive elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                cargo nextest archive "''${nextest_args[@]}" --archive-format tar-zst --archive-file "$out/archive.tar.zst"
-              # Repeated static code spans test binaries. Recompress the exact
-              # tar stream with a 128 MiB window, within nextest's decoder
-              # limit, and four workers. Keep the original if it is smaller.
-              archive_original_bytes=$(stat -c %s "$out/archive.tar.zst")
-              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=archive_recompress elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                ${pkgs.bash}/bin/bash -euo pipefail -c '
-                  ${pkgs.zstd}/bin/zstd -dc "$1" | ${pkgs.zstd}/bin/zstd -T4 -3 --long=27 -o "$2"
-                ' _ "$out/archive.tar.zst" "$out/archive-repacked.tar.zst"
-              archive_repacked_bytes=$(stat -c %s "$out/archive-repacked.tar.zst")
-              echo "WADDLE_CI_METRIC phase=archive_recompress original_bytes=$archive_original_bytes repacked_bytes=$archive_repacked_bytes"
-              if [ "$archive_repacked_bytes" -lt "$archive_original_bytes" ]; then
-                mv "$out/archive-repacked.tar.zst" "$out/archive.tar.zst"
-              else
-                rm "$out/archive-repacked.tar.zst"
-              fi
-              # Compressed binaries hide their store references from Nix's
-              # scanner. Keep each interpreter/RPATH store root explicitly
-              # so an output-only NAR transfer can restore its runtime libs.
-              set -o pipefail
-              ${pkgs.jq}/bin/jq -r --arg target "''${CARGO_TARGET_DIR:-target}" '
-                .["rust-suites"][]["binary-path"],
-                (.["rust-build-meta"]["non-test-binaries"][][] | select(.kind == "bin-exe") | $target + "/" + .path)
-              ' "$out/test-inventory.json" | sort -u | while IFS= read -r binary; do
-                # Read ELF headers once instead of loading each large binary
-                # twice. Limit matches to interpreter and runtime search paths.
-                binary_metadata=$(${pkgs.binutils}/bin/readelf --wide --program-headers --dynamic --string-dump=.comment "$binary")
-                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                  if ! grep -Eq '] +mold ${lib.escapeRegex pkgs.mold.version}( |$)' <<< "$binary_metadata"; then
-                    echo "Expected mold ${pkgs.mold.version} in archived binary: $binary" >&2
-                    exit 1
-                  fi
-                  echo "WADDLE_CI_METRIC phase=linker_verified linker=mold binary=$binary" >&2
-                ''}
-                printf '%s\n' "$binary_metadata" |
-                  awk '/Requesting program interpreter:/ || /\((RPATH|RUNPATH)\)/ {
-                    sub(/\][[:space:]]*$/, "")
-                    print
-                  }'
-              done | grep -Eo '/nix/store/[a-z0-9]{32}-[^/:[:space:]]+' | sort -u > "$out/runtime-references"
-              wc -c "$out/archive.tar.zst"
+                "$out/test-inventory.json" "''${coverage_inventories[@]}" --count 8 \
+                --shared-binary waddle-server --shared-binary waddle-server::clustering_cluster_e2e \
+                > "$out/partition-coverage.json"
               runHook postCheck
             '';
           });
           mkServerTestShard =
             partition:
+            let
+              archiveOutput = serverTestArchive.${"shard${toString partition}"};
+            in
             self.checks.${system}.waddle-server-test.overrideAttrs (_: {
               pname = "waddle-server-test-shard-${toString partition}";
               cargoArtifacts = null;
@@ -161,24 +187,34 @@
               checkPhase = ''
                 runHook preCheck
                 mkdir -p "$out"
-                partition="count:${toString partition}/4"
                 extracted="$TMPDIR/nextest-archive"
                 mkdir -p "$extracted"
+                whole_filter=$(cat ${archiveOutput}/whole.filter)
+                shared_filter=$(cat ${archiveOutput}/shared.filter)
                 # Nextest sets runtime manifest/binary paths after remapping.
                 # Nix uses different temporary source roots on each worker.
-                cargo nextest list --profile ci --archive-file ${serverTestArchive}/archive.tar.zst \
+                cargo nextest list --profile ci --archive-file ${archiveOutput}/archive.tar.zst \
                   --extract-to "$extracted" --workspace-remap "$PWD" \
-                  --partition "$partition" --message-format json > "$out/test-inventory.json"
+                  -E "$whole_filter" --message-format json > "$out/whole-inventory.json"
                 ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
-                  ${serverTestArchive}/partition-${toString partition}.json "$out/test-inventory.json" \
-                  > "$out/partition-coverage.json"
-                # Reuse the extracted metadata to avoid decompressing twice.
-                ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  cargo nextest run --profile ci \
-                    --cargo-metadata "$extracted/target/nextest/cargo-metadata.json" \
-                    --binaries-metadata "$extracted/target/nextest/binaries-metadata.json" \
-                    --target-dir-remap "$extracted/target" --build-dir-remap "$extracted/target" \
-                    --workspace-remap "$PWD" --partition "$partition"
+                  ${archiveOutput}/whole-inventory.json "$out/whole-inventory.json" \
+                  > "$out/whole-coverage.json"
+                # Both phases reuse one extraction. The two slow binaries are
+                # shared across workers, with disjoint per-test partitions.
+                reused_args=(--profile ci
+                  --cargo-metadata "$extracted/target/nextest/cargo-metadata.json"
+                  --binaries-metadata "$extracted/target/nextest/binaries-metadata.json"
+                  --target-dir-remap "$extracted/target" --build-dir-remap "$extracted/target"
+                  --workspace-remap "$PWD")
+                cargo nextest list "''${reused_args[@]}" -E "$shared_filter" \
+                  --partition "count:${toString partition}/4" --message-format json > "$out/shared-inventory.json"
+                ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
+                  ${archiveOutput}/shared-inventory.json "$out/shared-inventory.json" \
+                  > "$out/shared-coverage.json"
+                ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                  cargo nextest run "''${reused_args[@]}" -E "$whole_filter"
+                ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                  cargo nextest run "''${reused_args[@]}" -E "$shared_filter" --partition "count:${toString partition}/4"
                 runHook postCheck
               '';
             });
@@ -375,6 +411,9 @@
             '';
           };
           testRuntimeEnv = {
+            # reqwest's platform verifier needs explicit trust roots inside
+            # the Nix sandbox, including tests that only construct a client.
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             WADDLE_CERTS_EPHEMERAL = "true";
             WADDLE_TEST_FIXED_ACCOUNT_ENABLED = "true";
             WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";

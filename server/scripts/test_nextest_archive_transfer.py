@@ -9,7 +9,7 @@ import unittest
 SCRIPT = Path(__file__).with_name("nextest-archive-transfer.sh")
 EXPECTED = "/nix/store/00000000000000000000000000000000-test-archive"
 REFERENCE = "/nix/store/11111111111111111111111111111111-runtime"
-PAYLOAD_FILES = ("archive-path", "archive-references", "archive.nar")
+PAYLOAD_FILES = ("archive-path", "archive-references", "archive-1.nar")
 
 
 class ArchiveTransferTests(unittest.TestCase):
@@ -26,19 +26,20 @@ class ArchiveTransferTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", NIX_CALL_LOG=str(self.log))
         (self.root / "archive-path").write_text(EXPECTED + "\n")
         (self.root / "archive-references").write_text("")
-        (self.root / "archive.nar").write_bytes(b"complete producer NAR payload")
+        (self.root / "archive-1.nar").write_bytes(b"complete producer NAR payload")
         self.write_checksums()
 
-    def write_checksums(self):
+    def write_checksums(self, partition="1"):
+        payload_files = ("archive-path", "archive-references", f"archive-{partition}.nar")
         manifest = "".join(
             f"{hashlib.sha256((self.root / name).read_bytes()).hexdigest()}  {name}\n"
-            for name in PAYLOAD_FILES
+            for name in payload_files
         )
         (self.root / "archive-checksums").write_text(manifest)
 
-    def run_import(self):
+    def run_import(self, partition="1"):
         return subprocess.run(
-            ["bash", str(SCRIPT), "import", EXPECTED, str(self.root)],
+            ["bash", str(SCRIPT), "import", EXPECTED, str(self.root), partition],
             env=self.env, capture_output=True, text=True,
         )
 
@@ -50,6 +51,21 @@ class ArchiveTransferTests(unittest.TestCase):
     def test_empty_reference_file_is_valid(self):
         self.assertEqual(self.run_import().returncode, 42)
         self.assertEqual(self.log.read_text(), "--import\n")
+
+    def test_selected_shard_requires_its_own_payload_and_manifest(self):
+        self.assertNotEqual(self.run_import("2").returncode, 0)
+        self.assertFalse(self.log.exists())
+        (self.root / "archive-1.nar").rename(self.root / "archive-2.nar")
+        self.assertNotEqual(self.run_import("2").returncode, 0)
+        self.assertFalse(self.log.exists())
+        self.write_checksums("2")
+        self.assertEqual(self.run_import("2").returncode, 42)
+
+    def test_invalid_partition_is_rejected_before_nix(self):
+        for partition in ("0", "5", "../archive", "1\n2"):
+            with self.subTest(partition=partition):
+                self.assertNotEqual(self.run_import(partition).returncode, 0)
+                self.assertFalse(self.log.exists())
 
     def test_runtime_references_are_substituted_without_building(self):
         (self.root / "archive-references").write_text(REFERENCE + "\n")
