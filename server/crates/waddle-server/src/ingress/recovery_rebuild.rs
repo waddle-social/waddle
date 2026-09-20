@@ -45,6 +45,10 @@ pub(super) struct RecoveryInput<'a> {
     pub unreceipted: &'a [IngressEffectIntent],
     pub route_progress: Vec<RouteProgress>,
     pub host_owned_resources: Vec<jid::FullJid>,
+    /// Occupants whose frozen copy maintenance already settled because they
+    /// are no longer in the room (XEP-0045 §7.14). No rebuilt effect may queue
+    /// another copy for them.
+    pub departed_occupants: Vec<jid::FullJid>,
     pub blocked_recipients: &'a [jid::BareJid],
 }
 pub(super) struct RebuiltRecovery {

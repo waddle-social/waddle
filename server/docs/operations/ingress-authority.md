@@ -153,6 +153,7 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
 | `ingress.maintenance.recovered_obligations` | `ingress_maintenance_recovered_obligations_total` | Recovery progress |
 | `ingress.maintenance.unrecoverable_obligations{kind,reason}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported evaluations and stalled recovery classifications; read alongside `IngressNonTerminalBacklog` |
+| `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | XEP-0045 ghost-occupant evictions; not zero-registered, so read it as "did this ever tick" |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind,phase}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` considers only `phase="live"`; `maintenance_recovery`, `maintenance_terminalization`, and `stream_retirement` remain available for inspection |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
@@ -893,6 +894,15 @@ unattempted.
 appeared on a row between the scan and the end of its attempt, so a row
 deadline cancelling an attempt mid-way cannot lose credit; a concurrent client
 retransmission settling the same row is attributed to recovery as well.
+`ingress.maintenance.departed_occupant_copies` counts frozen `route_muc`
+occupant copies recovery settled because the room's authoritative local actor
+no longer lists the occupant (XEP-0045 "Ghost Users" / §7.14: a non-occupant is
+owed no groupchat message). Eviction is fail-closed — no room registry, no
+local room actor, an unanswered probe, or (with clustering and a durable MUC
+store) a local incarnation that has lost its claim fence all leave the copy
+owed — so a persistent `route_muc` backlog with this counter flat means the
+rooms are not resolvable on the recovering node, not that the occupants are
+still seated.
 The existing manual repair procedure below remains for unrecoverable families,
 with its explicit reviewed manifest and abandonment semantics.
 

@@ -51,6 +51,17 @@ replay_case!(
 );
 
 #[tokio::test]
+async fn xep0045_ingress_occupant_progress_departed_occupant_sqlite() {
+    muc_progress_support::departed_occupant_maintenance(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn xep0045_ingress_occupant_progress_departed_occupant_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("xep0045_muc_departed").await {
+        muc_progress_support::departed_occupant_maintenance(fixture).await;
+    }
+}
+
+#[tokio::test]
 async fn xep0045_ingress_occupant_progress_maintenance_sqlite() {
     muc_progress_support::maintenance(IngressFixture::sqlite().await).await;
 }

@@ -560,6 +560,21 @@ pub fn increment_ingress_maintenance_recovered_obligations(count: u64) {
     );
 }
 
+/// Frozen MUC occupant copies maintenance settled because XEP-0045 no longer
+/// owes them to the occupant.
+///
+/// Not zero-registered — see [`register_reliability_counters`]: a healthy pod
+/// never has to evict a ghost occupant, so its alert reads "did this ever
+/// tick" rather than `> N`.
+pub fn add_ingress_maintenance_departed_occupant_copies(count: u64) {
+    crate::counter_add!(
+        "ingress.maintenance.departed_occupant_copies",
+        "{copy}",
+        "Frozen MUC occupant copies settled by maintenance because the occupant is no longer in the room.",
+        count,
+    );
+}
+
 pub fn increment_ingress_maintenance_unrecoverable_obligations(
     count: u64,
     kind: IngressEffectKind,

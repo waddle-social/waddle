@@ -122,6 +122,7 @@ async fn host_owned_progress(fixture: IngressFixture) {
             unreceipted: std::slice::from_ref(intent),
             route_progress: first.route_progress.clone(),
             host_owned_resources: vec![bot.clone()],
+            departed_occupants: vec![],
             blocked_recipients: &[],
         })
         .expect("rebuild host-owned route");

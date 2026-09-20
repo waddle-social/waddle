@@ -103,7 +103,8 @@ pub(super) async fn execute(
             completion = SettledCompletion::Uncertain;
         }
         if accepted(outcome) {
-            match record_resource(uow, key, progress, resource).await {
+            match record_delivery_progress(uow, key, progress, std::slice::from_ref(resource)).await
+            {
                 Ok(settled) => {
                     if !settled.is_empty() {
                         persisted = settled;
@@ -212,11 +213,15 @@ async fn append_resource(
     ResourceDelivery { outcome, certainty }
 }
 
-async fn record_resource(
+/// Commit one obligation's newly discharged resources and, once the frozen
+/// fanout is complete, its aggregate receipt — atomically, under the canonical
+/// lock. Shared by live delivery (one appended resource) and by maintenance
+/// recovery settling copies the room no longer owes.
+pub(in crate::ingress) async fn record_delivery_progress(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     progress: &RouteProgress,
-    resource: &FullJid,
+    resources: &[FullJid],
 ) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
     let mut tx = uow
         .begin_with_timeouts(
@@ -227,13 +232,7 @@ async fn record_resource(
     if !CanonicalMessageRepository::lock(&mut tx, key).await? {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
-    DeliveryProgressRepository::record(
-        &mut tx,
-        key,
-        &progress.receipt,
-        std::slice::from_ref(resource),
-    )
-    .await?;
+    DeliveryProgressRepository::record(&mut tx, key, &progress.receipt, resources).await?;
     #[cfg(test)]
     if FAIL_DELIVERY_PROGRESS_TX
         .try_with(|fail| *fail)

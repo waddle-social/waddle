@@ -23,6 +23,7 @@ pub use principal::{ExtensionPrincipal, IngressPrincipal};
 pub(crate) mod maintenance;
 mod receipts;
 mod recovery;
+mod recovery_departed;
 mod recovery_environment;
 mod recovery_executor;
 mod recovery_rebuild;

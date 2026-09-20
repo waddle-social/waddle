@@ -1,21 +1,26 @@
 //! Public Phase B/C wire regressions; real planner coverage lives in muc_occupant_progress_tests.
 use crate::{detached_progress_support as detached, ingress_support::IngressFixture};
 use jid::{BareJid, FullJid};
+use kameo::actor::Spawn;
 use std::{sync::Arc, time::Duration};
 use waddle_server::ingress::{
     commit::commit_submission,
     effects::{delivery::ExternalDeliveryEffect, Effect},
     ExternalEffect, IngressSubmission, PlanSuppressionPolicy, PlannedEffect, RecoveryEnvironment,
 };
-use waddle_xmpp::xep::xep0421::{self, OccupantId};
+use waddle_xmpp::xep::xep0421::{self, OccupantId, OccupantIdSecret};
 use waddle_xmpp::{
     ingress::{
         DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
         NormalizedTarget, StoredMessagePayload,
     },
+    muc::{
+        room_actor::Join,
+        room_registry_actor::{CreateRoom, RoomRegistryActor},
+    },
     registry::ConnectionRegistry,
     stream_management::InMemorySmSessionRegistry,
-    Stanza,
+    Affiliation, Role, Stanza,
 };
 use waddle_xmpp_core::xep0359::{add_stanza_id, extract_stanza_ids, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -416,6 +421,110 @@ impl RecoveryEnvironment for Environment {
     }
 }
 
+/// Recovery that can consult the room roster, so XEP-0045 ghost occupants are
+/// distinguishable from occupants whose copy is merely undeliverable.
+struct RoomEnvironment {
+    connections: ConnectionRegistry,
+    sm: Arc<InMemorySmSessionRegistry>,
+    rooms: kameo::actor::ActorRef<RoomRegistryActor>,
+}
+impl RecoveryEnvironment for RoomEnvironment {
+    fn recovery_deps(&self) -> waddle_server::ingress::Deps<'_> {
+        let mut deps = waddle_server::ingress::Deps::new(&self.connections, "example.com");
+        deps.sm_session_registry = Some(&self.sm);
+        deps.room_registry = Some(&self.rooms);
+        deps
+    }
+}
+
+/// XEP-0045 "Ghost Users" / §7.14: an entity that is no longer an occupant is
+/// owed no groupchat copy, so its frozen obligation must settle rather than
+/// hold the canonical message non-terminal forever.
+pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
+    let sm = detached::registry(&fixture).await;
+    let [a, b, _] = detached::resources();
+    let submission = make_submission(&fixture, false);
+    detached::attach(&sm, &a).await;
+    detached::attach(&sm, &submission.sender).await;
+    let first = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("accept");
+    detached::execute(&fixture, &first, &ConnectionRegistry::new(), &sm).await;
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 1);
+    // `b` keeps a resumable session: only room occupancy may settle its copy.
+    detached::attach(&sm, &b).await;
+    let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".into(),
+        OccupantIdSecret::new(vec![b'g'; 32]).expect("occupant-id secret"),
+    ));
+    let actor = rooms
+        .ask(CreateRoom {
+            room_jid: room(),
+            waddle_id: "ghost".into(),
+            channel_id: "ghost".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    for (jid, nick) in [(&a, "alice"), (&submission.sender, "romeo")] {
+        actor
+            .ask(Join {
+                nick: nick.into(),
+                real_jid: jid.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+    let authority = fixture.authority().await;
+    let environment: Arc<dyn RecoveryEnvironment> = Arc::new(RoomEnvironment {
+        connections: ConnectionRegistry::new(),
+        sm: sm.clone(),
+        rooms,
+    });
+    authority.bind_recovery_environment(Arc::downgrade(&environment));
+    age_pending_rows(&fixture).await;
+    authority.trigger_maintenance();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await
+            != 1
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("maintenance settled the departed occupant");
+    assert!(
+        detached::queued(&sm, &b).await.unacked_stanzas.is_empty(),
+        "a non-occupant is owed no groupchat copy"
+    );
+    assert_eq!(detached::queued(&sm, &a).await.unacked_stanzas.len(), 1);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 2);
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
+    drop(environment);
+    drop(authority);
+    drop(sm);
+    fixture.close().await;
+}
+
+async fn age_pending_rows(fixture: &IngressFixture) {
+    let sql = match fixture.db.driver() {
+        waddle_server::db::DatabaseDriver::Postgres => "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE terminal_at IS NULL",
+        waddle_server::db::DatabaseDriver::Sqlite => "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE terminal_at IS NULL",
+    };
+    fixture
+        .execute(
+            sql,
+            waddle_server::db_params![
+                (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()
+            ],
+        )
+        .await;
+}
+
 pub async fn maintenance(fixture: IngressFixture) {
     maintenance_case(fixture, false).await;
 }
@@ -443,18 +552,7 @@ async fn maintenance_case(fixture: IngressFixture, compare_occupant: bool) {
         sm: sm.clone(),
     });
     authority.bind_recovery_environment(Arc::downgrade(&environment));
-    let sql = match fixture.db.driver() {
-        waddle_server::db::DatabaseDriver::Postgres => "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE terminal_at IS NULL",
-        waddle_server::db::DatabaseDriver::Sqlite => "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE terminal_at IS NULL",
-    };
-    fixture
-        .execute(
-            sql,
-            waddle_server::db_params![
-                (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()
-            ],
-        )
-        .await;
+    age_pending_rows(&fixture).await;
     authority.trigger_maintenance();
     tokio::time::timeout(Duration::from_secs(15), async {
         while fixture

@@ -54,11 +54,9 @@ pub(super) fn restore_muc_routes(
         else {
             continue;
         };
-        for occupant in progress
-            .fanout
-            .iter()
-            .filter(|occupant| !progress.completed.contains(occupant))
-        {
+        for occupant in progress.fanout.iter().filter(|occupant| {
+            !progress.completed.contains(occupant) && !input.departed_occupants.contains(occupant)
+        }) {
             let stanza = Box::new(Stanza::Message(room_canonical::occupant_copy_message(
                 source,
                 occupant,

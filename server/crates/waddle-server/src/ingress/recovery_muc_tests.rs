@@ -447,6 +447,9 @@ paired!(
 #[path = "recovery_muc_pin_tests.rs"]
 mod pin;
 
+#[path = "recovery_departed_tests.rs"]
+mod departed;
+
 #[cfg(feature = "clustering")]
 #[path = "recovery_muc_remote_tests.rs"]
 mod remote;

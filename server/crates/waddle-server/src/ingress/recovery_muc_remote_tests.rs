@@ -108,6 +108,7 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         unreceipted: &unreceipted,
         route_progress: vec![progress],
         host_owned_resources: vec![],
+        departed_occupants: vec![],
         blocked_recipients: &[],
     })
     .expect("rebuild remote occupant");
