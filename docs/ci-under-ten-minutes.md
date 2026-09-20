@@ -21,3 +21,18 @@ CUE remains authoritative for generated workflows. No production XMPP wire behav
 The final baseline Rust compile took 176 seconds; the critical shard executed tests for about 197 seconds. Other overhead accounted for about 391 seconds. Independent lanes measured 608 seconds for CodeQL and 493 seconds for Android device tests. XMPP server compliance took 688 seconds on the preceding source-changing trial. Optimizing Rust tests alone cannot deliver a full under-ten-minute result.
 
 Results will be recorded here after implementation and live qualification. No improvement is claimed by this planning commit.
+
+## First implementation trial
+
+The focused trial keeps the existing binary/hash partitions and tests four changes:
+
+- Compile and package once on the 32 CPU / 64 GB builder, then run all four existing Nix shard derivations locally with `--max-jobs 4`. Required Linux sandboxes isolate files, network and IPC; disabled sandbox fallback and remote builders prevent an unisolated execution path. Each shard pins its build shell, PostgreSQL and nextest descendants to eight disjoint allowed CPUs, retaining the previous per-worker concurrency and serialized groups.
+- Package the four native nextest archives concurrently after serial inventory generation and exact union verification. Await every packager and propagate any archive, ELF-reference or checksum failure. Remove cross-runner raw NAR upload/download work from the ordinary test path; keep compact diagnostics and all eight worker inventory comparisons.
+- Apply the already measured workspace-only mold and opt-level-0 settings to default-feature XMPP server tests. Keep the existing dependency artifact, exact feature set, selected tests and fixture hooks. Lower only the ephemeral PostgreSQL fixture's deadlock detection interval from its one-second default to 50 ms. The 200-round race, transaction semantics, lock/statement timeouts and assertions stay unchanged. Baseline logs showed 57 one-second deadlocks immediately preceding a 57.197-second test.
+- Trial eight CPUs with 32 GB RAM for Rust CodeQL, preserving its eight threads and all queries. Expand CodeQL PR events to include stacked PR base branches. More memory is an unproven hypothesis and may cause resource queueing; measure total workflow time before keeping it.
+
+Source narrowing and custom duration-based partitioning are deferred. The former needs feature/fixture parity work; the latter offers only about 29 seconds under ideal balance before other costs. The Rust change in this trial is an explanatory stress-test comment, which invalidates source-derived checks without changing test behavior. This is a controlled source-invalidation trial, not a representative production-code edit.
+
+Local validation: 94 helper tests (including the three native Nix transfer tests), native parent/child CPU-affinity inheritance, four concurrently generated/relocated fixture archives, and injected archive/ELF/checksum failures. Both independent operational/security and coverage reviews must be clean before the trial is pushed. The installed cuenv 0.55 evaluator can exceed its local ten-second timeout; the previously reviewed scratch-only generator with a longer timeout is used for generation parity, and live CI still runs the original pinned binary.
+
+Live timings, complete test identity parity and scanner results are pending. No under-ten-minute result is claimed yet.

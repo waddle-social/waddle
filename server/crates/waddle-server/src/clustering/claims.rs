@@ -5379,6 +5379,9 @@ mod tests {
     // `ClaimError::Backend`, never a panic, and counts how often it
     // happened for the test's own report (not an assertion, since a
     // deadlock is a possible-but-not-guaranteed outcome of any given round).
+    // The Nix PostgreSQL fixture lowers deadlock_timeout so this exercises
+    // the same 200 races without paying the default one-second detection
+    // delay for every cycle; lock and statement timeouts remain unchanged.
     #[tokio::test]
     async fn steal_intent_veto_vs_steal_stress_never_both_succeed_same_round() {
         let _guard = clustering_control_plane_table_lock().lock().await;

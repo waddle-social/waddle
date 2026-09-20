@@ -409,6 +409,8 @@ schema.#Project & {
 			inputs: list.Concat([
 				_nixInputs,
 				["scripts/build-nextest-archive.sh", "scripts/test_build_nextest_archive.py",
+					"scripts/run-nextest-shards.sh", "scripts/test_run_nextest_shards.py",
+					"scripts/pin-nextest-shard.py", "scripts/test_pin_nextest_shard.py",
 					"scripts/plan_nextest_binary_shards.py", "scripts/test_plan_nextest_binary_shards.py",
 					"scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py",
 					"scripts/test_nextest_archive_transfer.py", "scripts/test_check_nextest_shards.py",
@@ -422,74 +424,22 @@ schema.#Project & {
 			hermetic: false
 		}
 
-		nixTestShard1: schema.#Task & {
+		// The immutable archives and four sandboxed shards stay on one
+		// 32-core builder. The runner enforces eight disjoint CPUs per shard.
+		nixTestLocal: schema.#Task & {
 			command: "bash"
-			args: ["-c", #"""
-				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.shard1.outPath)"
-				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
-				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
-				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 1
-				nix build --print-build-logs --no-link ../#waddle-server-test-shard-1
-				"""#]
+			args: ["scripts/run-nextest-shards.sh"]
 			inputs: tasks.nixTestArchive.inputs
-			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
+			outputs: ["server/.ci/nextest-archive"]
 			hermetic: false
 		}
 
-		nixTestShard2: schema.#Task & {
-			command: "bash"
-			args: ["-c", #"""
-				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.shard2.outPath)"
-				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
-				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
-				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 2
-				nix build --print-build-logs --no-link ../#waddle-server-test-shard-2
-				"""#]
-			inputs: tasks.nixTestArchive.inputs
-			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
-			hermetic: false
-		}
-
-		nixTestShard3: schema.#Task & {
-			command: "bash"
-			args: ["-c", #"""
-				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.shard3.outPath)"
-				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
-				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
-				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 3
-				nix build --print-build-logs --no-link ../#waddle-server-test-shard-3
-				"""#]
-			inputs: tasks.nixTestArchive.inputs
-			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
-			hermetic: false
-		}
-
-		nixTestShard4: schema.#Task & {
-			command: "bash"
-			args: ["-c", #"""
-				set -euo pipefail
-				expected="$(nix eval --raw ../#waddle-server-test-archive.shard4.outPath)"
-				transfer_mode="${ARCHIVE_TRANSFER_MODE:-import}"
-				case "$transfer_mode" in import|verify) ;; *) echo "Invalid archive transfer mode" >&2; exit 1 ;; esac
-				bash scripts/nextest-archive-transfer.sh "$transfer_mode" "$expected" .ci/nextest-archive/builder 4
-				nix build --print-build-logs --no-link ../#waddle-server-test-shard-4
-				"""#]
-			inputs: tasks.nixTestArchive.inputs
-			// Cross-job dependencies are declared in ci/rust-tests/workflow.cue.
-			hermetic: false
-		}
-
-		// The archive proves the four partitions cover the entire suite;
-		// each worker checks its actual inventory against that partition.
-		// Keep a stable gate that succeeds only after all four workers pass.
+		// Preserve the complete inventory and stable all-shards success gate.
 		nixTest: schema.#Task & {
 			command: "bash"
 			args: ["-c", "echo 'All four test shards and inventory checks passed.'"]
 			inputs: tasks.nixTestArchive.inputs
-			dependsOn: [tasks.nixTestShard1, tasks.nixTestShard2, tasks.nixTestShard3, tasks.nixTestShard4]
+			dependsOn: [tasks.nixTestLocal]
 		}
 
 		nixDoctest: schema.#Task & {

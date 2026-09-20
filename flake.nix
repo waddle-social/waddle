@@ -29,6 +29,13 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
+      mkTestRustcWrapper =
+        pkgs:
+        pkgs.writeShellScript "waddle-test-archive-rustc" ''
+          # Keep Nix's linker wrapper, including its runtime library paths.
+          export PATH="${pkgs.lib.makeBinPath [ pkgs.mold ]}:$PATH"
+          exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
+        '';
     in
     {
       packages = forAllSystems (
@@ -38,11 +45,7 @@
           lib = pkgs.lib;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          testArchiveRustc = pkgs.writeShellScript "waddle-test-archive-rustc" ''
-            # Keep Nix's linker wrapper, including its runtime library paths.
-            export PATH="${lib.makeBinPath [ pkgs.mold ]}:$PATH"
-            exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
-          '';
+          testArchiveRustc = mkTestRustcWrapper pkgs;
           testBuilderMemoryGuard = ''
             # MemTotal can exceed a container's cgroup limit. Enforce
             # both when cgroup v2 exposes its memory limit. Allow for
@@ -64,8 +67,8 @@
             fi
           '';
           # Opt in to a 64 GB builder; the ordinary check keeps one Cargo job.
-          # Build a portable archive once. Test execution stays in separate
-          # jobs so nextest's whole-machine reservations remain meaningful.
+          # Build portable archives once. Four isolated Nix sandboxes run
+          # them on disjoint eight-CPU sets on the same 32-core builder.
           serverTestArchive = self.checks.${system}.waddle-server-test.overrideAttrs (old: {
             pname = "waddle-server-test-archive";
             outputs = [
@@ -138,6 +141,20 @@
                 ${pkgs.gzip}/bin/gzip -n -c "$out/whole-$partition.json" > "$archive_output/whole-inventory.json.gz"
                 ${pkgs.gzip}/bin/gzip -n -c "$out/shared-$partition.json" > "$archive_output/shared-inventory.json.gz"
                 coverage_inventories+=("$out/whole-$partition.json" "$out/shared-$partition.json")
+              done
+              ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} \
+                "$out/test-inventory.json" "''${coverage_inventories[@]}" --count 8 \
+                --shared-binary waddle-server --shared-binary waddle-server::clustering_cluster_e2e \
+                > "$out/partition-coverage.json"
+              # Cargo inventory creation has finished before packaging starts.
+              # Each job writes only its own output. Cargo's build lock still
+              # serializes its brief freshness check; compression, ELF checks
+              # and content hashing can use the otherwise idle builder cores.
+              package_archive() (
+                set -euo pipefail
+                partition="$1"
+                archive_output="''${archive_outputs[$((partition - 1))]}"
+                filter=$(cat "$out/partition-$partition.filter")
                 ${pkgs.time}/bin/time -f "WADDLE_CI_METRIC phase=archive shard=$partition elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x" \
                   cargo nextest archive "''${nextest_args[@]}" -E "$filter" \
                     --archive-format tar-zst --archive-file "$archive_output/archive.tar.zst"
@@ -176,11 +193,26 @@
                   > "$archive_output/archive-content-checksums"
                 echo "WADDLE_CI_METRIC phase=archive_content_hash shard=$partition elapsed_seconds=$((SECONDS - content_hash_started))"
                 wc -c "$archive_output/archive.tar.zst"
+              )
+              package_started=$SECONDS
+              package_pids=()
+              for partition in 1 2 3 4; do
+                package_archive "$partition" &
+                package_pids+=("$!")
               done
-              ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} \
-                "$out/test-inventory.json" "''${coverage_inventories[@]}" --count 8 \
-                --shared-binary waddle-server --shared-binary waddle-server::clustering_cluster_e2e \
-                > "$out/partition-coverage.json"
+              package_status=0
+              for package_pid in "''${package_pids[@]}"; do
+                if wait "$package_pid"; then
+                  :
+                else
+                  package_status=1
+                fi
+              done
+              if [[ "$package_status" -ne 0 ]]; then
+                echo "At least one test archive failed to package or verify" >&2
+                exit "$package_status"
+              fi
+              echo "WADDLE_CI_METRIC phase=archive_all elapsed_seconds=$((SECONDS - package_started)) concurrency=4"
               runHook postCheck
             '';
           });
@@ -219,6 +251,8 @@
               '';
               installPhase = ''mkdir -p "$out"'';
               checkPhase = ''
+                ${pkgs.python3}/bin/python3 ${./server/scripts/pin-nextest-shard.py} \
+                  --parent-pid "$$" --partition ${toString partition} --count 4 --cores 8
                 runHook preCheck
                 mkdir -p "$out"
                 extracted="$TMPDIR/nextest-archive"
@@ -246,9 +280,9 @@
                   ${archiveOutput}/shared-inventory.json.gz "$out/shared-inventory.json" \
                   > "$out/shared-coverage.json"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" -E "$whole_filter"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$whole_filter"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" -E "$shared_filter" --partition "hash:${toString partition}/4"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$shared_filter" --partition "hash:${toString partition}/4"
                 runHook postCheck
               '';
             };
@@ -501,7 +535,10 @@
               trap cleanup_waddle_test_postgres EXIT
 
               initdb -D "$PGDATA" -U waddle_test -A trust --no-locale --encoding=UTF8
-              pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses=" -w start
+              # The 200-round steal/veto stress test deliberately exercises
+              # deadlocks. Detect cycles promptly without changing lock or
+              # statement timeouts, transaction semantics, or test rounds.
+              pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses= -c deadlock_timeout=50ms" -w start
               createdb -h "$PGHOST" -p "$PGPORT" -U waddle_test waddle_test
               export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
             '';
@@ -671,6 +708,24 @@
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
+              checkPhase = ''
+                runHook preCheck
+                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  export RUSTC_WORKSPACE_WRAPPER=${mkTestRustcWrapper pkgs}
+                  echo "WADDLE_CI_METRIC lane=xmpp-server phase=compile linker=mold version=${pkgs.mold.version}"
+                ''}
+                # Match the archive's compiler improvements while retaining
+                # this lane's default-feature coverage and dependency cache.
+                nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --profile ci --lib --tests
+                  --config profile.ci-test.package.waddle-server.opt-level=0
+                  --config profile.ci-test.package.waddle-xmpp.opt-level=0)
+                echo "WADDLE_CI_METRIC lane=xmpp-server phase=compile waddle_server_opt_level=0 waddle_xmpp_opt_level=0 dependency_profile_unchanged=true"
+                ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC lane=xmpp-server phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                  cargo nextest run "''${nextest_args[@]}" --no-run --timings
+                ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC lane=xmpp-server phase=tests elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                  cargo nextest run "''${nextest_args[@]}"
+                runHook postCheck
+              '';
             }
           );
           waddle-server-xmpp-cue-e2e = craneLib.cargoNextest (
