@@ -904,12 +904,35 @@ retransmission settling the same row is attributed to recovery as well.
 `ingress.maintenance.departed_occupant_copies` counts frozen `route_muc`
 occupant copies recovery settled because the room's authoritative local actor
 no longer lists the occupant (XEP-0045 "Ghost Users" / §7.14: a non-occupant is
-owed no groupchat message). Eviction is fail-closed — no room registry, no
+owed no groupchat message). Settlement is fail-closed — no room registry, no
 local room actor, an unanswered probe, or (with clustering and a durable MUC
-store) a local incarnation that has lost its claim fence all leave the copy
-owed — so a persistent `route_muc` backlog with this counter flat means the
-rooms are not resolvable on the recovering node, not that the occupants are
-still seated.
+store) an incarnation whose EXACT claim fence the store no longer holds all
+leave the copy owed — so a persistent `route_muc` backlog with this counter
+flat means the rooms are not resolvable on the recovering node, not that the
+occupants are still seated.
+
+Two properties bound that settlement, because it permanently drops a copy:
+
+- **The claim is proven against the store, not read off the actor (#1803).**
+  `RoomActor::durable_claim_fence` is assigned once and never cleared, so an
+  incarnation sealed `OwnershipLost`, or one that has not yet noticed its
+  supersession, still reports a fence and still serves the roster it had when
+  it lost the room. The probe therefore asks the durable store whether that
+  exact `(entity, epoch, node)` tuple is still on file, and — wherever the
+  unit of work is clustered — asserts the same claim under `FOR SHARE` inside
+  the settlement transaction. A steal committing between the roster read and
+  the write rolls the settlement back rather than dropping a copy for an
+  occupant who joined on the new owner. `Ok(false)` leaves the copy owed;
+  a store that cannot answer makes the attempt inconclusive.
+- **A copy is never settled for an occupant this node can still reach
+  (#1803).** Rosters are memory-only, so after a room-host restart every
+  frozen pre-restart occupant reads "absent from the roster". An occupant with
+  a live entry in this node's connection registry, or a resumable XEP-0198
+  session in its memory or the shared durable store (including a probe that
+  cannot answer), is skipped by the settlement and falls through to the
+  ordinary rebuild, which delivers or queues its copy in the same pass. The
+  row still terminalizes — it just does not terminalize by dropping a
+  message.
 
 ### Ghost-occupant eviction (#1803)
 
@@ -932,20 +955,43 @@ runs in the same attempt, so a repaired row terminalizes immediately instead
 of waiting out the 15-minute parking cooldown — and is not counted as
 `no_durable_progress`.
 
-A `UserActor` claim is per account, but the question here is per resource. In
-the dominant production shape the room is hosted on one node while the user's
-claim sits on another because a healthy `web-<uuid>` resource lives there, and
-a second, abandoned resource of the same account pins the row forever. A fresh
-foreign claim is therefore not an answer — it is the trigger for one bounded
-(one second overall), strictly read-only ask to that claim owner's relay,
-`waddle.clustering.relay.resource_presence.v1`, naming the exact full JID. The
-owner answers `Present` when its own `UserActor` tree lists that resource (a
-local socket, or a registered-remote mirror it holds for a peer's socket) or
-it has a resumable XEP-0198 session for it, `Absent` when it holds the fresh
-claim and knows none of those, and `NotOwner` when the claim has since moved.
-Only `Absent` makes the occupant evictable. The handler acquires no claim,
-spawns no actor and changes no client-visible state, so a duplicated or
-abandoned ask costs nothing.
+Reachability is proven against SOCKETS, never against ownership claims. A
+`UserActor` claim is routing authority, not socket liveness: a live idle
+socket lives in one node's own connection registry and nothing re-registers it
+anywhere when that account's claim owner dies or moves — so the very condition
+that stalls delivery would also defeat a claim-shaped guard, and a LIVE user
+could be torn out of every room. The guard therefore reads the cluster
+membership and asks EVERY other node, concurrently and inside one overall
+1.5-second budget, through a strictly read-only relay message,
+`waddle.clustering.relay.resource_presence.v1`, naming the exact full JID.
+Each node answers only about itself: `Present` when it hosts a socket for that
+resource, when its own `UserActor` tree lists it (a local socket, or a
+registered-remote mirror it holds for a peer's socket), or when it has a
+resumable XEP-0198 session for it; `Absent` when it knows none of those. The
+occupant is evictable only when the membership read succeeded and every peer
+answered `Absent`. The handler reads no claim, spawns no actor and changes no
+client-visible state, so a duplicated or abandoned ask costs nothing.
+
+The membership source is the `clustering_nodes` liveness rows, filtered to
+every node other than this one that has NOT been committed-expired. That is
+deliberately weaker than the isolation heuristic's "live" predicate: draining
+replicas keep serving the sockets they already hold, and a lapsed heartbeat is
+not a commitment that a node is gone, so both stay in the set and still get
+asked. A node leaves the set only once the `expired = true` CAS has committed
+— the same flag that makes its claims stealable and its sockets
+unreattachable — and the orphan reaper's stale-node watchdog commits that
+within about one sweep of a lease lapsing, so a hard-killed replica does drop
+out and the backlog drains. A membership read that errors, or one that fills
+its page bound, is treated as "the cluster is unknown" and blocks the
+eviction.
+
+An eviction is also only counted once the full JID is provably unseated. The
+sweep reports success for a `Superseded` disposition too — a client that
+rebound the same full JID and rejoined mid-probe keeps its new seat, which is
+what the generation selector is for — and that is a no-op, not an eviction.
+The generation is pinned from the room BEFORE any probe runs, so a rejoin
+during the seconds the probes take is classified `Superseded` rather than
+evicted.
 
 That probe is a NEW relay message id, not a change to the ordered-relay
 envelope or its replies, so `deliver_ordered.vN` does not move and **no
@@ -961,11 +1007,13 @@ copy owed: a live entry for the full JID in this node's connection registry
 (which includes the clustered registered-remote mirror), a resumable XEP-0198
 session in this node's memory OR in the shared durable store (including a read
 of that store that fails), the actor tree still listing the exact resource (or
-failing to answer), a claim read that errors, a fresh foreign claim whose
-owner answers `Present` or `NotOwner` — or cannot be asked at all — a room
-this node does not authoritatively host, a room
-probe that does not answer, and a recovery environment with no WebSocket state
-to run the sweep with. Consequently a `route_muc` backlog with
+failing to answer), a membership read that errors or is truncated, any peer
+that answers `Present` or cannot be asked at all (an old replica's
+`UnknownMessage`, a timeout, a transport or decode failure), the whole
+fan-out exceeding its budget, a room this node does not authoritatively host,
+a room whose exact claim fence the durable store no longer holds, a room probe
+that does not answer, and a recovery environment with no WebSocket state to
+run the sweep with. Consequently a `route_muc` backlog with
 `unrecoverable_obligations{reason="no_durable_progress"}` ticking while
 `muc.ghost_occupants.evicted` stays flat means the occupants are still
 reachable somewhere (or a probe cannot answer) — not that the eviction is
@@ -1162,7 +1210,10 @@ no longer lists the occupant (see "Ghost-occupant eviction (#1803)" and
 `ingress.maintenance.departed_occupant_copies`), so the backlog drains after
 the #1803 rollout without the scale-to-zero window below. After that rollout,
 verify `max by (kind) (cnpg_waddle_ingress_nonterminal_messages)` for
-`route_muc` falls to zero and the counter accounts for the drop. The procedure
+`route_muc` falls to zero and the counter accounts for the drop. Note that
+settlement now covers only occupants this node cannot reach at all; a frozen
+occupant that still has a resumable session here has its copy DELIVERED by the
+rebuild instead, which terminalizes the row just the same. The procedure
 below remains for rows that settlement cannot reach, such as a room no node
 hosts any more.
 

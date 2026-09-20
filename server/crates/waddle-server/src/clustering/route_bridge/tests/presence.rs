@@ -1,4 +1,4 @@
-//! #1803 receiver side: the claim owner answers one exact full JID.
+//! #1803 receiver side: every node answers for its OWN sockets and sessions.
 use super::*;
 use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry as _};
 
@@ -30,8 +30,9 @@ async fn register_local_resource(
 }
 
 /// The target resource every case asks about. `services_with_claims` gives
-/// its account's `UserActor` claim to the `target_owner` argument, which is
-/// what decides `Present`/`Absent` against `NotOwner`.
+/// its account's `UserActor` claim to the `target_owner` argument, which the
+/// probe must now ignore entirely: a claim is routing authority, not socket
+/// liveness.
 fn probe_target() -> jid::FullJid {
     target_full()
 }
@@ -47,9 +48,9 @@ async fn bridge_owning_target(
     bridge
 }
 
-/// Claim owned here, and the account's `UserActor` tree lists the exact
-/// resource because a local socket is dual-registered on it — the healthy
-/// sibling resource in the production ghost shape.
+/// The account's `UserActor` tree lists the exact resource because a local
+/// socket is dual-registered on it — the healthy sibling resource in the
+/// production ghost shape.
 #[tokio::test]
 async fn resource_presence_local_reports_a_live_local_resource_present() {
     let services = services_with_claims(
@@ -127,9 +128,9 @@ async fn resource_presence_local_reports_a_resumable_session_present() {
     );
 }
 
-/// The only authoritative negative: this node owns the account's claim with a
-/// fresh lease, its actor tree does not list the resource, and no resumable
-/// session exists for it.
+/// The only authoritative negative: this node hosts no socket for the
+/// resource, its actor tree does not list it, and no resumable session exists
+/// for it — while a DIFFERENT resource of the same account is live here.
 #[tokio::test]
 async fn resource_presence_local_reports_an_unknown_resource_absent() {
     let services = services_with_claims(
@@ -160,13 +161,38 @@ async fn resource_presence_local_reports_an_unknown_resource_absent() {
     );
 }
 
-/// The claim moved (or was never here): this node has no authority to answer,
-/// and the asker must not read that as absence.
+/// THE #1803 REGRESSION: a live socket here, while the account's `UserActor`
+/// claim sits on another node (its owner died, moved, or never existed).
+/// Nothing re-registers an idle socket anywhere when that happens, so this
+/// node is the only one that knows — and a claim gate would have made it deny
+/// a socket it is holding open, evicting a LIVE user from every room.
 #[tokio::test]
-async fn resource_presence_local_without_the_claim_is_not_owner() {
+async fn resource_presence_local_reports_its_own_socket_without_holding_the_claim() {
     let services = services_with_claims(
         origin_identity(),
         // The account's claim belongs to another node.
+        origin_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    let target = probe_target();
+    let _socket = register_local_resource(&services, &target).await;
+    let bridge = bridge_owning_target(services).await;
+
+    assert_eq!(
+        bridge.resource_presence_local(&target).await,
+        LocalResourcePresence::Present
+    );
+}
+
+/// The complement: no claim here AND nothing known about the resource is
+/// still an authoritative negative — for THIS node. The asker only evicts
+/// once every peer has answered that way.
+#[tokio::test]
+async fn resource_presence_local_reports_an_unknown_resource_absent_without_the_claim() {
+    let services = services_with_claims(
+        origin_identity(),
         origin_identity(),
         receiver_identity(),
         test_peer_id(),
@@ -176,7 +202,7 @@ async fn resource_presence_local_without_the_claim_is_not_owner() {
 
     assert_eq!(
         bridge.resource_presence_local(&probe_target()).await,
-        LocalResourcePresence::NotOwner
+        LocalResourcePresence::Absent
     );
 }
 
@@ -204,11 +230,11 @@ async fn resource_presence_local_with_a_failed_resumable_probe_is_present() {
     );
 }
 
-/// Fail closed: a control-plane read that never answers must resolve inside
-/// the receiver's own budget and answer `Present`, not hang one delegated
-/// relay task per repair attempt.
+/// The probe reads no claim at all, so a wedged control plane cannot stall it
+/// or change its answer: a socket this node holds is still `Present`, and a
+/// resource it does not know is still `Absent`.
 #[tokio::test]
-async fn resource_presence_local_bounds_a_stalled_claim_store() {
+async fn resource_presence_local_never_touches_the_claim_store() {
     use super::reassert::stalled_claim::StalledClaimStore;
 
     let mut services = services_with_claims(
@@ -219,16 +245,29 @@ async fn resource_presence_local_bounds_a_stalled_claim_store() {
     )
     .await;
     services.claim_store = Arc::new(StalledClaimStore);
+    let target = probe_target();
+    let sibling: jid::FullJid = "juliet@example.test/web-healthy"
+        .parse()
+        .expect("sibling full jid");
+    let _socket = register_local_resource(&services, &sibling).await;
     let bridge = bridge_owning_target(services).await;
 
-    let outcome = tokio::time::timeout(
-        super::super::presence::RESOURCE_PRESENCE_CLAIM_READ_TIMEOUT + Duration::from_secs(3),
-        bridge.resource_presence_local(&probe_target()),
-    )
+    let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+        (
+            bridge.resource_presence_local(&sibling).await,
+            bridge.resource_presence_local(&target).await,
+        )
+    })
     .await
-    .expect("a stalled claim store must not hang the executor");
+    .expect("a stalled claim store must not reach the probe at all");
 
-    assert_eq!(outcome, LocalResourcePresence::Present);
+    assert_eq!(
+        outcome,
+        (
+            LocalResourcePresence::Present,
+            LocalResourcePresence::Absent
+        )
+    );
 }
 
 fn detached_session(resource: &jid::FullJid) -> DetachedSession {

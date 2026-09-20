@@ -1106,15 +1106,15 @@ async fn cluster_exit_criteria_end_to_end() {
     // Node A holds this account's `UserActor` claim and hosts two of its
     // resources — one local socket and one registered-remote mirror for the
     // socket on node B — while a third, never-bound resource is exactly the
-    // ghost shape that pinned stalled `route_muc` rows in production. The
-    // claim is per account; the answer must be per resource.
+    // ghost shape that pinned stalled `route_muc` rows in production. Every
+    // node answers about the sockets IT holds; the claim decides nothing.
     assert_eq!(
         relay_a
             .resource_presence(ordered_target_full.clone())
             .await
-            .expect("presence probe to the claim owner"),
+            .expect("presence probe for node A's own socket"),
         RelayResourcePresenceReply::Present,
-        "the owner's own local socket is present"
+        "a node's own local socket is present"
     );
     assert_eq!(
         relay_a
@@ -1122,7 +1122,19 @@ async fn cluster_exit_criteria_end_to_end() {
             .await
             .expect("presence probe for the mirrored resource"),
         RelayResourcePresenceReply::Present,
-        "a registered-remote mirror on the owner is present"
+        "a registered-remote mirror is present"
+    );
+    // The #1803 regression, over the wire: node B holds NO claim for this
+    // account — A does — yet B hosts this socket, and B is the only node that
+    // knows. A claim-gated answer here would deny a live socket and evict a
+    // live user from every room.
+    assert_eq!(
+        relay_b
+            .resource_presence(remote_target_full.clone())
+            .await
+            .expect("presence probe to the socket's host, which holds no claim"),
+        RelayResourcePresenceReply::Present,
+        "a node answers for its own socket without owning the account's claim"
     );
     let ghost_resource: jid::FullJid = format!(
         "{}/ghost-{}",
@@ -1135,17 +1147,17 @@ async fn cluster_exit_criteria_end_to_end() {
         relay_a
             .resource_presence(ghost_resource.clone())
             .await
-            .expect("presence probe for an unknown resource"),
+            .expect("presence probe to node A for an unknown resource"),
         RelayResourcePresenceReply::Absent,
-        "the owner must deny a resource it never bound, even while the account is online"
+        "node A must deny a resource it never bound, even while the account is online"
     );
     assert_eq!(
         relay_b
-            .resource_presence(ordered_target_full.clone())
+            .resource_presence(ghost_resource.clone())
             .await
-            .expect("presence probe to a non-owner"),
-        RelayResourcePresenceReply::NotOwner,
-        "a node without the account's claim has no authority to answer"
+            .expect("presence probe to node B for an unknown resource"),
+        RelayResourcePresenceReply::Absent,
+        "node B must deny it too — an eviction needs EVERY peer to say so"
     );
 
     drop(ordered_target_client);

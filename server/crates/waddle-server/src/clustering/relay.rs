@@ -1121,16 +1121,16 @@ impl Message<RelayReassertMediaGrants> for RelayActor {
     }
 }
 
-/// #1803: does the node that owns a user's `UserActor` claim know this ONE
-/// exact full JID?
+/// #1803: does the RECEIVING node know this ONE exact full JID?
 ///
-/// A `UserActor` claim is per account, not per resource: the owner can hold a
-/// healthy `web-a` socket while `web-b` is the ghost pinning a stalled
-/// `route_muc` obligation on the room's host node. The claim alone therefore
-/// cannot answer "is THIS resource reachable"; only the owner's own actor tree
-/// and SM store can.
+/// Asked of every unexpired cluster member, because a socket is known only to
+/// the node that holds it. A `UserActor` claim is routing authority, not
+/// socket liveness: nothing re-registers an idle socket anywhere when that
+/// claim's owner dies or moves, so the claim can neither vouch for a resource
+/// nor deny one. The receiver answers only about its own connection registry,
+/// actor tree and SM store, which it is unconditionally authoritative about.
 ///
-/// Strictly read-only: the handler acquires no claim, spawns no actor and
+/// Strictly read-only: the handler reads no claim, spawns no actor and
 /// performs no side effect, so an ask that times out or is answered twice
 /// changes nothing.
 ///
@@ -1151,30 +1151,26 @@ pub struct RelayResourcePresence {
     pub trace: RelayTraceContext,
 }
 
-/// Reply to [`RelayResourcePresence`]. Only [`Self::Absent`] is proof; the
-/// other two variants mean "this node cannot rule the resource out", which the
-/// caller must treat as reachable.
+/// Reply to [`RelayResourcePresence`]. Only [`Self::Absent`] is proof, and
+/// only about the answering node: the asker must collect an `Absent` from
+/// EVERY peer before it may treat the resource as gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
 pub enum RelayResourcePresenceReply {
-    /// The receiver's `UserActor` tree lists that exact full JID (a local
-    /// socket, or a registered-remote resource it mirrors for a peer), or it
-    /// holds a resumable/detached XEP-0198 session for it — including a
-    /// session probe that could not answer.
+    /// The receiver hosts a socket for that exact full JID, its `UserActor`
+    /// tree lists it (a local socket, or a registered-remote resource it
+    /// mirrors for a peer), or it holds a resumable/detached XEP-0198 session
+    /// for it — including a read that could not answer.
     Present,
-    /// The receiver holds the fresh `UserActor` claim for the account and
-    /// knows nothing about that resource. The only authoritative negative.
+    /// The receiver knows nothing about that resource: no socket, no
+    /// actor-tree entry, no resumable session. The only authoritative
+    /// negative, and only for this one node.
     Absent,
-    /// The receiver does not hold a fresh claim for the account, so it has no
-    /// authority to answer: the asker's claim read was stale or the claim has
-    /// moved. Terminal on the receiver — never re-relayed, so a stale claim
-    /// read cannot bounce the probe around the cluster.
-    NotOwner,
 }
 
 #[kameo::remote_message("waddle.clustering.relay.resource_presence.v1")]
 impl Message<RelayResourcePresence> for RelayActor {
     // Delegated for the same reason as [`RelayReassertMediaGrants`]: the
-    // owner-side claim read plus actor-tree ask are bounded but must not
+    // actor-tree ask and durable session probe are bounded but must not
     // head-of-line block this node's relay mailbox while they resolve.
     type Reply = kameo::reply::DelegatedReply<RelayResourcePresenceReply>;
 
@@ -1191,7 +1187,6 @@ impl Message<RelayResourcePresence> for RelayActor {
             match bridge.resource_presence_local(&msg.target).await {
                 LocalResourcePresence::Present => RelayResourcePresenceReply::Present,
                 LocalResourcePresence::Absent => RelayResourcePresenceReply::Absent,
-                LocalResourcePresence::NotOwner => RelayResourcePresenceReply::NotOwner,
             }
         })
     }

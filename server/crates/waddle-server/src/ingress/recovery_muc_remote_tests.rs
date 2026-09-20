@@ -259,44 +259,55 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     f.close().await;
 }
 
-/// How another node relates to the occupant, which decides whether evicting
-/// its occupancy here would tear down a seat that is alive elsewhere.
+/// How the rest of the cluster relates to the occupant, which decides whether
+/// evicting its occupancy here would tear down a seat that is alive elsewhere.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ElsewhereCase {
-    /// A fresh `UserActor` claim owned by a different node, whose owner
-    /// answers the #1803 cross-node resource-presence probe this way.
-    ForeignClaim(OwnerAnswer),
+    /// A peer answers `Present` for the exact resource: it is holding that
+    /// socket. Parameterised by where the account's `UserActor` claim sits,
+    /// because the claim must decide NOTHING — see [`ClaimState`].
+    PeerHoldsTheSocket(ClaimState),
+    /// Every peer denies the exact resource while still answering `Present`
+    /// for a healthy sibling resource of the same account. The production
+    /// ghost shape (#1803).
+    AbsentOnEveryPeer,
+    /// A peer cannot answer at all — an old replica answering
+    /// `UnknownMessage` during a rolling update, a timeout, or a transport
+    /// failure. Fail closed.
+    PeerAskFails,
+    /// The membership read itself cannot answer, so the set of nodes that
+    /// would have to deny the resource is unknown. Fail closed.
+    MembershipUnreadable,
     /// A registered-remote mirror for the exact full JID, installed here by
-    /// the claim owner. Decided locally, without any probe.
+    /// the socket's host. Decided locally, without any probe.
     RegisteredRemote,
 }
 
-/// What the account's claim owner says about the exact ghost RESOURCE.
+/// Where the account's `UserActor` claim sits while a peer holds the socket.
 ///
-/// A `UserActor` claim is per account, so a fresh foreign claim alone proves
-/// only that the USER is online somewhere — which is precisely the production
-/// shape that stalled the backlog (#1803): one healthy `web-<uuid>` resource
-/// keeping the claim alive while a second, abandoned one pins the room's
-/// frozen `route_muc` obligation forever.
+/// A claim is ROUTING AUTHORITY, not socket liveness: a live idle socket on a
+/// peer is known only to that peer's own connection registry, and nothing
+/// re-registers it when the claim owner dies or moves. Every one of these
+/// states must therefore keep the occupant seated, and the first two are the
+/// exact shapes the superseded claim-gated guard evicted a LIVE user in.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum OwnerAnswer {
-    /// The owner's actor tree lists this exact resource, or it holds a
-    /// resumable session for it.
-    Present,
-    /// The owner holds the fresh claim and knows nothing about this exact
-    /// resource: the only authoritative negative.
-    Absent,
-    /// The ask never produced an answer — a peer that predates
-    /// `waddle.clustering.relay.resource_presence.v1` answering
-    /// `UnknownMessage` during a rolling update, a timeout, or a transport
-    /// failure. Fail closed.
-    AskFails,
+enum ClaimState {
+    /// No claim row at all — the owner died and its claim was reaped.
+    Unclaimed,
+    /// The room's own host holds the account claim, while the socket is on a
+    /// peer (the claim moved here after the socket was bound elsewhere).
+    OwnedByTheAsker,
+    /// A fresh claim on a third node that is not the socket's host.
+    FreshOnAnotherNode,
 }
 
-/// One scripted answer from the account's claim owner, recording exactly who
-/// was asked about which resource.
+/// One scripted peer answer, recording exactly who was asked about which
+/// resource.
 struct ScriptedResourcePresence {
-    answer: OwnerAnswer,
+    case: ElsewhereCase,
+    /// The one peer actually holding the socket, when any does.
+    socket_host: NodeIdentity,
+    ghost: jid::FullJid,
     asked: Arc<std::sync::Mutex<Vec<(NodeIdentity, jid::FullJid)>>>,
 }
 
@@ -304,7 +315,7 @@ struct ScriptedResourcePresence {
 impl crate::clustering::resource_presence::ResourcePresenceAsker for ScriptedResourcePresence {
     async fn resource_presence(
         &self,
-        owner: &NodeIdentity,
+        peer: &NodeIdentity,
         target: &jid::FullJid,
     ) -> Result<
         crate::clustering::relay::RelayResourcePresenceReply,
@@ -316,29 +327,57 @@ impl crate::clustering::resource_presence::ResourcePresenceAsker for ScriptedRes
         self.asked
             .lock()
             .expect("probe log")
-            .push((owner.clone(), target.clone()));
-        match self.answer {
-            OwnerAnswer::Present => Ok(RelayResourcePresenceReply::Present),
-            OwnerAnswer::Absent => Ok(RelayResourcePresenceReply::Absent),
+            .push((peer.clone(), target.clone()));
+        assert_eq!(
+            target, &self.ghost,
+            "only the ghost resource is asked about"
+        );
+        match self.case {
+            // ONLY the node actually holding the socket knows about it. Every
+            // other peer — including whichever one happens to hold the
+            // account's claim — answers a truthful `Absent`.
+            ElsewhereCase::PeerHoldsTheSocket(_) if peer == &self.socket_host => {
+                Ok(RelayResourcePresenceReply::Present)
+            }
             // Exactly what kameo reports for a peer that does not know the
             // message id: a no-effect codec failure.
-            OwnerAnswer::AskFails => Err(RelayAskError::Send {
+            ElsewhereCase::PeerAskFails => Err(RelayAskError::Send {
                 failure: RelaySendFailure::Codec,
                 effect: RelaySendEffect::NoEffect,
                 message: "peer does not know waddle.clustering.relay.resource_presence.v1"
                     .to_string(),
             }),
+            _ => Ok(RelayResourcePresenceReply::Absent),
+        }
+    }
+}
+
+/// The cluster's unexpired peers, or a membership read that cannot answer.
+struct ScriptedMembership {
+    peers: Vec<NodeIdentity>,
+    readable: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::clustering::resource_presence::ClusterMembership for ScriptedMembership {
+    async fn peers(&self) -> Result<Vec<NodeIdentity>, waddle_xmpp::ownership::ClaimError> {
+        if self.readable {
+            Ok(self.peers.clone())
+        } else {
+            Err(waddle_xmpp::ownership::ClaimError::Backend(
+                "clustering_nodes unreadable".to_string(),
+            ))
         }
     }
 }
 
 /// XEP-0045 ghost eviction is for occupancies NOTHING can reach. An occupant
-/// another node still owns keeps its seat even once its frozen copy has
-/// stalled long enough to be classified `no_durable_progress` — but a
-/// resource the claim owner authoritatively does not know is a ghost, even
-/// while its account stays online on that owner.
+/// some peer still holds a socket for keeps its seat even once its frozen copy
+/// has stalled long enough to be classified `no_durable_progress` — but a
+/// resource EVERY peer authoritatively denies is a ghost, even while its
+/// account stays online on one of them.
 async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase) {
-    let evictable = case == ElsewhereCase::ForeignClaim(OwnerAnswer::Absent);
+    let evictable = case == ElsewhereCase::AbsentOnEveryPeer;
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let before = metrics
         .counter_sum("muc.ghost_occupants.evicted", &[])
@@ -361,33 +400,52 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
 
     let claims = Arc::new(InProcessClaimStore::new());
     let local = NodeIdentity::new("recovering-node", "local-epoch");
+    let socket_node = NodeIdentity::new("socket-node", "foreign-epoch");
     let entity = Entity::new(EntityType::UserActor, occupant.to_bare().to_string());
-    // The registered-remote mirror is installed by the claim OWNER, so that
-    // case leaves the claim here and isolates the resource-lookup guard.
-    let owner = match case {
-        ElsewhereCase::ForeignClaim(_) => NodeIdentity::new("socket-node", "foreign-epoch"),
-        ElsewhereCase::RegisteredRemote => local.clone(),
+    // The claim must decide nothing, so every case pins it somewhere
+    // DIFFERENT and asserts the same seat outcome.
+    let third_node = NodeIdentity::new("third-node", "third-epoch");
+    let claim_owner = match case {
+        ElsewhereCase::PeerHoldsTheSocket(ClaimState::Unclaimed) => None,
+        ElsewhereCase::PeerHoldsTheSocket(ClaimState::OwnedByTheAsker) => Some(local.clone()),
+        ElsewhereCase::PeerHoldsTheSocket(ClaimState::FreshOnAnotherNode) => {
+            Some(third_node.clone())
+        }
+        // The registered-remote mirror is installed by the socket's host, so
+        // that case leaves the claim here and isolates the resource lookup.
+        ElsewhereCase::RegisteredRemote => Some(local.clone()),
+        _ => Some(socket_node.clone()),
     };
-    claims.acquire(&entity, &owner).await.expect("claim");
+    // Every unexpired peer must be asked, not just whichever one the claim
+    // names: the third node holds the claim but never held the socket.
+    let peers = match case {
+        ElsewhereCase::PeerHoldsTheSocket(ClaimState::FreshOnAnotherNode) => {
+            vec![socket_node.clone(), third_node.clone()]
+        }
+        _ => vec![socket_node.clone()],
+    };
+    if let Some(owner) = claim_owner.as_ref() {
+        claims.acquire(&entity, owner).await.expect("claim");
+    }
     let bridge = OrderedRelayDeliveryBridge::new(
         tokio_util::sync::CancellationToken::new(),
         &crate::config::ClusteringMessagingConfig::default(),
     );
     let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
-    // The registered-remote case must be decided locally, so any probe at all
-    // there would be a bug: it gets an asker that never answers positively.
-    let scripted_answer = match case {
-        ElsewhereCase::ForeignClaim(answer) => answer,
-        ElsewhereCase::RegisteredRemote => OwnerAnswer::Absent,
-    };
     let state = socket_tests::create_test_websocket_state_with_clustering(
         ClusteringHandles {
             claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
             node_identity: Some(SharedNodeIdentity::new(local.clone())),
             ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
             resource_presence: Some(Arc::new(ScriptedResourcePresence {
-                answer: scripted_answer,
+                case,
+                socket_host: socket_node.clone(),
+                ghost: occupant.clone(),
                 asked: Arc::clone(&asked),
+            })),
+            cluster_membership: Some(Arc::new(ScriptedMembership {
+                peers: peers.clone(),
+                readable: case != ElsewhereCase::MembershipUnreadable,
             })),
             ..Default::default()
         },
@@ -443,10 +501,6 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         .connection_registry
         .is_connected(&occupant);
     match case {
-        ElsewhereCase::ForeignClaim(_) => assert!(
-            !locally_registered,
-            "no local entry: the ownership claim must be what decides"
-        ),
         ElsewhereCase::RegisteredRemote => {
             // The production mirror installs both a non-locally-hosted
             // connection entry and an actor-tree resource; either one alone
@@ -463,6 +517,10 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
                 "the actor tree lists the mirrored resource"
             );
         }
+        _ => assert!(
+            !locally_registered,
+            "no local entry: only the cross-node fan-out may decide"
+        ),
     }
 
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
@@ -480,7 +538,7 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
             .expect("occupancy probe")
             .is_some(),
         !evictable,
-        "only a resource the claim owner authoritatively denies is evicted"
+        "only a resource EVERY peer authoritatively denies is evicted"
     );
     assert_eq!(
         metrics
@@ -499,56 +557,99 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
     tx.commit().await.expect("read commit");
     let asked = asked.lock().expect("probe log").clone();
     match case {
-        ElsewhereCase::ForeignClaim(_) => {
-            assert!(
-                !asked.is_empty(),
-                "a fresh foreign claim must be resolved by asking its owner"
-            );
-            assert!(
-                asked
-                    .iter()
-                    .all(|(node, jid)| node == &owner && jid == &occupant),
-                "the owner must be asked about the EXACT full JID: {asked:?}"
-            );
-        }
         ElsewhereCase::RegisteredRemote => assert!(
             asked.is_empty(),
             "a locally mirrored resource needs no cross-node ask: {asked:?}"
         ),
+        ElsewhereCase::MembershipUnreadable => assert!(
+            asked.is_empty(),
+            "no peer may be asked without a membership answer: {asked:?}"
+        ),
+        _ => {
+            assert!(
+                !asked.is_empty(),
+                "every unexpired peer must be asked before an eviction"
+            );
+            assert!(
+                asked
+                    .iter()
+                    .all(|(node, jid)| peers.contains(node) && jid == &occupant),
+                "each peer must be asked about the EXACT full JID: {asked:?}"
+            );
+            if case == ElsewhereCase::AbsentOnEveryPeer {
+                assert!(
+                    peers
+                        .iter()
+                        .all(|peer| asked.iter().any(|(node, _)| node == peer)),
+                    "an eviction needs an Absent from EVERY peer: {asked:?}"
+                );
+            }
+        }
     }
     f.close().await;
 }
 
+/// THE #1803 REGRESSION, three ways: a peer is holding this socket, and the
+/// account claim is unclaimed, owned by the room's own host, or fresh on a
+/// third node — every arrangement the superseded claim-gated guard read as
+/// "nothing keeps this resource alive elsewhere" before evicting a LIVE user
+/// from the room.
 #[tokio::test]
-async fn sqlite_stalled_remote_owned_occupant_keeps_its_seat() {
+async fn sqlite_stalled_occupant_with_a_peer_socket_keeps_its_seat_when_unclaimed() {
     stalled_remote_occupant_recovery(
         IngressFixture::sqlite().await,
-        ElsewhereCase::ForeignClaim(OwnerAnswer::Present),
+        ElsewhereCase::PeerHoldsTheSocket(ClaimState::Unclaimed),
     )
     .await;
 }
 
-/// Rolling-deploy safety: a claim owner that cannot answer the probe (an
-/// older peer answering `UnknownMessage`, a timeout, a transport failure)
-/// leaves absence unproven, so the occupant keeps its seat.
 #[tokio::test]
-async fn sqlite_stalled_remote_owned_occupant_keeps_its_seat_when_the_probe_fails() {
+async fn sqlite_stalled_occupant_with_a_peer_socket_keeps_its_seat_when_the_asker_holds_the_claim()
+{
     stalled_remote_occupant_recovery(
         IngressFixture::sqlite().await,
-        ElsewhereCase::ForeignClaim(OwnerAnswer::AskFails),
+        ElsewhereCase::PeerHoldsTheSocket(ClaimState::OwnedByTheAsker),
     )
     .await;
 }
 
-/// The dominant production shape (#1803): the room is hosted here, the user's
-/// `UserActor` claim is fresh on another node — because a healthy sibling
-/// resource keeps it there — and the ghost resource pinning this row is one
-/// the owner does not know. The per-account claim must not vouch for it.
+#[tokio::test]
+async fn sqlite_stalled_occupant_with_a_peer_socket_keeps_its_seat_when_the_claim_moved() {
+    stalled_remote_occupant_recovery(
+        IngressFixture::sqlite().await,
+        ElsewhereCase::PeerHoldsTheSocket(ClaimState::FreshOnAnotherNode),
+    )
+    .await;
+}
+
+/// Rolling-deploy safety: a peer that cannot answer the probe (an older
+/// replica answering `UnknownMessage`, a timeout, a transport failure) leaves
+/// absence unproven, so the occupant keeps its seat.
+#[tokio::test]
+async fn sqlite_stalled_remote_occupant_keeps_its_seat_when_a_peer_ask_fails() {
+    stalled_remote_occupant_recovery(IngressFixture::sqlite().await, ElsewhereCase::PeerAskFails)
+        .await;
+}
+
+/// An unknown cluster is not an empty one: a membership read that fails must
+/// not be mistaken for "there is nobody else to ask".
+#[tokio::test]
+async fn sqlite_stalled_remote_occupant_keeps_its_seat_when_the_membership_read_fails() {
+    stalled_remote_occupant_recovery(
+        IngressFixture::sqlite().await,
+        ElsewhereCase::MembershipUnreadable,
+    )
+    .await;
+}
+
+/// The dominant production shape (#1803): the room is hosted here, a healthy
+/// sibling resource of the same account is live on the peer, and the ghost
+/// resource pinning this row is one every peer denies.
 #[tokio::test]
 async fn sqlite_stalled_ghost_resource_of_a_live_remote_user_is_evicted() {
     stalled_remote_occupant_recovery(
         IngressFixture::sqlite().await,
-        ElsewhereCase::ForeignClaim(OwnerAnswer::Absent),
+        ElsewhereCase::AbsentOnEveryPeer,
     )
     .await;
 }

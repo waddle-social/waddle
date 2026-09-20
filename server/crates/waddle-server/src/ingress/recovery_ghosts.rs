@@ -22,10 +22,21 @@
 //! once maintenance has classified the row as stalled — never as a delivery
 //! fallback.
 //!
+//! Reachability is proven against SOCKETS, never against ownership claims. A
+//! `UserActor` claim is routing authority: a live idle socket on a peer is
+//! known only to that peer's own connection registry, and nothing
+//! re-registers it when the claim owner dies or moves — so the very condition
+//! that stalls delivery would also defeat a claim-shaped guard, and a LIVE
+//! user could be torn out of every room. Every unexpired cluster member is
+//! therefore asked about the exact full JID, and each answers only about its
+//! own sockets and sessions.
+//!
 //! Every probe here fails closed: a registry that cannot answer, a session
-//! probe that cannot read its durable store, an indeterminate ownership claim,
-//! a room this node does not authoritatively host, or a missing WebSocket
-//! state all mean "not a ghost", and the copy stays owed.
+//! probe that cannot read its durable store, a membership read that errors or
+//! is truncated, any peer ask that errors or times out, a room this node does
+//! not authoritatively host, a room whose exact claim fence this node no
+//! longer holds, or a missing WebSocket state all mean "not a ghost", and the
+//! copy stays owed.
 
 use std::time::Duration;
 
@@ -40,8 +51,6 @@ use waddle_xmpp::{
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
 
-#[cfg(feature = "clustering")]
-use crate::clustering::relay::RelayResourcePresenceReply;
 use crate::{
     ingress_uow::{
         CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
@@ -57,6 +66,44 @@ use super::{
     recovery_departed::{self, RoomAuthority},
     RouteProgress,
 };
+
+/// Test seam for the window the generation pin exists to close: everything
+/// between pinning the seated generation and the reachability probes, which a
+/// rebinding client can rejoin inside.
+///
+/// Registered per canonical row rather than per task: the repair runs on the
+/// recovery-accounting worker task, so a `task_local` set around a
+/// maintenance pass never reaches it.
+#[cfg(test)]
+#[async_trait::async_trait]
+pub(crate) trait GhostProbeWindow: Send + Sync {
+    async fn enter(&self, occupant: &FullJid);
+}
+
+#[cfg(test)]
+static GHOST_PROBE_WINDOWS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<MessageKey, std::sync::Arc<dyn GhostProbeWindow>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn hook_ghost_probe_window(key: MessageKey, hook: std::sync::Arc<dyn GhostProbeWindow>) {
+    GHOST_PROBE_WINDOWS
+        .lock()
+        .expect("ghost probe hooks")
+        .insert(key, hook);
+}
+
+#[cfg(test)]
+async fn enter_probe_window(key: MessageKey, occupant: &FullJid) {
+    let hook = GHOST_PROBE_WINDOWS
+        .lock()
+        .expect("ghost probe hooks")
+        .get(&key)
+        .map(std::sync::Arc::clone);
+    if let Some(hook) = hook {
+        hook.enter(occupant).await;
+    }
+}
 
 /// Bounds the read that reconstructs the row's frozen groupchat obligations,
 /// matching every other recovery transaction on this row.
@@ -80,23 +127,26 @@ pub(super) async fn repair_stalled_row(
         return Ok(false);
     };
     let routes = pending_groupchat_routes(uow, key).await?;
-    let mut evicted = 0u64;
+    let mut evicted = false;
     for route in &routes {
         let Some(room) = route.room() else {
             continue;
         };
         // Only the authoritative local incarnation's roster may be acted on:
         // another node hosting the room runs its own maintenance for it.
-        let RoomAuthority::Local(actor) =
+        let RoomAuthority::Local { actor, .. } =
             recovery_departed::resolve_authority(rooms, deps, room).await
         else {
             continue;
         };
         for occupant in recovery_departed::owed_occupants(deps, route) {
-            let Some(generation) = abandoned_occupancy(&actor, deps, &occupant).await else {
+            let Some(generation) = abandoned_occupancy(&actor, deps, key, &occupant).await else {
                 continue;
             };
-            if evict(state, &occupant, generation).await {
+            if evict(state, &actor, &occupant, generation).await {
+                // Ticked per eviction, immediately: a budget timeout later in
+                // this loop must not lose the ones already performed.
+                waddle_xmpp::telemetry::reliability::add_muc_ghost_occupants_evicted(1);
                 // A ghost means a cleanup leak happened upstream; keep it
                 // visible rather than silently repairing it forever.
                 tracing::warn!(
@@ -105,14 +155,13 @@ pub(super) async fn repair_stalled_row(
                     %occupant,
                     "evicting a ghost MUC occupant that pinned a stalled groupchat obligation"
                 );
-                evicted += 1;
+                evicted = true;
             }
         }
     }
-    if evicted == 0 {
+    if !evicted {
         return Ok(false);
     }
-    waddle_xmpp::telemetry::reliability::add_muc_ghost_occupants_evicted(evicted);
     // The room no longer lists the evicted occupants, so the same settlement
     // that discharges a departed occupant's copy now discharges theirs — in
     // this attempt, rather than after the parking cooldown.
@@ -134,15 +183,41 @@ pub(super) async fn repair_stalled_row(
 /// The occupancy generation to evict, or `None` when anything at all leaves
 /// the occupant reachable — or leaves a probe unable to answer.
 ///
-/// The generation comes from the room in the same ask as the presence check:
-/// a same-full-JID session that joined since carries a different generation,
-/// and `LeaveSessionSelector::Generation` makes the sweep classify it
-/// `Superseded` instead of evicting it.
+/// The generation is pinned FIRST, before any probe runs. The probes read a
+/// database, ask actors and fan out across the cluster, which takes up to
+/// seconds; the web client reuses its `web-<uuid>` resource across reconnects
+/// within a page, so the same full JID can rebind and rejoin inside that
+/// window. Pinning first means the eviction names the generation that was
+/// seated when the evidence was gathered: a session that joined during the
+/// probes carries a different generation, and
+/// `LeaveSessionSelector::Generation` makes the sweep classify it
+/// `Superseded` instead of tearing it out.
+///
+/// `None` from the room means the occupant is not seated at all, so there is
+/// nothing to evict and no reason to spend the probes.
 async fn abandoned_occupancy(
     actor: &ActorRef<RoomActor>,
     deps: &Deps<'_>,
+    key: MessageKey,
     occupant: &FullJid,
 ) -> Option<OccupancySessionGeneration> {
+    let generation = match actor
+        .ask(GetOccupantSessionGeneration {
+            jid: occupant.clone(),
+        })
+        .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+        .await
+    {
+        Ok(generation) => generation?,
+        Err(error) => {
+            tracing::debug!(%occupant, ?error, "ghost probe could not pin the occupancy generation");
+            return None;
+        }
+    };
+    #[cfg(test)]
+    enter_probe_window(key, occupant).await;
+    #[cfg(not(test))]
+    let _ = key;
     if deps.connection_registry.is_connected(occupant) {
         return None;
     }
@@ -156,25 +231,13 @@ async fn abandoned_occupancy(
     if reachable_on_another_node(deps, occupant).await {
         return None;
     }
-    match actor
-        .ask(GetOccupantSessionGeneration {
-            jid: occupant.clone(),
-        })
-        .reply_timeout(recovery_departed::PROBE_TIMEOUT)
-        .await
-    {
-        Ok(generation) => generation,
-        Err(error) => {
-            tracing::debug!(%occupant, ?error, "ghost probe could not pin the occupancy generation");
-            None
-        }
-    }
+    Some(generation)
 }
 
 /// Whether some other node can still reach this exact full JID. An
 /// indeterminate read answers `true`: an eviction is not reversible.
 async fn reachable_on_another_node(deps: &Deps<'_>, occupant: &FullJid) -> bool {
-    registered_resource(deps, occupant).await || foreign_claim(deps, occupant).await
+    registered_resource(deps, occupant).await || reachable_on_a_peer(deps, occupant).await
 }
 
 /// Whether the authoritative actor tree lists this exact resource. That covers
@@ -195,86 +258,69 @@ async fn registered_resource(deps: &Deps<'_>, occupant: &FullJid) -> bool {
     }
 }
 
-/// Whether another node can still reach this exact RESOURCE.
+/// Whether any OTHER cluster node can still reach this exact RESOURCE.
 ///
-/// A `UserActor` claim is per account, the question here is per resource: in
-/// production the room is hosted here while the user's claim sits on another
-/// node because a healthy `web-<uuid>` resource lives there, and a second,
-/// abandoned resource pins this row forever (#1803). Treating the claim alone
-/// as proof of reachability is what let that backlog grow, so a fresh foreign
-/// claim is resolved by asking its owner about the exact full JID; only its
-/// definitive negative makes the occupant evictable.
+/// The question is asked of every peer the control plane has not
+/// committed-expired, never of an ownership claim. A claim is per account and
+/// is routing authority, not socket liveness: in the production shape the
+/// room is hosted here while the user's claim sits elsewhere because a
+/// healthy `web-<uuid>` resource lives there, and a second, abandoned
+/// resource pins this row forever (#1803) — but in the symmetric failure the
+/// claim's owner is exactly what died, leaving a LIVE socket on a peer that
+/// no claim row names. Only that peer knows about it, so only that peer can
+/// be asked.
 ///
-/// Every other outcome answers `true`: an eviction is not reversible, so an
-/// unread claim, an unanswered ask, an owner that has since lost the claim,
-/// and a missing asker all leave the occupant seated. That is also what makes
-/// a rolling update safe in both orders — a peer that predates
-/// `waddle.clustering.relay.resource_presence.v1` fails the ask with
-/// `UnknownMessage`, which lands in the same fail-closed arm.
+/// Every indeterminate outcome answers `true`, because an eviction is not
+/// reversible: a membership read that errors or is truncated, any per-peer
+/// `Err` (an old peer answering `UnknownMessage` mid-rolling-update, a
+/// timeout, a transport or decode failure), a `Present` from any peer, the
+/// fan-out budget elapsing, and a half-wired set of handles all leave the
+/// occupant seated.
 #[cfg(feature = "clustering")]
-async fn foreign_claim(deps: &Deps<'_>, occupant: &FullJid) -> bool {
+async fn reachable_on_a_peer(deps: &Deps<'_>, occupant: &FullJid) -> bool {
+    use crate::clustering::resource_presence::{
+        peer_resource_reachability, PeerResourceReachability,
+    };
+
     let Some(state) = deps.web_socket_state else {
         return true;
     };
     let handles = &state.deps.app_state.clustering_claims;
-    let (Some(store), Some(identity)) = (&handles.claim_store, &handles.node_identity) else {
-        // No cluster claim authority is configured, so no node can hold one.
-        return false;
+    let (membership, asker) = match (&handles.cluster_membership, &handles.resource_presence) {
+        // No clustering is configured at all, so this node is the whole
+        // cluster and there is no peer that could hold the socket.
+        (None, None) => return false,
+        (Some(membership), Some(asker)) => (membership, asker),
+        // Half-wired: the question cannot be asked, so absence is unproven.
+        _ => return true,
     };
-    let entity = waddle_xmpp::ownership::Entity::new(
-        waddle_xmpp::ownership::EntityType::UserActor,
-        occupant.to_bare().to_string(),
-    );
-    let owner = match store.current_claim(&entity).await {
-        Ok(Some(claim)) if claim.owner_lease_fresh && claim.owner != identity.current() => {
-            claim.owner
-        }
-        // Unclaimed, stale-leased, or our own claim: nothing to ask, and
-        // nothing that keeps the resource alive elsewhere.
-        Ok(_) => return false,
-        Err(error) => {
-            tracing::debug!(%occupant, %error, "ghost probe could not read the ownership claim");
-            return true;
-        }
-    };
-    let Some(asker) = &handles.resource_presence else {
-        return true;
-    };
-    match asker.resource_presence(&owner, occupant).await {
-        Ok(RelayResourcePresenceReply::Absent) => false,
-        Ok(RelayResourcePresenceReply::Present) => true,
-        Ok(RelayResourcePresenceReply::NotOwner) => {
-            tracing::debug!(
-                %occupant,
-                owner = %owner.node_id,
-                "ghost probe reached a node that no longer owns the account's claim"
-            );
-            true
-        }
-        Err(error) => {
-            tracing::debug!(
-                %occupant,
-                owner = %owner.node_id,
-                %error,
-                "ghost probe could not ask the claim owner about the resource"
-            );
-            true
-        }
+    match peer_resource_reachability(membership.as_ref(), asker.as_ref(), occupant).await {
+        PeerResourceReachability::AbsentOnEveryPeer => false,
+        PeerResourceReachability::NotProven => true,
     }
 }
 
-/// Cluster claims exist only behind the `clustering` feature; without it this
+/// Cluster peers exist only behind the `clustering` feature; without it this
 /// node is the only one there is.
 #[cfg(not(feature = "clustering"))]
-async fn foreign_claim(_deps: &Deps<'_>, _occupant: &FullJid) -> bool {
+async fn reachable_on_a_peer(_deps: &Deps<'_>, _occupant: &FullJid) -> bool {
     false
 }
 
 /// Remove the occupancy through the one full-JID leave sweep every other
 /// departure path uses, so XEP-0045 §7.14 presence, SFU teardown, empty-room
 /// eviction and failure retention stay in a single place.
+///
+/// `true` only when the full JID is provably no longer seated at all.
+/// The sweep reports `Completed` for a `Superseded` disposition too — a
+/// client that rebound the same full JID and rejoined during the probes keeps
+/// its new seat, which is the point of the generation selector — and that is
+/// a no-op, not an eviction: it must neither tick the counter nor claim the
+/// progress that lets the settlement run. A room that cannot answer the
+/// confirmation is treated the same way, since nothing was proven.
 async fn evict(
     state: &WebSocketState,
+    actor: &ActorRef<RoomActor>,
     occupant: &FullJid,
     generation: OccupancySessionGeneration,
 ) -> bool {
@@ -285,7 +331,7 @@ async fn evict(
         .protocol
         .remote_muc_memberships
         .generation_watermark();
-    redrive_local_muc_cleanup(
+    if redrive_local_muc_cleanup(
         state,
         occupant,
         LeaveSessionSelector::Generation(generation),
@@ -293,7 +339,26 @@ async fn evict(
         remote_ceiling,
     )
     .await
-        == MucCleanupOutcome::Completed
+        != MucCleanupOutcome::Completed
+    {
+        return false;
+    }
+    match actor
+        .ask(GetOccupantSessionGeneration {
+            jid: occupant.clone(),
+        })
+        .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+        .await
+    {
+        // Any seat at all means the room still owes this full JID a copy: a
+        // `Superseded` sweep leaves the rejoined session sitting there, and
+        // that is not an eviction.
+        Ok(seated) => seated.is_none(),
+        Err(error) => {
+            tracing::debug!(%occupant, ?error, "ghost sweep could not confirm the eviction");
+            false
+        }
+    }
 }
 
 /// The row's still-owed groupchat obligations with the progress each has

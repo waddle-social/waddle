@@ -823,14 +823,21 @@ pub struct ClusteringHandles {
     /// sequence allocator used by origin routing calls.
     #[cfg(feature = "clustering")]
     pub ordered_relay_delivery_bridge: Option<Arc<route_bridge::OrderedRelayDeliveryBridge>>,
-    /// #1803: the seam ghost-occupant eviction asks an account's claim owner
-    /// through — "do you know this exact full JID?". A `UserActor` claim is
-    /// per account, so the claim row alone cannot answer a per-resource
-    /// question; only the owner's own actor tree and SM store can. `None`
-    /// under the same conditions `claim_store` is `None`, and a `None` here
-    /// makes the guard fail closed (the occupant keeps its seat).
+    /// #1803: the seam ghost-occupant eviction asks ONE cluster peer through
+    /// — "do you know this exact full JID?". A socket is known only to the
+    /// node that holds it, so the question goes to every peer
+    /// `cluster_membership` names. `None` under the same conditions
+    /// `claim_store` is `None`.
     #[cfg(feature = "clustering")]
     pub resource_presence: Option<Arc<dyn resource_presence::ResourcePresenceAsker>>,
+    /// #1803: which peers `resource_presence` must clear an eviction with —
+    /// the `clustering_nodes` rows the control plane has not
+    /// committed-expired. Both this and `resource_presence` being `None` is
+    /// the single-node configuration (nothing else can be holding the
+    /// socket); exactly one of the two missing fails closed, because a
+    /// half-wired cluster cannot prove anything.
+    #[cfg(feature = "clustering")]
+    pub cluster_membership: Option<Arc<dyn resource_presence::ClusterMembership>>,
     /// This node's clustering-scope cancellation token (the same child
     /// token every clustering task races against — see
     /// `clustering_scope_token`'s doc comment). Exposed so a caller outside
@@ -1136,6 +1143,10 @@ pub async fn start_if_enabled(
             room_local_claims: Some(Arc::clone(&room_local_claims)),
             user_local_claims: Some(Arc::clone(&user_local_claims)),
             muc_durable_store: Some(muc_durable_store),
+            cluster_membership: Some(resource_presence::NodeLeaseClusterMembership::new(
+                Arc::clone(&node_lease_handle),
+                live_identity.clone(),
+            )),
             node_lease: Some(node_lease_handle),
             lease_ttl: Some(config.node_lease.lease_ttl),
             pod_template_hash: pod_template_hash.clone(),

@@ -1401,6 +1401,46 @@ pub trait NodeLeaseStore: Send + Sync {
         lease_ttl: Duration,
     ) -> Result<usize, ClaimError>;
 
+    /// Every other (not `me`) node row that has NOT been committed-expired —
+    /// the #1803 ghost-eviction fan-out's membership read.
+    ///
+    /// Deliberately a different predicate from
+    /// [`count_other_live_nodes`](Self::count_other_live_nodes), which is an
+    /// advisory isolation heuristic about this node's own renewal. This list
+    /// decides whether an occupant may be TORN OUT of a room, so it must
+    /// over-approximate who might still be holding that occupant's socket:
+    ///
+    /// - **`draining` rows are included.** Slice 10's drain stops a node
+    ///   acquiring NEW claims while it keeps serving the sockets it already
+    ///   has; excluding it would let another node evict an occupant whose
+    ///   socket is live on the draining replica.
+    /// - **Heartbeat-stale rows are included.** A lapsed heartbeat is not a
+    ///   commitment that the node is gone; the single authoritative
+    ///   transition is the `expired = true` CAS
+    ///   ([`expire`](Self::expire)), the same flag `steal_stale`'s
+    ///   `OwnerStale` predicate requires before another node may take that
+    ///   node's claims. A node that is alive but momentarily heartbeat-stale
+    ///   therefore stays in the set and still gets asked.
+    ///
+    /// A node excluded here is one the cluster has already committed to be
+    /// gone, which is exactly the point at which its claims become stealable
+    /// and its sockets cannot be reattached — so excluding it is the same
+    /// decision the rest of the control plane already made. The orphan
+    /// reaper's stale-node watchdog
+    /// (`session_janitors::run_orphan_reaper_sweep`) feeds every
+    /// heartbeat-stale row through `expire`, so a hard-killed replica does
+    /// leave the set within about one sweep of its lease lapsing and the
+    /// ghost backlog drains rather than pinning forever.
+    ///
+    /// `limit` bounds the read. Callers MUST treat a full page as "the
+    /// membership read did not answer" and fail closed rather than fan out
+    /// to a truncated set.
+    async fn list_other_unexpired_nodes(
+        &self,
+        me: &NodeIdentity,
+        limit: usize,
+    ) -> Result<Vec<NodeIdentity>, ClaimError>;
+
     /// The demotion-reconciliation query (element 4/Slice 2): read every
     /// entity currently on file as owned by `(me.node_id, me.node_epoch)`
     /// via the `clustering_claims_node_id_node_epoch` index, and return
@@ -1989,6 +2029,41 @@ impl NodeLeaseStore for PostgresClaimStore {
             None => 0,
         };
         Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    async fn list_other_unexpired_nodes(
+        &self,
+        me: &NodeIdentity,
+        limit: usize,
+    ) -> Result<Vec<NodeIdentity>, ClaimError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        // Only the committed `expired` flag filters here — see the trait doc
+        // for why draining and heartbeat-stale rows must stay in the set.
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT node_id, node_epoch
+                FROM clustering_nodes
+                WHERE node_id != ?
+                  AND NOT expired
+                ORDER BY node_id ASC, node_epoch ASC
+                LIMIT ?
+                "#,
+                crate::db_params![me.node_id.clone(), limit],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(db_err)? {
+            let node_id: String = row.get(0).map_err(db_err)?;
+            let node_epoch: String = row.get(1).map_err(db_err)?;
+            out.push(NodeIdentity::new(node_id, node_epoch));
+        }
+        Ok(out)
     }
 
     async fn reconcile(

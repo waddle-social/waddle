@@ -438,8 +438,15 @@ impl RecoveryEnvironment for RoomEnvironment {
 }
 
 /// XEP-0045 "Ghost Users" / §7.14: an entity that is no longer an occupant is
-/// owed no groupchat copy, so its frozen obligation must settle rather than
-/// hold the canonical message non-terminal forever.
+/// owed no groupchat copy, so its frozen obligation must terminalize rather
+/// than hold the canonical message non-terminal forever.
+///
+/// #1803 H1 bounds that: rosters are memory-only, so "absent from the roster"
+/// is never on its own a reason to PERMANENTLY DROP a copy for somebody this
+/// node can still hand it to — after a room-host restart every frozen
+/// pre-restart occupant reads absent. `b` keeps a resumable session here, so
+/// its copy is delivered by the ordinary rebuild instead of being settled;
+/// the row terminalizes either way.
 pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
     let sm = detached::registry(&fixture).await;
     let [a, b, _] = detached::resources();
@@ -451,7 +458,8 @@ pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
         .expect("accept");
     detached::execute(&fixture, &first, &ConnectionRegistry::new(), &sm).await;
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 1);
-    // `b` keeps a resumable session: only room occupancy may settle its copy.
+    // `b` keeps a resumable session: this node can still deliver its copy, so
+    // the roster's "absent" must not settle (drop) it (#1803 H1).
     detached::attach(&sm, &b).await;
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
@@ -497,9 +505,11 @@ pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
     })
     .await
     .expect("maintenance settled the departed occupant");
-    assert!(
-        detached::queued(&sm, &b).await.unacked_stanzas.is_empty(),
-        "a non-occupant is owed no groupchat copy"
+    assert_eq!(
+        detached::queued(&sm, &b).await.unacked_stanzas.len(),
+        1,
+        "#1803 H1: a copy this node can still deliver is delivered, not \
+         dropped on the strength of a memory-only roster"
     );
     assert_eq!(detached::queued(&sm, &a).await.unacked_stanzas.len(), 1);
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 2);

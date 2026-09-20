@@ -349,3 +349,121 @@ async fn sqlite_ghost_occupant_survives_below_the_stall_threshold() {
     );
     f.f.close().await;
 }
+
+/// A client that rebinds the SAME full JID and rejoins while the probes are
+/// running (the web client reuses its `web-<uuid>` resource across reconnects
+/// within a page). The generation is pinned before the probes, so the sweep
+/// targets the session the evidence was gathered about and the new one is
+/// classified `Superseded` instead of being torn out.
+#[tokio::test]
+async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
+    use crate::ingress::recovery_ghosts::{hook_ghost_probe_window, GhostProbeWindow};
+
+    /// Rejoins the ghost's full JID exactly once, from inside the probe
+    /// window the generation pin exists to close.
+    struct RejoinOnce {
+        room: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        ghost: jid::FullJid,
+        done: std::sync::atomic::AtomicBool,
+        ran: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl GhostProbeWindow for RejoinOnce {
+        async fn enter(&self, occupant: &jid::FullJid) {
+            if occupant != &self.ghost || self.done.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            let admission_revision = self
+                .room
+                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .await
+                .expect("room snapshot")
+                .admission_revision;
+            self.room
+                .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                    sender_jid: self.ghost.clone(),
+                    nick: "alice".to_owned(),
+                    affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                        waddle_xmpp::Affiliation::Member,
+                    ),
+                    local_domain: "example.com".to_owned(),
+                    admission_revision,
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                })
+                .await
+                .expect("the client rebinds the same resource and rejoins");
+        }
+    }
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before_evicted = metrics.counter_sum(EVICTED, &[]).unwrap_or(0);
+    let f = ghost_fixture(IngressFixture::sqlite().await, GhostCase::Evictable).await;
+    let room = f
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: ROOM.parse().expect("room"),
+        })
+        .await
+        .expect("registry lookup")
+        .expect("local room actor");
+    let seated = |room: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+                  ghost: jid::FullJid| async move {
+        room.ask(waddle_xmpp::muc::room_actor::GetOccupantSessionGeneration { jid: ghost })
+            .await
+            .expect("generation probe")
+    };
+    let before = seated(room.clone(), f.ghost.clone())
+        .await
+        .expect("the ghost starts seated");
+
+    // Three stalled passes, then the pass that would evict — with the rejoin
+    // landing between the generation pin and the probes.
+    for _ in 0..3 {
+        f.pass().await;
+    }
+    let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    hook_ghost_probe_window(
+        f.key,
+        std::sync::Arc::new(RejoinOnce {
+            room: room.clone(),
+            ghost: f.ghost.clone(),
+            done: std::sync::atomic::AtomicBool::new(false),
+            ran: std::sync::Arc::clone(&hook_ran),
+        }) as std::sync::Arc<dyn GhostProbeWindow>,
+    );
+    f.pass().await;
+
+    assert!(
+        hook_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the probe-window hook must have run"
+    );
+    let after = seated(room, f.ghost.clone())
+        .await
+        .expect("the rejoined session keeps its seat");
+    assert_ne!(
+        after, before,
+        "the fixture must have rejoined a NEW session"
+    );
+    assert!(
+        f.occupies(&f.ghost).await,
+        "a session that joined during the probes must not be evicted"
+    );
+    assert_eq!(
+        f.progress().await,
+        vec![f.watcher.clone()],
+        "no copy is settled for a seat that is still live"
+    );
+    assert!(!f.terminal().await);
+    assert_eq!(
+        metrics.counter_sum(EVICTED, &[]).unwrap_or(0),
+        before_evicted,
+        "a superseded sweep is not an eviction"
+    );
+    f.f.close().await;
+}

@@ -112,7 +112,6 @@ fn resource_presence_is_a_new_message_id_with_a_round_tripping_reply() {
     for reply in [
         RelayResourcePresenceReply::Present,
         RelayResourcePresenceReply::Absent,
-        RelayResourcePresenceReply::NotOwner,
     ] {
         assert_eq!(
             serde_json::from_slice::<RelayResourcePresenceReply>(
@@ -283,6 +282,14 @@ impl NodeLeaseStore for NoopNodeLease {
         _lease_ttl: Duration,
     ) -> Result<usize, ClaimError> {
         Ok(0)
+    }
+
+    async fn list_other_unexpired_nodes(
+        &self,
+        _me: &NodeIdentity,
+        _limit: usize,
+    ) -> Result<Vec<NodeIdentity>, ClaimError> {
+        Ok(Vec::new())
     }
 
     async fn reconcile(
