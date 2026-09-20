@@ -35,7 +35,8 @@ fn default_availability() -> String {
 }
 
 fn server_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"))
+        .join("../..")
 }
 
 fn load_manifest() -> Manifest {

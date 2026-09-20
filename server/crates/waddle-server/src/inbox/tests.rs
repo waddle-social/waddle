@@ -836,7 +836,10 @@ async fn postgres_inbox_storage_tracks_groupchat_notification_recovery() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlx_inbox_storage_persists_file_backing() {
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("inbox-{}.db", uuid::Uuid::new_v4()));
     let user = jid("me@example.com");
@@ -943,7 +946,10 @@ async fn sqlx_inbox_postgres_handles_i32_overflow_last_updated() {
 ///   5. asserting the column is present after init.
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_migration_replaces_legacy_recoveries_with_required_message_keys() {
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("inbox-migration-{}.db", uuid::Uuid::new_v4()));
     let url = format!("sqlite://{}", path.display());
@@ -1198,7 +1204,10 @@ fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn migration_adds_call_thread_columns_to_legacy_inbox_table() {
     use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("inbox-call-migration-{}.db", uuid::Uuid::new_v4()));
     let url = format!("sqlite://{}", path.display());

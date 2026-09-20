@@ -12,7 +12,10 @@ fn message() -> Message {
 }
 
 fn config(capability: ExtensionCapability) -> ExtensionConfig {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/message_hook.wat");
+    let fixture = Path::new(
+        &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("tests/fixtures/message_hook.wat");
     ExtensionConfig {
         modules: vec![ExtensionModuleConfig {
             name: "message-hook-fixture".into(),

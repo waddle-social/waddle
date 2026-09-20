@@ -454,10 +454,12 @@ impl TestArtifacts {
             .duration_since(UNIX_EPOCH)
             .expect("clock should move forward")
             .as_nanos();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-artifacts")
-            .join(format!("manager-{nonce}-{}", std::process::id()));
+        let root = PathBuf::from(
+            std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+        )
+        .join("target")
+        .join("test-artifacts")
+        .join(format!("manager-{nonce}-{}", std::process::id()));
         fs::create_dir_all(&root).expect("artifact directory should be created");
         Self { root }
     }

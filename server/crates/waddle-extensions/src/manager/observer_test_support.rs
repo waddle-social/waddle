@@ -5,7 +5,11 @@ impl ExtensionManager {
     /// Load real fixture actors with independent deterministic invocation controls.
     pub async fn with_observer_test_plugins(plugins: Vec<Arc<ObserverTestPlugin>>) -> Self {
         let runtime = WasmRuntime::new().expect("fixture runtime");
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/message_hook.wat");
+        // This helper also runs inside sibling crates' test binaries.
+        let path = Path::new(
+            &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+        )
+        .join("../waddle-extensions/tests/fixtures/message_hook.wat");
         let mut actors = Vec::new();
         for plugin in plugins {
             let loaded = LoadedExtension::load(&runtime, &path).expect("fixture component");

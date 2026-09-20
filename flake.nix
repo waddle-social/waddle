@@ -38,6 +38,111 @@
           lib = pkgs.lib;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          testBuilderMemoryGuard = ''
+            # MemTotal can exceed a container's cgroup limit. Enforce
+            # both when cgroup v2 exposes its memory limit. Allow for
+            # kernel reservations on a nominal 64 GB runner.
+            required_memory_kib=$((56 * 1024 * 1024))
+            available_memory_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+            if [ -r /sys/fs/cgroup/memory.max ]; then
+              cgroup_memory_bytes=$(cat /sys/fs/cgroup/memory.max)
+              if [ "$cgroup_memory_bytes" != max ]; then
+                cgroup_memory_kib=$((cgroup_memory_bytes / 1024))
+                if [ "$cgroup_memory_kib" -lt "$available_memory_kib" ]; then
+                  available_memory_kib=$cgroup_memory_kib
+                fi
+              fi
+            fi
+            if [ "$available_memory_kib" -lt "$required_memory_kib" ]; then
+              echo "waddle-server-test-archive requires a 64 GB builder; use waddle-server-test on smaller machines" >&2
+              exit 1
+            fi
+          '';
+          # Opt in to a 64 GB builder; the ordinary check keeps one Cargo job.
+          # Build a portable archive once. Test execution stays in separate
+          # jobs so nextest's whole-machine reservations remain meaningful.
+          serverTestArchive = self.checks.${system}.waddle-server-test.overrideAttrs (old: {
+            pname = "waddle-server-test-archive";
+            CARGO_BUILD_JOBS = "4";
+            doInstallCargoArtifacts = false;
+            # Compilation and test listing do not require a live database.
+            preCheck = "";
+            nativeBuildInputs = lib.filter (input: input != pkgs.postgresql_17) old.nativeBuildInputs;
+            checkPhase = ''
+              ${testBuilderMemoryGuard}
+              runHook preCheck
+              mkdir -p "$out/ci-performance"
+              nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests)
+              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                  cargo nextest run "''${nextest_args[@]}" --no-run --timings
+                # This is the visible cgroup's lifetime peak, which can
+                # include dependency preparation; it is not a phase RSS.
+                if [ -r /sys/fs/cgroup/memory.peak ]; then
+                  echo "WADDLE_CI_METRIC phase=compile cgroup_lifetime_peak_bytes=$(cat /sys/fs/cgroup/memory.peak)"
+                fi
+                if [ -r /sys/fs/cgroup/memory.events ]; then
+                  while read -r event count; do
+                    echo "WADDLE_CI_METRIC phase=compile cgroup_lifetime_memory_event=$event count=$count"
+                  done < /sys/fs/cgroup/memory.events
+                fi
+              cp "''${CARGO_TARGET_DIR:-target}/cargo-timings/cargo-timing.html" "$out/ci-performance/cargo-timing.html"
+              cargo nextest list "''${nextest_args[@]}" --message-format json > "$out/test-inventory.json"
+              for partition in 1 2 3 4; do
+                cargo nextest list "''${nextest_args[@]}" --partition "count:$partition/4" \
+                  --message-format json > "$out/partition-$partition.json"
+              done
+              ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} \
+                "$out/test-inventory.json" "$out/partition-1.json" "$out/partition-2.json" \
+                "$out/partition-3.json" "$out/partition-4.json" > "$out/partition-coverage.json"
+              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=archive elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                cargo nextest archive "''${nextest_args[@]}" --archive-format tar-zst --archive-file "$out/archive.tar.zst"
+              # Compressed binaries hide their store references from Nix's
+              # scanner. Keep each interpreter/RPATH store root explicitly
+              # so an output-only NAR transfer can restore its runtime libs.
+              set -o pipefail
+              ${pkgs.jq}/bin/jq -r --arg target "''${CARGO_TARGET_DIR:-target}" '
+                .["rust-suites"][]["binary-path"],
+                (.["rust-build-meta"]["non-test-binaries"][][] | select(.kind == "bin-exe") | $target + "/" + .path)
+              ' "$out/test-inventory.json" | sort -u | while IFS= read -r binary; do
+                ${pkgs.patchelf}/bin/patchelf --print-rpath "$binary"
+                ${pkgs.patchelf}/bin/patchelf --print-interpreter "$binary"
+              done | grep -Eo '/nix/store/[a-z0-9]{32}-[^/:[:space:]]+' | sort -u > "$out/runtime-references"
+              wc -c "$out/archive.tar.zst"
+              runHook postCheck
+            '';
+          });
+          mkServerTestShard =
+            partition:
+            self.checks.${system}.waddle-server-test.overrideAttrs (_: {
+              pname = "waddle-server-test-shard-${toString partition}";
+              cargoArtifacts = null;
+              cargoVendorDir = null;
+              doInstallCargoArtifacts = false;
+              CARGO_PROFILE = "";
+              checkPhase = ''
+                runHook preCheck
+                mkdir -p "$out"
+                partition="count:${toString partition}/4"
+                extracted="$TMPDIR/nextest-archive"
+                mkdir -p "$extracted"
+                # Nextest sets runtime manifest/binary paths after remapping.
+                # Nix uses different temporary source roots on each worker.
+                cargo nextest list --profile ci --archive-file ${serverTestArchive}/archive.tar.zst \
+                  --extract-to "$extracted" --workspace-remap "$PWD" \
+                  --partition "$partition" --message-format json > "$out/test-inventory.json"
+                ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
+                  ${serverTestArchive}/partition-${toString partition}.json "$out/test-inventory.json" \
+                  > "$out/partition-coverage.json"
+                # Reuse the extracted metadata to avoid decompressing twice.
+                ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                  cargo nextest run --profile ci \
+                    --cargo-metadata "$extracted/target/nextest/cargo-metadata.json" \
+                    --binaries-metadata "$extracted/target/nextest/binaries-metadata.json" \
+                    --target-dir-remap "$extracted/target" --build-dir-remap "$extracted/target" \
+                    --workspace-remap "$PWD" --partition "$partition"
+                runHook postCheck
+              '';
+            });
           serverPackageSrc = lib.fileset.toSource {
             root = ./server;
             fileset =
@@ -181,49 +286,12 @@
         }
         // lib.optionalAttrs pkgs.stdenv.isLinux {
           waddle-server-image-stream = image;
-          # Explicit opt-in for the >=64 GB CI builder. Keep the ordinary
-          # check at one Cargo job so `nix flake check` remains safe on the
-          # existing 16 GB runners and developer machines. Reuse exactly
-          # the same dependency artifacts, profile and test configuration.
-          waddle-server-test-parallel = self.checks.${system}.waddle-server-test.overrideAttrs (_: {
-            pname = "waddle-server-test-parallel";
-            CARGO_BUILD_JOBS = "4";
-            checkPhase = ''
-              # MemTotal can exceed a container's cgroup limit. Enforce
-              # both when cgroup v2 exposes its memory limit. Allow for
-              # kernel reservations on a nominal 64 GB runner.
-              required_memory_kib=$((56 * 1024 * 1024))
-              available_memory_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
-              if [ -r /sys/fs/cgroup/memory.max ]; then
-                cgroup_memory_bytes=$(cat /sys/fs/cgroup/memory.max)
-                if [ "$cgroup_memory_bytes" != max ]; then
-                  cgroup_memory_kib=$((cgroup_memory_bytes / 1024))
-                  if [ "$cgroup_memory_kib" -lt "$available_memory_kib" ]; then
-                    available_memory_kib=$cgroup_memory_kib
-                  fi
-                fi
-              fi
-              if [ "$available_memory_kib" -lt "$required_memory_kib" ]; then
-                echo "waddle-server-test-parallel requires a 64 GB builder; use waddle-server-test on smaller machines" >&2
-                exit 1
-              fi
+          waddle-server-test-archive = serverTestArchive;
+          waddle-server-test-shard-1 = mkServerTestShard 1;
+          waddle-server-test-shard-2 = mkServerTestShard 2;
+          waddle-server-test-shard-3 = mkServerTestShard 3;
+          waddle-server-test-shard-4 = mkServerTestShard 4;
 
-              runHook preCheck
-              mkdir -p "$out/ci-performance"
-              nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests)
-              # Split compilation from execution without changing the
-              # selected binaries or rebuilding them in a second worker.
-              # GNU time's RSS is the largest child, not aggregate memory.
-              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                cargo nextest run "''${nextest_args[@]}" --no-run --timings
-              cp "''${CARGO_TARGET_DIR:-target}/cargo-timings/cargo-timing.html" "$out/ci-performance/cargo-timing.html"
-              cargo nextest list "''${nextest_args[@]}" --message-format json \
-                > "$out/ci-performance/test-inventory.json"
-              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                cargo nextest run "''${nextest_args[@]}"
-              runHook postCheck
-            '';
-          });
         }
       );
 
@@ -274,23 +342,26 @@
             WADDLE_UPLOAD_DIR = "./uploads";
             RUST_BACKTRACE = "1";
           };
-          testArgs = baseArgs // testRuntimeEnv // {
-            # The Mimir-rules drift guard test (waddle-xmpp) reads the
-            # rules file at <manifest>/../../../infrastructure/... — the
-            # parent of the source root. Without this copy the guard
-            # silently skips in every nix test lane, including the
-            # dedicated xmpp unit/XEP lanes built from testArgs (#1436).
-            postUnpack = ''
-              mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir"
-              cp ${./infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml} \
-                "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
-              # The CNPG monitoring-query drift test (waddle-server, Postgres
-              # lane) reads the ConfigMap the same way (#1695).
-              mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server"
-              cp ${./infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml} \
-                "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
-            '';
-          };
+          testArgs =
+            baseArgs
+            // testRuntimeEnv
+            // {
+              # The Mimir-rules drift guard test (waddle-xmpp) reads the
+              # rules file at <manifest>/../../../infrastructure/... — the
+              # parent of the source root. Without this copy the guard
+              # silently skips in every nix test lane, including the
+              # dedicated xmpp unit/XEP lanes built from testArgs (#1436).
+              postUnpack = ''
+                mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir"
+                cp ${./infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml} \
+                  "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
+                # The CNPG monitoring-query drift test (waddle-server, Postgres
+                # lane) reads the ConfigMap the same way (#1695).
+                mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server"
+                cp ${./infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml} \
+                  "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
+              '';
+            };
           serverTestArgs = testArgs // {
             postUnpack = testArgs.postUnpack + ''
               cp -R ${./server/charts} "$sourceRoot/charts"
@@ -451,6 +522,17 @@
               CARGO_BUILD_TARGET = "wasm32-wasip2";
               cargoArtifacts = extensionWasmArtifacts;
               cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes";
+              # Publish these exact immutable outputs instead of compiling
+              # the same extensions again in the publication job.
+              doInstallCargoArtifacts = false;
+              installPhaseCommand = ''
+                mkdir -p "$out/wasm"
+                for module in ai_chatbot decision_polls github link_board stargate_quotes; do
+                  wasm="''${CARGO_TARGET_DIR:-target}/wasm32-wasip2/release/$module.wasm"
+                  test -s "$wasm"
+                  cp "$wasm" "$out/wasm/$module.wasm"
+                done
+              '';
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoNextest (
@@ -510,16 +592,18 @@
           # because an upstream issue looks closed -- measure `cue vet .`
           # in server/ on the candidate version first. Covers the CLI only;
           # the cuengine crate is pinned separately in server/Cargo.lock.
-          cue = pkgs.cue.overrideAttrs (finalAttrs: _prev: {
-            version = "0.16.1";
-            src = pkgs.fetchFromGitHub {
-              owner = "cue-lang";
-              repo = "cue";
-              tag = "v${finalAttrs.version}";
-              hash = "sha256-mTj3XMWByNrKjm+/MOQGLyUKIv4JJ8i6Oaphbzls84U=";
-            };
-            vendorHash = "sha256-HXRrVPjPc10Q1MVr1d9vZBWgSVqNZ5J0UgvP/hTPfcg=";
-          });
+          cue = pkgs.cue.overrideAttrs (
+            finalAttrs: _prev: {
+              version = "0.16.1";
+              src = pkgs.fetchFromGitHub {
+                owner = "cue-lang";
+                repo = "cue";
+                tag = "v${finalAttrs.version}";
+                hash = "sha256-mTj3XMWByNrKjm+/MOQGLyUKIv4JJ8i6Oaphbzls84U=";
+              };
+              vendorHash = "sha256-HXRrVPjPc10Q1MVr1d9vZBWgSVqNZ5J0UgvP/hTPfcg=";
+            }
+          );
         in
         {
           default = pkgs.mkShell {

@@ -837,8 +837,10 @@ mod tests {
     #[tokio::test]
     async fn ingress_maintenance_failure_rule_matches_exported_labels() {
         let guard = setup().await;
-        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules_path = std::path::Path::new(
+            &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+        )
+        .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
         let rules = std::fs::read_to_string(&rules_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
         let expression = rules
@@ -867,8 +869,10 @@ mod tests {
     #[tokio::test]
     async fn ingress_gc_failure_rule_matches_exported_outcome_label() {
         let guard = setup().await;
-        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules_path = std::path::Path::new(
+            &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+        )
+        .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
         let rules = std::fs::read_to_string(&rules_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
         let expression = rules
@@ -898,8 +902,10 @@ mod tests {
 
     #[test]
     fn ingress_gc_backlog_rule_covers_idle_maintenance() {
-        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules_path = std::path::Path::new(
+            &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+        )
+        .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
         let rules = std::fs::read_to_string(&rules_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
         let expression = rules
@@ -915,8 +921,10 @@ mod tests {
 
     #[test]
     fn ingress_rules_cover_every_non_advancing_decision() {
-        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules_path = std::path::Path::new(
+            &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+        )
+        .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
         let rules = std::fs::read_to_string(&rules_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
         let alerted_classes: Vec<_> = rules
@@ -1286,8 +1294,10 @@ mod tests {
     /// registration list against drifting apart.
     #[test]
     fn every_xmpp_counter_in_the_mimir_rules_is_registered() {
-        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules_path = std::path::Path::new(
+            &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+        )
+        .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
         // Full checkouts have the file, and the nix test derivations
         // copy it into the build tree (flake.nix testArgs postUnpack),
         // so a missing file is a broken copy path, not an expected

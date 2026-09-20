@@ -78,7 +78,7 @@ permissions:
 jobs:
   checkCiDrift:
     name: checkCiDrift
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -128,7 +128,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkSwitchableAlternativeProgram:
     name: checkSwitchableAlternativeProgram
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -178,7 +178,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkXmppClientFfiBindings:
     name: checkXmppClientFfiBindings
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -228,7 +228,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildCi:
     name: nixBuildCi
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -258,7 +258,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildExtensionModules:
     name: nixBuildExtensionModules
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -288,7 +288,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildImageStream:
     name: nixBuildImageStream
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -318,7 +318,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixClippy:
     name: nixClippy
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -348,7 +348,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixDoctest:
     name: nixDoctest
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -378,7 +378,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixFmt:
     name: nixFmt
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -408,7 +408,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   renderDeployment:
     name: renderDeployment
-    runs-on: namespace-profile-linux-x86
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4

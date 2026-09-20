@@ -136,7 +136,8 @@ schema.#Project & {
 				_t.doctest,
 				_t.checkXmppClientFfiBindings,
 				_t.renderDeployment,
-				_t.buildExtensionModules,
+				_t.nixBuildImageStream,
+				_t.nixBuildExtensionModules,
 				_t.publishContainerImage,
 			]
 		}
@@ -162,6 +163,7 @@ schema.#Project & {
 				pullRequest: true
 			}
 			mode: "expanded"
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -176,13 +178,14 @@ schema.#Project & {
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
 		}
-		// Separate compute sizing keeps lightweight checks on the existing
-		// runner while retaining nixTest's dependency-prewarm ordering.
+		// Compile once on a memory-safe builder; every shard runs in its own
+		// runner so nextest exclusive-test reservations remain machine-wide.
 		rustTests: {
 			when: pullRequest: true
 			mode: "expanded"
 			provider: github: {
-				runner: "nscloud-ubuntu-24.04-amd64-32x64"
+				runner: "namespace-profile-linux-x86"
+				runners: arch: builder: "nscloud-ubuntu-24.04-amd64-32x64;job.priority=1"
 				permissions: {
 					"id-token":      "write"
 					contents:        "read"
@@ -191,7 +194,33 @@ schema.#Project & {
 					"pull-requests": "none"
 				}
 			}
-			tasks: [_t.nixBuildDeps, _t.nixTest]
+			tasks: [
+				{task: _t.nixTestArchive, matrix: arch: ["builder"]},
+				// Empty matrices use cuenv's artifact aggregation jobs:
+				// each waits for the builder and downloads its exact output.
+				// Unlike a test matrix, these preserve the producer dependency.
+				{
+					task: _t.nixTestShard1
+					matrix: {}
+					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
+				},
+				{
+					task: _t.nixTestShard2
+					matrix: {}
+					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
+				},
+				{
+					task: _t.nixTestShard3
+					matrix: {}
+					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
+				},
+				{
+					task: _t.nixTestShard4
+					matrix: {}
+					artifacts: [{from: "nixTestArchive", to: "server/.ci/nextest-archive"}]
+				},
+				_t.nixTest,
+			]
 		}
 		rootSync: {
 			mode: "expanded"
@@ -369,31 +398,89 @@ schema.#Project & {
 			inputs: _nixInputs
 		}
 
-		// Realises nixTest's large inputs (the ci-test dependency artifacts and
-		// the vendored crate sources, several GB) so the FlakeHub Cache daemon
-		// uploads them from this light job, not while nixTest's ~6 GB rustc
-		// peak is running on the same 8x16 runner (see #FlakeHubCache in
-		// ci/contributors/nix.cue). These must be the checks' derivations:
-		// the packages.* deps use a different source fileset and profile.
-		nixBuildDeps: schema.#Task & {
-			command: "nix"
-			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-check-deps", "../#checks.x86_64-linux.waddle-server-cargo-vendor"]
-			inputs: _nixInputs
-		}
-
-		nixTest: schema.#Task & {
-			command: "nix"
-			args: ["build", "--print-build-logs", "../#waddle-server-test-parallel"]
-			// Preserve the former combined PR workflow's triggers when moving
-			// this check to its own compute pool, including charts and fixtures.
+		// Nix realises dependency artifacts in this same job. The 64 GB
+		// builder has room for four compilers plus cache uploads, avoiding
+		// another runner queue between dependency warming and compilation.
+		nixTestArchive: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+				set -euo pipefail
+				archive="$(nix build --print-build-logs --print-out-paths --no-link ../#waddle-server-test-archive)"
+				bash scripts/nextest-archive-transfer.sh export "$archive" .ci/nextest-archive
+				"""#]
+			// Keep the former combined PR workflow's full trigger coverage.
 			inputs: list.Concat([
 				_nixInputs,
+				["scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py"],
 				tasks.checkCiDrift.inputs,
 				tasks.checkSwitchableAlternativeProgram.inputs,
 				tasks.checkXmppClientFfiBindings.inputs,
 				tasks.renderDeployment.inputs,
 			])
-			dependsOn: [tasks.nixBuildDeps]
+			outputs: ["server/.ci/nextest-archive"]
+			hermetic: false
+		}
+
+		nixTestShard1: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+				set -euo pipefail
+				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				nix build --print-build-logs --no-link ../#waddle-server-test-shard-1
+				"""#]
+			inputs: tasks.nixTestArchive.inputs
+			// Cross-job needs/downloads are declared by the pipeline above.
+			hermetic: false
+		}
+
+		nixTestShard2: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+				set -euo pipefail
+				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				nix build --print-build-logs --no-link ../#waddle-server-test-shard-2
+				"""#]
+			inputs: tasks.nixTestArchive.inputs
+			// Cross-job needs/downloads are declared by the pipeline above.
+			hermetic: false
+		}
+
+		nixTestShard3: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+				set -euo pipefail
+				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				nix build --print-build-logs --no-link ../#waddle-server-test-shard-3
+				"""#]
+			inputs: tasks.nixTestArchive.inputs
+			// Cross-job needs/downloads are declared by the pipeline above.
+			hermetic: false
+		}
+
+		nixTestShard4: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+				set -euo pipefail
+				expected="$(nix eval --raw ../#waddle-server-test-archive.outPath)"
+				bash scripts/nextest-archive-transfer.sh import "$expected" .ci/nextest-archive/builder
+				nix build --print-build-logs --no-link ../#waddle-server-test-shard-4
+				"""#]
+			inputs: tasks.nixTestArchive.inputs
+			// Cross-job needs/downloads are declared by the pipeline above.
+			hermetic: false
+		}
+
+		// The archive proves the four partitions cover the entire suite;
+		// each worker checks its actual inventory against that partition.
+		// Keep a stable gate that succeeds only after all four workers pass.
+		nixTest: schema.#Task & {
+			command: "bash"
+			args: ["-c", "echo 'All four test shards and inventory checks passed.'"]
+			inputs: tasks.nixTestArchive.inputs
+			dependsOn: [tasks.nixTestShard1, tasks.nixTestShard2, tasks.nixTestShard3, tasks.nixTestShard4]
 		}
 
 		nixDoctest: schema.#Task & {
@@ -475,17 +562,15 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
-					rustup target add wasm32-wasip2 >/dev/null 2>&1 || true
-					for module in link-board ai-chatbot decision-polls github stargate-quotes; do
-					  cargo build --release --locked --target wasm32-wasip2 --target-dir target --manifest-path "extensions/${module}/Cargo.toml"
+					nix_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+					extension_bundle="$(nix build --print-out-paths --no-link "../#checks.${nix_system}.waddle-server-extension-modules")"
+					mkdir -p target/wasm32-wasip2/release
+					for module in link_board ai_chatbot decision_polls github stargate_quotes; do
+					  test -s "${extension_bundle}/wasm/${module}.wasm"
+					  install -m 0644 "${extension_bundle}/wasm/${module}.wasm" "target/wasm32-wasip2/release/${module}.wasm"
 					done
-					test -s target/wasm32-wasip2/release/link_board.wasm
-					test -s target/wasm32-wasip2/release/ai_chatbot.wasm
-					test -s target/wasm32-wasip2/release/decision_polls.wasm
-					test -s target/wasm32-wasip2/release/github.wasm
-					test -s target/wasm32-wasip2/release/stargate_quotes.wasm
 				"""#]
-			inputs: _rustInputs
+			inputs: _nixInputs
 			outputs: [
 				"server/target/wasm32-wasip2/release/link_board.wasm",
 				"server/target/wasm32-wasip2/release/ai_chatbot.wasm",
@@ -879,7 +964,15 @@ schema.#Project & {
 					SHORT_SHA="$(git rev-parse --short HEAD)"
 					mkdir -p ../target/digests
 
-					image_stream="$(nix build --print-out-paths ../#waddle-server-image-stream)"
+					# Resolve the same immutable outputs built by the parallel gates
+					# from this checkout. FlakeHub supplies them across job runners.
+					image_stream="$(nix build --print-out-paths --no-link ../#waddle-server-image-stream)"
+					extension_bundle="$(nix build --print-out-paths --no-link ../#checks.x86_64-linux.waddle-server-extension-modules)"
+					mkdir -p target/wasm32-wasip2/release
+					for module in link_board ai_chatbot decision_polls github stargate_quotes; do
+					  test -s "${extension_bundle}/wasm/${module}.wasm"
+					  install -m 0644 "${extension_bundle}/wasm/${module}.wasm" "target/wasm32-wasip2/release/${module}.wasm"
+					done
 					"${image_stream}" | docker image load
 
 					docker tag ghcr.io/waddle-social/waddle:nix "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}"
@@ -949,7 +1042,6 @@ schema.#Project & {
 					fi
 					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-					rustup target add wasm32-wasip2 >/dev/null 2>&1 || true
 					declare -a EXTENSIONS=(
 					  "link-board:link_board:urn:waddle:link-board:1"
 					  "ai-chatbot:ai_chatbot:urn:waddle:ai-chatbot:1"
@@ -969,7 +1061,6 @@ schema.#Project & {
 					  wasm_path="target/wasm32-wasip2/release/${crate_name}.wasm"
 					  extension_ref="ghcr.io/waddle-social/waddle/extensions/${extension_name}:sha-${SHORT_SHA}"
 
-					  cargo build --release --locked --target wasm32-wasip2 --target-dir target --manifest-path "extensions/${extension_name}/Cargo.toml"
 					  test -s "${wasm_path}"
 					  if [ "${extension_name}" = "ai-chatbot" ]; then
 					    if grep -aE "AI provider unavailable|WADDLE_AI_PROVIDER|OPENROUTER_API_KEY|OPENAI_API_KEY" "${wasm_path}" >/dev/null; then
@@ -1066,7 +1157,18 @@ schema.#Project & {
 				"""#]
 			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest, tasks.renderDeployment, tasks.buildExtensionModules]
+			dependsOn: [
+				tasks.checkCiDrift,
+				tasks.checkSwitchableAlternativeProgram,
+				tasks.fmt,
+				tasks.clippy,
+				tasks.test,
+				tasks.doctest,
+				tasks.checkXmppClientFfiBindings,
+				tasks.renderDeployment,
+				tasks.nixBuildImageStream,
+				tasks.nixBuildExtensionModules,
+			]
 		}
 
 		flakehubPublished: schema.#Task & {

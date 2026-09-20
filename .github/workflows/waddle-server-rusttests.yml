@@ -63,6 +63,10 @@ on:
     - server/rust-toolchain.toml/**
     - server/schema/**
     - server/scripts/**
+    - server/scripts/check_nextest_shards.py
+    - server/scripts/check_nextest_shards.py/**
+    - server/scripts/nextest-archive-transfer.sh
+    - server/scripts/nextest-archive-transfer.sh/**
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml
@@ -76,14 +80,15 @@ permissions:
   packages: read
   id-token: write
 jobs:
-  nixBuildDeps:
-    name: nixBuildDeps
-    runs-on: nscloud-ubuntu-24.04-amd64-32x64
+  nixTestArchive-builder:
+    name: nixTestArchive (builder)
+    runs-on: nscloud-ubuntu-24.04-amd64-32x64;job.priority=1
+    timeout-minutes: 60
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        fetch-depth: 2
+        fetch-depth: 0
     - name: Install Determinate Nix
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
@@ -98,8 +103,268 @@ jobs:
         drain-timeout: '900'
         upstream-cache-filter: 'true'
         version: v2.0.0
-    - name: nixBuildDeps
-      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-check-deps ../#checks.x86_64-linux.waddle-server-cargo-vendor
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.55.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: nixTestArchive (builder)
+      run: cuenv task nixTestArchive --skip-dependencies
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        CUENV_ARCH: builder
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: nixTestArchive-builder
+        path: server/.ci/nextest-archive
+        if-no-files-found: ignore
+        include-hidden-files: true
+  nixTestShard1:
+    name: nixTestShard1
+    runs-on: namespace-profile-linux-x86
+    needs:
+    - nixTestArchive-builder
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+      with:
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.55.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Download nixTestArchive-builder
+      uses: actions/download-artifact@v4
+      with:
+        name: nixTestArchive-builder
+        path: server/.ci/nextest-archive/builder
+    - name: nixTestShard1
+      run: cuenv task nixTestShard1 --skip-dependencies
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+  nixTestShard2:
+    name: nixTestShard2
+    runs-on: namespace-profile-linux-x86
+    needs:
+    - nixTestArchive-builder
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+      with:
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.55.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Download nixTestArchive-builder
+      uses: actions/download-artifact@v4
+      with:
+        name: nixTestArchive-builder
+        path: server/.ci/nextest-archive/builder
+    - name: nixTestShard2
+      run: cuenv task nixTestShard2 --skip-dependencies
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+  nixTestShard3:
+    name: nixTestShard3
+    runs-on: namespace-profile-linux-x86
+    needs:
+    - nixTestArchive-builder
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+      with:
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.55.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Download nixTestArchive-builder
+      uses: actions/download-artifact@v4
+      with:
+        name: nixTestArchive-builder
+        path: server/.ci/nextest-archive/builder
+    - name: nixTestShard3
+      run: cuenv task nixTestShard3 --skip-dependencies
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+  nixTestShard4:
+    name: nixTestShard4
+    runs-on: namespace-profile-linux-x86
+    needs:
+    - nixTestArchive-builder
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
+    - name: Setup Hestia Nix Cache
+      uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+      with:
+        drain-timeout: '900'
+        upstream-cache-filter: 'true'
+        version: v2.0.0
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.55.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Download nixTestArchive-builder
+      uses: actions/download-artifact@v4
+      with:
+        name: nixTestArchive-builder
+        path: server/.ci/nextest-archive/builder
+    - name: nixTestShard4
+      run: cuenv task nixTestShard4 --skip-dependencies
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -108,9 +373,12 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixTest:
     name: nixTest
-    runs-on: nscloud-ubuntu-24.04-amd64-32x64
+    runs-on: namespace-profile-linux-x86
     needs:
-    - nixBuildDeps
+    - nixTestShard1
+    - nixTestShard2
+    - nixTestShard3
+    - nixTestShard4
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -130,8 +398,28 @@ jobs:
         drain-timeout: '900'
         upstream-cache-filter: 'true'
         version: v2.0.0
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.55.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: nixTest
-      run: nix build --print-build-logs ../#waddle-server-test-parallel
+      run: cuenv task nixTest --skip-dependencies
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

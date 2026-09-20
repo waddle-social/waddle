@@ -615,10 +615,13 @@ pub(crate) async fn room_observer_test_manager(
             provider_room_grants: Vec::new(),
             config_secret_files: Default::default(),
             local_path: Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../waddle-extensions/tests/fixtures/message_hook.wat")
-                    .display()
-                    .to_string(),
+                std::path::Path::new(
+                    &std::env::var_os("CARGO_MANIFEST_DIR")
+                        .expect("test runner sets CARGO_MANIFEST_DIR"),
+                )
+                .join("../waddle-extensions/tests/fixtures/message_hook.wat")
+                .display()
+                .to_string(),
             ),
         })
         .into_iter()

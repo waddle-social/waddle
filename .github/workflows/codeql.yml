@@ -21,7 +21,7 @@ jobs:
     # Namespace's documented machine labels provision an ephemeral runner without
     # requiring a separately configured profile or a persistent shared cache.
     # https://namespace.so/docs/reference/github-actions/runner-configuration
-    runs-on: ${{ matrix.language == 'rust' && 'nscloud-ubuntu-24.04-amd64-16x32' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.language == 'rust' && 'nscloud-ubuntu-24.04-amd64-16x32;job.priority=2' || 'ubuntu-latest' }}
     permissions:
       security-events: write
       packages: read

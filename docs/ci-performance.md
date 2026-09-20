@@ -117,3 +117,47 @@ The inspected active main ruleset has merge-queue configuration but no required-
 Initial acceptance: 20 representative changed-code runs complete all applicable checks in under 15 minutes, including default and all-feature variants, queueing, source-cache misses and artifact work. Include dependency and toolchain cache misses in explicit stress cases and report their timings separately; do not declare the universal target met if these still exceed it. Then track rolling p50/p95, cost per successful commit, peak memory, flakes and cache performance. Twenty runs are an initial acceptance sample, not statistical proof of a long-term percentile.
 
 Stop conditions: missing coverage, new OOMs, hidden retries, incorrect cache reuse, or any prerequisite exceeding its budget. Retain the previous complete graph until replacement coverage and artifacts have been demonstrated. A 15-minute timeout alone does not deliver faster successful CI.
+
+## Implementation pilot: PR #1801
+
+Goal: every applicable PR check finishes within 15 minutes of the commit event,
+with a 13-minute working budget. A successful cached run alone does not establish
+this target. Main publication is measured separately, also against 15 minutes.
+
+The first pilot at `6c9bd09d` kept the complete test suite in one job to measure
+compiler parallelism independently. Rust CodeQL used a 16 CPU / 32 GB runner,
+16 threads and 28 GB analysis memory, retaining the existing languages and query
+configuration. The [CodeQL workflow](https://github.com/waddle-social/waddle/actions/runs/35501509537)
+finished in **9m47s** from workflow creation; its Rust job took **8m22s**, compared
+with **19m42s** in the baseline. This is one measurement, not a percentile claim.
+
+The [Rust pilot](https://github.com/waddle-social/waddle/actions/runs/35501509477)
+exposed **7m14s** of waiting between the dependency-prewarm job finishing and the
+32 CPU / 64 GB test job starting. Observed Namespace overlap reached 64 vCPU;
+that supports resource contention as a cause, but does not establish the account's
+configured quota. The compiler now starts directly, at higher scheduling priority.
+Lightweight PR validation uses GitHub runners; four test workers use the existing
+8 CPU / 16 GB profile. The new compiler's memory guard requires at least 56 GiB
+available on a nominal 64 GB worker. The ordinary Nix check remains at one Cargo
+job for smaller machines.
+
+The replacement test path compiles once, proves that four nextest partitions
+cover the original inventory without overlap, and transfers the exact Nix archive
+output as a GitHub artifact. Its explicit runtime-library references remain in the
+Nix closure. Each worker verifies the expected store path, imports the archive,
+checks its partition's inventory, and runs with its own PostgreSQL instance and
+unchanged nextest scheduling restrictions. Runtime fixture and executable paths
+replace embedded builder paths in tests. Doctests and the distinct XMPP feature
+configurations retain their existing jobs.
+
+CUE generates the builder as a single matrix variant for its larger runner, and
+four artifact-aggregation jobs for test execution. This is intentional: cuenv
+0.55.0's ordinary matrix jobs do not preserve producer dependencies. The final
+`nixTest` job depends on all four workers. It is not an always-reporting required
+status check; do not install it as branch protection without implementing that
+separate gate and merge-queue event support.
+
+Main starts release-image and WASM builds alongside validation. Publishing uses
+the same Nix image and five WASM outputs after every validation gate succeeds.
+FlakeHub substitution on the publication worker still needs a live main run;
+a cache miss may rebuild those outputs, so no publication timing claim is made.

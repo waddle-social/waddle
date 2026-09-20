@@ -1429,7 +1429,10 @@ async fn test_fulltext_query_filters_before_pagination_and_count() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_sqlite_file_backing_persists() {
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("mam-{}.db", uuid::Uuid::new_v4()));
     let database_url = format!("sqlite://{}", path.display());
@@ -1518,7 +1521,10 @@ async fn reaction_round_trips_through_in_memory_storage() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn reaction_round_trips_through_persistent_sqlite() {
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("mam-reaction-{}.db", uuid::Uuid::new_v4()));
     let database_url = format!("sqlite://{}", path.display());
@@ -1611,7 +1617,10 @@ async fn reaction_round_trips_through_persistent_sqlite() {
 async fn reaction_lands_after_legacy_body_not_null_schema_migrated() {
     use sqlx::sqlite::SqlitePoolOptions;
 
-    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("mam-legacy-body-{}.db", uuid::Uuid::new_v4()));
     let database_url = format!("sqlite://{}?mode=rwc", path.display());

@@ -1301,7 +1301,7 @@ const EXPECTED_MONITORING_QUERIES: [&str; 7] = [
 ];
 
 fn monitoring_configmap_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+    PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR")).join(
         "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
     )
 }
