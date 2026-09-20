@@ -2,6 +2,7 @@
 """Cache miss and provider-isolation contracts for the CI experiment."""
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -17,6 +18,50 @@ spec.loader.exec_module(benchmark)
 
 
 class CacheBenchmarkTests(unittest.TestCase):
+    def test_archive_read_hashes_all_bytes_and_records_separate_cost(self):
+        payload = b"archive payload\x00" * 10000
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "archive.tar.zst").write_bytes(payload)
+            with patch.object(benchmark, "received_bytes", side_effect=[10, 42]):
+                report = benchmark.read_archive(directory)
+        self.assertTrue(report["success"])
+        self.assertEqual(report["bytes_read"], len(payload))
+        self.assertEqual(report["sha256"], hashlib.sha256(payload).hexdigest())
+        self.assertEqual(report["observed_network_rx_bytes"], 32)
+
+    def test_timed_out_archive_read_cannot_claim_complete_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "archive.tar.zst").write_bytes(b"payload")
+            with patch.object(benchmark, "command", side_effect=subprocess.TimeoutExpired("sha256sum", 180)) as run:
+                report = benchmark.read_archive(directory)
+            self.assertEqual(run.call_args.kwargs["timeout"], 180)
+        self.assertFalse(report["success"])
+        self.assertEqual(report["bytes_read"], 0)
+        self.assertNotIn("sha256", report)
+
+    def test_summary_compares_seed_and_warm_payloads(self):
+        for warm_digest, expected in [("a" * 64, 0), ("b" * 64, 1)]:
+            with self.subTest(digest=warm_digest), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                jobs = []
+                for index, phase in enumerate(["seed", "warm"]):
+                    benchmark.write_json(root / "input" / phase / "result.json", {
+                        "phase": phase, "variant": "namespace", "complete": True,
+                        "paths": [{"name": "trial-shard1-archive", "path": benchmark.ARCHIVE_PATH,
+                                   "archive_read": {"success": True, "bytes_read": 10,
+                                                    "sha256": "a" * 64 if phase == "seed" else warm_digest}}]})
+                    jobs.append({"name": f"cache-benchmark/{phase}/namespace", "id": index,
+                                 "conclusion": "success", "steps": []})
+                args = types.SimpleNamespace(input=str(root / "input"), output=str(root / "output"))
+                with patch.object(benchmark, "api_collection", return_value=jobs), \
+                        patch.dict(benchmark.os.environ, {"GITHUB_RUN_ID": "1"}), patch("builtins.print"):
+                    self.assertEqual(benchmark.summarize(args), expected)
+                rows = json.loads((root / "output" / "summary.json").read_text())["rows"]
+                self.assertEqual(rows[1]["complete"], expected == 0)
+                self.assertEqual(rows[1]["archive_seed_warm_comparison"],
+                                 "matching seed/warm bytes and SHA256" if expected == 0 else "MISMATCH")
+                self.assertFalse(rows[1]["eligible_for_cache_selection"])
+
     def test_excludes_unselected_providers(self):
         configured = ["https://cache.nixos.org", "https://cache.flakehub.com",
                       "http://127.0.0.1:37516?trusted=true", "http://127.0.0.1:37515?trusted=true",

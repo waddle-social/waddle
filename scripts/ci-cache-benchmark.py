@@ -91,6 +91,29 @@ def path_sizes(path):
     return sum(item["narSize"] for item in entries), len(entries)
 
 
+def read_archive(path):
+    """Materialize the complete archive payload, separately from store validity."""
+    archive = Path(path) / "archive.tar.zst"
+    before = received_bytes()
+    started = time.monotonic()
+    report = {"success": False, "bytes_read": 0, "timeout_seconds": 180}
+    try:
+        report["file_bytes"] = archive.stat().st_size
+        # sha256sum streams the file with bounded memory. A process deadline
+        # also bounds reads stalled by a remote volume's lazy block fetches.
+        result = command(["sha256sum", str(archive)], timeout=180)
+        digest = result.stdout.split()[0] if result.stdout.split() else ""
+        if result.returncode or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("full archive read did not produce a SHA256 digest")
+        report.update(success=True, bytes_read=report["file_bytes"], sha256=digest)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        report["error"] = str(error)
+    finally:
+        report["seconds"] = round(time.monotonic() - started, 3)
+        report["observed_network_rx_bytes"] = received_bytes() - before
+    return report
+
+
 def restore(args):
     directory = Path(args.output)
     directory.mkdir(parents=True, exist_ok=True)
@@ -139,6 +162,10 @@ def restore(args):
             if restored:
                 item["closure_nar_bytes"], item["closure_paths"] = path_sizes(path)
             report["paths"].append(item)
+            if restored and name == "trial-shard1-archive":
+                item["archive_read"] = read_archive(path)
+                if not item["archive_read"]["success"]:
+                    raise ValueError("restored archive payload could not be fully read")
         report["complete"] = all(item["success"] for item in report["paths"])
     except (OSError, ValueError, KeyError) as error:
         report["error"] = str(error)
@@ -277,6 +304,26 @@ def summarize(args):
                      "cache_post_status": "unverified; inspect post logs and fresh-runner seed restore",
                      "eligible_for_cache_selection": False,
                      "result": report})
+    mismatched_payload = False
+    for row in rows:
+        if row["phase"] != "warm":
+            continue
+        seed = next((r for r in rows if r["phase"] == "seed" and r["variant"] == row["variant"]), None)
+        def archive_payload(candidate):
+            paths = ((candidate or {}).get("result") or {}).get("paths", [])
+            return next((p for p in paths if p["name"] == "trial-shard1-archive"), {})
+        seed_archive, warm_archive = archive_payload(seed), archive_payload(row)
+        seed_read, warm_read = seed_archive.get("archive_read", {}), warm_archive.get("archive_read", {})
+        comparison = "unverified; no successful seed and warm payload reads"
+        if seed_read.get("success") and warm_read.get("success"):
+            matches = (seed_archive["path"] == warm_archive["path"]
+                       and seed_read["bytes_read"] == warm_read["bytes_read"]
+                       and seed_read["sha256"] == warm_read["sha256"])
+            comparison = "matching seed/warm bytes and SHA256" if matches else "MISMATCH"
+            if not matches:
+                row["complete"] = False
+                mismatched_payload = True
+        row["archive_seed_warm_comparison"] = comparison
     output = Path(args.output)
     write_json(output / "summary.json", {"schema": 1, "rows": rows})
     lines = ["# Nix cache restore qualification", "",
@@ -292,15 +339,19 @@ def summarize(args):
     lines.extend(["", "## Exact archive transfer", "",
                   f"Archive from `{ARCHIVE_SOURCE_SHA}`: `{ARCHIVE_PATH}`.", "",
                   "Original Actions payload: 1,950,935,616 NAR bytes. Production Hestia excludes this output; the explicit H3 seed pair registers it.", "",
-                  "| Phase | Cache | Archive outcome | Restore (s) | Closure NAR bytes |",
-                  "|---|---|---|---:|---:|"])
+                  "| Phase | Cache | Archive outcome | Restore (s) | Closure NAR bytes | Full payload read (s) | Bytes read | Seed/warm comparison |",
+                  "|---|---|---|---:|---:|---:|---:|---|"])
     for row in rows:
         report = row["result"] or {}
         item = next((p for p in report.get("paths", []) if p["name"] == "trial-shard1-archive"), {})
+        payload = item.get("archive_read", {})
         lines.append(f"| {row['phase']} | {row['variant']} | {item.get('outcome', 'no result')} | "
-                     f"{item.get('seconds', 'unknown')} | {item.get('closure_nar_bytes', 'unknown')} |")
+                     f"{item.get('seconds', 'unknown')} | {item.get('closure_nar_bytes', 'unknown')} | "
+                     f"{payload.get('seconds', 'not measured')} | {payload.get('bytes_read', 'unknown')} | "
+                     f"{row.get('archive_seed_warm_comparison', 'not paired')} |")
     lines.extend(["", "Cache-save success is unverified: actions may warn and still succeed. Inspect post logs and confirm each seed through its fresh-runner warm restore before selecting a cache.",
                   "A miss, setup failure, incomplete report or failed cache upload is not a winning result.",
+                  "Payload reads force archive blocks to be read; they measure neither extraction nor compilation. Matching seed/warm hashes establish consistency, not an independently trusted digest.",
                   "Closure NAR bytes are uncompressed logical bytes. Network counters include concurrent traffic; they are not compressed cache payload measurements."])
     markdown = "\n".join(lines) + "\n"
     (output / "summary.md").write_text(markdown)
@@ -308,7 +359,7 @@ def summarize(args):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
             stream.write(markdown)
     print(markdown)
-    return 0
+    return 1 if mismatched_payload else 0
 
 
 def main():

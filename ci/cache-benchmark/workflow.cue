@@ -1,6 +1,7 @@
 package cachebenchmark
 
 import (
+	"encoding/json"
 	"list"
 	wc "github.com/waddle-social/waddle/ci/contributors"
 )
@@ -29,7 +30,10 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	name: "cache-benchmark/\(_phase)/${{ matrix.variant }}"
 	"runs-on": "${{ matrix.runner }}"
 	"timeout-minutes": 20
-	if _phase == "existing" {needs: ["normal-ci"]}
+	if _phase == "existing" {
+		needs: ["normal-ci"]
+		if: "${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}"
+	}
 	if _phase == "seed" && !_hestiaSeeded {
 		needs: ["normal-ci", "existing"]
 		if: "${{ !cancelled() && needs.normal-ci.result == 'success' }}"
@@ -39,7 +43,7 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 		if: "${{ !cancelled() && needs.normal-ci.result == 'success' }}"
 	}
 	if _hestiaSeeded {
-		if: "${{ !cancelled() && needs.normal-ci.result == 'success' }}"
+		if: "${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}"
 		if _phase == "seed" {
 			needs: ["normal-ci", "warm"]
 			outputs: "manifest-version": "${{ steps.hestia-seed.outputs.manifest-version }}"
@@ -49,7 +53,7 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	strategy: {
 		"fail-fast": false
 		"max-parallel": 1
-		matrix: include: [
+		_rows: [
 			if _phase == "existing" {
 				variant: "fh-h2", provider: "fh-h2", runner: _runner
 			},
@@ -82,6 +86,13 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 				if _phase == "warm" {provider: "h3"}
 			},
 		]
+		if _phase == "existing" || _hestiaSeeded {matrix: include: _rows}
+		if _phase != "existing" && !_hestiaSeeded {
+			// The full comparison has run twice. PR pushes now exercise only
+			// the repaired Namespace integration, including its fresh warm job.
+			_namespaceRows: [for row in _rows if row.variant == "namespace" {row}]
+			matrix: include: "${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.scope == 'all') && '\(json.Marshal(_rows))' || '\(json.Marshal(_namespaceRows))') }}"
+		}
 	}
 	steps: [
 		{name: "Checkout", uses: _checkout},
@@ -95,7 +106,43 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 			uses: _volume
 			with: cache: "nix"
 		},
+		{
+			name: "Prepare retained Namespace store for fresh host installation"
+			if: "${{ matrix.variant == 'namespace' }}"
+			// Installer v3.22.3 cureSelfCases use receipt relocation before
+			// additive installation. Never request reinstall: that uninstalls Nix.
+			run: """
+				set -euo pipefail
+				if ! sudo test -f /nix/receipt.json; then
+				  echo "No cached installation receipt; continue with fresh installation."
+				  exit 0
+				fi
+				if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+				  echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+				  exit 1
+				fi
+				receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+				sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+				echo "Retained cached store and database; preserved receipt for fresh host setup."
+				"""
+		},
 		{name: "Install Determinate Nix", uses: _nix.uses, with: _nix.with},
+		{
+			name: "Verify Namespace host daemon without building"
+			if: "${{ matrix.variant == 'namespace' }}"
+			// The installer waits for socket existence; a retained socket can
+			// precede readiness of this runner's new daemon. Bound every ping.
+			run: """
+				for attempt in 1 2 3 4 5; do
+				  if timeout 5s nix store ping --store daemon; then
+				    exit 0
+				  fi
+				  sleep 1
+				done
+				echo "::error::Namespace Nix daemon did not become ready."
+				exit 1
+				"""
+		},
 		{
 			name: "Restore or seed isolated Nix store snapshot"
 			if: "${{ matrix.variant == 'cache-nix' }}"
@@ -198,7 +245,13 @@ workflow: {
 	name: "waddle-ci-cache-benchmark"
 	on: {
 		pull_request: paths: ["ci/cache-benchmark/**", "scripts/*cache-benchmark*", "docs/ci-cache-benchmarks.md"]
-		workflow_dispatch: {}
+		workflow_dispatch: inputs: scope: {
+			description: "Compare all providers, or retry only the Namespace seed/warm pair"
+			type: "choice"
+			default: "all"
+			required: true
+			options: ["all", "namespace"]
+		}
 	}
 	permissions: {contents: "read", actions: "read", "id-token": "write"}
 	concurrency: {

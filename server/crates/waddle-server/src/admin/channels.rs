@@ -7410,6 +7410,21 @@ mod group_dm_durable_reconciliation_tests {
             "handler proceeds with catalog work after reconciling the committed config"
         );
 
+        let coordinates = *durable_store
+            .coordinates
+            .lock()
+            .expect("coordinates lock")
+            .get(&room_jid)
+            .expect("committed coordinates");
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: coordinates.0,
+            revision: RoomRevision::from_stored(coordinates.1).expect("revision"),
+            ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
+        };
+        // Arming runs asynchronously after the handler returns. Wait before
+        // capturing the one-shot drain's clock so the committed row is due.
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;
+
         let drain_state = Arc::clone(&websocket_state);
         let drain = tokio::spawn(async move {
             crate::room_effect_outbox::drain::drain_due_effects(

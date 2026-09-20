@@ -61,9 +61,11 @@ The corrected paths below exclude authentication state without changing its
 permissions. Magic's successful seed save did not imply a usable warm cache:
 the downloaded per-path logs establish the throttling failure, despite green
 diagnostic jobs. Its warm post took only 1s because store diffing was disabled.
-No new provider qualified in this first run. The next qualification verifies
+No new provider qualified in this first run. The second qualification verifies
 the corrected snapshot, repeated Namespace identity, and a real Hestia 3
-seed/warm pair. After that qualification, remove the PR trigger and retain
+seed/warm pair. A subsequent focused Namespace retry repairs the fresh-host
+installation defect described below, without repeating every provider. After
+that retry, remove the PR trigger and retain
 manual dispatch so cumulative PR diffs do not repeatedly schedule this long
 serial diagnostic workflow.
 
@@ -79,7 +81,10 @@ python3 scripts/test-ci-cache-benchmark.py
 ```
 
 The workflow runs on changes to its own CUE, scripts or this document, or via
-manual dispatch once GitHub exposes that trigger. It is an isolated diagnostic
+manual dispatch once GitHub exposes that trigger. PR pushes now select only
+the Namespace seed/warm pair. Manual dispatch offers `scope=all` (the default)
+or `scope=namespace`; skipped provider groups do not block the selected pair.
+It is an isolated diagnostic
 workflow, not a replacement test gate. Every cache job uses Namespace Ubuntu
 24.04 AMD64 with 8 vCPU and 16 GB RAM. An Ubuntu gate first waits for the other
 observed workflows on the exact PR head SHA to finish, followed by 60 seconds
@@ -130,6 +135,35 @@ Namespace reuses the isolated first-experiment cache tag
 substitution only, so missing Waddle outputs cannot be hidden by a FlakeHub hit.
 Its documented `nscloud-cache-exp-do-not-commit` label prevents warm probes
 from replacing the seeded volume.
+
+The second run's [Namespace seed](https://github.com/waddle-social/waddle/actions/runs/35513007420/job/106086811754)
+restored both cache paths and reported 7.1 GB used. Its retained installation
+receipt then caused the Determinate action to skip installation, although the
+fresh host lacked `/usr/local/bin/determinate-nixd` and a running daemon. This
+is an integration failure, not a cache-speed result. The focused retry preserves
+that receipt in a private runner-temporary directory before normal installation,
+only when no host daemon binary or `nix` on PATH exists; unexpected host state
+fails closed. The pinned installer's
+[Linux curing tests](https://github.com/DeterminateSystems/nix-installer/blob/a0b0252e916a0fde9c89fd7917de6134093db944/nix/tests/vm-test/default.nix#L240)
+exercise this receipt relocation with an existing store and missing host users,
+services or configuration. We never invoke uninstall or `reinstall:true`.
+The installer retains existing store/database directories, imports its bootstrap
+registrations, and recreates host setup; it can refresh bootstrap paths and
+ownership. Setup timing includes this recovery. A daemon ping and the existing
+per-output validity probes must then succeed, without compiling anything.
+
+Validity and closure metadata alone need not read lazy volume blocks. Every
+successful archive restore in the focused retry and later runs therefore also
+streams the full `archive.tar.zst` through SHA256 with a 180-second deadline.
+Its byte count, read duration, hash and observed network bytes are recorded
+separately from restore time; setup/probe and whole-job time include this read.
+A failed or timed-out read fails the probe. The report compares each available
+seed/warm pair's path, size and digest and fails on a mismatch. Matching hashes
+show pair consistency, not comparison with an independently trusted digest.
+This forces archive payload access but does not measure extraction, all closure
+files or compilation. The earlier runs did not include this read and cannot be
+compared using the later setup/probe total without separating that addition.
+
 Cache-nix uses a run-specific key, disables cache purging, and uses
 only that exact key on restore. A key miss is subsequently recorded by the
 per-output probes. Its paths input removes the automatic `/nix` root and includes

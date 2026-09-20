@@ -8,7 +8,16 @@ name: waddle-ci-cache-benchmark
       - ci/cache-benchmark/**
       - scripts/*cache-benchmark*
       - docs/ci-cache-benchmarks.md
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Compare all providers, or retry only the Namespace seed/warm pair
+        type: choice
+        default: all
+        required: true
+        options:
+          - all
+          - namespace
 permissions:
   contents: read
   actions: read
@@ -35,11 +44,11 @@ jobs:
     name: cache-benchmark/existing/${{ matrix.variant }}
     needs:
       - normal-ci
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - variant: fh-h2
@@ -62,6 +71,7 @@ jobs:
             provider: fh-h3
             runner:
               - nscloud-ubuntu-24.04-amd64-8x16
+      max-parallel: 1
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -72,10 +82,36 @@ jobs:
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
         with:
           cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -148,23 +184,9 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
-        include:
-          - provider: fh
-            runner:
-              - nscloud-ubuntu-24.04-amd64-8x16-with-cache
-              - nscloud-cache-tag-waddle-ci-benchmark-35510413179
-              - nscloud-cache-size-20gb
-            variant: namespace
-          - provider: fh
-            variant: cache-nix
-            runner:
-              - nscloud-ubuntu-24.04-amd64-8x16
-          - provider: magic-seed
-            variant: magic
-            runner:
-              - nscloud-ubuntu-24.04-amd64-8x16
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.scope == 'all') && '[{"provider":"fh","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb"],"variant":"namespace"},{"provider":"fh","variant":"cache-nix","runner":["nscloud-ubuntu-24.04-amd64-8x16"]},{"provider":"magic-seed","variant":"magic","runner":["nscloud-ubuntu-24.04-amd64-8x16"]}]' || '[{"provider":"fh","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb"],"variant":"namespace"}]') }}
+      max-parallel: 1
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -175,10 +197,36 @@ jobs:
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
         with:
           cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -251,24 +299,9 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
-        include:
-          - provider: namespace
-            runner:
-              - nscloud-ubuntu-24.04-amd64-8x16-with-cache
-              - nscloud-cache-tag-waddle-ci-benchmark-35510413179
-              - nscloud-cache-size-20gb
-              - nscloud-cache-exp-do-not-commit
-            variant: namespace
-          - provider: cache-nix
-            variant: cache-nix
-            runner:
-              - nscloud-ubuntu-24.04-amd64-8x16
-          - provider: magic
-            variant: magic
-            runner:
-              - nscloud-ubuntu-24.04-amd64-8x16
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.scope == 'all') && '[{"provider":"namespace","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb","nscloud-cache-exp-do-not-commit"],"variant":"namespace"},{"provider":"cache-nix","variant":"cache-nix","runner":["nscloud-ubuntu-24.04-amd64-8x16"]},{"provider":"magic","variant":"magic","runner":["nscloud-ubuntu-24.04-amd64-8x16"]}]' || '[{"provider":"namespace","runner":["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-tag-waddle-ci-benchmark-35510413179","nscloud-cache-size-20gb","nscloud-cache-exp-do-not-commit"],"variant":"namespace"}]') }}
+      max-parallel: 1
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -279,10 +312,36 @@ jobs:
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
         with:
           cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -350,20 +409,20 @@ jobs:
     needs:
       - normal-ci
       - warm
-    if: ${{ !cancelled() && needs.normal-ci.result == 'success' }}
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     outputs:
       manifest-version: ${{ steps.hestia-seed.outputs.manifest-version }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - provider: fh
             variant: h3-seeded
             runner:
               - nscloud-ubuntu-24.04-amd64-8x16
+      max-parallel: 1
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -374,10 +433,36 @@ jobs:
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
         with:
           cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -448,18 +533,18 @@ jobs:
     needs:
       - normal-ci
       - h3-seed
-    if: ${{ !cancelled() && needs.normal-ci.result == 'success' }}
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - provider: h3
             variant: h3-seeded
             runner:
               - nscloud-ubuntu-24.04-amd64-8x16
+      max-parallel: 1
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -470,10 +555,36 @@ jobs:
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
         with:
           cache: nix
+      - name: Prepare retained Namespace store for fresh host installation
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+          echo "Retained cached store and database; preserved receipt for fresh host setup."
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: accept-flake-config = true
+      - name: Verify Namespace host daemon without building
+        if: ${{ matrix.variant == 'namespace' }}
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Namespace Nix daemon did not become ready."
+          exit 1
       - name: Restore or seed isolated Nix store snapshot
         if: ${{ matrix.variant == 'cache-nix' }}
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569

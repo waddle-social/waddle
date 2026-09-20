@@ -414,3 +414,43 @@ derivation. On a complete-output miss, its dependency-only Cargo artifact should
 require real workspace compilation again; confirm that in the live Cargo
 timings. This is an archive-derivation rebuild with unchanged Rust source, not
 a changed-crate or cold-dependency trial.
+
+## Cache-first archive trial: `cabddd00`
+
+The [Rust workflow](https://github.com/waddle-social/waddle/actions/runs/35513007365)
+finished in **13m14s**, but failed one group-DM reconciliation test. All 10,645
+selected tests ran: 10,644 passed, one failed; exact identity comparison with
+`f7525e51` found zero additions or removals. All other ordinary workflows passed
+below 15 minutes. From the earliest ordinary workflow event to the final gate,
+the run took 13m16s. This failed run does not satisfy the goal.
+
+The builder took 7m26s and performed 182.92s of real workspace compilation;
+Cargo reported 225 dirty units and 1,134 fresh dependency units. Rust source
+was unchanged, and archive packaging changes triggered the rebuild. Every
+worker restored the new archive through the binary cache and verified its
+content; none downloaded the raw fallback.
+
+| Shard | Cache restore/verify step | Preparation including extraction | Whole tests | Shared tests | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1 | 36s | 32.12s | 15.13s | 157.77s | Passed |
+| 2 | 37s | 32.89s | 35.82s | 157.27s | Passed |
+| 3 | 35s | 30.25s | 21.37s | 185.79s | One failed test |
+| 4 | 39s | 34.52s | 9.56s | 96.50s | Passed |
+
+The concurrent cache steps replaced 154–175s raw artifact downloads; minimal
+workers reduced subsequent preparation from about 70–79s to 30–35s. Each worker
+fetched 56 additional runtime paths, 163.5 MiB compressed. Archive metadata no
+longer references `rust-minimal`; vendor and zstd-sys source references remain.
+Do not claim those remaining dependencies were removed.
+
+The failed test was
+`admin::channels::group_dm_durable_reconciliation_tests::group_dm_rename_recovers_and_arms_the_committed_config_reservation`.
+Its one-second recipient wait expired after it spawned a single outbox drain.
+The handler schedules arming asynchronously, while that drain captures a fixed
+eligibility timestamp and exits when no row is due. It can therefore run before
+arming completes and never deliver the row. The correction waits for the exact
+committed row using the existing one-second readiness helper before taking the
+drain timestamp. Recipient timeout, write acknowledgement and exactly-once
+assertions remain intact. A complete corrected run is still required before
+accepting the performance result. The previously corrected janitor test passed
+in 0.011s.
