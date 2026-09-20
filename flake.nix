@@ -429,6 +429,18 @@
         }
         // lib.optionalAttrs pkgs.stdenv.isLinux {
           waddle-server-image-stream = image;
+          # Fail before compiling if a CI runner cannot create the namespaces
+          # required by the four co-located test sandboxes.
+          waddle-ci-sandbox-probe =
+            pkgs.runCommand "waddle-ci-sandbox-probe"
+              {
+                preferLocalBuild = true;
+                allowSubstitutes = false;
+              }
+              ''
+                echo "WADDLE_CI_METRIC phase=sandbox_probe success=true"
+                touch "$out"
+              '';
           waddle-server-test-archive = serverTestArchive;
           waddle-server-test-shard-1 = mkServerTestShard 1;
           waddle-server-test-shard-2 = mkServerTestShard 2;

@@ -37,6 +37,9 @@ class LocalShardTests(unittest.TestCase):
             "import json, os, pathlib, sys\n"
             "root = pathlib.Path(os.environ['TEST_ROOT'])\n"
             "args = sys.argv[1:]\n"
+            "if args[0] == 'build' and args[-1] == '../#waddle-ci-sandbox-probe':\n"
+            "    (root / 'probe-args.json').write_text(json.dumps(args))\n"
+            "    sys.exit(int(os.environ.get('SANDBOX_EXIT', '0')))\n"
             "if args[0] == 'build':\n"
             "    (root / 'build-args.json').write_text(json.dumps(args))\n"
             "    print('[]')\n"
@@ -60,6 +63,9 @@ class LocalShardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.root / "build-args.json").read_text())
         self.assertEqual(args[-4:], [f"../#waddle-server-test-shard-{i}" for i in range(1, 5)])
+        probe_args = json.loads((self.root / "probe-args.json").read_text())
+        for setting in ("builders", "sandbox", "sandbox-fallback"):
+            self.assertIn(setting, probe_args)
         self.assertIn("--keep-going", args)
         for option, value in (("--max-jobs", "4"), ("--cores", "8")):
             self.assertEqual(args[args.index(option) + 1], value)
@@ -75,6 +81,13 @@ class LocalShardTests(unittest.TestCase):
         result = self.run_shards()
         self.assertEqual(result.returncode, 17)
         self.assertTrue((self.root / ".ci/nextest-archive/cargo-timing.html").is_file())
+
+    def test_unavailable_sandbox_fails_before_compilation(self):
+        self.env["SANDBOX_EXIT"] = "23"
+        self.env["COMPILE_EXIT"] = "19"
+        self.assertEqual(self.run_shards().returncode, 23)
+        self.assertFalse((self.root / "build-args.json").exists())
+        self.assertFalse((self.root / ".ci/nextest-archive").exists())
 
     def test_failed_compile_cannot_start_shards(self):
         self.env["COMPILE_EXIT"] = "19"

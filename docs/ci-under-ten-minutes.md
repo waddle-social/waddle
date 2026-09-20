@@ -36,3 +36,15 @@ Source narrowing and custom duration-based partitioning are deferred. The former
 Local validation: 94 helper tests (including the three native Nix transfer tests), native parent/child CPU-affinity inheritance, four concurrently generated/relocated fixture archives, and injected archive/ELF/checksum failures. Both independent operational/security and coverage reviews must be clean before the trial is pushed. The installed cuenv 0.55 evaluator can exceed its local ten-second timeout; the previously reviewed scratch-only generator with a longer timeout is used for generation parity, and live CI still runs the original pinned binary.
 
 Live timings, complete test identity parity and scanner results are pending. No under-ten-minute result is claimed yet.
+
+## First trial result and runner correction
+
+Commit `1419e418` failed before any Rust shard ran: Namespace's default runner container could not create the kernel namespaces required by `sandbox=true` with `sandbox-fallback=false`. The required isolation guard was retained. Compilation succeeded in 183.61 seconds; all four archives packaged in 25 seconds; OOM and OOM-kill counts were zero. This is not a successful CI timing or coverage result. The post-job FlakeHub drain took about 57 seconds after the early failure.
+
+The first trial also exposed PR base-branch filtering: only seven workflows started while the PR was stacked. PR #1809 now targets main so the existing XMPP, root-sync and code-quality workflows participate. The next push performs another controlled Rust source invalidation through a comment-only change.
+
+Namespace [documents privileged runner containers for Nix sandboxing](https://namespace.so/docs/solutions/github-actions/runner-controls/privileged-workflows). The builder now opts into `container.privileged` using its documented `-with-features` runner label. Host PID sharing is not enabled. A small local, non-substitutable Nix derivation checks required sandbox support before compilation; all shard builds continue to require sandboxes and disable fallback and remote builders. The four eight-CPU affinity masks and per-shard PostgreSQL instances remain unchanged.
+
+The eight-CPU/32-GB CodeQL trial queued for 194 seconds, compared with about ten seconds on the preceding eight-CPU/16-GB baseline. The scheduling cause is unknown; its start preceded Android PR completion, so that job's resource release does not explain the delay. The next trial restores the original eight-CPU/16-GB runner and 14,336-MB analysis budget. CodeQL still covers every PR base branch and retains all queries.
+
+The deadlock stress test is enabled by clustering and is absent from the default-feature XMPP lane, so its faster detection must not be counted as a default-feature speedup. That lane's qualification depends on its measured mold/profile improvement and full 4,119-test identity parity.

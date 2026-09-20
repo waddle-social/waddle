@@ -20,11 +20,11 @@ jobs:
     name: Analyze (${{ matrix.language }})
     # Namespace's documented machine labels provision an ephemeral runner without
     # requiring a separately configured profile or a persistent shared cache.
-    # Trial more analysis memory without increasing Rust's eight-thread CPU
-    # allocation. Measure queueing too: Namespace limits aggregate RAM as well
-    # as CPUs, and the account's actual concurrency entitlement is unverified.
+    # Keep the measured eight-core allocation. The 8x32 memory-only trial
+    # waited 194 seconds for a runner, so retain the existing shape while
+    # measuring complete workflow latency, including provisioning and queueing.
     # https://namespace.so/docs/reference/github-actions/runner-configuration
-    runs-on: ${{ matrix.language == 'rust' && 'nscloud-ubuntu-24.04-amd64-8x32;job.priority=2' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.language == 'rust' && 'nscloud-ubuntu-24.04-amd64-8x16;job.priority=2' || 'ubuntu-latest' }}
     permissions:
       security-events: write
       packages: read
@@ -46,10 +46,10 @@ jobs:
           languages: ${{ matrix.language }}
           config-file: ./.github/codeql/codeql-config.yml
           # Init applies these limits to extraction and the subsequent analyze
-          # action. Leave 4 GiB for the OS and runner; other languages keep their
+          # action. Leave 2 GiB for the OS and runner; other languages keep their
           # existing automatic resource selection and the same query coverage.
           threads: ${{ matrix.language == 'rust' && '8' || '' }}
-          ram: ${{ matrix.language == 'rust' && '28672' || '' }}
+          ram: ${{ matrix.language == 'rust' && '14336' || '' }}
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@865f5f5c36632f18690a3d569fa0a764f2da0c3e
