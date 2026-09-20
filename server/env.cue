@@ -169,7 +169,29 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixBuildDeps, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream]
+			tasks: [
+				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram,
+				_t.nixFmt, _t.nixClippy,
+				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
+				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
+			]
+		}
+		// Separate compute sizing keeps lightweight checks on the existing
+		// runner while retaining nixTest's dependency-prewarm ordering.
+		rustTests: {
+			when: pullRequest: true
+			mode: "expanded"
+			provider: github: {
+				runner: "nscloud-ubuntu-24.04-amd64-32x64"
+				permissions: {
+					"id-token":      "write"
+					contents:        "read"
+					checks:          "write"
+					packages:        "read"
+					"pull-requests": "none"
+				}
+			}
+			tasks: [_t.nixBuildDeps, _t.nixTest]
 		}
 		rootSync: {
 			mode: "expanded"
@@ -361,8 +383,16 @@ schema.#Project & {
 
 		nixTest: schema.#Task & {
 			command: "nix"
-			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-test"]
-			inputs: _nixInputs
+			args: ["build", "--print-build-logs", "../#waddle-server-test-parallel"]
+			// Preserve the former combined PR workflow's triggers when moving
+			// this check to its own compute pool, including charts and fixtures.
+			inputs: list.Concat([
+				_nixInputs,
+				tasks.checkCiDrift.inputs,
+				tasks.checkSwitchableAlternativeProgram.inputs,
+				tasks.checkXmppClientFfiBindings.inputs,
+				tasks.renderDeployment.inputs,
+			])
 			dependsOn: [tasks.nixBuildDeps]
 		}
 

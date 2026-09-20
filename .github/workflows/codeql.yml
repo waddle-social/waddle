@@ -10,10 +10,18 @@ on:
   schedule:
     - cron: "0 3 * * 1"
 
+concurrency:
+  # Superseded PR scans can stop, but every main and scheduled scan must finish.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    # Namespace's documented machine labels provision an ephemeral runner without
+    # requiring a separately configured profile or a persistent shared cache.
+    # https://namespace.so/docs/reference/github-actions/runner-configuration
+    runs-on: ${{ matrix.language == 'rust' && 'nscloud-ubuntu-24.04-amd64-16x32' || 'ubuntu-latest' }}
     permissions:
       security-events: write
       packages: read
@@ -34,6 +42,11 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           config-file: ./.github/codeql/codeql-config.yml
+          # Init applies these limits to extraction and the subsequent analyze
+          # action. Leave 4 GiB for the OS and runner; other languages keep their
+          # existing automatic resource selection and the same query coverage.
+          threads: ${{ matrix.language == 'rust' && '16' || '' }}
+          ram: ${{ matrix.language == 'rust' && '28672' || '' }}
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@865f5f5c36632f18690a3d569fa0a764f2da0c3e

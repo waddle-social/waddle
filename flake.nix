@@ -181,6 +181,49 @@
         }
         // lib.optionalAttrs pkgs.stdenv.isLinux {
           waddle-server-image-stream = image;
+          # Explicit opt-in for the >=64 GB CI builder. Keep the ordinary
+          # check at one Cargo job so `nix flake check` remains safe on the
+          # existing 16 GB runners and developer machines. Reuse exactly
+          # the same dependency artifacts, profile and test configuration.
+          waddle-server-test-parallel = self.checks.${system}.waddle-server-test.overrideAttrs (_: {
+            pname = "waddle-server-test-parallel";
+            CARGO_BUILD_JOBS = "4";
+            checkPhase = ''
+              # MemTotal can exceed a container's cgroup limit. Enforce
+              # both when cgroup v2 exposes its memory limit. Allow for
+              # kernel reservations on a nominal 64 GB runner.
+              required_memory_kib=$((56 * 1024 * 1024))
+              available_memory_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+              if [ -r /sys/fs/cgroup/memory.max ]; then
+                cgroup_memory_bytes=$(cat /sys/fs/cgroup/memory.max)
+                if [ "$cgroup_memory_bytes" != max ]; then
+                  cgroup_memory_kib=$((cgroup_memory_bytes / 1024))
+                  if [ "$cgroup_memory_kib" -lt "$available_memory_kib" ]; then
+                    available_memory_kib=$cgroup_memory_kib
+                  fi
+                fi
+              fi
+              if [ "$available_memory_kib" -lt "$required_memory_kib" ]; then
+                echo "waddle-server-test-parallel requires a 64 GB builder; use waddle-server-test on smaller machines" >&2
+                exit 1
+              fi
+
+              runHook preCheck
+              mkdir -p "$out/ci-performance"
+              nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests)
+              # Split compilation from execution without changing the
+              # selected binaries or rebuilding them in a second worker.
+              # GNU time's RSS is the largest child, not aggregate memory.
+              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                cargo nextest run "''${nextest_args[@]}" --no-run --timings
+              cp "''${CARGO_TARGET_DIR:-target}/cargo-timings/cargo-timing.html" "$out/ci-performance/cargo-timing.html"
+              cargo nextest list "''${nextest_args[@]}" --message-format json \
+                > "$out/ci-performance/test-inventory.json"
+              ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
+                cargo nextest run "''${nextest_args[@]}"
+              runHook postCheck
+            '';
+          });
         }
       );
 
