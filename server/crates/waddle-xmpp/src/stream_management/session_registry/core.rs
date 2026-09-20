@@ -932,7 +932,26 @@ impl InMemorySmSessionRegistry {
                 "durable SM principal persistence requires an attached storage backend".to_string(),
             ));
         }
-        self.store_session_with_principal_inner(session, Some(&principal))
+        self.store_session_with_principal_inner(session, Some(&principal), Vec::new())
+            .await
+            .map(|stored| stored.displaced)
+    }
+
+    /// [`Self::store_session_with_principal`] for a session whose queue holds frames
+    /// drained from the detaching socket (issue #1789): each drained obligation is
+    /// proven in the same atomic write as the snapshot it sits in.
+    pub async fn store_session_with_drained_ingress_appends(
+        &self,
+        session: DetachedSession,
+        principal: crate::auth::AuthenticatedPrincipalRef,
+        drained_appends: Vec<crate::stream_management::SmDrainedIngressAppend>,
+    ) -> Result<super::StoredDetachedSession, SmRegistryError> {
+        if self.persistence.is_none() {
+            return Err(SmRegistryError::Internal(
+                "durable SM principal persistence requires an attached storage backend".to_string(),
+            ));
+        }
+        self.store_session_with_principal_inner(session, Some(&principal), drained_appends)
             .await
     }
 
@@ -2000,9 +2019,10 @@ impl InMemorySmSessionRegistry {
         &self,
         session: &DetachedSession,
         principal: Option<&crate::auth::AuthenticatedPrincipalRef>,
-    ) -> Result<(), SmRegistryError> {
+        drained_appends: Vec<crate::stream_management::SmDrainedIngressAppend>,
+    ) -> Result<Vec<crate::stream_management::SmIngressAppendKey>, SmRegistryError> {
         let Some(storage) = &self.persistence else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let persisted = detached_to_persisted(session)?;
         let mut unacked_rows = Vec::with_capacity(session.unacked_stanzas.len());
@@ -2015,13 +2035,40 @@ impl InMemorySmSessionRegistry {
                 entry.ingress_receipts.clone(),
             )?);
         }
+        let accepting_stream = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        let appended_at = chrono::Utc::now();
+        let appends = drained_appends
+            .into_iter()
+            .map(
+                |append| crate::stream_management::persistence::PersistedIngressAppend {
+                    key: append.ticket.key,
+                    accepting_stream: accepting_stream.clone(),
+                    sequence: append.sequence,
+                    appended_at,
+                    supersedes: append.ticket.supersedes,
+                },
+            )
+            .collect::<Vec<_>>();
         match principal {
-            Some(principal) => {
+            // Only a principal-bearing detach drains a socket queue.
+            Some(principal) if !appends.is_empty() => {
                 storage
-                    .store_session_atomic_with_principal(principal, persisted, unacked_rows)
+                    .store_session_atomic_with_principal_and_ingress_appends(
+                        principal,
+                        persisted,
+                        unacked_rows,
+                        appends,
+                    )
                     .await
             }
-            None => storage.store_session_atomic(persisted, unacked_rows).await,
+            Some(principal) => storage
+                .store_session_atomic_with_principal(principal, persisted, unacked_rows)
+                .await
+                .map(|()| Vec::new()),
+            None => storage
+                .store_session_atomic(persisted, unacked_rows)
+                .await
+                .map(|()| appends.into_iter().map(|append| append.key).collect()),
         }
         .map_err(|error| SmRegistryError::Internal(error.to_string()))
     }
@@ -2139,7 +2186,7 @@ impl InMemorySmSessionRegistry {
         // and with claim completion/deletion so an older clone cannot overwrite
         // a newer replay window.
         self.mark_snapshot_stale(&session_id)?;
-        self.persist_detached_session_snapshot(&updated, None)
+        self.persist_detached_session_snapshot(&updated, None, Vec::new())
             .await?;
         self.publish_detached_snapshot(&session_id, updated)
     }

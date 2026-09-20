@@ -106,7 +106,8 @@ impl InMemorySmSessionRegistry {
         &self,
         session: DetachedSession,
         principal: Option<&crate::auth::AuthenticatedPrincipalRef>,
-    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        drained_appends: Vec<crate::stream_management::SmDrainedIngressAppend>,
+    ) -> Result<StoredDetachedSession, SmRegistryError> {
         let stream_id = session.stream_id.clone();
         let jid = session.jid.clone();
         let stream_lock = self.stream_lock(&stream_id)?;
@@ -121,7 +122,14 @@ impl InMemorySmSessionRegistry {
                     stream_id = %stream_id,
                     "store_session skipped: resume claim in flight owns this stream"
                 );
-                return Ok(Vec::new());
+                // Nothing was written, so no drained obligation was proven either.
+                return Ok(StoredDetachedSession {
+                    displaced: Vec::new(),
+                    unproven: drained_appends
+                        .into_iter()
+                        .map(|append| append.ticket.key)
+                        .collect(),
+                });
             }
         }
         // Reserve exact-fence/reconciliation capacity before publishing the
@@ -271,13 +279,16 @@ impl InMemorySmSessionRegistry {
         // this stream's shard lock, and two crossed store_session
         // calls re-inserting each other's displaced sessions would
         // otherwise deadlock.
-        if let Err(error) = self
-            .persist_detached_session_snapshot(&session, principal)
+        let unproven = match self
+            .persist_detached_session_snapshot(&session, principal, drained_appends)
             .await
         {
-            detach_reservation.cancel_if_owned(self, &stream_id);
-            return Err(error);
-        }
+            Ok(unproven) => unproven,
+            Err(error) => {
+                detach_reservation.cancel_if_owned(self, &stream_id);
+                return Err(error);
+            }
+        };
 
         // ADR-0017 Phase 3 Slice 5: acquire (or self-reacquire) this node's
         // `ClaimStore` claim for the just-detached session now that its
@@ -299,8 +310,20 @@ impl InMemorySmSessionRegistry {
             let _displaced_guard = displaced_lock.lock().await;
             self.reconcile_promotion_session_locked(displaced).await?;
         }
-        Ok(displaced_guard.transfer())
+        Ok(StoredDetachedSession {
+            displaced: displaced_guard.transfer(),
+            unproven,
+        })
     }
+}
+
+/// Outcome of publishing a detached session.
+#[derive(Debug)]
+pub struct StoredDetachedSession {
+    /// Sessions evicted by this store, owed XEP-0198 §5 promotion.
+    pub displaced: Vec<DetachedSession>,
+    /// Drained obligations whose ledger proof was withheld; their entries stay queued.
+    pub unproven: Vec<crate::stream_management::SmIngressAppendKey>,
 }
 
 #[async_trait]
@@ -309,7 +332,9 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         &self,
         session: DetachedSession,
     ) -> Result<Vec<DetachedSession>, SmRegistryError> {
-        self.store_session_with_principal_inner(session, None).await
+        self.store_session_with_principal_inner(session, None, Vec::new())
+            .await
+            .map(|stored| stored.displaced)
     }
 
     async fn take_session(

@@ -42,6 +42,13 @@ where
         return false;
     }
     debug!(kind = ?outbound_stanza.kind, "Received outbound stanza from registry");
+    // Recording into the SM queue makes the frame recovery-owned before the write
+    // below can fail, so the relayed obligation must move with that entry rather
+    // than die with this dequeued item (issue #1789).
+    let ingress_append = super::drain_append::bind_live(
+        &outbound_stanza.stanza,
+        outbound_stanza.ingress_append.clone(),
+    );
     match outbound_stanza.kind {
         DeliveryKind::DirectFrame => {
             // Server-generated frame (carbon, IQ reply, SM ack, ...). Bypass
@@ -63,6 +70,10 @@ where
                         .record_outbound(xml.clone(), SmEvictionPath::DirectOutbound),
                 };
                 request_ack_after = record_result.request_ack;
+                if let Some(obligation) = ingress_append {
+                    conn.sm_state
+                        .attach_ingress_append(conn.sm_state.outbound_count, obligation);
+                }
                 resumable_recovery_owned =
                     conn.sm_state.is_resumable() && conn.sm_state.replay_gap_through().is_none();
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound
@@ -247,7 +258,8 @@ where
             // already-arrived inbound `<a/>` acks after each `<r/>` so
             // a large outbound frame batch can't pin the unacked queue
             // at capacity.
-            match write_response_batch_with_admission(
+            let recorded_before = conn.sm_state.outbound_count;
+            let batch_outcome = write_response_batch_with_admission(
                 sender,
                 reader,
                 state.as_ref(),
@@ -256,8 +268,16 @@ where
                 BatchSmPolicy::Record,
                 BatchAuthority { permit, shutdown },
             )
-            .await
-            {
+            .await;
+            // The obligation stands for the first frame the recipient pass recorded,
+            // whether or not its write then succeeded.
+            if let Some(obligation) = ingress_append {
+                if conn.sm_state.outbound_count != recorded_before {
+                    conn.sm_state
+                        .attach_ingress_append(recorded_before.wrapping_add(1), obligation);
+                }
+            }
+            match batch_outcome {
                 BatchWriteOutcome::Continue => {}
                 BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
                     return false;
@@ -463,6 +483,146 @@ mod tests {
                 .await
                 .is_ok(),
             "SM-backed writer resolves acceptance"
+        );
+    }
+
+    /// Issue #1789 (review on PR #1794): the live handler dequeues the frame and
+    /// records it into the recovery-owned SM queue *before* the transport write. If
+    /// the write then fails, detach persists that entry — so the obligation has to
+    /// travel with it, or recovery re-executes against a proofless queue entry.
+    #[tokio::test]
+    async fn direct_frame_obligation_stays_with_the_sm_entry_when_the_write_fails() {
+        use waddle_xmpp::stream_management::{
+            SmIngressAppendKey, SmIngressReceiptKind, SmRelayedAppendObligation,
+        };
+
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("outbound-obligation-close".to_owned(), true, Some(300));
+        let (acceptance, accepted) = OutboundWriteAcceptance::new();
+        let mut sink = TransportClosedSink {
+            acceptance: Some(accepted),
+            acceptance_pending_on_send: false,
+            send_attempts: 0,
+        };
+        let mut reader = futures::stream::pending::<Result<Message, Infallible>>();
+        let mut timers = TransportTimers::new();
+        let recipient: jid::FullJid = "alice@example.test/web".parse().expect("recipient");
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
+        message.from = Some("bob@example.test/phone".parse().expect("sender"));
+        let obligation = SmRelayedAppendObligation {
+            key: SmIngressAppendKey {
+                message_key: waddle_xmpp::ingress::MessageKey::new(),
+                kind: SmIngressReceiptKind::from_storage(
+                    waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
+                ),
+                semantic_identity_hash: [89; 32],
+                resource: recipient,
+            },
+            sender_bare: "bob@example.test".parse().expect("sender bare"),
+            received_at: None,
+        };
+
+        assert!(
+            !handle_outbound_stanza(
+                &mut sink,
+                &mut reader,
+                &state,
+                &mut conn,
+                &mut timers,
+                OutboundStanza::with_write_acceptance(Stanza::Message(message), acceptance)
+                    .with_ingress_append(obligation.clone()),
+                OutboundAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await
+        );
+        assert_eq!(sink.send_attempts, 1, "writer attempted the direct send");
+        assert_eq!(
+            conn.sm_state.unacked_ingress_appends(),
+            vec![(1, obligation)],
+            "the obligation travels with the recovery-owned entry"
+        );
+    }
+
+    /// The same custody rule on the recipient-pass arm: the obligation lands on the
+    /// first frame the pass records, which is what a later detach persists.
+    #[tokio::test]
+    async fn peer_stanza_obligation_lands_on_the_first_recorded_frame() {
+        use waddle_xmpp::stream_management::{
+            SmIngressAppendKey, SmIngressReceiptKind, SmRelayedAppendObligation,
+        };
+
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let recipient: jid::FullJid = "bob@example.com/desk".parse().expect("recipient");
+        let mut conn = WsConnState::new();
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            recipient.clone(),
+            false,
+            waddle_xmpp::protocol::Blocklist::empty(),
+        );
+        conn.sm_state
+            .enable("outbound-peer-obligation".to_owned(), true, Some(300));
+        let (_acceptance, accepted) = OutboundWriteAcceptance::new();
+        let mut sink = RecordingSink {
+            sent: Vec::new(),
+            acceptance: Some(accepted),
+            acceptance_pending_on_send: false,
+        };
+        let mut reader = futures::stream::pending::<Result<Message, Infallible>>();
+        let mut timers = TransportTimers::new();
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.to_bare())));
+        message.from = Some("alice@example.com/web".parse().expect("sender"));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hi bob".to_owned());
+        let obligation = SmRelayedAppendObligation {
+            key: SmIngressAppendKey {
+                message_key: waddle_xmpp::ingress::MessageKey::new(),
+                kind: SmIngressReceiptKind::from_storage(
+                    waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
+                ),
+                semantic_identity_hash: [89; 32],
+                resource: recipient,
+            },
+            sender_bare: "alice@example.com".parse().expect("sender bare"),
+            received_at: None,
+        };
+
+        assert!(
+            handle_outbound_stanza(
+                &mut sink,
+                &mut reader,
+                &state,
+                &mut conn,
+                &mut timers,
+                OutboundStanza::peer_stanza(Stanza::Message(message))
+                    .with_ingress_append(obligation.clone()),
+                OutboundAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await
+        );
+        assert!(!sink.sent.is_empty(), "the recipient pass wrote a frame");
+        assert_eq!(
+            conn.sm_state.unacked_ingress_appends(),
+            vec![(1, obligation)]
         );
     }
 

@@ -342,6 +342,91 @@ async fn corrupt_ledger(storage: &DatabaseSmPersistence) {
         .expect("session delete");
 }
 
+/// Issue #1789: a drained batch proves every unallocated obligation with the snapshot
+/// and withholds only the conflicting proof. The conflicting entry keeps its row — its
+/// sequence was already counted — and the conflict must not poison the transaction.
+async fn drained_batch_withholds_only_conflicting_proofs(storage: &DatabaseSmPersistence) {
+    let standing_stream = format!("drain-standing-{}", uuid::Uuid::new_v4());
+    let standing_session = fixture_session(&standing_stream);
+    let standing = append_for(&standing_session);
+    assert_eq!(
+        storage
+            .store_session_atomic_with_ingress_append(
+                standing_session,
+                vec![fixture_unacked(&standing_stream, 12)],
+                standing.clone(),
+            )
+            .await
+            .expect("standing allocation"),
+        KeyedSnapshotOutcome::Committed
+    );
+
+    let drained_stream = format!("drain-batch-{}", uuid::Uuid::new_v4());
+    let drained_session = fixture_session(&drained_stream);
+    let conflicting = PersistedIngressAppend {
+        accepting_stream: drained_session.stream_id.clone(),
+        sequence: 11,
+        ..standing.clone()
+    };
+    let fresh = PersistedIngressAppend {
+        sequence: 12,
+        ..append_for(&drained_session)
+    };
+    let withheld = storage
+        .store_session_atomic_with_principal_and_ingress_appends(
+            &fixture_principal(),
+            drained_session.clone(),
+            vec![
+                fixture_unacked(&drained_stream, 11),
+                fixture_unacked(&drained_stream, 12),
+            ],
+            vec![conflicting, fresh.clone()],
+        )
+        .await
+        .expect("a ledger conflict is not an error");
+    assert_eq!(withheld, vec![standing.key.clone()]);
+
+    let queued = storage
+        .list_unacked(&drained_session.stream_id)
+        .await
+        .expect("list drained queue");
+    assert_eq!(
+        queued.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+        vec![11, 12],
+        "the conflicting entry stays queued"
+    );
+    assert!(storage
+        .get_session_principal(&drained_session.stream_id)
+        .await
+        .expect("principal read")
+        .is_some());
+    assert_eq!(
+        storage
+            .get_ingress_append(&fresh.key)
+            .await
+            .expect("fresh proof"),
+        Some(fresh)
+    );
+    assert_eq!(
+        storage
+            .get_ingress_append(&standing.key)
+            .await
+            .expect("standing proof"),
+        Some(standing),
+        "the standing allocation is untouched"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_drained_batch_withholds_only_conflicting_proofs() {
+    drained_batch_withholds_only_conflicting_proofs(
+        &DatabaseSmPersistence::open(None)
+            .await
+            .expect("storage open"),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn sqlite_fresh_allocation_and_duplicate_rollback() {
     allocation_and_duplicate(
@@ -420,6 +505,7 @@ async fn postgres_keyed_append_storage_contract() {
     unrelated_constraint(&storage).await;
     old_stream_and_deletion(&storage).await;
     corrupt_ledger(&storage).await;
+    drained_batch_withholds_only_conflicting_proofs(&storage).await;
 }
 
 #[tokio::test]

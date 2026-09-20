@@ -3,7 +3,7 @@ use jid::BareJid;
 use serde::{Deserialize, Serialize};
 use waddle_xmpp::{
     auth::AuthenticatedPrincipalRef,
-    ingress::{IngressEffectKind, MessageKey, SmIngressId, WireHandledCount},
+    ingress::{MessageKey, SmIngressId, WireHandledCount},
     pending_delivery::SmSessionId,
 };
 #[cfg(feature = "clustering")]
@@ -73,6 +73,19 @@ impl IngressAppendObligationRef {
         }
     }
 
+    /// Bind a recorded obligation to the message that discharges it. `None` unless the
+    /// stanza is a message with a sender and the recorded route allocates keyed appends.
+    pub fn for_message(
+        context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        stanza: &waddle_xmpp::Stanza,
+    ) -> Option<Self> {
+        let waddle_xmpp::Stanza::Message(message) = stanza else {
+            return None;
+        };
+        let sender = message.from.as_ref()?.to_bare();
+        Some(Self::from_context(context?, sender)).filter(Self::kind_is_append_eligible)
+    }
+
     pub fn into_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {
         crate::server::routes::interpret::SmIngressAppendContext {
             message_key: self.message_key,
@@ -83,12 +96,42 @@ impl IngressAppendObligationRef {
 
     /// Only recorded direct and MUC groupchat routes allocate keyed SM appends.
     pub fn kind_is_append_eligible(&self) -> bool {
-        [
-            IngressEffectKind::RouteDirect,
-            IngressEffectKind::RouteMucGroupchat,
-        ]
-        .into_iter()
-        .any(|kind| self.receipt.kind.to_storage() == kind.storage_tag())
+        super::append_authority::receipt_kind_is_append_eligible(self.receipt.kind.to_storage())
+    }
+
+    /// The claim as a registered socket's queue carries it (issue #1789).
+    pub fn into_relayed_for(
+        self,
+        resource: jid::FullJid,
+    ) -> waddle_xmpp::stream_management::SmRelayedAppendObligation {
+        waddle_xmpp::stream_management::SmRelayedAppendObligation {
+            key: waddle_xmpp::stream_management::SmIngressAppendKey {
+                message_key: self.message_key,
+                kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+                    self.receipt.kind.to_storage(),
+                ),
+                semantic_identity_hash: self.receipt.semantic_identity_hash,
+                resource,
+            },
+            sender_bare: self.sender_bare,
+            received_at: self.received_at,
+        }
+    }
+
+    pub fn from_relayed(
+        obligation: waddle_xmpp::stream_management::SmRelayedAppendObligation,
+    ) -> Self {
+        Self {
+            message_key: obligation.key.message_key,
+            sender_bare: obligation.sender_bare,
+            receipt: super::EffectReceiptKey {
+                kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+                    obligation.key.kind.to_storage(),
+                ),
+                semantic_identity_hash: obligation.key.semantic_identity_hash,
+            },
+            received_at: obligation.received_at,
+        }
     }
 }
 

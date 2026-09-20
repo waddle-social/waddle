@@ -512,6 +512,7 @@ async fn try_deliver_registered_remote_resource(
                 target,
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
+                None,
             )
             .await
     }

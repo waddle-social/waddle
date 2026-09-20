@@ -30,8 +30,9 @@ failures and against concurrent client retransmission;
 and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger
 locally and on authorized cross-node receiver appends (#1778), including direct
-routes and recorded MUC occupant copies. The registered-remote-socket drain
-(#1789) and authorization-failure fallback remain unkeyed and at-least-once;
+routes and recorded MUC occupant copies, and on the registered-remote-socket
+detach drain (#1789). The authorization-failure fallback remains unkeyed and
+at-least-once;
 #1760 custody failures still let proofs outlive payloads and suppress recovery
 (§3.3a). Live sends remain at-least-once, and maintenance never relays
 remote-hosted resources; (iii) live full-JID delivery keeps the
@@ -329,12 +330,22 @@ The remaining limits are explicit:
   sender claim and stanza `from`, and that the canonical ingress row for
   `message_key` exists and names that sender. Authorized detached appends on
   the receiving node use the same `sm_ingress_appends` ledger as local appends.
-- **Still at-least-once (#1789):** a committed obligation delivered to a
-  registered remote socket is enqueued as a live outbound frame with no
-  obligation identity (`remote_resource_frame.v1`). If the socket later
-  detaches, the drain uses unkeyed `record_outbound_for_detached_stream_at`
-  (`server/routes/websocket/replay.rs`). Queue acceptance can precede the
-  origin's receipt, so recovery can allocate a second entry.
+- **Registered remote sockets (#1789):** the owner-to-socket frame
+  (`remote_resource_frame.v2`) carries the obligation, queued unverified on the
+  socket node's live outbound entry. It is authorized lazily, only when a detach
+  drain is about to append it, and the drain reads the ledger *before* counting
+  the frame so a duplicate never occupies a sequence the client cannot
+  acknowledge. First-drain entries are proven in the session snapshot's
+  transaction; later ones commit with their proof individually.
+- **Still at-least-once:** a drained entry that loses the ledger race between
+  the drain's read and the session store keeps its queue entry and only its proof
+  is withheld; entries past a drain's 2 s authorization budget, or after one
+  indeterminate canonical read, drain unkeyed.
+- **Live writes (#1789):** the handler records a frame into the SM queue before the
+  transport write, so the obligation moves onto that recovery-owned entry and the
+  detach proves it with the session snapshot, whether the write failed or went
+  unacknowledged. After the client acknowledges the entry there is nothing left to
+  key; a later re-execution is the lost-receipt duplicate of #1760 direction 2.
 - **Still at-least-once:** failed receiver-side authorization degrades to an
   unkeyed append, with a warning and counter. Delivery never fails because
   this check failed; availability does not depend on authorization succeeding.
@@ -428,8 +439,8 @@ local before execution or during relay fallback. Declined or uncertain delivery
 leaves the occupant pending. Both direct-route and MUC groupchat obligations
 carry their append identity through ordered relay and the
 `remote_resource_route.v7` full-JID second hop. Receiver-authorized detached
-appends are keyed, subject to the #1789 drain gap, authorization-failure fallback
-and unchanged #1760 custody limits in §3.3a.
+appends and the registered-socket detach drain (#1789) are keyed, subject to the
+authorization-failure fallback and unchanged #1760 custody limits in §3.3a.
 
 Phase B freezes the room-canonical groupchat envelope at first owner acceptance,
 independently of observer eligibility, retaining observer request context when

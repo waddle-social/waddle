@@ -588,6 +588,7 @@ async fn try_deliver_registered_remote_destroy_notification(
             target,
             stanza,
             waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            None,
         )
         .await
         .is_some()

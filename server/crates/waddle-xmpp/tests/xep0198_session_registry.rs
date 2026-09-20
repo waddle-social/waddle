@@ -210,6 +210,23 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
             .await
     }
 
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,
+        session: waddle_xmpp::stream_management::persistence::PersistedSession,
+        unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
+        appends: Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_principal_and_ingress_appends(
+                principal, session, unacked, appends,
+            )
+            .await
+    }
+
     async fn get_ingress_append(
         &self,
         key: &SmIngressAppendKey,
@@ -329,6 +346,23 @@ impl SmPersistenceStorage for MislabelingStore {
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
         self.inner
             .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,
+        session: waddle_xmpp::stream_management::persistence::PersistedSession,
+        unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
+        appends: Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_principal_and_ingress_appends(
+                principal, session, unacked, appends,
+            )
             .await
     }
 
@@ -1706,4 +1740,207 @@ async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
         .live_session_ids()
         .expect("live inventory")
         .is_empty());
+}
+
+fn drain_obligation(resource: &FullJid) -> SmIngressAppendKey {
+    SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(3),
+        semantic_identity_hash: [9; 32],
+        resource: resource.clone(),
+    }
+}
+
+/// Issue #1789: a frame queued on a live socket carries its origin's ingress
+/// obligation. When the socket detaches unwritten, the drain records it at the
+/// connection's next sequence. Doing that twice for one obligation must
+/// allocate once, and the duplicate must not move the outbound counter —
+/// nothing on this path reached a wire, so the client's `h` never counts it.
+#[tokio::test]
+async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::SmKeyedAppendOutcome;
+
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new())),
+    );
+    let session = detached_session("stream-keyed-drain", "alice@example.com/laptop");
+    let resource = session.jid.clone();
+    registry.store_session(session).await.expect("store");
+    let key = drain_obligation(&resource);
+
+    let first = registry
+        .record_keyed_outbound_for_detached_stream_at(
+            "stream-keyed-drain",
+            12,
+            &chat_stanza(&resource, "once"),
+            chrono::Utc::now(),
+            key.clone(),
+        )
+        .await
+        .expect("first drain record");
+    assert_eq!(
+        first,
+        SmKeyedAppendOutcome::Appended {
+            accepting_stream: SmSessionId::new("stream-keyed-drain")
+        }
+    );
+
+    let second = registry
+        .record_keyed_outbound_for_detached_stream_at(
+            "stream-keyed-drain",
+            13,
+            &chat_stanza(&resource, "once"),
+            chrono::Utc::now(),
+            key,
+        )
+        .await
+        .expect("duplicate drain record");
+    assert_eq!(
+        second,
+        SmKeyedAppendOutcome::AlreadyAppended {
+            accepting_stream: SmSessionId::new("stream-keyed-drain")
+        }
+    );
+
+    let claimed = registry
+        .claim_session("stream-keyed-drain")
+        .await
+        .expect("claim")
+        .expect("present");
+    let sequences: Vec<u32> = claimed.unacked_stanzas.iter().map(|e| e.sequence).collect();
+    assert_eq!(
+        sequences,
+        vec![12],
+        "the obligation holds exactly one queue entry"
+    );
+    assert_eq!(claimed.outbound_count, 12, "a duplicate is never counted");
+}
+
+fn drain_principal() -> AuthenticatedPrincipalRef {
+    AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("valid bare JID"),
+        waddle_xmpp::auth::AuthContextId::new(uuid::Uuid::new_v4()),
+        waddle_xmpp::auth::AuthContextVersion::INITIAL,
+        waddle_xmpp::auth::PrincipalAuthEpoch::INITIAL,
+    )
+}
+
+fn drained_entry(sequence: u32) -> waddle_xmpp::stream_management::DetachedUnackedStanza {
+    waddle_xmpp::stream_management::DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
+        sequence,
+        stanza_xml: queued_stanza_xml(&format!("m{sequence}"), "drained"),
+        original_receipt_at: chrono::Utc::now(),
+    }
+}
+
+/// Issue #1789, first detach drain: frames drained before the detached session
+/// exists are persisted with the session snapshot. Their obligations must be
+/// proven in that same write, so a recovery re-execution of the obligation
+/// finds the proof instead of queueing the stanza a second time.
+#[tokio::test]
+async fn xep0198_session_store_proves_drained_obligations_with_the_snapshot() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::SmKeyedAppendOutcome;
+
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new())),
+    );
+    let mut session = detached_session("stream-first-drain", "alice@example.com/laptop");
+    let resource = session.jid.clone();
+    session.unacked_stanzas.push(drained_entry(12));
+    session.outbound_count = 12;
+    let key = drain_obligation(&resource);
+
+    let ticket = registry
+        .reserve_drained_ingress_append(key.clone())
+        .await
+        .expect("ledger read")
+        .expect("obligation is unallocated");
+    let unproven = registry
+        .store_session_with_drained_ingress_appends(session, drain_principal(), vec![ticket.at(12)])
+        .await
+        .expect("store")
+        .unproven;
+    assert!(unproven.is_empty(), "the proof committed with the snapshot");
+
+    assert!(
+        registry
+            .reserve_drained_ingress_append(key.clone())
+            .await
+            .expect("ledger read")
+            .is_none(),
+        "a later drain of the same obligation must skip the frame"
+    );
+    let retried = registry
+        .record_keyed_stanza_for_detached_bound_resource(
+            &resource,
+            &chat_stanza(&resource, "drained"),
+            chrono::Utc::now(),
+            key,
+        )
+        .await
+        .expect("recovery re-execution");
+    assert_eq!(
+        retried,
+        SmKeyedAppendOutcome::AlreadyAppended {
+            accepting_stream: SmSessionId::new("stream-first-drain")
+        }
+    );
+    let claimed = registry
+        .claim_session("stream-first-drain")
+        .await
+        .expect("claim")
+        .expect("present");
+    assert_eq!(claimed.unacked_stanzas.len(), 1);
+}
+
+/// A sequence is assigned before the store, so an obligation that loses the
+/// ledger race keeps its queue entry: dropping it would leave a counted stanza
+/// the client can never acknowledge. Only the proof is withheld.
+#[tokio::test]
+async fn xep0198_session_store_keeps_the_entry_of_a_conflicting_obligation() {
+    use std::sync::Arc;
+
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new())),
+    );
+    let mut session = detached_session("stream-drain-race", "alice@example.com/laptop");
+    let resource = session.jid.clone();
+    session.unacked_stanzas.push(drained_entry(12));
+    session.unacked_stanzas.push(drained_entry(13));
+    session.outbound_count = 13;
+    let key = drain_obligation(&resource);
+
+    // Both reservations read the ledger before either write commits.
+    let winner = registry
+        .reserve_drained_ingress_append(key.clone())
+        .await
+        .expect("ledger read")
+        .expect("unallocated");
+    let loser = registry
+        .reserve_drained_ingress_append(key.clone())
+        .await
+        .expect("ledger read")
+        .expect("unallocated");
+    let unproven = registry
+        .store_session_with_drained_ingress_appends(
+            session,
+            drain_principal(),
+            vec![winner.at(12), loser.at(13)],
+        )
+        .await
+        .expect("store")
+        .unproven;
+    assert_eq!(unproven, vec![key]);
+
+    let claimed = registry
+        .claim_session("stream-drain-race")
+        .await
+        .expect("claim")
+        .expect("present");
+    let sequences: Vec<u32> = claimed.unacked_stanzas.iter().map(|e| e.sequence).collect();
+    assert_eq!(sequences, vec![12, 13]);
+    assert_eq!(claimed.outbound_count, 13);
 }

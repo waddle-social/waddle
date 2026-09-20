@@ -65,6 +65,7 @@ mod batch_write;
 mod call_signaling_telemetry;
 mod cleanup;
 mod connection;
+mod drain_append;
 mod frame;
 mod frame_backstop;
 pub(crate) mod interpret_loop;

@@ -28,6 +28,11 @@ pub struct UnackedStanza {
     /// Used by the Q6 SM-expiry promotion path for the XEP-0203
     /// `<delay/>` stamp on offline replays (issue #209 PR #361).
     pub original_receipt_at: DateTime<Utc>,
+    /// The relayed ingress obligation this entry discharges, unverified (issue #1789).
+    /// It lives exactly as long as the entry is recovery-owned: a detach proves it
+    /// with the session snapshot, and an acknowledgement drops it with the entry.
+    /// Boxed: almost no entry carries one.
+    pub ingress_append: Option<Box<crate::stream_management::SmRelayedAppendObligation>>,
 }
 
 /// Outcome of a `push` onto the unacked queue.
@@ -69,6 +74,7 @@ impl UnackedStanza {
             sent_at: Instant::now(),
             ingress_receipts: Vec::new(),
             original_receipt_at,
+            ingress_append: None,
         }
     }
 
@@ -209,6 +215,27 @@ impl UnackedQueue {
                 self.stanzas.push_back(stanza);
             }
         }
+    }
+
+    pub(super) fn attach_ingress_append(
+        &mut self,
+        sequence: u32,
+        obligation: super::SmRelayedAppendObligation,
+    ) {
+        if let Some(entry) = self
+            .stanzas
+            .iter_mut()
+            .find(|entry| entry.sequence == sequence)
+        {
+            entry.ingress_append = Some(Box::new(obligation));
+        }
+    }
+
+    pub(super) fn ingress_appends(&self) -> Vec<(u32, super::SmRelayedAppendObligation)> {
+        self.stanzas
+            .iter()
+            .filter_map(|entry| Some((entry.sequence, *entry.ingress_append.clone()?)))
+            .collect()
     }
 
     pub(super) fn attach_ingress_receipts(&mut self, receipts: Vec<super::SmIngressFrameReceipt>) {

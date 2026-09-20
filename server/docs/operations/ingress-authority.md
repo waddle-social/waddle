@@ -1368,12 +1368,52 @@ stanza `from`, and a canonical ingress row for `message_key` naming that sender.
 Failed authorization warns and increments
 `waddle.clustering.ingress_append.authorization_failed`, then degrades to an
 unkeyed append; delivery never fails because the check failed.
-That fallback remains at-least-once. So does the registered-remote-socket drain
-(#1789): queue acceptance of a live `remote_resource_frame.v1` carrying no
-obligation identity can precede the origin's receipt. If the socket detaches,
-`server/routes/websocket/replay.rs` drains via unkeyed
-`record_outbound_for_detached_stream_at`, and recovery can allocate a second
-entry. `RegistryFrame` live transport is outside the durable append guarantee;
+That fallback remains at-least-once.
+
+The registered-remote-socket drain is keyed (#1789). The owner-to-socket frame
+(`remote_resource_frame.v2`) carries the recorded obligation, and the socket node
+queues it **unverified** on the live outbound entry. Only if that socket detaches
+before writing the frame does the detach drain
+(`server/routes/websocket/drain_append.rs`) authorize it — the same canonical
+check, the same 250 ms bound — so a frame delivered live never pays the read.
+The drain consults the ledger before counting the frame: an obligation that
+already holds an allocation is dropped uncounted, because nothing on the drain
+path reached a wire and the client's `h` can never include it. Entries drained
+before the detached session exists are proven in the same transaction as the
+session snapshot; entries that arrive afterwards commit with their proof one at a
+time. What stays at-least-once on this path:
+
+- a drain-time authorization failure or timeout drains the entry unkeyed (same
+  counter, same `unauthorized` / `indeterminate` classes) — the origin was already
+  told `Delivered`, so refusing the entry would be silent loss;
+- a keyed writer that wins the ledger between the drain's read and the session
+  store keeps both entries: the drained one already holds a counted sequence, so
+  only its proof is withheld. A session store skipped for an in-flight resume
+  claim proves nothing either. Both log `drained ingress obligations were not
+  proven with the session store; at-least-once`;
+- one indeterminate canonical read (timeout or read failure) ends authorization
+  for the rest of that drain: the reads are serial and run before the detached
+  session is stored, so a full queue against a browned-out database would
+  otherwise hold the detach — and the client's `<resume/>` — for up to a minute;
+- a detach that diverts to terminal recovery or is refused for a missing principal
+  promotes the drained queue without proofs;
+- a re-executed `PeerStanza` runs the recipient pass before the ledger is read, so
+  its archive write and received carbons repeat even though the frame is then
+  dropped. "Exactly once" here means the replay-queue entry and the ledger row;
+- an obligation is proven only while its entry is recovery-owned. The live handler
+  records a frame into the SM queue *before* the transport write, so the obligation
+  moves onto that entry and the detach proves it with the session snapshot — whether
+  the write failed or merely went unacknowledged. Once the client acknowledges the
+  entry, entry and obligation are both gone; a recovery re-execution after that point
+  is the ordinary lost-receipt duplicate (#1760 direction 2), not this path;
+- the first drain takes only the backlog it found and spends at most 2 s authorizing.
+  The socket is still registered while it runs, so a producer refilling the queue
+  could otherwise hold the detach open; later arrivals go to the post-unregister
+  drain, and entries past the budget drain unkeyed;
+- an old peer answers the v2 frame with `UnknownMessage`: a no-effect failure that
+  leaves the owner mirror intact and the obligation unresolved for retry.
+
+`RegistryFrame` live transport is outside the durable append guarantee;
 side-effect carbons also perform their own unkeyed registry appends
 (`clustering/route_bridge/registration/side_effects.rs`). With no unexpired
 session and no prior proof, no append occurs and the obligation stays unresolved.

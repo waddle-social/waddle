@@ -246,6 +246,7 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
                     target.clone(),
                 ))))),
                 kind: DeliveryKind::DirectFrame,
+                ingress_append: None,
             },
             trace: RelayTraceContext::default(),
         })
@@ -260,7 +261,152 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
     );
     assert!(
         outbound.write_acceptance.is_none(),
-        "remote_resource_frame.v1 must remain enqueue-only"
+        "remote_resource_frame.v2 must remain enqueue-only"
+    );
+}
+
+/// Issue #1789: the socket node queues the frame's obligation on the live outbound
+/// entry, bound to the frame's resource and unverified. This is the only place the
+/// identity crosses from the wire into the queue a detach drain later reads.
+#[tokio::test]
+async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
+    use crate::ingress::identity::IngressAppendObligationRef;
+    use crate::ingress::EffectReceiptKey;
+    use crate::ingress_substrate::EffectReceiptKind;
+    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, mut rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            Arc::clone(&owner),
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration_id = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .expect("socket registration")
+        .registration_id;
+    let obligation = IngressAppendObligationRef {
+        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
+        sender_bare: sender_full().to_bare(),
+        receipt: EffectReceiptKey {
+            kind: EffectReceiptKind::from_storage(IngressEffectKind::RouteDirect.storage_tag()),
+            semantic_identity_hash: [89; 32],
+        },
+        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    };
+
+    let reply = bridge
+        .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
+            frame: RemoteResourceOutboundFrame {
+                jid: target.clone(),
+                registration_id,
+                stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                    target.clone(),
+                ))))),
+                kind: DeliveryKind::PeerStanza,
+                ingress_append: Some(obligation.clone()),
+            },
+            trace: RelayTraceContext::default(),
+        })
+        .await;
+
+    assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
+    let outbound = rx.recv().await.expect("socket receives relayed frame");
+    assert_eq!(
+        outbound.ingress_append,
+        Some(obligation.into_relayed_for(target))
+    );
+}
+
+/// Issue #1789: the frame to a registered remote socket carries the executor's
+/// ingress obligation, bound to the stanza's sender, so the socket node can key a
+/// later detach drain. Only an append-eligible message obligation crosses the wire.
+#[test]
+fn registered_remote_frame_carries_the_executors_ingress_obligation() {
+    use super::super::delivery::remote_socket::remote_resource_frame;
+    use crate::ingress::EffectReceiptKey;
+    use crate::ingress_substrate::EffectReceiptKind;
+    use crate::server::routes::interpret::SmIngressAppendContext;
+    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+
+    let context = |kind: IngressEffectKind| SmIngressAppendContext {
+        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
+        receipt: EffectReceiptKey {
+            kind: EffectReceiptKind::from_storage(kind.storage_tag()),
+            semantic_identity_hash: [89; 32],
+        },
+        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    };
+    let registration_id = RemoteResourceRegistrationId::fresh();
+    let target = target_full();
+    let mut message = Message::new(Some(jid::Jid::from(target.clone())));
+    message.from = Some(sender_full().into());
+    let message = Stanza::Message(message);
+    let direct = context(IngressEffectKind::RouteDirect);
+
+    let frame = remote_resource_frame(
+        &target,
+        registration_id,
+        &message,
+        DeliveryKind::PeerStanza,
+        Some(&direct),
+    );
+    let obligation = frame.ingress_append.expect("obligation crosses the wire");
+    assert_eq!(obligation.message_key, direct.message_key);
+    assert_eq!(obligation.receipt, direct.receipt);
+    assert_eq!(obligation.received_at, direct.received_at);
+    assert_eq!(obligation.sender_bare, sender_full().to_bare());
+
+    let unkeyed = |stanza: &Stanza, context: Option<&SmIngressAppendContext>| {
+        remote_resource_frame(
+            &target,
+            registration_id,
+            stanza,
+            DeliveryKind::PeerStanza,
+            context,
+        )
+        .ingress_append
+    };
+    assert_eq!(unkeyed(&message, None), None, "no obligation, no key");
+    assert_eq!(
+        unkeyed(
+            &message,
+            Some(&context(IngressEffectKind::ArchiveAuthoritative))
+        ),
+        None,
+        "only recorded routes allocate keyed appends"
+    );
+    let mut anonymous = Message::new(Some(jid::Jid::from(target.clone())));
+    anonymous.from = None;
+    assert_eq!(
+        unkeyed(&Stanza::Message(anonymous), Some(&direct)),
+        None,
+        "an obligation cannot be bound without a sender"
     );
 }
 
@@ -1022,6 +1168,7 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
             &target,
             &Stanza::Message(Message::new(Some(jid::Jid::from(target.clone())))),
             DeliveryKind::PeerStanza,
+            None,
         )
         .await;
 

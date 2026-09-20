@@ -1,5 +1,6 @@
 //! Durable ingress authority: immutable planning, atomic commit, bounded execution.
 use crate::server::routes::interpret::DeliveryExecutionContext;
+pub(crate) mod append_authority;
 mod archive_authority;
 mod capture;
 #[cfg(test)]

@@ -492,6 +492,7 @@ pub(crate) async fn registered_remote_resource_delivery(
                 target,
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
+                None,
             )
             .await
         {

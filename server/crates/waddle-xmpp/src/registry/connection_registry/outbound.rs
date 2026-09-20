@@ -103,6 +103,10 @@ pub struct OutboundStanza {
     /// Optional acknowledgement for a durable producer waiting until this
     /// frame reaches the connection's write/recovery-owning path.
     pub write_acceptance: Option<OutboundWriteAcceptance>,
+    /// The origin's ingress obligation for a frame relayed to this socket, unverified
+    /// (issue #1789). Read only by the detach drain, which keys the XEP-0198 replay
+    /// append with it; a live wire write ignores it.
+    pub ingress_append: Option<crate::stream_management::SmRelayedAppendObligation>,
 }
 
 impl OutboundStanza {
@@ -120,7 +124,17 @@ impl OutboundStanza {
             pending_row_id: None,
             pending_row_original_receipt_at: None,
             write_acceptance: None,
+            ingress_append: None,
         }
+    }
+
+    /// Attach the relaying origin's ingress obligation.
+    pub fn with_ingress_append(
+        mut self,
+        obligation: crate::stream_management::SmRelayedAppendObligation,
+    ) -> Self {
+        self.ingress_append = Some(obligation);
+        self
     }
 
     /// Create an outbound stanza tagged for the **recipient pass** —
@@ -135,6 +149,7 @@ impl OutboundStanza {
             pending_row_id: None,
             pending_row_original_receipt_at: None,
             write_acceptance: None,
+            ingress_append: None,
         }
     }
 
@@ -159,6 +174,7 @@ impl OutboundStanza {
             pending_row_id: Some(row_id),
             pending_row_original_receipt_at: Some(original_receipt_at),
             write_acceptance: None,
+            ingress_append: None,
         }
     }
 
@@ -172,6 +188,7 @@ impl OutboundStanza {
             pending_row_id: None,
             pending_row_original_receipt_at: None,
             write_acceptance: Some(acceptance),
+            ingress_append: None,
         }
     }
 }

@@ -463,6 +463,67 @@ async fn store_session_atomic_also_applies_divergence_a() {
     );
 }
 
+/// Issue #1789: the fenced drained-batch store proves unallocated obligations with
+/// the snapshot and withholds only a conflicting proof — without aborting, because a
+/// caught unique violation would poison the Postgres transaction and lose the detach.
+#[tokio::test]
+async fn drained_batch_withholds_only_conflicting_proofs_under_the_fence() {
+    use waddle_xmpp::ingress::MessageKey;
+    use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
+
+    let Some(f) = fixture().await else { return };
+    let session = fixture_session("stream-drained-batch");
+    let append = |sequence: u32| PersistedIngressAppend {
+        key: SmIngressAppendKey {
+            message_key: MessageKey::new(),
+            kind: SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [89; 32],
+            resource: session.jid.clone(),
+        },
+        accepting_stream: session.stream_id.clone(),
+        sequence,
+        appended_at: Utc::now(),
+        supersedes: None,
+    };
+    let first = append(1);
+    let racing_duplicate = PersistedIngressAppend {
+        sequence: 2,
+        ..first.clone()
+    };
+    let withheld = f
+        .fenced
+        .store_session_atomic_with_principal_and_ingress_appends(
+            &fixture_principal(),
+            session.clone(),
+            vec![
+                fixture_unacked("stream-drained-batch", 1),
+                fixture_unacked("stream-drained-batch", 2),
+            ],
+            vec![first.clone(), racing_duplicate],
+        )
+        .await
+        .expect("a ledger conflict must not fail the detach");
+    assert_eq!(withheld, vec![first.key.clone()]);
+
+    let queue = f
+        .fenced
+        .list_unacked(&session.stream_id)
+        .await
+        .expect("list_unacked");
+    assert_eq!(
+        queue.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+        vec![1, 2],
+        "the conflicting entry keeps its counted sequence"
+    );
+    let proof = f
+        .fenced
+        .get_ingress_append(&first.key)
+        .await
+        .expect("ledger read")
+        .expect("first proof committed");
+    assert_eq!(proof.sequence, 1);
+}
+
 #[tokio::test]
 async fn list_expired_sessions_ignores_caller_now_and_uses_postgres_now() {
     let Some(f) = fixture().await else { return };

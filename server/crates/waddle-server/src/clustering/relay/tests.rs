@@ -24,6 +24,64 @@ fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     );
 }
 
+/// Issue #1789: the owner-to-socket frame carries the origin's ingress obligation so
+/// the socket node's detach drain can key its append. The shape changed, so the id
+/// must (#1597): an old peer answers `UnknownMessage`, which proves no handler ran
+/// and must not be read as a stale registration — the mirror has to survive a
+/// rolling update so the retry can land once the peer is upgraded.
+#[test]
+fn remote_resource_frame_v2_carries_the_ingress_obligation() {
+    use crate::ingress::identity::IngressAppendObligationRef;
+    use crate::ingress::EffectReceiptKey;
+    use crate::ingress_substrate::EffectReceiptKind;
+    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayDeliverRemoteResourceFrame>>::REMOTE_ID,
+        "waddle.clustering.relay.remote_resource_frame.v2"
+    );
+
+    let obligation = IngressAppendObligationRef {
+        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
+        sender_bare: "romeo@example.test".parse().expect("sender"),
+        receipt: EffectReceiptKey {
+            kind: EffectReceiptKind::from_storage(IngressEffectKind::RouteDirect.storage_tag()),
+            semantic_identity_hash: [89; 32],
+        },
+        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    };
+    let frame = RemoteResourceOutboundFrame {
+        jid: "juliet@example.test/phone".parse().expect("full jid"),
+        registration_id: serde_json::from_str("\"00000000-0000-0000-0000-000000001789\"")
+            .expect("registration id"),
+        stanza: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Message(
+            xmpp_parsers::message::Message::new(None::<jid::Jid>),
+        )),
+        kind: waddle_xmpp::registry::DeliveryKind::PeerStanza,
+        ingress_append: Some(obligation.clone()),
+    };
+    let encoded = serde_json::to_vec(&frame).expect("encode frame");
+    let decoded: RemoteResourceOutboundFrame =
+        serde_json::from_slice(&encoded).expect("decode frame");
+    assert_eq!(decoded.ingress_append, Some(obligation));
+
+    let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
+        actor_remote_id: "actor".into(),
+        message_remote_id: "waddle.clustering.relay.remote_resource_frame.v2".into(),
+    });
+    assert!(
+        matches!(
+            old_peer,
+            RelayAskError::Send {
+                failure: RelaySendFailure::Codec,
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+        ),
+        "an old peer is a no-effect codec failure, never a stale registration: {old_peer:?}"
+    );
+}
+
 #[test]
 fn incomplete_carbons_reply_has_new_remote_message_id() {
     assert_eq!(

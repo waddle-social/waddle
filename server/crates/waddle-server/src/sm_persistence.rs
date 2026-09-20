@@ -587,6 +587,19 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     ) -> Result<(), SmPersistenceError> {
         atomic_store::store_session_atomic_with_principal(self, principal, session, unacked).await
     }
+
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        appends: Vec<PersistedIngressAppend>,
+    ) -> Result<Vec<waddle_xmpp::stream_management::SmIngressAppendKey>, SmPersistenceError> {
+        atomic_store::store_session_atomic_with_principal_and_ingress_appends(
+            self, principal, session, unacked, appends,
+        )
+        .await
+    }
 }
 
 /// Choose between the portable [`DatabaseSmPersistence`] and the
