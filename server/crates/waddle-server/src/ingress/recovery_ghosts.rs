@@ -83,7 +83,10 @@ use crate::{
     },
     server::routes::{
         interpret::{DeliveryExecutionContext, Deps},
-        websocket::{sweep_abandoned_muc_occupancy, MucCleanupOutcome, WebSocketState},
+        websocket::{
+            retain_abandoned_muc_occupancy_sweep, sweep_abandoned_muc_occupancy, MucCleanupOutcome,
+            WebSocketState,
+        },
     },
 };
 
@@ -256,6 +259,19 @@ pub(super) async fn repair_stalled_row(
             );
             settled_any = true;
             receipted_any |= !settled.is_empty();
+            // Every settled ghost gets a retained janitor sweep NOW, with no
+            // await between the commit above and these records: the sweeps
+            // below run one by one under the repair budget, and a cancellation
+            // between two of them must not leave a settled ghost seated with
+            // nobody owing its removal (the row may already be terminal, so
+            // recovery would never revisit it).
+            for (occupant, generation) in &ghosts {
+                retain_abandoned_muc_occupancy_sweep(
+                    state,
+                    occupant,
+                    LeaveSessionSelector::Generation(*generation),
+                );
+            }
             // Sequential on purpose: each sweep MUTATES the room, and the
             // empty-room destroy one of them triggers must not race the next.
             for (occupant, generation) in ghosts {

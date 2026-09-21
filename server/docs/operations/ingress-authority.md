@@ -1715,6 +1715,14 @@ Maintenance never relays. Ownership is relative to the recovering node: the
 destination node's own maintenance can still deliver the globally recorded copy
 through its local registry and settle its progress.
 
+Every ghost whose copy a chunk settled is handed to the local-departure
+janitor as a retained full-JID sweep immediately after the commit and before
+any inline sweep starts. The inline sweeps run one by one under the repair
+budget, so a cancellation between two of them can no longer leave a settled
+ghost seated with nobody owing its removal; when the inline sweep already
+unseated the occupancy, the janitor's generation-scoped redrive answers
+`NotOccupant` and completes.
+
 ### Pending delivery and SM database placement
 
 `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` and `WADDLE_XMPP_SM_DATABASE_URL`

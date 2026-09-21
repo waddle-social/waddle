@@ -413,6 +413,37 @@ pub async fn cleanup_muc_presence_for_jid(
     }
 }
 
+/// Hand the local-departure janitor responsibility for unseating an occupancy
+/// maintenance proved abandoned (#1803), BEFORE any inline sweep runs.
+///
+/// Synchronous on purpose: the ghost repair settles a whole chunk of copies and
+/// then sweeps the ghosts one by one under a bounded budget, and a cancellation
+/// between two sweeps must not leave an already-settled ghost with nobody owing
+/// its removal. The inline sweep that follows is an optimization; when it has
+/// already unseated the occupancy the janitor's redrive is a generation-scoped
+/// leave that answers `NotOccupant` and completes.
+pub(crate) fn retain_abandoned_muc_occupancy_sweep(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+) {
+    let remote_ceiling = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .generation_watermark();
+    state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .record(LocalDepartureItem::FullJidSweep {
+            jid: jid.clone(),
+            selector: session,
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            remote_ceiling,
+        });
+}
+
 /// A fresh full-JID leave sweep for an occupancy maintenance proved abandoned
 /// (#1803). Unlike [`redrive_local_muc_cleanup`] it is not replaying a sweep the
 /// janitor already holds, so a room enumeration or lookup failure records a

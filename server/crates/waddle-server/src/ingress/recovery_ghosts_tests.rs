@@ -350,6 +350,69 @@ async fn sqlite_ghost_occupant_survives_below_the_stall_threshold() {
     f.f.close().await;
 }
 
+/// The repair settles a chunk of copies and then sweeps the ghosts one by one
+/// under a bounded budget. A cancellation between two sweeps must not leave a
+/// settled ghost seated with nobody owing its removal — the row may already be
+/// terminal, so recovery never revisits it. Every settled ghost therefore gets
+/// a retained janitor sweep BEFORE its inline sweep starts; the window the
+/// inline sweep opens observes it.
+#[tokio::test]
+async fn sqlite_settled_ghost_has_a_retained_sweep_before_its_inline_sweep() {
+    use crate::ingress::recovery_ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
+    use crate::server::routes::websocket::LocalDepartureItem;
+
+    /// Records whether a full-JID sweep for the ghost was already retained
+    /// when the inline sweep's window opened.
+    struct ObserveRetained {
+        state: std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
+        retained: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl GhostEvictionWindow for ObserveRetained {
+        async fn enter(&self, occupant: &jid::FullJid) {
+            let due = self
+                .state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .take_due(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+            let found = due.iter().any(|entry| {
+                matches!(
+                    &entry.item,
+                    LocalDepartureItem::FullJidSweep { jid, .. } if jid == occupant
+                )
+            });
+            self.retained
+                .store(found, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let f = ghost_fixture(IngressFixture::sqlite().await, GhostCase::Evictable).await;
+    for _ in 0..3 {
+        f.pass().await;
+    }
+    let retained = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    hook_ghost_eviction_window(
+        f.key,
+        std::sync::Arc::new(ObserveRetained {
+            state: std::sync::Arc::clone(&f.state),
+            retained: std::sync::Arc::clone(&retained),
+        }) as std::sync::Arc<dyn GhostEvictionWindow>,
+    );
+    f.pass().await;
+
+    assert!(
+        !f.occupies(&f.ghost).await,
+        "the inline sweep still unseats the ghost"
+    );
+    assert!(
+        retained.load(std::sync::atomic::Ordering::SeqCst),
+        "a settled ghost's removal is owed by the janitor before the inline sweep runs"
+    );
+    f.f.close().await;
+}
+
 /// The eviction can take away the very authority the settlement it enables
 /// needs. The leave sweep that removes the ghost runs the empty-room path for
 /// the room it just emptied (`maybe_evict_empty_room`), and that destroy —
