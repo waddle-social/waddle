@@ -1029,7 +1029,12 @@ Two properties bound the settlement, because it permanently drops a copy:
   holds that socket", "the occupant is still seated"), Inconclusive for a read
   that failed — so a stable fact accumulates the streak and is parked, while a
   transient failure is retried. Rows with no `route_muc` route, or none with an
-  owed occupant, are cached exactly as before. For
+  owed occupant, are cached exactly as before. One consequence to expect: a
+  retried row re-runs every rebuildable arm on it, so a row that carries both
+  an owed groupchat copy and a warning-only `room_observer` obligation
+  re-invokes that keyless, at-least-once plugin observer on each attempt (a
+  handful per parking cycle; every pass while a read keeps failing) — the same
+  behaviour newer-shaped rows already had, now also true for legacy ones. For
   `ingress.maintenance.unrecoverable_obligations{reason="unsupported"}`, a
   per-evaluation counter: such a row ticks it once per attempt — a handful of
   times while the streak builds, then once per 15-minute parking cycle, not
