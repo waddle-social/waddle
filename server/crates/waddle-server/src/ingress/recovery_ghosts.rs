@@ -28,7 +28,10 @@
 //! and requires it on the presence to the removed user and on the presences to
 //! the remaining occupants once the service supports it — this eviction is
 //! precisely that case, so it passes [`MucRemovalCause::TechnicalProblem`]
-//! into both the retained janitor sweep and the inline one. 307 is not emitted
+//! into both the retained janitor sweep and the inline one, and every retry
+//! the sweep leaves behind — the per-room `RoomDeparture`/`ConfirmRetired`
+//! items and the write-ahead `InFlight` entry — carries it too, so a delayed
+//! removal is indistinguishable on the wire from an immediate one (#1814). 307 is not emitted
 //! alongside it; the XEP calls that "generally not advisable", because such a
 //! removal follows no moderator action. An ordinary disconnect keeps the bare
 //! §7.14 shape, so a client can tell the two apart. The cause is

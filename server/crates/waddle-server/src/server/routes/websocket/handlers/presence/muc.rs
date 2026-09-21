@@ -2071,6 +2071,7 @@ pub async fn handle_muc_leave(
         selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(occupancy_session),
         attempt: leave_attempt,
         notified: HashSet::new(),
+        removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
     };
     state
         .deps
@@ -2201,6 +2202,7 @@ pub async fn handle_muc_leave(
                     ),
                     attempt: leave_attempt,
                     notified: HashSet::new(),
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
             );
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
@@ -2232,6 +2234,7 @@ pub async fn handle_muc_leave(
                     ),
                     attempt: leave_attempt,
                     notified: HashSet::new(),
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
             );
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room; waiting for actor retirement");

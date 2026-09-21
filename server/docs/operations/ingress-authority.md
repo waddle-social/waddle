@@ -1050,16 +1050,18 @@ no removal code at all, so a client can tell the two apart. Nothing new is
 advertised in disco: XEP-0045 registers 333 as a status code, not as a
 feature.
 
-Both eviction paths emit that shape: the inline sweep and the retained
-`FullJidSweep` the local-departure janitor redrives (its cause is retained
-with the sweep, and coalescing two sweeps never downgrades a service-side
-removal to a voluntary one). **Known gap:** the narrower per-ROOM retries —
-the `RoomDeparture` / `ConfirmRetired` items a sweep retains when one room's
-leave ask deferred, timed out or failed — carry only the durable
-`OccupancyLeaveCause` and not the presentational removal cause, so the
-janitor's replay of those emits the bare §7.14 shape without 333. That
-affects only a ghost eviction whose room ask did not complete on the first
-attempt; the copy settlement and the eviction itself are unaffected.
+Every path that can finish the eviction emits that shape, so a delayed
+removal is indistinguishable on the wire from an immediate one (#1814): the
+inline sweep; the retained `FullJidSweep` the local-departure janitor
+redrives; and the narrower per-ROOM retries — the `RoomDeparture`,
+`ConfirmRetired` and write-ahead `InFlight` items a sweep retains when one
+room's leave ask deferred, timed out or failed — which now carry the
+presentational removal cause alongside the durable `OccupancyLeaveCause` and
+hand it to the janitor's §7.14 broadcast and self-echo. Coalescing never
+downgrades a service-side removal to a voluntary one, and the inventory's
+dedup key deliberately ignores the cause, so a voluntary disconnect and a
+proven ghost eviction for the same (room, JID, cause, occupancy generation)
+still merge into one retained item — one that says 333.
 
 The copy is settled **before** the sweep runs, under the room authority the
 ghost was proven with, and `ingress.maintenance.departed_occupant_copies`

@@ -679,9 +679,11 @@ fn test_build_destroy_notification_not_self_minimal() {
 /// moderator) action that the 307 code usually indicates".
 #[test]
 fn xep0045_service_error_removal_marks_the_other_occupants_presence_with_333() {
-    let from: FullJid = "room@muc.example.com/ghost".parse().unwrap();
-    let to: FullJid = "watcher@example.com/desk".parse().unwrap();
-    let occupant_jid: FullJid = "ghost@example.com/web".parse().unwrap();
+    let from: FullJid = "room@muc.example.com/ghost".parse().expect("room nick");
+    let to: FullJid = "watcher@example.com/desk"
+        .parse()
+        .expect("remaining occupant");
+    let occupant_jid: FullJid = "ghost@example.com/web".parse().expect("removed occupant");
     let secret = test_secret();
     let occupant_bare = occupant_jid.to_bare();
 
@@ -719,8 +721,8 @@ fn xep0045_service_error_removal_marks_the_other_occupants_presence_with_333() {
 /// 110 (self) alongside 333.
 #[test]
 fn xep0045_service_error_removal_marks_the_removed_users_own_presence_with_110_and_333() {
-    let from: FullJid = "room@muc.example.com/ghost".parse().unwrap();
-    let to: FullJid = "ghost@example.com/web".parse().unwrap();
+    let from: FullJid = "room@muc.example.com/ghost".parse().expect("room nick");
+    let to: FullJid = "ghost@example.com/web".parse().expect("removed occupant");
     let secret = test_secret();
     let occupant_bare = to.to_bare();
 
@@ -748,9 +750,13 @@ fn xep0045_service_error_removal_marks_the_removed_users_own_presence_with_110_a
 /// leave the occupant caused itself carries no removal code at all.
 #[test]
 fn xep0045_voluntary_leave_carries_no_removal_status_code() {
-    let from: FullJid = "room@muc.example.com/leaver".parse().unwrap();
-    let to: FullJid = "watcher@example.com/desk".parse().unwrap();
-    let occupant_jid: FullJid = "leaver@example.com/phone".parse().unwrap();
+    let from: FullJid = "room@muc.example.com/leaver".parse().expect("room nick");
+    let to: FullJid = "watcher@example.com/desk"
+        .parse()
+        .expect("remaining occupant");
+    let occupant_jid: FullJid = "leaver@example.com/phone"
+        .parse()
+        .expect("departing occupant");
     let secret = test_secret();
     let occupant_bare = occupant_jid.to_bare();
 
