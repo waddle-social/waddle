@@ -1538,3 +1538,247 @@ async fn sqlite_room_claimed_here_without_an_actor_settles_nothing() {
 async fn sqlite_unreadable_room_claim_settles_nothing() {
     unhosted_room_recovery(IngressFixture::sqlite().await, UnhostedCase::ClaimReadFails).await;
 }
+
+/// What one cluster peer answers about the exact frozen resource — and, more to
+/// the point, WHEN. Every answer below is time-varying: a terminated pod's
+/// `clustering_nodes` row stays unexpired for a minute or two after a rolling
+/// deploy, so its ask cannot be answered at all; a peer holding the socket
+/// today releases it tomorrow; only then is the copy owed to nobody.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeerAnswer {
+    /// The ask itself cannot answer — an old replica's `UnknownMessage` during
+    /// a rolling update, a timeout, a transport failure. A FAILED READ.
+    Fails,
+    /// The peer is holding that socket. A STABLE fact, not a failed read.
+    Present,
+    /// The peer authoritatively denies the resource.
+    Absent,
+}
+
+/// One peer whose answer the test switches between maintenance passes.
+struct SwitchablePeer {
+    answer: Arc<std::sync::Mutex<PeerAnswer>>,
+}
+
+#[async_trait::async_trait]
+impl crate::clustering::resource_presence::ResourcePresenceAsker for SwitchablePeer {
+    async fn resource_presence(
+        &self,
+        _peer: &NodeIdentity,
+        _target: &jid::FullJid,
+    ) -> Result<
+        crate::clustering::relay::RelayResourcePresenceReply,
+        crate::clustering::relay::RelayAskError,
+    > {
+        use crate::clustering::relay::{
+            RelayAskError, RelayResourcePresenceReply, RelaySendEffect, RelaySendFailure,
+        };
+        let answer = *self.answer.lock().expect("peer answer");
+        match answer {
+            PeerAnswer::Fails => Err(RelayAskError::Send {
+                failure: RelaySendFailure::Codec,
+                effect: RelaySendEffect::NoEffect,
+                message: "peer does not know waddle.clustering.relay.resource_presence.v1"
+                    .to_string(),
+            }),
+            PeerAnswer::Present => Ok(RelayResourcePresenceReply::Present),
+            PeerAnswer::Absent => Ok(RelayResourcePresenceReply::Absent),
+        }
+    }
+}
+
+/// The production #1803 row, post-#1808: a committed groupchat row in the
+/// LEGACY shape, whose canonical envelope lost the room provenance
+/// `restore_muc_routes` needs (`Case::OldEnvelope` →
+/// `missing_canonical_provenance`), so no rebuild path can ever produce its
+/// occupant copy and only the departed-copy settlement can discharge it.
+///
+/// It is hosted by a clustered incarnation with an EMPTY roster — a room host
+/// that just restarted — so the occupant is roster-absent, unreachable here,
+/// and only `SwitchablePeer` decides whether the copy is still owed.
+async fn legacy_unrebuildable_row(
+    f: &IngressFixture,
+    sm: Arc<InMemorySmSessionRegistry>,
+    occupant: &jid::FullJid,
+    answer: Arc<std::sync::Mutex<PeerAnswer>>,
+) -> (
+    MessageKey,
+    crate::ingress::EffectReceiptKey,
+    Arc<dyn RecoveryEnvironment>,
+) {
+    let planning_state = state_for(f, sm.clone()).await;
+    let submission = planned_room(
+        f,
+        &planning_state,
+        Case::OldEnvelope,
+        std::slice::from_ref(occupant),
+    )
+    .await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("room fanout intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    // Replace the reflected canonical envelope with the raw sender payload, as
+    // rows committed before the room-provenance rule carry it.
+    let mut tx = f.uow.begin().await.expect("legacy row");
+    CanonicalMessageRepository::lock(&mut tx, key)
+        .await
+        .expect("lock");
+    CanonicalMessageRepository::record_room_canonical_envelope(
+        &mut tx,
+        key,
+        &crate::ingress_substrate::MessageEnvelope::new(submission.plan.sanitized_message.clone()),
+    )
+    .await
+    .expect("old real-sender envelope");
+    tx.commit().await.expect("legacy row commit");
+    super::departed::settle_non_delivery_effects(f, &planning_state, &decision).await;
+    let (state, _room) = one_peer_room(sm, Arc::new(SwitchablePeer { answer })).await;
+    (key, receipt, Arc::new(StateEnvironment(state)))
+}
+
+async fn assert_legacy_row_pending(
+    f: &IngressFixture,
+    key: MessageKey,
+    receipt: &crate::ingress::EffectReceiptKey,
+) {
+    let mut tx = f.uow.begin().await.expect("inspect pending row");
+    assert_eq!(
+        DeliveryProgressRepository::load(&mut tx, key, receipt)
+            .await
+            .expect("delivery progress"),
+        Vec::<jid::FullJid>::new(),
+        "an unproven attempt settles nothing"
+    );
+    assert!(
+        !CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"),
+        "the frozen copy is still owed"
+    );
+    tx.commit().await.expect("read commit");
+}
+
+/// THE #1808 REGRESSION: a row whose only obstacle is an owed groupchat copy
+/// must never be cached as unsupported.
+///
+/// The settlement's every-peer proof is time-varying, but the unsupported cache
+/// releases a row only when its RECEIPT and PROGRESS counts change — the very
+/// counts only a later settlement could change. So the first attempt's verdict
+/// became permanent: in production 47 legacy rows attempted inside the first
+/// ~2.5 minutes of a rolling deploy, while the terminated pods' node rows were
+/// still unexpired, were parked for the life of the process while ~700 siblings
+/// drained.
+async fn legacy_row_with_an_owed_copy_is_retried(f: IngressFixture, first: PeerAnswer) {
+    let sm = persistent_sm(&f).await;
+    let occupant: jid::FullJid = "ghost@example.com/phone".parse().expect("occupant");
+    let answer = Arc::new(std::sync::Mutex::new(first));
+    let (key, receipt, env) =
+        legacy_unrebuildable_row(&f, sm, &occupant, Arc::clone(&answer)).await;
+
+    let cursor = MaintenanceCursor::default();
+    assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(
+        super::super::super::attempt_count(key),
+        1,
+        "the legacy row is attempted once"
+    );
+    assert_legacy_row_pending(&f, key, &receipt).await;
+
+    // The cluster changes its mind: the terminated pod's node row expired, or
+    // the peer that held the socket let it go.
+    *answer.lock().expect("peer answer") = PeerAnswer::Absent;
+    assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(
+        super::super::super::attempt_count(key),
+        2,
+        "a row with an owed groupchat copy is attempted again, not cached"
+    );
+
+    let mut tx = f.uow.begin().await.expect("inspect settled row");
+    assert_eq!(
+        DeliveryProgressRepository::load(&mut tx, key, &receipt)
+            .await
+            .expect("delivery progress"),
+        vec![occupant.clone()],
+        "the later attempt settles the copy the first could not"
+    );
+    assert!(
+        EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash
+        )
+        .await
+        .expect("aggregate receipt"),
+        "the frozen fanout is complete"
+    );
+    assert!(CanonicalMessageRepository::is_terminal(&mut tx, key)
+        .await
+        .expect("terminal"));
+    tx.commit().await.expect("read commit");
+    f.close().await;
+}
+
+/// The rolling-deploy shape: the peer ask cannot be answered at all while the
+/// terminated pods' node rows are still unexpired.
+#[tokio::test]
+async fn sqlite_legacy_row_is_retried_after_an_unanswerable_peer_ask() {
+    legacy_row_with_an_owed_copy_is_retried(IngressFixture::sqlite().await, PeerAnswer::Fails)
+        .await;
+}
+
+/// The same rule for a STABLE fact rather than a failed read: a peer holding
+/// the socket keeps the copy owed, and that too is only true until it is not.
+#[tokio::test]
+async fn sqlite_legacy_row_is_retried_after_a_peer_held_the_socket() {
+    legacy_row_with_an_owed_copy_is_retried(IngressFixture::sqlite().await, PeerAnswer::Present)
+        .await;
+}
+
+/// The cost bound the rule relies on. A row that keeps failing to settle is
+/// retryable, not free: once its attempts are EVALUABLE — a peer that keeps
+/// holding the socket is a stable fact, not a failed read — the ordinary stall
+/// accounting takes over, and after `recovery_stall_attempts` samples the row
+/// is parked for `recovery_stall_cooldown` instead of being attempted by every
+/// pass. That is what keeps `ingress.maintenance.unrecoverable_obligations`
+/// (`reason="unsupported"`), a per-evaluation counter, on the parking cadence.
+#[tokio::test]
+async fn sqlite_legacy_row_with_a_permanently_owed_copy_is_parked_by_the_stall_accounting() {
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let occupant: jid::FullJid = "ghost@example.com/phone".parse().expect("occupant");
+    let answer = Arc::new(std::sync::Mutex::new(PeerAnswer::Present));
+    let (key, receipt, env) = legacy_unrebuildable_row(&f, sm, &occupant, answer).await;
+
+    let cursor = MaintenanceCursor::default();
+    for expected in 1..=MaintenanceBudget::DEFAULT.recovery_stall_attempts {
+        assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            super::super::super::attempt_count(key),
+            u64::from(expected),
+            "every sample of the stall streak attempts the row"
+        );
+    }
+    assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+    cursor.wait_for_recovery_accounting().await;
+    assert_eq!(
+        super::super::super::attempt_count(key),
+        u64::from(MaintenanceBudget::DEFAULT.recovery_stall_attempts),
+        "the completed stall streak parks the row for the cooldown"
+    );
+    assert_legacy_row_pending(&f, key, &receipt).await;
+    f.close().await;
+}

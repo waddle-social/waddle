@@ -1011,11 +1011,41 @@ Two properties bound the settlement, because it permanently drops a copy:
   occupant discussion history on join rather than the traffic that predates
   it, and the message remains in the room's XEP-0313 archive regardless.
 
+  **A row with an owed groupchat copy is never cached as unsupported
+  (#1803).** Every answer the settlement rests on is TIME-VARYING: a peer that
+  holds the socket today releases it tomorrow, a peer that cannot answer now
+  answers on the next pass, a room becomes hosted or unhosted. The unsupported
+  cache asserts the opposite — "nothing on this row can progress until its
+  receipt or progress counts change" — and it is released only by exactly those
+  counts, which only a later settlement can change. A recovery attempt
+  therefore reports a row unsupported only once every unreceipted `route_muc`
+  route on it has no owed occupant left after the settlement pass (owed =
+  frozen in the fanout, not completed, not host-owned, and not settled by this
+  attempt). A row that still owes a copy falls through to the ordinary stall
+  accounting instead, which already bounds its cost: three evaluable samples at
+  least `recovery_stall_sample_interval` apart, then a
+  `recovery_stall_cooldown` parking, then a retry. Its attempts keep whatever
+  classification the settlement decided — Evaluable for a stable fact ("a peer
+  holds that socket", "the occupant is still seated"), Inconclusive for a read
+  that failed — so a stable fact accumulates the streak and is parked, while a
+  transient failure is retried. Rows with no `route_muc` route, or none with an
+  owed occupant, are cached exactly as before. For
+  `ingress.maintenance.unrecoverable_obligations{reason="unsupported"}`, a
+  per-evaluation counter: such a row ticks it once per attempt — a handful of
+  times while the streak builds, then once per 15-minute parking cycle, not
+  once per 30-second pass forever.
+
   **Rollout note:** because a peer that predates
   `waddle.clustering.relay.resource_presence.v1` answers `UnknownMessage`,
   which fails closed, departed-copy settlement is also suspended for the
   duration of a rolling update. Legacy `route_muc` rows only start draining
-  once BOTH replicas run the new image.
+  once BOTH replicas run the new image. The same holds for the first one to
+  three minutes AFTER a rolling deploy: the terminated pods' `clustering_nodes`
+  rows are still unexpired, so those pods are still asked, their asks fail, and
+  the every-peer proof is `Unproven`. Settlement stays suspended until the
+  stale-node watchdog expires those rows. Rows attempted inside that window are
+  retried once it has, rather than parked for the life of the process — which
+  is exactly what the rule above buys.
 
 ### Ghost-occupant eviction (#1803)
 

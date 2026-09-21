@@ -825,6 +825,11 @@ mod family_tests {
                     // fanout's aggregate receipt lands on the first pass. The
                     // warning-only observer is still the reason the row stays
                     // pending, and is still cached rather than re-invoked.
+                    //
+                    // This is the CONTROL for the owed-occupant rule: the
+                    // aggregate receipt below proves the route has no owed
+                    // occupant left, so nothing keeps the row retryable and it
+                    // is cached exactly as it was before that rule.
                     "the successful sibling's receipt, plus the settled legacy MUC fanout's"
                 );
             } else {

@@ -347,14 +347,26 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
     );
     if matches!(case, Case::OldEnvelope | Case::SubjectPending) {
         assert_eq!(
+            super::super::attempt_count(key),
+            2,
+            // #1803: both rooms still SEAT the frozen occupants, so the route
+            // still owes them a copy after the settlement pass and the row is
+            // never cached as unsupported — the settlement's evidence is
+            // time-varying and only a later attempt can change the receipt
+            // counts the cache keys on. The ordinary stall accounting bounds
+            // the retries (three samples, then a cooldown parking).
+            "a row with owed groupchat occupants is re-attempted, not cached"
+        );
+        assert_eq!(
             metrics
                 .counter_sum(
                     "ingress.maintenance.unrecoverable_obligations",
                     &[("kind", "route_muc")],
                 )
                 .unwrap_or(0),
-            before_unrecoverable + 1,
-            "source and prerequisite failures count once"
+            before_unrecoverable + 2,
+            // The counter is per EVALUATION, not per row: one tick per attempt.
+            "source and prerequisite failures count once per attempt"
         );
         let (_, attribute_counts) = metrics
             .counter_shape("ingress.maintenance.unrecoverable_obligations")
