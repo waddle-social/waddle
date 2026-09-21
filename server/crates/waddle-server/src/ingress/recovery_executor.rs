@@ -76,6 +76,14 @@ pub(super) async fn recover_row(
     // progress until the evidence changes" — which is all the unsupported cache
     // means — is simply false for it (#1803).
     let still_owed = departed.still_owed;
+    // The MUC route receipts this row is still waiting for, kept so the
+    // post-execution check below can tell whether a rebuilt copy landed.
+    let owed_muc_receipts: Vec<EffectReceiptKey> = frozen
+        .route_progress
+        .iter()
+        .filter(|progress| progress.room().is_some())
+        .map(|progress| progress.receipt.clone())
+        .collect();
     let pending = pending_kinds(&frozen.unreceipted);
     let blocked_recipients = blocked_recipients(deps, &frozen).await?;
     let host_owned_resources = frozen
@@ -155,7 +163,19 @@ pub(super) async fn recover_row(
     if !settled_here.is_empty() {
         settled_here.extend(&rebuilt.unsupported_receipts);
         let missing = missing_receipts(uow, key, &rebuilt.decision.receipts_pending).await?;
-        unsupported = !still_owed
+        // `still_owed` was decided BEFORE the rebuilt effects ran. A copy one
+        // of them delivered since is no longer owed, so the receipts as they
+        // stand NOW decide, not the pre-execution answer: otherwise a row whose
+        // last copy just landed is retried once more, re-invoking any
+        // warning-only observer it also carries. `missing` already IS that
+        // reading — every frozen MUC route's receipt is one of the
+        // `receipts_pending` it was read from — so this costs no second
+        // transaction inside the row deadline.
+        let owed_now = still_owed
+            && owed_muc_receipts
+                .iter()
+                .any(|receipt| missing.contains(receipt));
+        unsupported = !owed_now
             && !missing.is_empty()
             && missing
                 .iter()

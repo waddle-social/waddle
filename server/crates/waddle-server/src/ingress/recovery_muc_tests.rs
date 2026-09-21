@@ -495,6 +495,159 @@ paired!(
     Case::OccupantPm
 );
 
+/// #1815: the post-execution cache decision must read the receipts as they
+/// stand AFTER the rebuilt effects ran, never the pre-execution settlement
+/// answer.
+///
+/// One row can carry both a REBUILDABLE frozen groupchat copy and a
+/// warning-only `room_observer`. The copy is still owed when the departed-copy
+/// settlement looks at it — its occupant is seated, so nothing may be settled —
+/// and the rebuilt `QueueDetached` then delivers it in the SAME attempt,
+/// landing the fanout's aggregate receipt. Nothing is owed by the time the row
+/// is classified: the only obligation left is the warning-only observer, whose
+/// reply belongs to a connection that no longer exists, so no later attempt can
+/// settle it and the row must be cached. Trusting the pre-execution
+/// `still_owed` left it uncached, and the next scan re-invoked the
+/// at-least-once observer plugin.
+async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) {
+    use crate::ingress::{
+        effects::{room::ExternalRoomEffect, PlanSuppressionPolicy},
+        PlannedEffect,
+    };
+    use waddle_extensions::{
+        observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
+        ExtensionManager, PluginId,
+    };
+
+    let sm = persistent_sm(&f).await;
+    let occupant: jid::FullJid = "alice@example.com/phone".parse().expect("occupant");
+    // A detached session is what makes the frozen copy REBUILDABLE and
+    // deliverable inside the same attempt.
+    store_detached(&sm, &occupant).await;
+    let plugin_id = PluginId::new("muc-recovery-observer").expect("plugin id");
+    let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Warning);
+    let mut state = state_for(&f, sm.clone()).await;
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .deps
+        .protocol
+        .extension_manager =
+        Arc::new(ExtensionManager::with_observer_test_plugins(vec![plugin.clone()]).await);
+
+    // `Case::Partial` differs from `Case::Lost` only in keeping the body, which
+    // the observer hook carries.
+    let mut submission =
+        planned_room(&f, &state, Case::Partial, std::slice::from_ref(&occupant)).await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("MUC intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let room: jid::BareJid = "recovery@muc.example.com".parse().expect("room");
+    let observed = submission
+        .plan
+        .room_canonical_message
+        .clone()
+        .expect("room canonical message");
+    submission
+        .plan
+        .intents
+        .push(IngressEffectIntent::RoomObserver {
+            room: room.clone(),
+            plugin: plugin_id.clone(),
+            requester: submission.sender.to_bare(),
+            sender: submission.sender.clone(),
+        });
+    // The planned effect is what carries the observer's error request into the
+    // stored envelope at commit; recovery rebuilds the effect from the intent.
+    submission.plan.plan.push(
+        PlannedEffect::new(Effect::External(ExternalEffect::Room(
+            ExternalRoomEffect::ObserveRoomMessage {
+                room,
+                plugin: plugin_id,
+                requester: submission.sender.to_bare(),
+                sender: submission.sender.clone(),
+                message: observed,
+                error_request: Box::new(submission.plan.sanitized_message.clone()),
+            },
+        )))
+        .with_suppression(PlanSuppressionPolicy::Always),
+    );
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("commit");
+    let key = decision.message_key.expect("key");
+    assert!(
+        plugin.invocations().is_empty(),
+        "commit records the obligation without running the observer"
+    );
+
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let cursor = MaintenanceCursor::default();
+    for pass_number in 1..=2 {
+        assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            plugin.invocations().len(),
+            1,
+            "pass {pass_number}: the at-least-once observer is not re-invoked"
+        );
+        assert_eq!(
+            super::super::attempt_count(key),
+            1,
+            "pass {pass_number}: the row is cached once its last frozen copy has landed"
+        );
+        assert_eq!(
+            append_count(&sm, &occupant).await,
+            1,
+            "pass {pass_number}: the frozen copy is delivered exactly once"
+        );
+    }
+
+    let mut tx = f.uow.begin().await.expect("inspect cached row");
+    assert_eq!(
+        DeliveryProgressRepository::load(&mut tx, key, &receipt)
+            .await
+            .expect("delivery progress"),
+        vec![occupant.clone()],
+        "the copy was owed at settlement time and delivered by the rebuild"
+    );
+    assert!(
+        EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash
+        )
+        .await
+        .expect("aggregate receipt"),
+        "the rebuilt copy completed the frozen fanout in the same attempt"
+    );
+    assert!(
+        !CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"),
+        "the warning-only observer keeps the row pending"
+    );
+    tx.commit().await.expect("read commit");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_delivered_copy_still_caches_a_warning_only_observer() {
+    delivered_copy_still_caches_a_warning_only_observer(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_delivered_copy_still_caches_a_warning_only_observer() {
+    if let Some(f) = IngressFixture::postgres("muc_recovery_delivered_copy_observer").await {
+        delivered_copy_still_caches_a_warning_only_observer(f).await;
+    }
+}
+
 /// A maintenance pass whose per-row deadline is `recovery_row` rather than the
 /// generous one the rest of these tests run under: the #1803 probe loops are
 /// bounded by exactly that deadline, so a test that measures them has to use

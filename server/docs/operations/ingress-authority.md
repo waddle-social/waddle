@@ -1036,9 +1036,13 @@ Two properties bound the settlement, because it permanently drops a copy:
   handful per parking cycle; every pass while a read keeps failing) — the same
   behaviour newer-shaped rows already had, now also true for legacy ones. For
   `ingress.maintenance.unrecoverable_obligations{reason="unsupported"}`, a
-  per-evaluation counter: such a row ticks it once per attempt — a handful of
-  times while the streak builds, then once per 15-minute parking cycle, not
-  once per 30-second pass forever.
+  per-evaluation counter: such a row ticks it once per attempt. For EVALUABLE
+  attempts (a stable fact keeps the copy owed) that is a handful of times while
+  the streak builds, then once per 15-minute parking cycle. For INCONCLUSIVE
+  attempts (a peer or claim read keeps failing) the streak is reset on purpose
+  and the row is never parked, so it ticks once per maintenance pass (~30 s)
+  for as long as the read fails — expected for the 1–3 minutes after a rolling
+  deploy; sustained ticking points at a peer that cannot be asked (#1813).
 
   **Rollout note:** because a peer that predates
   `waddle.clustering.relay.resource_presence.v1` answers `UnknownMessage`,
