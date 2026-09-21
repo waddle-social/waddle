@@ -14,6 +14,7 @@ use tracing::warn;
 use waddle_xmpp::muc::{
     durable::OccupancyLeaveCause,
     room_actor::{LeaveAttemptId, LeaveSessionSelector},
+    MucRemovalCause,
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
 
@@ -59,6 +60,11 @@ pub enum LocalDepartureItem {
         /// below it, so a replacement session's later remote registrations
         /// are never relayed as this sweep's departures (#1647, round 26).
         remote_ceiling: u64,
+        /// Why the occupancy is being removed, so the redrive's §7.14
+        /// broadcast carries the SAME XEP-0045 status codes the inline sweep
+        /// would have (#1803): a ghost eviction is a service-side removal and
+        /// must carry `#service-error-kick`'s status 333 on either path.
+        removal: MucRemovalCause,
     },
     RoomDeparture {
         room: BareJid,
@@ -274,11 +280,13 @@ impl LocalDepartureItem {
                     selector: _,
                     attempt: existing_attempt,
                     remote_ceiling: existing_ceiling,
+                    removal: existing_removal,
                 },
                 LocalDepartureItem::FullJidSweep {
                     selector: _,
                     attempt: incoming_attempt,
                     remote_ceiling: incoming_ceiling,
+                    removal: incoming_removal,
                     ..
                 },
             ) => LocalDepartureItem::FullJidSweep {
@@ -290,6 +298,12 @@ impl LocalDepartureItem {
                 } else {
                     existing_ceiling
                 },
+                // A service-side removal is never downgraded by a coalescing
+                // voluntary sweep: one of the two sweeps DID prove the
+                // occupancy abandoned, and XEP-0045 `#service-error-kick`
+                // requires 333 on the resulting presence once the service
+                // supports it.
+                removal: merge_removal(existing_removal, incoming_removal),
             },
             (
                 LocalDepartureItem::FullJidSweep {
@@ -297,6 +311,7 @@ impl LocalDepartureItem {
                     selector,
                     attempt,
                     remote_ceiling,
+                    removal,
                 },
                 _,
             ) => LocalDepartureItem::FullJidSweep {
@@ -304,6 +319,7 @@ impl LocalDepartureItem {
                 selector,
                 attempt,
                 remote_ceiling,
+                removal,
             },
             (
                 LocalDepartureItem::EvictEmptyRoom {
@@ -363,6 +379,19 @@ const fn selector_generation(selector: LeaveSessionSelector) -> Option<Occupancy
 /// A re-recorded departure widens responsibility: `Any` dominates, otherwise
 /// the NEWEST watermark wins (a later disconnect of a re-joined session must
 /// not be judged `Superseded` by an older attempt's watermark).
+/// Coalescing two retained sweeps must never weaken the XEP-0045 shape the
+/// redrive will emit. A service-side removal (#1803 ghost eviction) stays
+/// service-side: one of the two sweeps proved the occupancy abandoned, and
+/// `#service-error-kick` requires status 333 on the resulting presence.
+fn merge_removal(existing: MucRemovalCause, incoming: MucRemovalCause) -> MucRemovalCause {
+    match (existing, incoming) {
+        (MucRemovalCause::TechnicalProblem, _) | (_, MucRemovalCause::TechnicalProblem) => {
+            MucRemovalCause::TechnicalProblem
+        }
+        (MucRemovalCause::Voluntary, MucRemovalCause::Voluntary) => MucRemovalCause::Voluntary,
+    }
+}
+
 fn merge_selectors(
     existing: Option<LeaveSessionSelector>,
     incoming: Option<LeaveSessionSelector>,
@@ -1039,6 +1068,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(first_generation),
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: 11,
+                removal: MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1048,6 +1078,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(second_generation),
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: 22,
+                removal: MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1302,6 +1333,7 @@ mod tests {
             selector,
             attempt,
             remote_ceiling: u64::MAX,
+            removal: MucRemovalCause::Voluntary,
         };
         let attempt_a = LeaveAttemptId::generate();
         let attempt_b = LeaveAttemptId::generate();
@@ -1804,6 +1836,7 @@ mod tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
+                    removal: MucRemovalCause::Voluntary,
                 },
                 now + Duration::from_secs(index as u64),
             );
@@ -2048,6 +2081,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: u64::MAX,
+                removal: MucRemovalCause::Voluntary,
             },
             now + Duration::from_secs(2),
         );
@@ -2057,6 +2091,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: u64::MAX,
+                removal: MucRemovalCause::Voluntary,
             },
             now + Duration::from_secs(1),
         );

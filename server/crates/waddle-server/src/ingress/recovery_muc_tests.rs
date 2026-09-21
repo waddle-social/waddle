@@ -26,25 +26,64 @@ async fn planned_room(
     case: Case,
     resources: &[jid::FullJid],
 ) -> IngressSubmission {
+    planned_room_with_origin(f, state, case, resources, "muc-recovery").await
+}
+
+/// The same planning pass under a caller-chosen XEP-0359 origin id, so one
+/// test can commit SEVERAL distinct canonical rows for the same room and the
+/// same occupants — the shape one ghost pinning several rows takes (#1803).
+async fn planned_room_with_origin(
+    f: &IngressFixture,
+    state: &WebSocketState,
+    case: Case,
+    resources: &[jid::FullJid],
+    origin: &str,
+) -> IngressSubmission {
     let room: jid::BareJid = "recovery@muc.example.com".parse().expect("room");
-    let mut submission = f.submission(Some("muc-recovery"), "frozen original content");
-    let actor = state
+    let mut submission = f.submission(Some(origin), "frozen original content");
+    // Get-or-create: a second obligation for the SAME room reuses the live
+    // incarnation, exactly as a second client message would.
+    let existing = state
         .deps
         .protocol
         .room_registry
-        .ask(CreateRoom {
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
             room_jid: room.clone(),
-            waddle_id: "recovery".into(),
-            channel_id: "recovery".into(),
-            config: Default::default(),
         })
         .await
-        .expect("room");
+        .expect("registry lookup");
+    let actor = match existing {
+        Some(actor) => actor,
+        None => state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "recovery".into(),
+                channel_id: "recovery".into(),
+                config: Default::default(),
+            })
+            .await
+            .expect("room"),
+    };
     for (resource, nick) in resources
         .iter()
         .map(|r| (r, r.node().expect("node").as_str()))
         .chain(std::iter::once((&submission.sender, "romeo")))
     {
+        // A reused room already seats these occupants; re-joining them would
+        // only collide on the nick.
+        if actor
+            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+                jid: resource.clone(),
+            })
+            .await
+            .expect("occupancy probe")
+            .is_some()
+        {
+            continue;
+        }
         actor
             .ask(Join {
                 nick: nick.into(),

@@ -2265,6 +2265,8 @@ pub async fn handle_muc_leave(
         room_jid,
         sender_jid,
         &outcome,
+        // The occupant asked to leave: the §7.14 shape, no removal code.
+        waddle_xmpp::muc::MucRemovalCause::Voluntary,
         Some(super::super::super::cleanup::LeaveFanOutProgress {
             skip: &super::super::super::cleanup::NO_SKIP,
             record: Some((

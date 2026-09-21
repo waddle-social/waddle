@@ -56,7 +56,8 @@ pub use presence::{
     build_kick_presence, build_leave_presence, build_membership_removal_presence,
     build_occupant_presence, build_occupant_presence_update, build_role_change_presence,
     parse_muc_presence, DestroyRequest, HistoryRequest, MucJoinRequest, MucLeaveRequest,
-    MucPresenceAction, MucPresenceStatus, MucPresenceUpdateRequest, OutboundMucPresence,
+    MucPresenceAction, MucPresenceStatus, MucPresenceUpdateRequest, MucRemovalCause,
+    OutboundMucPresence,
 };
 pub use room::{is_remote_jid, AllowPm, MucRoom, Occupant, RoomConfig};
 pub use room_actor::{RoomActorError, RoomInfo};

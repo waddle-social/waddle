@@ -202,8 +202,9 @@ impl GhostFixture {
         );
     }
 
-    /// Whether the remaining occupants were told the ghost left, per §7.14.
-    fn watcher_saw_unavailable(&mut self) -> bool {
+    /// The XEP-0045 status codes the remaining occupant's §7.14 unavailable
+    /// presence for the ghost carried, or `None` if no such presence arrived.
+    fn watcher_leave_status_codes(&mut self) -> Option<Vec<String>> {
         let nick = self
             .ghost
             .node()
@@ -211,10 +212,25 @@ impl GhostFixture {
             .to_string()
             .to_string();
         let from: jid::Jid = format!("{ROOM}/{nick}").parse().expect("room nick");
-        std::iter::from_fn(|| self.watcher_rx.try_recv().ok()).any(|outbound| {
-            matches!(&outbound.stanza, waddle_xmpp::Stanza::Presence(presence)
-                if presence.from.as_ref() == Some(&from)
-                    && presence.type_ == xmpp_parsers::presence::Type::Unavailable)
+        std::iter::from_fn(|| self.watcher_rx.try_recv().ok()).find_map(|outbound| {
+            let waddle_xmpp::Stanza::Presence(presence) = &outbound.stanza else {
+                return None;
+            };
+            if presence.from.as_ref() != Some(&from)
+                || presence.type_ != xmpp_parsers::presence::Type::Unavailable
+            {
+                return None;
+            }
+            let x = presence
+                .payloads
+                .iter()
+                .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))?;
+            Some(
+                x.children()
+                    .filter(|child| child.is("status", waddle_xmpp::muc::presence::NS_MUC_USER))
+                    .filter_map(|child| child.attr("code").map(str::to_owned))
+                    .collect(),
+            )
         })
     }
 }
@@ -270,9 +286,13 @@ async fn ghost_recovery(fixture: IngressFixture, case: GhostCase) {
     );
     assert_eq!(f.terminal().await, evictable);
     assert_eq!(
-        f.watcher_saw_unavailable(),
-        evictable,
-        "XEP-0045 §7.14: remaining occupants learn the ghost left"
+        f.watcher_leave_status_codes(),
+        // XEP-0045 §7.14: remaining occupants learn the ghost left, and
+        // §`#service-error-kick`: a SERVICE-side removal because of a
+        // technical problem carries status 333 (and never 307, which the
+        // same section calls "generally not advisable" here).
+        evictable.then(|| vec!["333".to_owned()]),
+        "XEP-0045 §7.14 + #service-error-kick: the remaining occupants learn          the ghost was removed by the service"
     );
     assert_eq!(
         metrics.counter_sum(EVICTED, &[]).unwrap_or(0),
@@ -621,6 +641,151 @@ async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
         metrics.counter_sum(EVICTED, &[]).unwrap_or(0),
         before_evicted,
         "a superseded sweep is not an eviction"
+    );
+    f.f.close().await;
+}
+
+/// #1803, the sibling-row half of the ordering note above: ONE ghost can pin
+/// SEVERAL canonical rows, and repairing the first destroys the room out from
+/// under the rest. Evicting the last occupant of a non-persistent room runs
+/// the empty-room destroy, which removes the registry entry AND releases the
+/// durable room claim — so every OTHER row the same ghost pinned answered
+/// `GetRoom -> Ok(None)` on that pass and on every pass after it. Settling
+/// before the sweep keeps the repair from stranding the row it is repairing;
+/// it does nothing for the siblings, which had no authoritative roster left to
+/// prove anything against and stayed pending forever.
+///
+/// The unhosted-room proof is what reaches them: a room no node hosts has no
+/// roster anywhere, so its frozen occupants are absent by definition and the
+/// unchanged every-peer reachability proof decides the rest. The sibling row
+/// settles on a later pass.
+#[tokio::test]
+async fn sqlite_sibling_row_settles_once_the_ghost_eviction_destroyed_the_room() {
+    use crate::ingress::recovery_ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
+    use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, DestroyRoomReason};
+
+    /// The empty-room destroy the eviction queues, landing at the worst
+    /// possible moment: the instant the first row's eviction is confirmed.
+    struct DestroyOnce {
+        registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+        done: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl GhostEvictionWindow for DestroyOnce {
+        async fn enter(&self, _occupant: &jid::FullJid) {
+            if self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            self.registry
+                .ask(DestroyRoom {
+                    room_jid: ROOM.parse().expect("room"),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("the empty-room destroy removes the room");
+        }
+    }
+
+    let f = ghost_fixture(IngressFixture::sqlite().await, GhostCase::Evictable).await;
+    // The first row accumulates its stall streak alone, so the pass that
+    // repairs it is the same pass the sibling row is first attempted on.
+    for _ in 0..3 {
+        f.pass().await;
+    }
+    // A SECOND obligation for the same room, frozen against the same two
+    // occupants. Distinct origin id, so it is a distinct canonical row.
+    let sibling = super::planned_room_with_origin(
+        &f.f,
+        &f.state,
+        Case::Lost,
+        &[f.ghost.clone(), f.watcher.clone()],
+        "muc-recovery-sibling",
+    )
+    .await;
+    let sibling_muc = sibling
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("sibling room fanout intent");
+    let sibling_receipt = receipt_key(&sibling_muc).expect("sibling MUC receipt");
+    let sibling_decision = commit_submission(&f.f.uow, &sibling, 1)
+        .await
+        .expect("sibling room commit");
+    let sibling_key = sibling_decision.message_key.expect("sibling key");
+    assert_ne!(sibling_key, f.key, "the sibling must be its own row");
+    super::departed::settle_non_delivery_effects(&f.f, &f.state, &sibling_decision).await;
+
+    hook_ghost_eviction_window(
+        f.key,
+        std::sync::Arc::new(DestroyOnce {
+            registry: f.state.deps.protocol.room_registry.clone(),
+            done: std::sync::atomic::AtomicBool::new(false),
+        }) as std::sync::Arc<dyn GhostEvictionWindow>,
+    );
+    // The repairing pass, then one more: the sibling cannot settle before the
+    // room is gone, and must settle once it is.
+    f.pass().await;
+    assert!(
+        f.state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: ROOM.parse().expect("room"),
+            })
+            .await
+            .expect("registry lookup")
+            .is_none(),
+        "the eviction destroyed the room the sibling row still names"
+    );
+    f.pass().await;
+
+    let mut tx = f.f.uow.begin().await.expect("inspect the sibling row");
+    let mut progress = DeliveryProgressRepository::load(&mut tx, sibling_key, &sibling_receipt)
+        .await
+        .expect("sibling delivery progress");
+    progress.sort();
+    let mut both = vec![f.ghost.clone(), f.watcher.clone()];
+    both.sort();
+    assert_eq!(
+        progress, both,
+        "the sibling row's frozen copies are discharged: the watcher's by \
+         delivery, the ghost's by the unhosted-room settlement"
+    );
+    assert!(
+        CanonicalMessageRepository::is_terminal(&mut tx, sibling_key)
+            .await
+            .expect("sibling terminal"),
+        "a row whose room no node hosts any more must still terminalize"
+    );
+    tx.commit().await.expect("read commit");
+    f.f.close().await;
+}
+
+/// The OPTIONAL `#service-error-kick` code must not leak onto an ordinary
+/// departure: the same room, the same watcher and the same full-JID leave
+/// sweep, driven with the ordinary disconnect cause rather than the ghost
+/// repair's, carries the bare XEP-0045 §7.14 shape with no status code at all.
+#[tokio::test]
+async fn sqlite_ordinary_disconnect_leave_carries_no_removal_status_code() {
+    let mut f = ghost_fixture(IngressFixture::sqlite().await, GhostCase::Evictable).await;
+    assert_eq!(
+        crate::server::routes::websocket::sweep_abandoned_muc_occupancy(
+            &f.state,
+            &f.ghost,
+            waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            waddle_xmpp::muc::MucRemovalCause::Voluntary,
+        )
+        .await,
+        crate::server::routes::websocket::MucCleanupOutcome::Completed
+    );
+    assert_eq!(
+        f.watcher_leave_status_codes(),
+        Some(Vec::new()),
+        "a disconnect is the occupant's own departure, not a service removal"
     );
     f.f.close().await;
 }

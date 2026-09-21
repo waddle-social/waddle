@@ -22,6 +22,20 @@
 //! once maintenance has classified the row as stalled — never as a delivery
 //! fallback.
 //!
+//! The sweep is told WHY, so the broadcast says so. XEP-0045 §"Service removes
+//! user because of error response" (`#service-error-kick`) lets a service add
+//! status code 333 when it removes an occupant because of a technical problem,
+//! and requires it on the presence to the removed user and on the presences to
+//! the remaining occupants once the service supports it — this eviction is
+//! precisely that case, so it passes [`MucRemovalCause::TechnicalProblem`]
+//! into both the retained janitor sweep and the inline one. 307 is not emitted
+//! alongside it; the XEP calls that "generally not advisable", because such a
+//! removal follows no moderator action. An ordinary disconnect keeps the bare
+//! §7.14 shape, so a client can tell the two apart. The cause is
+//! presentational only: it is a separate value from the durable
+//! `OccupancyLeaveCause` the room projection records, which must not grow a
+//! variant because it is fingerprinted into the room's durable lifecycle.
+//!
 //! Reachability is proven against SOCKETS, never against ownership claims. A
 //! `UserActor` claim is routing authority: a live idle socket on a peer is
 //! known only to that peer's own connection registry, and nothing
@@ -37,11 +51,21 @@
 //! on the local-departure janitor's next tick once the departure receipt is
 //! acknowledged — removes the registry entry AND releases the durable room
 //! claim. A settlement that re-derived its authority afterwards would find no
-//! room to settle against, and since no node hosts the room any more, no
-//! later pass could either: the row would be pinned forever, which is the
-//! failure this whole path exists to remove. Settling first also spares the
-//! attempt a second every-peer fan-out over an occupant it has just proven
-//! with the strictly stronger evidence.
+//! room to settle against. `recovery_departed::RoomAuthority::Unhosted`
+//! recovers that state on a LATER pass — a room no node hosts has no roster
+//! anywhere, so its frozen occupants are absent by definition — but only after
+//! another whole maintenance cycle, and only for the occupants the every-peer
+//! proof still clears. Settling first keeps the attempt that gathered the
+//! strictly stronger evidence from throwing it away, and spares it a second
+//! every-peer fan-out over an occupant it has just proven.
+//!
+//! What `Unhosted` does reach is the SIBLING rows. One ghost can pin several
+//! canonical rows; this repair evicts it once, and the destroy that follows
+//! takes the room away from every other row that named it. Those rows have no
+//! eviction left to make — nobody is seated in a room nobody hosts — so this
+//! module simply does not run for them: `resolve_authority` answers `Unhosted`
+//! rather than `Local`, the room is skipped here, and the departed-copy
+//! settlement discharges the copies instead.
 //!
 //! The consequences of that order are deliberate. The settlement asserts the
 //! same exact room claim inside its transaction, so a steal that committed
@@ -72,7 +96,10 @@ use jid::FullJid;
 use kameo::actor::ActorRef;
 use waddle_xmpp::{
     ingress::MessageKey,
-    muc::room_actor::{GetOccupantSessionGeneration, LeaveSessionSelector, RoomActor},
+    muc::{
+        room_actor::{GetOccupantSessionGeneration, LeaveSessionSelector, RoomActor},
+        MucRemovalCause,
+    },
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
 
@@ -204,7 +231,9 @@ pub(super) async fn repair_stalled_row(
             continue;
         };
         // Only the authoritative local incarnation's roster may be acted on:
-        // another node hosting the room runs its own maintenance for it.
+        // another node hosting the room runs its own maintenance for it, and a
+        // room nobody hosts (`Unhosted`) seats nobody, so there is no ghost to
+        // evict — the departed-copy settlement discharges those copies.
         let RoomAuthority::Local { actor, fence } =
             recovery_departed::resolve_authority(rooms, deps, room).await
         else {
@@ -270,6 +299,7 @@ pub(super) async fn repair_stalled_row(
                     state,
                     occupant,
                     LeaveSessionSelector::Generation(*generation),
+                    MucRemovalCause::TechnicalProblem,
                 );
             }
             // Sequential on purpose: each sweep MUTATES the room, and the
@@ -479,6 +509,7 @@ async fn evict(
         state,
         occupant,
         LeaveSessionSelector::Generation(generation),
+        MucRemovalCause::TechnicalProblem,
     )
     .await
         != MucCleanupOutcome::Completed

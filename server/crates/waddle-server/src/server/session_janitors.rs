@@ -142,6 +142,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     selector,
                     attempt,
                     remote_ceiling,
+                    removal,
                 } => {
                     // A live registration of the same full JID does NOT drop
                     // the sweep: the new connection has not necessarily
@@ -155,6 +156,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         selector,
                         attempt,
                         remote_ceiling,
+                        removal,
                     )
                     .await
                     {
@@ -177,6 +179,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         selector,
                                         attempt,
                                         remote_ceiling,
+                                        removal,
                                     },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
@@ -374,6 +377,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &room,
                                         &jid,
                                         &outcome,
+                                        // A retained per-ROOM retry carries the
+                                        // durable `OccupancyLeaveCause` only; the
+                                        // presentational removal cause is not
+                                        // retained with it (#1803 follow-up).
+                                        waddle_xmpp::muc::MucRemovalCause::Voluntary,
                                         Some(LeaveFanOutProgress {
                                             skip: &notified,
                                             record: None,
@@ -418,6 +426,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &jid,
                                         &outcome.leaving_room_jid,
                                         outcome.affiliation,
+                                        waddle_xmpp::muc::MucRemovalCause::Voluntary,
                                     )
                                     .await;
                                     broadcast_muc_leave_to_remaining_resumable(
@@ -425,6 +434,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &room,
                                         &jid,
                                         &outcome,
+                                        // A retained per-ROOM retry carries the
+                                        // durable `OccupancyLeaveCause` only; the
+                                        // presentational removal cause is not
+                                        // retained with it (#1803 follow-up).
+                                        waddle_xmpp::muc::MucRemovalCause::Voluntary,
                                         Some(LeaveFanOutProgress {
                                             skip: &notified,
                                             record: None,
@@ -612,6 +626,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     &jid,
                                     &nick.occupant_jid(&room),
                                     affiliation,
+                                    waddle_xmpp::muc::MucRemovalCause::Voluntary,
                                 )
                                 .await;
                             }
@@ -10665,6 +10680,7 @@ mod local_muc_departure_tests {
             &room,
             &alice,
             &outcome,
+            waddle_xmpp::muc::MucRemovalCause::Voluntary,
             Some(crate::server::routes::websocket::LeaveFanOutProgress {
                 skip: &skip_carol,
                 record: Some((
@@ -11206,6 +11222,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 remote_ceiling: u64::MAX,
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11565,6 +11582,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 remote_ceiling: u64::MAX,
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11611,6 +11629,7 @@ mod local_muc_departure_tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
             );
 
@@ -11654,6 +11673,7 @@ mod local_muc_departure_tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
                 attempts: requeued.attempts,
                 // Model the janitor's next pass after the retained item's

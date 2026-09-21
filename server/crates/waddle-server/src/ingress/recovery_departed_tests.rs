@@ -20,8 +20,13 @@ enum DepartedCase {
     Departed,
     /// The local room actor still lists the occupant.
     StillJoined,
-    /// No local actor hosts the room: absence is unproven.
-    NoLocalRoom,
+    /// No actor hosts the room ANYWHERE — the shape a destroyed non-persistent
+    /// room leaves behind for every sibling row the same ghost pinned (#1803).
+    /// Rosters are memory-only, so an unhosted room lists nobody and the copy
+    /// is owed to nobody. The fixture wires no claim store and no cluster
+    /// membership, which is the unclustered configuration: this node is the
+    /// whole cluster, so the local registry's `Ok(None)` is the whole proof.
+    UnhostedRoom,
     /// One departed occupant beside one still-deliverable detached occupant.
     Mixed,
     /// The roster says the occupant left, but this node can still hand it the
@@ -89,7 +94,7 @@ async fn departed_recovery(f: IngressFixture, case: DepartedCase) {
     if case != DepartedCase::StillJoined {
         depart(&state, &ghost).await;
     }
-    let registry = (case == DepartedCase::NoLocalRoom).then(|| {
+    let registry = (case == DepartedCase::UnhostedRoom).then(|| {
         RoomRegistryActor::spawn(RoomRegistryActor::new(
             "muc.example.com".into(),
             OccupantIdSecret::new(vec![b'd'; 32]).expect("occupant-id secret"),
@@ -104,12 +109,18 @@ async fn departed_recovery(f: IngressFixture, case: DepartedCase) {
         MaintenanceOutcome::Complete
     );
     // Copies this attempt SETTLED (dropped as owed to nobody).
-    let settled_copies = u64::from(matches!(case, DepartedCase::Departed | DepartedCase::Mixed));
+    let settled_copies = u64::from(matches!(
+        case,
+        DepartedCase::Departed | DepartedCase::Mixed | DepartedCase::UnhostedRoom
+    ));
     // Whether the frozen fanout is complete — by settlement, by delivery, or
     // by both.
     let settled = matches!(
         case,
-        DepartedCase::Departed | DepartedCase::Mixed | DepartedCase::ReachableDeparted
+        DepartedCase::Departed
+            | DepartedCase::Mixed
+            | DepartedCase::ReachableDeparted
+            | DepartedCase::UnhostedRoom
     );
     let mut tx = f.uow.begin().await.expect("inspect recovered row");
     let mut progress = DeliveryProgressRepository::load(&mut tx, key, &receipt)
@@ -498,14 +509,21 @@ async fn postgres_departed_joined_occupant_stays_pending() {
     }
 }
 
+/// #1803 sibling-row repair: a room NO node hosts has no roster anywhere, so
+/// every frozen occupant of it is absent by definition and its copy settles.
+/// Before this, the only authoritative answer was a local actor, so the ghost
+/// eviction that emptied and destroyed a room permanently stranded every other
+/// row the same ghost pinned — `GetRoom` answered `Ok(None)` on every later
+/// pass, forever. The every-peer reachability proof still gates the drop, so
+/// this is a weaker roster answer, not a weaker settlement.
 #[tokio::test]
-async fn sqlite_departed_without_local_room_stays_pending() {
-    departed_recovery(IngressFixture::sqlite().await, DepartedCase::NoLocalRoom).await;
+async fn sqlite_departed_without_any_room_host_settles() {
+    departed_recovery(IngressFixture::sqlite().await, DepartedCase::UnhostedRoom).await;
 }
 #[tokio::test]
-async fn postgres_departed_without_local_room_stays_pending() {
+async fn postgres_departed_without_any_room_host_settles() {
     if let Some(f) = IngressFixture::postgres("departed_no_room").await {
-        departed_recovery(f, DepartedCase::NoLocalRoom).await;
+        departed_recovery(f, DepartedCase::UnhostedRoom).await;
     }
 }
 

@@ -8,9 +8,42 @@
 //! is owed no groupchat message.
 //!
 //! Only maintenance recovery settles these copies, and only against an
-//! authoritative local room incarnation. A missing registry, a missing local
-//! actor, or a probe that does not answer never proves absence: another node
-//! may host the room, so the occupant stays owed its copy.
+//! authoritative answer about who owns the room. A missing registry or a probe
+//! that does not answer never proves absence: another node may host the room,
+//! so the occupant stays owed its copy.
+//!
+//! There are two authoritative answers, not one. The first is an authoritative
+//! LOCAL incarnation, whose roster decides. The second is the room being hosted
+//! NOWHERE: rosters are memory-only, so a room with no live actor on any node
+//! has no occupants at all, and every frozen occupant is roster-absent by
+//! definition. That second answer is what keeps a row settleable after the
+//! room it names is destroyed — the empty-room destroy a ghost eviction
+//! triggers removes the registry entry AND releases the durable room claim, so
+//! any SIBLING row the same ghost pinned would otherwise find no room to settle
+//! against on every later pass, forever (#1803). Proving it is the whole
+//! difficulty: `GetRoom -> Ok(None)` alone means only "not here". Without
+//! clustering that IS the proof, because there is no other node. With
+//! clustering it is the durable room claim that decides — `Ok(None)` from the
+//! claim store means no node holds `EntityType::RoomActor` for this room, and
+//! the empty-room destroy's `release_exact` is what deletes that row. Any claim
+//! still on file leaves the copy owed, including one whose owner's node lease
+//! has lapsed: a node that is merely partitioned from Postgres keeps serving
+//! the rosters and sockets it already holds, and its self-fence demotion is
+//! not instantaneous, so a lapsed lease is not proof that its rooms are gone.
+//! That fails closed, and it self-heals: the orphan reaper steals or exactly
+//! releases a dead owner's room claim, after which the row is provably absent.
+//!
+//! The false positive to keep in view is a room being (re)created concurrently
+//! with the settlement. It is the same one the roster path already accepts, and
+//! the same XEP-0045 reasoning answers it: a join into the new incarnation is a
+//! NEW occupancy, and §7.2.14 gives a new occupant the room's discussion
+//! history on join rather than the traffic that predates it. The copy frozen
+//! against the previous occupancy was never owed to the new one, and it stays
+//! in the room's XEP-0313 archive either way. The proof is also re-read
+//! immediately before the write — the hosting state takes the place the roster
+//! recheck holds on the local path — and the every-peer reachability proof
+//! below is unchanged, so an occupant anything can still deliver to keeps its
+//! copy whether or not its room still exists.
 //!
 //! With durable room ownership in play, "authoritative" means the EXACT claim
 //! is still on file, proven against the store — not merely that the actor is
@@ -183,12 +216,18 @@ pub(super) async fn settle_departed_occupants(
         let Some((_, authority)) = probed.iter().find(|(candidate, _)| candidate == room) else {
             continue;
         };
-        let (actor, fence) = match authority {
-            RoomAuthority::Local { actor, fence } => (actor, fence),
+        // `None` is the unhosted room: no roster exists anywhere, so every
+        // owed occupant is roster-absent and there is no claim to assert.
+        let (roster, fence) = match authority {
+            RoomAuthority::Local { actor, fence } => {
+                (Some(actor), fence.as_ref().map(|fence| fence.as_ref()))
+            }
+            RoomAuthority::Unhosted => (None, None),
             RoomAuthority::Unreadable => {
                 settlement.classification = AttemptClassification::Inconclusive;
                 continue;
             }
+            #[cfg(feature = "clustering")]
             RoomAuthority::Unproven => continue,
         };
         // Bounded chunks, each SETTLED before the next is probed. The probes
@@ -197,7 +236,7 @@ pub(super) async fn settle_departed_occupants(
         // means an elapsed deadline loses only the chunk in flight, never the
         // prefix this attempt already proved.
         for chunk in owed.chunks(PROBE_CONCURRENCY) {
-            let probed = probe_chunk(deps, actor, chunk).await;
+            let probed = probe_chunk(deps, roster, chunk).await;
             if matches!(probed.classification, AttemptClassification::Inconclusive) {
                 settlement.classification = AttemptClassification::Inconclusive;
             }
@@ -207,9 +246,11 @@ pub(super) async fn settle_departed_occupants(
             #[cfg(test)]
             enter_settlement_window(key, &probed.departed).await;
             // The probes above may have spent the whole fan-out budget. Ask
-            // the roster once more, immediately before the write, so a
-            // resource that rejoined inside that window keeps its copy.
-            let rechecked = still_departed(actor, probed.departed).await;
+            // the evidence once more, immediately before the write: the roster
+            // on the local path, so a resource that rejoined inside that
+            // window keeps its copy; the hosting state on the unhosted path,
+            // so a room that came back decides its own roster instead.
+            let rechecked = recheck_departed(registry, deps, room, roster, probed.departed).await;
             if matches!(
                 rechecked.classification,
                 AttemptClassification::Inconclusive
@@ -220,7 +261,6 @@ pub(super) async fn settle_departed_occupants(
             if departed.is_empty() {
                 continue;
             }
-            let fence = fence.as_ref().map(|fence| fence.as_ref());
             match commit_departed(uow, key, progress, room, fence, &departed).await? {
                 Some(settled) => {
                     settlement.settled.extend(settled);
@@ -249,15 +289,18 @@ struct ProbedChunk {
 /// bounded, so the chunk costs one probe budget rather than one per occupant —
 /// which is what keeps a route with several roster-absent occupants inside
 /// `recover_row`'s deadline instead of being cancelled before its first write.
+///
+/// `roster` is `None` for a room no node hosts: there is no roster to ask, and
+/// no occupancy it could report.
 async fn probe_chunk(
     deps: &Deps<'_>,
-    actor: &ActorRef<RoomActor>,
+    roster: Option<&ActorRef<RoomActor>>,
     chunk: &[FullJid],
 ) -> ProbedChunk {
     let verdicts = futures::future::join_all(
         chunk
             .iter()
-            .map(|occupant| departed_verdict(deps, actor, occupant)),
+            .map(|occupant| departed_verdict(deps, roster, occupant)),
     )
     .await;
     let mut probed = ProbedChunk {
@@ -290,17 +333,21 @@ enum OccupantVerdict {
 /// The ordered evidence one frozen occupant's copy may be dropped on.
 async fn departed_verdict(
     deps: &Deps<'_>,
-    actor: &ActorRef<RoomActor>,
+    roster: Option<&ActorRef<RoomActor>>,
     occupant: &FullJid,
 ) -> OccupantVerdict {
     // The roster comes FIRST. A seated occupant is owed its copy whatever the
     // cluster says, so asking anything else about it would only spend the row
     // deadline — and the SM probe is a full-table read of `sm_sessions` per
-    // occupant on this hot path.
-    match occupancy(actor, occupant).await {
-        Occupancy::Present => return OccupantVerdict::Owed,
-        Occupancy::Unknown => return OccupantVerdict::Inconclusive,
-        Occupancy::Absent => {}
+    // occupant on this hot path. An unhosted room has no roster to ask: the
+    // caller already proved no node holds one, which makes every frozen
+    // occupant roster-absent without a probe.
+    if let Some(actor) = roster {
+        match occupancy(actor, occupant).await {
+            Occupancy::Present => return OccupantVerdict::Owed,
+            Occupancy::Unknown => return OccupantVerdict::Inconclusive,
+            Occupancy::Absent => {}
+        }
     }
     // H1: a roster answer never settles a copy for somebody this node itself
     // can still hand it to.
@@ -402,7 +449,19 @@ pub(super) enum RoomAuthority {
         // `RoomAuthority` the size of a claim fence context.
         fence: Option<Box<RoomClaimFenceContext>>,
     },
-    /// Nothing here can decide the room's occupancy.
+    /// No node hosts this room at all, proven — not merely "not here". Rooms
+    /// carry their rosters in actor memory, so an unhosted room has no
+    /// occupants and owes no frozen copy. There is nothing to evict and no
+    /// claim to assert.
+    Unhosted,
+    /// Nothing here can decide the room's occupancy: some OTHER node may be
+    /// hosting the room, and it settles the row against its own roster.
+    ///
+    /// Only reachable with clustering, because only then is there another node
+    /// that could hold the room. Without it a room the local registry does not
+    /// know is hosted nowhere ([`RoomAuthority::Unhosted`]), and a local
+    /// incarnation is the only incarnation there can be.
+    #[cfg(feature = "clustering")]
     Unproven,
     /// A probe that did not answer: unproven, and the attempt is inconclusive.
     Unreadable,
@@ -421,8 +480,9 @@ pub(super) async fn resolve_authority(
         .await
     {
         Ok(Some(actor)) => actor,
-        // A room this node does not host says nothing about its roster.
-        Ok(None) => return RoomAuthority::Unproven,
+        // A room this node does not host says nothing about its roster by
+        // itself — only the ownership record can say whether ANY node does.
+        Ok(None) => return hosted_elsewhere(deps, room).await,
         Err(error) => {
             tracing::debug!(%room, ?error, "departed-occupant probe could not resolve the room");
             return RoomAuthority::Unreadable;
@@ -432,6 +492,74 @@ pub(super) async fn resolve_authority(
         return RoomAuthority::Local { actor, fence: None };
     };
     proven_fence(actor, store, room).await
+}
+
+/// Whether a room this node does not host is hosted by anybody else.
+///
+/// Without clustering there is no other node, so a room the local registry
+/// does not know is hosted nowhere.
+#[cfg(not(feature = "clustering"))]
+async fn hosted_elsewhere(_deps: &Deps<'_>, _room: &BareJid) -> RoomAuthority {
+    RoomAuthority::Unhosted
+}
+
+/// Whether a room this node does not host is hosted by anybody else.
+///
+/// The durable room claim is the only cluster-wide record of who owns a room,
+/// and it is exactly what the empty-room destroy releases, so its absence is
+/// the proof this settlement needs. Every other answer leaves the copy owed:
+///
+/// - a claim owned by ANOTHER node — fresh or not — means a live incarnation
+///   may still be serving that room's roster, and that node's own maintenance
+///   pass settles the row against it. A lapsed node lease is deliberately NOT
+///   treated as proof of absence: a replica partitioned from Postgres keeps
+///   serving the sockets and rosters it already holds while its lease expires,
+///   and `clustering::self_fence`'s demotion is neither instant nor guaranteed
+///   to have run. The orphan reaper's `steal_stale`/`release_exact` is what
+///   turns a genuinely dead owner's claim into `Ok(None)` here.
+/// - a claim owned by THIS node with no local actor is a handoff or restart in
+///   progress: the actor is about to exist.
+/// - a read that errors or outruns its budget proves nothing.
+#[cfg(feature = "clustering")]
+async fn hosted_elsewhere(deps: &Deps<'_>, room: &BareJid) -> RoomAuthority {
+    use waddle_xmpp::ownership::{Entity, EntityType};
+
+    let Some(state) = deps.web_socket_state else {
+        return RoomAuthority::Unproven;
+    };
+    let handles = &state.deps.app_state.clustering_claims;
+    let Some(store) = handles.claim_store.as_ref() else {
+        // The same single-node carve-out `recovery_reachability` makes: no
+        // claim store AND no cluster membership is the unclustered
+        // configuration, where this node is the whole cluster. Exactly one of
+        // the two missing is a half-wired cluster, which proves nothing.
+        return if handles.cluster_membership.is_none() {
+            RoomAuthority::Unhosted
+        } else {
+            RoomAuthority::Unproven
+        };
+    };
+    let entity = Entity::new(EntityType::RoomActor, room.to_string());
+    match tokio::time::timeout(PROBE_TIMEOUT, store.current_claim(&entity)).await {
+        Ok(Ok(None)) => RoomAuthority::Unhosted,
+        Ok(Ok(Some(claim))) => {
+            tracing::debug!(
+                %room,
+                owner = %claim.owner.node_id,
+                fresh = claim.owner_lease_fresh,
+                "departed-occupant probe found a room claim without a local actor"
+            );
+            RoomAuthority::Unproven
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(%room, %error, "departed-occupant probe could not read the room claim");
+            RoomAuthority::Unreadable
+        }
+        Err(_elapsed) => {
+            tracing::debug!(%room, "departed-occupant probe timed out reading the room claim");
+            RoomAuthority::Unreadable
+        }
+    }
 }
 
 /// Whether a settlement transaction failed because the room claim it was
@@ -541,6 +669,43 @@ struct RecheckedDeparted {
     /// `Inconclusive` when any recheck failed to answer: this attempt then
     /// proved nothing about the occupants it dropped.
     classification: AttemptClassification,
+}
+
+/// Re-prove, immediately before the write, whatever this chunk's evidence
+/// rests on: the roster for a locally hosted room, the hosting state itself
+/// for one no node hosts.
+///
+/// The unhosted proof is re-read rather than re-derived per occupant because
+/// that is the whole of it — an unhosted room has no roster to disagree with.
+/// Anything other than "still unhosted" drops the chunk and marks the attempt
+/// inconclusive: a room that came back decides its own occupancy, and the next
+/// pass asks its roster instead.
+async fn recheck_departed(
+    registry: &ActorRef<RoomRegistryActor>,
+    deps: &Deps<'_>,
+    room: &BareJid,
+    roster: Option<&ActorRef<RoomActor>>,
+    departed: Vec<FullJid>,
+) -> RecheckedDeparted {
+    let Some(actor) = roster else {
+        return match resolve_authority(registry, deps, room).await {
+            RoomAuthority::Unhosted => RecheckedDeparted {
+                occupants: departed,
+                classification: AttemptClassification::Evaluable,
+            },
+            _ => {
+                tracing::debug!(
+                    %room,
+                    "room regained a host before the settlement committed; keeping its copies"
+                );
+                RecheckedDeparted {
+                    occupants: Vec::new(),
+                    classification: AttemptClassification::Inconclusive,
+                }
+            }
+        };
+    };
+    still_departed(actor, departed).await
 }
 
 /// Re-ask the roster about every occupant this attempt is about to settle.

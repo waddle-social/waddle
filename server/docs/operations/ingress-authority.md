@@ -902,16 +902,56 @@ appeared on a row between the scan and the end of its attempt, so a row
 deadline cancelling an attempt mid-way cannot lose credit; a concurrent client
 retransmission settling the same row is attributed to recovery as well.
 `ingress.maintenance.departed_occupant_copies` counts frozen `route_muc`
-occupant copies recovery settled because the room's authoritative local actor
-no longer lists the occupant (XEP-0045 "Ghost Users" / §7.14: a non-occupant is
-owed no groupchat message). Settlement is fail-closed — no room registry, no
-local room actor, an unanswered probe, or (with clustering and a durable MUC
-store) an incarnation whose EXACT claim fence the store no longer holds all
-leave the copy owed — so a persistent `route_muc` backlog with this counter
-flat means the rooms are not resolvable on the recovering node, not that the
+occupant copies recovery settled because the room does not list the occupant
+(XEP-0045 "Ghost Users" / §7.14: a non-occupant is owed no groupchat message).
+Settlement is fail-closed — no room registry, an unanswered probe, a room some
+OTHER node may still be hosting, or (with clustering and a durable MUC store)
+an incarnation whose EXACT claim fence the store no longer holds all leave the
+copy owed — so a persistent `route_muc` backlog with this counter flat means
+the rooms' ownership is not resolvable on the recovering node, not that the
 occupants are still seated.
 
-Two properties bound that settlement, because it permanently drops a copy:
+There are two authoritative answers, not one (#1803):
+
+- **An authoritative LOCAL incarnation**, whose roster decides, under the claim
+  proof below.
+- **A room hosted NOWHERE.** Rosters are memory-only, so a room with no live
+  actor on any node has no occupants at all and every frozen occupant of it is
+  roster-absent by definition. `GetRoom -> Ok(None)` alone is not that answer —
+  it only means "not here". Without clustering it IS the answer, because there
+  is no other node. With clustering the durable room claim decides: `Ok(None)`
+  from the claim store for `EntityType::RoomActor` means no node holds the
+  room, and `release_exact` on the empty-room destroy is exactly what deletes
+  that row. Any claim still on file leaves the copy owed — a claim on another
+  node (that node settles the row against its own roster), a claim held here
+  with no published actor (a handoff or restart in flight), or a claim whose
+  owner's node lease has LAPSED. The lapsed case is deliberately fail-closed:
+  a replica merely partitioned from Postgres keeps serving the sockets and
+  rosters it already holds while its lease expires, and self-fence demotion is
+  neither instant nor guaranteed to have run. It self-heals — the orphan reaper
+  steals or exactly releases a dead owner's room claim, after which the row is
+  provably absent and the copy settles on a later pass. A claim read that
+  errors or outruns its 250 ms budget makes the attempt inconclusive.
+
+  This is what reaches the SIBLING rows of a ghost eviction. One ghost can pin
+  several canonical rows; the repair evicts it once, the empty-room destroy
+  that follows removes the registry entry and releases the claim, and before
+  this every other row that named the room answered `GetRoom -> Ok(None)` on
+  every later pass and stayed pending forever. Under the unhosted answer those
+  rows settle on the next pass that reaches them.
+
+  The unhosted answer replaces the ROSTER evidence only. Everything else is
+  unchanged: `locally_reachable` and the every-peer fan-out still gate the
+  drop, the hosting state is re-read immediately before the write (the place
+  the roster recheck holds on the local path, and a room that regained a host
+  drops the chunk and marks the attempt inconclusive), and the settlement
+  writes with no room fence to assert, because there is no claim to assert.
+  A room being (re)created concurrently is the same false positive the roster
+  path already accepts, with the same XEP-0045 answer: a join into the new
+  incarnation is a NEW occupancy, and §7.2.14 owes it the room's discussion
+  history rather than the traffic that predates its join.
+
+Two properties bound the settlement, because it permanently drops a copy:
 
 - **The claim is proven against the store, not read off the actor (#1803).**
   `RoomActor::durable_claim_fence` is assigned once and never cleared, so an
@@ -997,6 +1037,29 @@ meanwhile is classified `Superseded` rather than evicted. The settlement runs
 in the same attempt, so a repaired row terminalizes immediately instead of
 waiting out the 15-minute parking cooldown — and is not counted as
 `no_durable_progress`.
+
+The removal is marked as the service's, not the user's. XEP-0045
+§"Service removes user because of error response" (`#service-error-kick`)
+lets a service add status code **333** when it removes an occupant because of
+a technical problem, and requires it on the presence to the removed user (next
+to 110) and on the presences to the remaining occupants once the service
+supports it. A ghost eviction is exactly that case, so its §7.14 unavailable
+broadcast carries `<status code='333'/>`; 307 is deliberately absent, which is
+what the XEP recommends here. An ordinary disconnect or explicit leave carries
+no removal code at all, so a client can tell the two apart. Nothing new is
+advertised in disco: XEP-0045 registers 333 as a status code, not as a
+feature.
+
+Both eviction paths emit that shape: the inline sweep and the retained
+`FullJidSweep` the local-departure janitor redrives (its cause is retained
+with the sweep, and coalescing two sweeps never downgrades a service-side
+removal to a voluntary one). **Known gap:** the narrower per-ROOM retries —
+the `RoomDeparture` / `ConfirmRetired` items a sweep retains when one room's
+leave ask deferred, timed out or failed — carry only the durable
+`OccupancyLeaveCause` and not the presentational removal cause, so the
+janitor's replay of those emits the bare §7.14 shape without 333. That
+affects only a ghost eviction whose room ask did not complete on the first
+attempt; the copy settlement and the eviction itself are unaffected.
 
 The copy is settled **before** the sweep runs, under the room authority the
 ghost was proven with, and `ingress.maintenance.departed_occupant_copies`
@@ -1100,13 +1163,21 @@ reachable somewhere (or a probe cannot answer) — not that the eviction is
 broken. A sustained ghost-eviction rate is the signal to chase the upstream
 cleanup leak, not to raise the maintenance budget.
 
-One limitation survives this ordering and is not fixable from here: a row
-whose room **no node hosts any more** — a destroyed non-persistent room that
-still has other, non-ghost pending occupants — has no authoritative roster to
-prove anything against, so neither the ghost repair nor the departed-copy
-settlement can reach it. Settling before the sweep keeps the repair from
-CREATING such a row for the ghost it just proved; it cannot recover one that
-already exists. Those rows need the manual repair below.
+A row whose room **no node hosts any more** — a destroyed non-persistent room
+that still has other, non-ghost pending occupants, or a SIBLING row the same
+ghost pinned — has no roster to prove anything against, but it is no longer
+stranded: the unhosted answer described under
+`ingress.maintenance.departed_occupant_copies` above settles those copies on a
+later pass, once the room claim is provably gone. The ghost repair itself
+still does nothing for such a row — nobody is seated in a room nobody hosts —
+and settling before the sweep still matters, because it keeps the attempt that
+gathered the strictly stronger every-peer evidence from discarding it and
+waiting out another maintenance cycle.
+
+What still does not drain on its own is a room whose claim is stuck on file:
+a dead owner's `room_actor` claim until the orphan reaper reaps it, or a
+release that keeps failing. Those rows stay pending (fail-closed) and need the
+manual repair below only if the claim never clears.
 
 The existing manual repair procedure below remains for unrecoverable families,
 with its explicit reviewed manifest and abandonment semantics.
@@ -1304,8 +1375,10 @@ that still has a resumable session on either replica has its copy delivered
 (by whichever replica holds the socket) rather than dropped, which
 terminalizes the row just the same — and nothing drains until both replicas
 run the new image, since an old peer's `UnknownMessage` fails closed. The procedure
-below remains for rows that settlement cannot reach, such as a room no node
-hosts any more.
+below remains for rows that settlement cannot reach — no longer a room no node
+hosts (that case now settles once the room claim is provably gone), but a room
+whose `room_actor` claim is stuck on file, or occupants the every-peer probe
+cannot clear.
 
 The pre-#1757 legacy backlog was 183 non-terminal rows when #1782 was recorded.
 That count is incident context, not a selection criterion. Stall parking

@@ -1252,3 +1252,289 @@ async fn sqlite_seated_occupant_is_decided_by_the_roster_alone() {
     )
     .await;
 }
+
+/// #1803: what makes "no node hosts this room" PROVABLE in a cluster, and what
+/// still keeps the copy owed once it is.
+///
+/// `GetRoom -> Ok(None)` alone only means "not here". With clustering the
+/// durable room claim is the cluster-wide record of who owns the room, and it
+/// is exactly what the empty-room destroy releases, so its absence is the
+/// proof. Every other answer leaves the copy owed, and the every-peer
+/// reachability proof is unchanged by any of them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnhostedCase {
+    /// No `room_actor` claim row anywhere and every peer denies the resource.
+    /// The only case that settles.
+    NoClaimAnywhere,
+    /// Hosted nowhere, but a peer still holds the occupant's socket: the
+    /// hosting answer replaces the ROSTER evidence, never the reachability
+    /// evidence.
+    NoClaimButPeerHoldsTheSocket,
+    /// A fresh claim on ANOTHER node: that node hosts the room (or is about to)
+    /// and settles the row against its own roster.
+    ForeignRoomClaim,
+    /// A fresh claim held by THIS node with no local actor — a handoff or a
+    /// restart in flight, and the actor is about to exist.
+    OwnRoomClaim,
+    /// The claim read cannot answer, so the hosting state is unknown.
+    ClaimReadFails,
+}
+
+/// A claim store whose ROOM claim reads fail. Everything else delegates to the
+/// real in-process store the rest of the fixture needs, so only the hosting
+/// proof is unreadable.
+struct UnreadableRoomClaims(Arc<InProcessClaimStore>);
+
+#[async_trait::async_trait]
+impl ClaimStore for UnreadableRoomClaims {
+    async fn ensure_schema(&self) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.0.ensure_schema().await
+    }
+    async fn acquire(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.0.acquire(entity, me).await
+    }
+    async fn ensure_claimed(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.0.ensure_claimed(entity, me).await
+    }
+    async fn steal_stale(
+        &self,
+        entity: &Entity,
+        observed: waddle_xmpp::ownership::ClaimEpoch,
+        staleness: waddle_xmpp::ownership::StalePredicate,
+        me: &NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.0.steal_stale(entity, observed, staleness, me).await
+    }
+    async fn steal_for_resume(
+        &self,
+        entity: &Entity,
+        observed: waddle_xmpp::ownership::ClaimEpoch,
+        witness: waddle_xmpp::ownership::ResumeIdentityProof,
+        me: &NodeIdentity,
+    ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
+        self.0.steal_for_resume(entity, observed, witness, me).await
+    }
+    async fn current_claim(
+        &self,
+        entity: &Entity,
+    ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, waddle_xmpp::ownership::ClaimError>
+    {
+        if entity.entity_type == EntityType::RoomActor {
+            return Err(waddle_xmpp::ownership::ClaimError::Backend(
+                "clustering_claims unreadable".to_string(),
+            ));
+        }
+        self.0.current_claim(entity).await
+    }
+    async fn fence(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
+        self.0.fence(entity, me, mine).await
+    }
+    async fn release(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.0.release(entity, me, mine).await
+    }
+    async fn release_many(
+        &self,
+        entities: &[Entity],
+        me: &NodeIdentity,
+    ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.0.release_many(entities, me).await
+    }
+}
+
+async fn unhosted_room_recovery(f: IngressFixture, case: UnhostedCase) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before = metrics
+        .counter_sum("ingress.maintenance.departed_occupant_copies", &[])
+        .unwrap_or(0);
+    let sm = persistent_sm(&f).await;
+    let planning_state = state_for(&f, sm.clone()).await;
+    let occupant: jid::FullJid = "foreign@example.com/phone".parse().expect("occupant");
+    let room: jid::BareJid = "recovery@muc.example.com".parse().expect("room");
+    let submission = planned_room(
+        &f,
+        &planning_state,
+        Case::Lost,
+        std::slice::from_ref(&occupant),
+    )
+    .await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("room fanout intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+
+    let local = NodeIdentity::new("recovering-node", "local-epoch");
+    let elsewhere = NodeIdentity::new("other-node", "foreign-epoch");
+    let inner = Arc::new(InProcessClaimStore::new());
+    let room_entity = Entity::new(EntityType::RoomActor, room.to_string());
+    match case {
+        UnhostedCase::ForeignRoomClaim => {
+            inner
+                .acquire(&room_entity, &elsewhere)
+                .await
+                .expect("a peer owns the room");
+        }
+        UnhostedCase::OwnRoomClaim => {
+            inner
+                .acquire(&room_entity, &local)
+                .await
+                .expect("this node owns the room but has not published the actor");
+        }
+        _ => {}
+    }
+    let claims: Arc<dyn ClaimStore> = if case == UnhostedCase::ClaimReadFails {
+        Arc::new(UnreadableRoomClaims(Arc::clone(&inner)))
+    } else {
+        Arc::clone(&inner) as Arc<dyn ClaimStore>
+    };
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    let (membership, _reads) = ScriptedMembership::new(vec![elsewhere.clone()], true);
+    let state = socket_tests::create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(Arc::clone(&claims)),
+            node_identity: Some(SharedNodeIdentity::new(local.clone())),
+            ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+            resource_presence: Some(Arc::new(DepartedPeers {
+                case: if case == UnhostedCase::NoClaimButPeerHoldsTheSocket {
+                    DepartedElsewhere::PeerHoldsTheSocket
+                } else {
+                    DepartedElsewhere::AbsentOnEveryPeer
+                },
+                socket_host: elsewhere.clone(),
+                asked: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })),
+            cluster_membership: Some(membership),
+            ..Default::default()
+        },
+        sm.clone(),
+    )
+    .await;
+    wire_for_test(
+        &bridge,
+        &state,
+        Arc::clone(&claims),
+        SharedNodeIdentity::new(local),
+    )
+    .await;
+    // The recovering node hosts NO room actor: `GetRoom` answers `Ok(None)`
+    // and only the claim read can say whether anybody else does.
+    assert!(
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                room_jid: room.clone(),
+            })
+            .await
+            .expect("registry lookup")
+            .is_none(),
+        "the fixture must host no local incarnation of the room"
+    );
+
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    assert_eq!(
+        pass(&f, &env, &MaintenanceCursor::default()).await,
+        MaintenanceOutcome::Complete
+    );
+
+    let settled = case == UnhostedCase::NoClaimAnywhere;
+    let mut tx = f.uow.begin().await.expect("inspect recovered row");
+    assert_eq!(
+        DeliveryProgressRepository::load(&mut tx, key, &receipt)
+            .await
+            .expect("delivery progress"),
+        if settled {
+            vec![occupant.clone()]
+        } else {
+            vec![]
+        },
+        "only a room provably hosted by nobody settles without a roster"
+    );
+    assert_eq!(
+        CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"),
+        settled
+    );
+    tx.commit().await.expect("read commit");
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.maintenance.departed_occupant_copies", &[])
+            .unwrap_or(0),
+        before + u64::from(settled)
+    );
+    f.close().await;
+}
+
+/// The sibling-row shape after an empty-room destroy released the claim: no
+/// node hosts the room, so it lists nobody and the copy is owed to nobody.
+#[tokio::test]
+async fn sqlite_unhosted_room_without_a_claim_settles_the_departed_copy() {
+    unhosted_room_recovery(
+        IngressFixture::sqlite().await,
+        UnhostedCase::NoClaimAnywhere,
+    )
+    .await;
+}
+
+/// A hosting answer may only replace the roster evidence. An occupant a peer
+/// still holds a socket for keeps its copy however the room is hosted.
+#[tokio::test]
+async fn sqlite_unhosted_room_keeps_a_copy_a_peer_can_still_take() {
+    unhosted_room_recovery(
+        IngressFixture::sqlite().await,
+        UnhostedCase::NoClaimButPeerHoldsTheSocket,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_room_claimed_by_a_peer_settles_nothing_here() {
+    unhosted_room_recovery(
+        IngressFixture::sqlite().await,
+        UnhostedCase::ForeignRoomClaim,
+    )
+    .await;
+}
+
+/// This node owns the claim but has not published the actor yet — a handoff or
+/// restart in flight. The roster is about to exist, so nothing may be dropped.
+#[tokio::test]
+async fn sqlite_room_claimed_here_without_an_actor_settles_nothing() {
+    unhosted_room_recovery(IngressFixture::sqlite().await, UnhostedCase::OwnRoomClaim).await;
+}
+
+#[tokio::test]
+async fn sqlite_unreadable_room_claim_settles_nothing() {
+    unhosted_room_recovery(IngressFixture::sqlite().await, UnhostedCase::ClaimReadFails).await;
+}
