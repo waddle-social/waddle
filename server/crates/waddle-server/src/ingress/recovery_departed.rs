@@ -349,13 +349,13 @@ pub(super) async fn resolve_authority(
 /// asserting is no longer on file — a steal that committed between the roster
 /// probe and the write.
 #[cfg(feature = "clustering")]
-fn lost_room_claim(error: &IngressUowError) -> bool {
+pub(super) fn lost_room_claim(error: &IngressUowError) -> bool {
     matches!(error, IngressUowError::ClaimFenceMissing)
 }
 
 /// Without clustering nothing asserts a room claim, so no error can mean this.
 #[cfg(not(feature = "clustering"))]
-fn lost_room_claim(_error: &IngressUowError) -> bool {
+pub(super) fn lost_room_claim(_error: &IngressUowError) -> bool {
     false
 }
 

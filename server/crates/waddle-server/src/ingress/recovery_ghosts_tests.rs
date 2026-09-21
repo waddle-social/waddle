@@ -350,6 +350,100 @@ async fn sqlite_ghost_occupant_survives_below_the_stall_threshold() {
     f.f.close().await;
 }
 
+/// The eviction can take away the very authority the settlement it enables
+/// needs. The leave sweep that removes the ghost runs the empty-room path for
+/// the room it just emptied (`maybe_evict_empty_room`), and that destroy —
+/// immediately, or on the local-departure janitor's next tick once the
+/// departure receipt is acknowledged — removes the registry entry AND
+/// releases the durable room claim. A settlement that re-derives authority
+/// afterwards then finds no room to settle against, and since no node hosts
+/// the room any more, no later pass can either: the row is pinned forever,
+/// which is the bug this whole path exists to fix.
+///
+/// The copy is therefore settled under the authority the ghost was proven
+/// with, BEFORE the sweep runs. The hook models the destroy landing at the
+/// worst possible moment — the instant the eviction is confirmed.
+#[tokio::test]
+async fn sqlite_ghost_copy_settles_although_the_eviction_destroys_the_room() {
+    use crate::ingress::recovery_ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
+    use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, DestroyRoomReason};
+
+    /// Destroys the room exactly once, from inside the window the eviction
+    /// opens: from here the registry no longer hosts it and its claim is gone.
+    struct DestroyOnce {
+        registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+        done: std::sync::atomic::AtomicBool,
+        ran: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl GhostEvictionWindow for DestroyOnce {
+        async fn enter(&self, _occupant: &jid::FullJid) {
+            if self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.registry
+                .ask(DestroyRoom {
+                    room_jid: ROOM.parse().expect("room"),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("the empty-room destroy removes the room");
+        }
+    }
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before_evicted = metrics.counter_sum(EVICTED, &[]).unwrap_or(0);
+    let f = ghost_fixture(IngressFixture::sqlite().await, GhostCase::Evictable).await;
+    for _ in 0..3 {
+        f.pass().await;
+    }
+    let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    hook_ghost_eviction_window(
+        f.key,
+        std::sync::Arc::new(DestroyOnce {
+            registry: f.state.deps.protocol.room_registry.clone(),
+            done: std::sync::atomic::AtomicBool::new(false),
+            ran: std::sync::Arc::clone(&hook_ran),
+        }) as std::sync::Arc<dyn GhostEvictionWindow>,
+    );
+    f.pass().await;
+
+    assert!(
+        hook_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the eviction-window hook must have run"
+    );
+    assert!(
+        !f.state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: ROOM.parse().expect("room"),
+            })
+            .await
+            .expect("registry lookup")
+            .is_some(),
+        "the room is gone, so nothing can re-derive its authority"
+    );
+    assert_eq!(
+        f.progress().await,
+        {
+            let mut both = vec![f.ghost.clone(), f.watcher.clone()];
+            both.sort();
+            both
+        },
+        "the ghost's copy was settled under the authority it was proven with"
+    );
+    assert!(f.terminal().await, "the repaired row terminalizes");
+    assert_eq!(
+        metrics.counter_sum(EVICTED, &[]).unwrap_or(0),
+        before_evicted + 1
+    );
+    f.f.close().await;
+}
+
 /// A client that rebinds the SAME full JID and rejoins while the probes are
 /// running (the web client reuses its `web-<uuid>` resource across reconnects
 /// within a page). The generation is pinned before the probes, so the sweep

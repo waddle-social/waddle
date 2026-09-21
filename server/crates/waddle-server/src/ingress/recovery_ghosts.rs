@@ -31,6 +31,34 @@
 //! therefore asked about the exact full JID, and each answers only about its
 //! own sockets and sessions.
 //!
+//! The copy is settled BEFORE the sweep runs, not after it. The sweep is the
+//! full disconnect path, so removing the last occupant of a non-persistent
+//! room also runs the empty-room destroy, and that destroy — immediately, or
+//! on the local-departure janitor's next tick once the departure receipt is
+//! acknowledged — removes the registry entry AND releases the durable room
+//! claim. A settlement that re-derived its authority afterwards would find no
+//! room to settle against, and since no node hosts the room any more, no
+//! later pass could either: the row would be pinned forever, which is the
+//! failure this whole path exists to remove. Settling first also spares the
+//! attempt a second every-peer fan-out over an occupant it has just proven
+//! with the strictly stronger evidence.
+//!
+//! The consequences of that order are deliberate. The settlement asserts the
+//! same exact room claim inside its transaction, so a steal that committed
+//! since the authority was resolved rolls it back and settles nothing. A full
+//! JID that rebound and rejoined between the proof and the write is seated at
+//! a different generation and is dropped from both the settlement and the
+//! sweep, so a live rejoin keeps its seat AND its copy. A rejoin in the
+//! remaining window (write committed, sweep not yet run) makes the sweep
+//! answer `Superseded`: the copy is settled against the occupancy that was
+//! proven abandoned, and XEP-0045 §7.2.14 owes a new occupancy the room's
+//! history rather than the traffic that predates its join — the same
+//! reasoning `recovery_departed` already rests on. The eviction counter still
+//! counts only confirmed unseatings, so a sweep that could not remove the
+//! occupancy settles the undeliverable copy without claiming an eviction; the
+//! leaked occupancy then stays in the roster for another cleanup path, which
+//! is where it already was.
+//!
 //! Every probe here fails closed: a registry that cannot answer, a session
 //! probe that cannot read its durable store, a membership read that errors or
 //! is truncated, any peer ask that errors or times out, a room this node does
@@ -104,6 +132,48 @@ async fn enter_probe_window(key: MessageKey, occupant: &FullJid) {
     }
 }
 
+/// Test seam for the moment a confirmed eviction has changed the room: the
+/// leave sweep has just queued the empty-room destroy, so from here the
+/// registry entry and the room claim the repair's authority rests on can go
+/// away under it.
+///
+/// Registered per canonical row for the same reason as [`GhostProbeWindow`].
+#[cfg(test)]
+#[async_trait::async_trait]
+pub(crate) trait GhostEvictionWindow: Send + Sync {
+    async fn enter(&self, occupant: &FullJid);
+}
+
+#[cfg(test)]
+static GHOST_EVICTION_WINDOWS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<MessageKey, std::sync::Arc<dyn GhostEvictionWindow>>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn hook_ghost_eviction_window(
+    key: MessageKey,
+    hook: std::sync::Arc<dyn GhostEvictionWindow>,
+) {
+    GHOST_EVICTION_WINDOWS
+        .lock()
+        .expect("ghost eviction hooks")
+        .insert(key, hook);
+}
+
+#[cfg(test)]
+async fn enter_eviction_window(key: MessageKey, occupant: &FullJid) {
+    let hook = GHOST_EVICTION_WINDOWS
+        .lock()
+        .expect("ghost eviction hooks")
+        .get(&key)
+        .map(std::sync::Arc::clone);
+    if let Some(hook) = hook {
+        hook.enter(occupant).await;
+    }
+}
+
 /// Bounds the read that reconstructs the row's frozen groupchat obligations,
 /// matching every other recovery transaction on this row.
 const READ_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
@@ -111,9 +181,9 @@ const READ_STATEMENT_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// One bounded repair of a row maintenance just classified as stalled.
 ///
-/// Returns `true` only when an eviction happened AND the settlement it enabled
-/// recorded durable progress: the caller then restarts the stall streak
-/// instead of parking and classifying the row.
+/// Returns `true` only when the repair recorded durable progress for at least
+/// one ghost's copy: the caller then restarts the stall streak instead of
+/// parking and classifying the row.
 pub(super) async fn repair_stalled_row(
     uow: &IngressUnitOfWork,
     deps: &Deps<'_>,
@@ -126,22 +196,67 @@ pub(super) async fn repair_stalled_row(
         return Ok(false);
     };
     let routes = pending_groupchat_routes(uow, key).await?;
-    let mut evicted = false;
+    let mut settled_any = false;
+    let mut receipted_any = false;
     for route in &routes {
         let Some(room) = route.room() else {
             continue;
         };
         // Only the authoritative local incarnation's roster may be acted on:
         // another node hosting the room runs its own maintenance for it.
-        let RoomAuthority::Local { actor, .. } =
+        let RoomAuthority::Local { actor, fence } =
             recovery_departed::resolve_authority(rooms, deps, room).await
         else {
             continue;
         };
+        let mut ghosts = Vec::new();
         for occupant in recovery_departed::owed_occupants(deps, route) {
-            let Some(generation) = abandoned_occupancy(&actor, deps, key, &occupant).await else {
+            if let Some(generation) = abandoned_occupancy(&actor, deps, key, &occupant).await {
+                ghosts.push((occupant, generation));
+            }
+        }
+        let ghosts = still_abandoned(&actor, ghosts).await;
+        if ghosts.is_empty() {
+            continue;
+        }
+        let occupants: Vec<FullJid> = ghosts.iter().map(|(jid, _)| jid.clone()).collect();
+        // Settled BEFORE the sweep, under the authority the proof rests on —
+        // see this function's ordering note above `evict`. The in-transaction
+        // claim assertion still fences a steal that committed since the
+        // authority was resolved.
+        let settled = match super::execute_uow::record_delivery_progress(
+            uow,
+            key,
+            route,
+            &occupants,
+            fence.as_ref().map(|fence| (room, fence.as_ref())),
+        )
+        .await
+        {
+            Ok(settled) => settled,
+            Err(error) if recovery_departed::lost_room_claim(&error) => {
+                tracing::debug!(
+                    %room,
+                    "ghost repair lost the room claim fence before it committed"
+                );
                 continue;
-            };
+            }
+            Err(error) => return Err(error),
+        };
+        let copies = u64::try_from(occupants.len()).unwrap_or(u64::MAX);
+        waddle_xmpp::telemetry::reliability::add_ingress_maintenance_departed_occupant_copies(
+            copies,
+        );
+        tracing::info!(
+            ?key,
+            %room,
+            copies,
+            occupants = ?occupants,
+            "maintenance settled groupchat copies for ghost MUC occupants"
+        );
+        settled_any = true;
+        receipted_any |= !settled.is_empty();
+        for (occupant, generation) in ghosts {
             if evict(state, &actor, &occupant, generation).await {
                 // Ticked per eviction, immediately: a budget timeout later in
                 // this loop must not lose the ones already performed.
@@ -154,21 +269,22 @@ pub(super) async fn repair_stalled_row(
                     %occupant,
                     "evicting a ghost MUC occupant that pinned a stalled groupchat obligation"
                 );
-                evicted = true;
+                #[cfg(test)]
+                enter_eviction_window(key, &occupant).await;
+            } else {
+                // The copy is settled either way — nothing can take it — but
+                // the XEP-0045 removal did not happen, so the leaked occupancy
+                // is still sitting in the roster for another path to clear.
+                tracing::warn!(
+                    ?key,
+                    %room,
+                    %occupant,
+                    "settled a ghost MUC occupant's copy but could not unseat it"
+                );
             }
         }
     }
-    if !evicted {
-        return Ok(false);
-    }
-    // The room no longer lists the evicted occupants, so the same settlement
-    // that discharges a departed occupant's copy now discharges theirs — in
-    // this attempt, rather than after the parking cooldown.
-    let settlement = recovery_departed::settle_departed_occupants(uow, deps, key, &routes).await?;
-    if settlement.occupants.is_empty() {
-        return Ok(false);
-    }
-    if !settlement.settled.is_empty() {
+    if receipted_any {
         super::execute::terminalize_if_complete_outcome(
             uow,
             key,
@@ -176,7 +292,49 @@ pub(super) async fn repair_stalled_row(
         )
         .await?;
     }
-    Ok(true)
+    Ok(settled_any)
+}
+
+/// Re-ask the room about every proven ghost, immediately before the write.
+///
+/// The probes above may have spent the whole fan-out budget, and the roster is
+/// actor memory that no transaction can hold still — exactly the window
+/// `recovery_departed::still_departed` narrows for a departed occupant. Only
+/// the pinned generation may be settled: a full JID that rebound and rejoined
+/// during the probes is seated at a DIFFERENT generation, and that new
+/// occupancy keeps both its seat and its copy. An occupancy that vanished on
+/// its own (`None`) is an ordinary departure, which the departed-copy
+/// settlement discharges with its own proof; a room that cannot answer proves
+/// nothing.
+async fn still_abandoned(
+    actor: &ActorRef<RoomActor>,
+    ghosts: Vec<(FullJid, OccupancySessionGeneration)>,
+) -> Vec<(FullJid, OccupancySessionGeneration)> {
+    let mut proven = Vec::with_capacity(ghosts.len());
+    for (occupant, generation) in ghosts {
+        match actor
+            .ask(GetOccupantSessionGeneration {
+                jid: occupant.clone(),
+            })
+            .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+            .await
+        {
+            Ok(Some(seated)) if seated == generation => proven.push((occupant, generation)),
+            Ok(Some(_)) => tracing::debug!(
+                %occupant,
+                "ghost rejoined before the settlement committed; keeping its seat and its copy"
+            ),
+            Ok(None) => tracing::debug!(
+                %occupant,
+                "ghost occupancy left before the settlement committed; leaving it to the \
+                 departed-copy settlement"
+            ),
+            Err(error) => {
+                tracing::debug!(%occupant, ?error, "ghost recheck did not answer")
+            }
+        }
+    }
+    proven
 }
 
 /// The occupancy generation to evict, or `None` when anything at all leaves
@@ -240,13 +398,18 @@ async fn abandoned_occupancy(
 /// departure path uses, so XEP-0045 §7.14 presence, SFU teardown, empty-room
 /// eviction and failure retention stay in a single place.
 ///
+/// Runs AFTER the copy is settled: the sweep's own empty-room destroy can
+/// take the room — and its claim — away, and the settlement must not depend
+/// on authority the eviction itself is allowed to destroy. See the module
+/// docs for why that order is the safe one.
+///
 /// `true` only when the full JID is provably no longer seated at all.
 /// The sweep reports `Completed` for a `Superseded` disposition too — a
-/// client that rebound the same full JID and rejoined during the probes keeps
-/// its new seat, which is the point of the generation selector — and that is
-/// a no-op, not an eviction: it must neither tick the counter nor claim the
-/// progress that lets the settlement run. A room that cannot answer the
-/// confirmation is treated the same way, since nothing was proven.
+/// client that rebound the same full JID and rejoined in the last window
+/// keeps its new seat, which is the point of the generation selector — and
+/// that is a no-op, not an eviction: it must not tick the counter. A room
+/// that cannot answer the confirmation is treated the same way, since nothing
+/// was proven.
 async fn evict(
     state: &WebSocketState,
     actor: &ActorRef<RoomActor>,

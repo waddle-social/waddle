@@ -984,10 +984,26 @@ unavailable presence. The removal goes through the same full-JID
 leave sweep as a disconnect, so the §7.14 unavailable broadcast, SFU teardown,
 empty-room eviction and failure retention are unchanged, and it targets the
 occupant's exact occupancy generation, so a same-full-JID session that joined
-meanwhile is classified `Superseded` rather than evicted. The settlement then
-runs in the same attempt, so a repaired row terminalizes immediately instead
-of waiting out the 15-minute parking cooldown — and is not counted as
+meanwhile is classified `Superseded` rather than evicted. The settlement runs
+in the same attempt, so a repaired row terminalizes immediately instead of
+waiting out the 15-minute parking cooldown — and is not counted as
 `no_durable_progress`.
+
+The copy is settled **before** the sweep runs, under the room authority the
+ghost was proven with, and `ingress.maintenance.departed_occupant_copies`
+counts it exactly as it counts a departed occupant's copy. That order is
+load-bearing: the sweep is the full disconnect path, so removing the last
+occupant of a non-persistent room also runs the empty-room destroy, and that
+destroy — immediately, or on the local-departure janitor's next tick once the
+departure receipt is acknowledged — removes the registry entry AND releases
+the durable room claim. A settlement that re-derived its authority afterwards
+would find no room to settle against, and since no node hosts the room any
+more, no later pass could either: the row would be pinned forever, which is
+the exact failure this path exists to remove. Settling first also spares the
+attempt a second every-peer fan-out over an occupant it has just proven with
+strictly stronger evidence. The settlement transaction still asserts the same
+exact room claim, so a steal that committed since the authority was resolved
+rolls it back and settles nothing.
 
 Reachability is proven against SOCKETS, never against ownership claims. A
 `UserActor` claim is routing authority, not socket liveness: a live idle
@@ -1021,11 +1037,22 @@ eviction.
 
 An eviction is also only counted once the full JID is provably unseated. The
 sweep reports success for a `Superseded` disposition too — a client that
-rebound the same full JID and rejoined mid-probe keeps its new seat, which is
-what the generation selector is for — and that is a no-op, not an eviction.
-The generation is pinned from the room BEFORE any probe runs, so a rejoin
-during the seconds the probes take is classified `Superseded` rather than
-evicted.
+rebound the same full JID and rejoined keeps its new seat, which is what the
+generation selector is for — and that is a no-op, not an eviction. The
+generation is pinned from the room BEFORE any probe runs, and the room is
+asked once more immediately before the settlement write: a full JID seated at
+a different generation by then rejoined during the probes, and that new
+occupancy is dropped from both the settlement and the sweep, so it keeps its
+seat AND its copy. In the remaining window — write committed, sweep not yet
+run — a rejoin makes the sweep answer `Superseded`: the copy was settled
+against the occupancy that was proven abandoned, and XEP-0045 §7.2.14 owes a
+new occupancy the room's history rather than the traffic that predates its
+join, the same reasoning the departed-copy settlement rests on. A sweep that
+cannot unseat the occupancy at all still leaves the copy settled — nothing
+can take it — but does not tick `muc.ghost_occupants.evicted`, and the leaked
+occupancy stays in the roster for another cleanup path; the log line
+"settled a ghost MUC occupant's copy but could not unseat it" is the marker
+for that case.
 
 That probe is a NEW relay message id, not a change to the ordered-relay
 envelope or its replies, so `deliver_ordered.vN` does not move and **no
@@ -1055,6 +1082,14 @@ Consequently a `route_muc` backlog with
 reachable somewhere (or a probe cannot answer) — not that the eviction is
 broken. A sustained ghost-eviction rate is the signal to chase the upstream
 cleanup leak, not to raise the maintenance budget.
+
+One limitation survives this ordering and is not fixable from here: a row
+whose room **no node hosts any more** — a destroyed non-persistent room that
+still has other, non-ghost pending occupants — has no authoritative roster to
+prove anything against, so neither the ghost repair nor the departed-copy
+settlement can reach it. Settling before the sweep keeps the repair from
+CREATING such a row for the ghost it just proved; it cannot recover one that
+already exists. Those rows need the manual repair below.
 
 The existing manual repair procedure below remains for unrecoverable families,
 with its explicit reviewed manifest and abandonment semantics.
