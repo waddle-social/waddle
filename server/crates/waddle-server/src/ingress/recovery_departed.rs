@@ -81,6 +81,18 @@ use super::{recovery_executor::AttemptClassification, recovery_reachability, Rou
 /// recovery transaction runs under. A slower answer is not proof of absence.
 pub(super) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// How many occupants of one route are probed at the same time.
+///
+/// A probe fans out to every unexpired cluster peer, so N occupants in flight
+/// mean N × peers asks on the relay at once: a large room must not turn one
+/// recovery attempt into an unbounded burst. Sixteen is the smallest bound
+/// that keeps every room Waddle actually runs to a single probe budget — the
+/// production ghost shape pins a row on one or two occupants — while capping
+/// the in-flight asks at a few dozen against the two-replica deployment.
+/// Each chunk is settled before the next is probed, so a deadline that elapses
+/// mid-route can only lose the chunk in flight, never the proven prefix.
+pub(super) const PROBE_CONCURRENCY: usize = 16;
+
 /// Test seam for the window [`still_departed`] narrows: between the
 /// reachability probes, which may spend the whole fan-out budget, and the
 /// settlement write.
@@ -179,113 +191,190 @@ pub(super) async fn settle_departed_occupants(
             }
             RoomAuthority::Unproven => continue,
         };
-        let mut departed = Vec::new();
-        for occupant in owed {
-            // The roster comes FIRST. A seated occupant is owed its copy
-            // whatever the cluster says, so asking anything else about it
-            // would only spend the row deadline — and the SM probe is a
-            // full-table read of `sm_sessions` per occupant on this hot path.
-            match occupancy(actor, &occupant).await {
-                Occupancy::Present => continue,
-                Occupancy::Unknown => {
-                    settlement.classification = AttemptClassification::Inconclusive;
-                    continue;
-                }
-                Occupancy::Absent => {}
-            }
-            // H1: a roster answer never settles a copy for somebody this node
-            // itself can still hand it to.
-            if recovery_reachability::locally_reachable(deps, &occupant).await {
-                continue;
-            }
-            // R2-1: nor for somebody a PEER can hand it to. After a room-host
-            // restart the new incarnation has a valid fence and an EMPTY
-            // roster, holds no mirror for a peer's socket, and the SM probe
-            // is `Absent` for a live attached one — every local signal says
-            // "gone" about a user who is simply connected to the other
-            // replica, whose own maintenance pass would deliver the copy.
-            match recovery_reachability::reachable_elsewhere(
-                deps,
-                &occupant,
-                recovery_reachability::SETTLEMENT_FANOUT_BUDGET,
-            )
-            .await
-            {
-                recovery_reachability::ResourceReachability::AbsentEverywhere => {
-                    departed.push(occupant)
-                }
-                // A peer is holding that socket. That is a STABLE fact, not a
-                // failed read: re-running this attempt answers the same until
-                // the socket goes away, and the peer delivers the copy in its
-                // own pass. Keeping the attempt Evaluable is deliberate — a
-                // row whose only obstacle is a stable fact must still be able
-                // to accumulate its stall streak and reach ghost repair,
-                // which is the path that resolves a resource nothing can
-                // actually deliver to.
-                recovery_reachability::ResourceReachability::Reachable => {}
-                // A read failed or the budget elapsed. Transient, and the row
-                // must not be parked on evidence this attempt never gathered.
-                recovery_reachability::ResourceReachability::Unproven => {
-                    settlement.classification = AttemptClassification::Inconclusive;
-                }
-            }
-        }
-        if departed.is_empty() {
-            continue;
-        }
-        #[cfg(test)]
-        enter_settlement_window(key, &departed).await;
-        // The probes above may have spent the whole fan-out budget. Ask the
-        // roster once more, immediately before the write, so a resource that
-        // rejoined inside that window keeps its copy.
-        let rechecked = still_departed(actor, departed).await;
-        if matches!(
-            rechecked.classification,
-            AttemptClassification::Inconclusive
-        ) {
-            settlement.classification = AttemptClassification::Inconclusive;
-        }
-        let departed = rechecked.occupants;
-        if departed.is_empty() {
-            continue;
-        }
-        let settled = match super::execute_uow::record_delivery_progress(
-            uow,
-            key,
-            progress,
-            &departed,
-            fence.as_ref().map(|fence| (room, fence.as_ref())),
-        )
-        .await
-        {
-            Ok(settled) => settled,
-            // The exact claim moved between the roster probe and the commit:
-            // nothing settled, and this attempt proved nothing.
-            Err(error) if lost_room_claim(&error) => {
-                tracing::debug!(
-                    %room,
-                    "departed-occupant settlement lost the room claim fence before it committed"
-                );
+        // Bounded chunks, each SETTLED before the next is probed. The probes
+        // may spend a whole fan-out budget, so a route with many owed
+        // occupants can outlive `recover_row`'s deadline: writing per chunk
+        // means an elapsed deadline loses only the chunk in flight, never the
+        // prefix this attempt already proved.
+        for chunk in owed.chunks(PROBE_CONCURRENCY) {
+            let probed = probe_chunk(deps, actor, chunk).await;
+            if matches!(probed.classification, AttemptClassification::Inconclusive) {
                 settlement.classification = AttemptClassification::Inconclusive;
+            }
+            if probed.departed.is_empty() {
                 continue;
             }
-            Err(error) => return Err(error),
-        };
-        let copies = u64::try_from(departed.len()).unwrap_or(u64::MAX);
-        waddle_xmpp::telemetry::reliability::add_ingress_maintenance_departed_occupant_copies(
-            copies,
-        );
-        tracing::info!(
-            ?key,
-            %room,
-            copies,
-            occupants = ?departed,
-            "maintenance settled groupchat copies for occupants that left the room"
-        );
-        settlement.settled.extend(settled);
-        settlement.occupants.extend(departed);
+            #[cfg(test)]
+            enter_settlement_window(key, &probed.departed).await;
+            // The probes above may have spent the whole fan-out budget. Ask
+            // the roster once more, immediately before the write, so a
+            // resource that rejoined inside that window keeps its copy.
+            let rechecked = still_departed(actor, probed.departed).await;
+            if matches!(
+                rechecked.classification,
+                AttemptClassification::Inconclusive
+            ) {
+                settlement.classification = AttemptClassification::Inconclusive;
+            }
+            let departed = rechecked.occupants;
+            if departed.is_empty() {
+                continue;
+            }
+            let fence = fence.as_ref().map(|fence| fence.as_ref());
+            match commit_departed(uow, key, progress, room, fence, &departed).await? {
+                Some(settled) => {
+                    settlement.settled.extend(settled);
+                    settlement.occupants.extend(departed);
+                }
+                // The exact claim moved between the roster probe and the
+                // commit: nothing settled, and this attempt proved nothing.
+                None => settlement.classification = AttemptClassification::Inconclusive,
+            }
+        }
     }
     Ok(settlement)
+}
+
+/// What one chunk of concurrent probes proved.
+struct ProbedChunk {
+    /// Occupants nothing anywhere can hand a copy to.
+    departed: Vec<FullJid>,
+    /// `Inconclusive` when any probe in the chunk could not answer.
+    classification: AttemptClassification,
+}
+
+/// Probe one chunk of occupants CONCURRENTLY and fold their verdicts.
+///
+/// Every occupant's decision is independent and every probe inside it is
+/// bounded, so the chunk costs one probe budget rather than one per occupant —
+/// which is what keeps a route with several roster-absent occupants inside
+/// `recover_row`'s deadline instead of being cancelled before its first write.
+async fn probe_chunk(
+    deps: &Deps<'_>,
+    actor: &ActorRef<RoomActor>,
+    chunk: &[FullJid],
+) -> ProbedChunk {
+    let verdicts = futures::future::join_all(
+        chunk
+            .iter()
+            .map(|occupant| departed_verdict(deps, actor, occupant)),
+    )
+    .await;
+    let mut probed = ProbedChunk {
+        departed: Vec::with_capacity(chunk.len()),
+        classification: AttemptClassification::Evaluable,
+    };
+    for (occupant, verdict) in chunk.iter().zip(verdicts) {
+        match verdict {
+            OccupantVerdict::Departed => probed.departed.push(occupant.clone()),
+            OccupantVerdict::Owed => {}
+            OccupantVerdict::Inconclusive => {
+                probed.classification = AttemptClassification::Inconclusive
+            }
+        }
+    }
+    probed
+}
+
+/// What this attempt proved about one frozen occupant.
+enum OccupantVerdict {
+    /// Nothing anywhere can hand this occupant its copy: it may be settled.
+    Departed,
+    /// Something can still take the copy, and that is a STABLE fact rather
+    /// than a failed read — the attempt stays evaluable.
+    Owed,
+    /// A probe did not answer: this attempt proved nothing about the occupant.
+    Inconclusive,
+}
+
+/// The ordered evidence one frozen occupant's copy may be dropped on.
+async fn departed_verdict(
+    deps: &Deps<'_>,
+    actor: &ActorRef<RoomActor>,
+    occupant: &FullJid,
+) -> OccupantVerdict {
+    // The roster comes FIRST. A seated occupant is owed its copy whatever the
+    // cluster says, so asking anything else about it would only spend the row
+    // deadline — and the SM probe is a full-table read of `sm_sessions` per
+    // occupant on this hot path.
+    match occupancy(actor, occupant).await {
+        Occupancy::Present => return OccupantVerdict::Owed,
+        Occupancy::Unknown => return OccupantVerdict::Inconclusive,
+        Occupancy::Absent => {}
+    }
+    // H1: a roster answer never settles a copy for somebody this node itself
+    // can still hand it to.
+    if recovery_reachability::locally_reachable(deps, occupant).await {
+        return OccupantVerdict::Owed;
+    }
+    // R2-1: nor for somebody a PEER can hand it to. After a room-host restart
+    // the new incarnation has a valid fence and an EMPTY roster, holds no
+    // mirror for a peer's socket, and the SM probe is `Absent` for a live
+    // attached one — every local signal says "gone" about a user who is simply
+    // connected to the other replica, whose own maintenance pass would deliver
+    // the copy.
+    match recovery_reachability::reachable_elsewhere(
+        deps,
+        occupant,
+        recovery_reachability::SETTLEMENT_FANOUT_BUDGET,
+    )
+    .await
+    {
+        recovery_reachability::ResourceReachability::AbsentEverywhere => OccupantVerdict::Departed,
+        // A peer is holding that socket. That is a STABLE fact, not a failed
+        // read: re-running this attempt answers the same until the socket goes
+        // away, and the peer delivers the copy in its own pass. Keeping the
+        // attempt Evaluable is deliberate — a row whose only obstacle is a
+        // stable fact must still be able to accumulate its stall streak and
+        // reach ghost repair, which is the path that resolves a resource
+        // nothing can actually deliver to.
+        recovery_reachability::ResourceReachability::Reachable => OccupantVerdict::Owed,
+        // A read failed or the budget elapsed. Transient, and the row must not
+        // be parked on evidence this attempt never gathered.
+        recovery_reachability::ResourceReachability::Unproven => OccupantVerdict::Inconclusive,
+    }
+}
+
+/// Commit one chunk's proven departures, reporting the obligations whose
+/// aggregate receipt that completed — or `None` when the room claim moved
+/// between the roster probe and the write, which settles nothing.
+async fn commit_departed(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    progress: &RouteProgress,
+    room: &BareJid,
+    fence: Option<&RoomClaimFenceContext>,
+    departed: &[FullJid],
+) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
+    let settled = match super::execute_uow::record_delivery_progress(
+        uow,
+        key,
+        progress,
+        departed,
+        fence.map(|fence| (room, fence)),
+    )
+    .await
+    {
+        Ok(settled) => settled,
+        Err(error) if lost_room_claim(&error) => {
+            tracing::debug!(
+                %room,
+                "departed-occupant settlement lost the room claim fence before it committed"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let copies = u64::try_from(departed.len()).unwrap_or(u64::MAX);
+    waddle_xmpp::telemetry::reliability::add_ingress_maintenance_departed_occupant_copies(copies);
+    tracing::info!(
+        ?key,
+        %room,
+        copies,
+        occupants = ?departed,
+        "maintenance settled groupchat copies for occupants that left the room"
+    );
+    Ok(Some(settled))
 }
 
 /// Frozen occupants this obligation still owes a copy. Host-owned resources
@@ -461,13 +550,20 @@ struct RecheckedDeparted {
 /// and the ordinary rebuild handles the frozen copy. `Unknown` drops it too,
 /// and marks the attempt inconclusive: an unanswered recheck is not the
 /// second proof this settlement needs.
+///
+/// The recheck is concurrent for the same reason the probes are: it sits
+/// between the evidence and the write, and asking one roster question per
+/// occupant in series would re-open the very deadline overrun the chunking
+/// closes.
 async fn still_departed(actor: &ActorRef<RoomActor>, departed: Vec<FullJid>) -> RecheckedDeparted {
+    let answers =
+        futures::future::join_all(departed.iter().map(|occupant| occupancy(actor, occupant))).await;
     let mut rechecked = RecheckedDeparted {
         occupants: Vec::with_capacity(departed.len()),
         classification: AttemptClassification::Evaluable,
     };
-    for occupant in departed {
-        match occupancy(actor, &occupant).await {
+    for (occupant, answer) in departed.into_iter().zip(answers) {
+        match answer {
             Occupancy::Absent => rechecked.occupants.push(occupant),
             Occupancy::Present => {
                 tracing::debug!(

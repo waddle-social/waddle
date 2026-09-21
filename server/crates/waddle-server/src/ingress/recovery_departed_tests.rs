@@ -377,6 +377,116 @@ async fn sqlite_rejoin_before_the_settlement_write_keeps_its_copy() {
     f.close().await;
 }
 
+/// #1803 review: the occupants of one route are probed in bounded chunks, and
+/// each chunk's proven departures are written BEFORE the next chunk is probed.
+/// A row deadline that cuts a later chunk can then only lose that chunk — the
+/// prefix this attempt already proved is durable, so the next pass starts from
+/// it instead of re-proving everything from scratch.
+#[tokio::test]
+async fn sqlite_a_settled_chunk_survives_a_deadline_that_cuts_the_next_one() {
+    use crate::ingress::recovery_departed::{
+        hook_settlement_write_window, SettlementWriteWindow, PROBE_CONCURRENCY,
+    };
+
+    /// Records every chunk that reaches the settlement write, and stalls the
+    /// SECOND one past the row deadline.
+    struct StallTheSecondChunk {
+        chunks: std::sync::Mutex<Vec<Vec<jid::FullJid>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SettlementWriteWindow for StallTheSecondChunk {
+        async fn enter(&self, occupants: &[jid::FullJid]) {
+            let seen = {
+                let mut chunks = self.chunks.lock().expect("chunk log");
+                chunks.push(occupants.to_vec());
+                chunks.len()
+            };
+            if seen > 1 {
+                // Far beyond the row deadline: this attempt is cancelled here,
+                // with the first chunk already committed.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        }
+    }
+
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let state = state_for(&f, sm.clone()).await;
+    // One more occupant than a single chunk can hold, so the settlement has to
+    // come back for a second one.
+    let occupants: Vec<jid::FullJid> = (0..=PROBE_CONCURRENCY)
+        .map(|index| {
+            format!("ghost{index:02}@example.com/phone")
+                .parse()
+                .expect("occupant")
+        })
+        .collect();
+    let submission = planned_room(&f, &state, Case::Lost, &occupants).await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("room fanout intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    settle_non_delivery_effects(&f, &state, &decision).await;
+    for occupant in &occupants {
+        depart(&state, occupant).await;
+    }
+
+    let hook = std::sync::Arc::new(StallTheSecondChunk {
+        chunks: std::sync::Mutex::new(Vec::new()),
+    });
+    hook_settlement_write_window(
+        key,
+        std::sync::Arc::clone(&hook) as std::sync::Arc<dyn SettlementWriteWindow>,
+    );
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(RoomOverrideEnvironment {
+        state: state.clone(),
+        registry: None,
+    });
+    pass_with_row_deadline(
+        &f,
+        &env,
+        &MaintenanceCursor::default(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    let chunks = hook.chunks.lock().expect("chunk log").clone();
+    assert_eq!(
+        chunks.len(),
+        2,
+        "the occupants must be probed in bounded chunks: {chunks:?}"
+    );
+    assert_eq!(chunks[0].len(), PROBE_CONCURRENCY);
+    let mut first_chunk = chunks[0].clone();
+    first_chunk.sort();
+    let mut tx = f.uow.begin().await.expect("inspect recovered row");
+    let mut progress = DeliveryProgressRepository::load(&mut tx, key, &receipt)
+        .await
+        .expect("delivery progress");
+    progress.sort();
+    assert_eq!(
+        progress, first_chunk,
+        "a cancelled chunk must not take the proven prefix with it"
+    );
+    assert!(
+        !CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"),
+        "the occupant the deadline cut is still owed its copy"
+    );
+    tx.commit().await.expect("read commit");
+    f.close().await;
+}
+
 #[tokio::test]
 async fn sqlite_departed_joined_occupant_stays_pending() {
     departed_recovery(IngressFixture::sqlite().await, DepartedCase::StillJoined).await;

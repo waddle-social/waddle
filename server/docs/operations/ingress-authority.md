@@ -937,6 +937,15 @@ Two properties bound that settlement, because it permanently drops a copy:
   runs, on a tighter 500 ms budget because the settlement runs inside the
   per-row recovery deadline.
 
+  The occupants of one route are probed CONCURRENTLY, in bounded chunks of 16,
+  so a route costs one fan-out budget rather than one per occupant: probed in
+  series, two or three roster-absent occupants behind a healthy-but-slow peer
+  spent the whole per-row deadline before the first write, so the attempt was
+  cancelled with nothing persisted and every later pass repeated it. Each
+  chunk's proven departures are written BEFORE the next chunk is probed, so an
+  elapsed deadline can only lose the chunk in flight, never the prefix this
+  attempt already proved.
+
   Where the copy is then delivered depends on who holds the socket. A socket
   or resumable session on the room host itself: the ordinary rebuild delivers
   or queues it in the same pass. A socket on a PEER: the room host never
@@ -1004,6 +1013,14 @@ attempt a second every-peer fan-out over an occupant it has just proven with
 strictly stronger evidence. The settlement transaction still asserts the same
 exact room claim, so a steal that committed since the authority was resolved
 rolls it back and settles nothing.
+
+The owed occupants of one room are probed concurrently, in the same bounded
+chunks of 16, and each chunk is settled before the next is probed: a ghost
+probe may spend the whole 1.5-second fan-out budget, so a room with several
+owed occupants probed in series exhausted maintenance's 5-second repair budget
+before its first write and discarded everything it had proven, leaving the row
+to park and repeat. The evictions themselves stay sequential — each sweep
+mutates the room — and still run only after that chunk's write.
 
 Reachability is proven against SOCKETS, never against ownership claims. A
 `UserActor` claim is routing authority, not socket liveness: a live idle

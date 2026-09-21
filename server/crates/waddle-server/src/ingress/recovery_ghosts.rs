@@ -207,80 +207,85 @@ pub(super) async fn repair_stalled_row(
         else {
             continue;
         };
-        let mut ghosts = Vec::new();
-        for occupant in recovery_departed::owed_occupants(deps, route) {
-            if let Some(generation) = abandoned_occupancy(&actor, deps, key, &occupant).await {
-                ghosts.push((occupant, generation));
-            }
-        }
-        let ghosts = still_abandoned(&actor, ghosts).await;
-        if ghosts.is_empty() {
-            continue;
-        }
-        let occupants: Vec<FullJid> = ghosts.iter().map(|(jid, _)| jid.clone()).collect();
-        // Settled BEFORE the sweep, under the authority the proof rests on —
-        // see this function's ordering note above `evict`. The in-transaction
-        // claim assertion still fences a steal that committed since the
-        // authority was resolved.
-        let settled = match super::execute_uow::record_delivery_progress(
-            uow,
-            key,
-            route,
-            &occupants,
-            fence.as_ref().map(|fence| (room, fence.as_ref())),
-        )
-        .await
-        {
-            Ok(settled) => settled,
-            Err(error) if recovery_departed::lost_room_claim(&error) => {
-                tracing::debug!(
-                    %room,
-                    "ghost repair lost the room claim fence before it committed"
-                );
+        let owed = recovery_departed::owed_occupants(deps, route);
+        // Bounded chunks, each settled (and swept) before the next is probed:
+        // every probe below may spend the whole ghost fan-out budget, so a
+        // room with several owed occupants would otherwise exhaust
+        // maintenance's repair budget before the first write and discard the
+        // prefix it had already proven. See `PROBE_CONCURRENCY`.
+        for chunk in owed.chunks(recovery_departed::PROBE_CONCURRENCY) {
+            let ghosts = probe_chunk(&actor, deps, key, chunk).await;
+            let ghosts = still_abandoned(&actor, ghosts).await;
+            if ghosts.is_empty() {
                 continue;
             }
-            Err(error) => return Err(error),
-        };
-        let copies = u64::try_from(occupants.len()).unwrap_or(u64::MAX);
-        waddle_xmpp::telemetry::reliability::add_ingress_maintenance_departed_occupant_copies(
-            copies,
-        );
-        tracing::info!(
-            ?key,
-            %room,
-            copies,
-            occupants = ?occupants,
-            "maintenance settled groupchat copies for ghost MUC occupants"
-        );
-        settled_any = true;
-        receipted_any |= !settled.is_empty();
-        for (occupant, generation) in ghosts {
-            if evict(state, &actor, &occupant, generation).await {
-                // Ticked per eviction, immediately: a budget timeout later in
-                // this loop must not lose the ones already performed.
-                waddle_xmpp::telemetry::reliability::add_muc_ghost_occupants_evicted(1);
-                // A ghost means a cleanup leak happened upstream; keep it
-                // visible rather than silently repairing it forever.
-                tracing::warn!(
-                    ?key,
-                    %room,
-                    %occupant,
-                    "evicting a ghost MUC occupant that pinned a stalled groupchat obligation"
-                );
-                #[cfg(test)]
-                enter_eviction_window(key, &occupant).await;
-            } else {
-                // The copy is settled either way — nothing can take it — but
-                // the XEP-0045 removal did not happen yet. A sweep that could
-                // not enumerate or resolve the rooms left the local-departure
-                // janitor a `FullJidSweep` to retry; a per-room failure is
-                // retained by the sweep itself.
-                tracing::warn!(
-                    ?key,
-                    %room,
-                    %occupant,
-                    "settled a ghost MUC occupant's copy but could not unseat it"
-                );
+            let occupants: Vec<FullJid> = ghosts.iter().map(|(jid, _)| jid.clone()).collect();
+            // Settled BEFORE the sweep, under the authority the proof rests on
+            // — see this function's ordering note above `evict`. The
+            // in-transaction claim assertion still fences a steal that
+            // committed since the authority was resolved.
+            let settled = match super::execute_uow::record_delivery_progress(
+                uow,
+                key,
+                route,
+                &occupants,
+                fence.as_ref().map(|fence| (room, fence.as_ref())),
+            )
+            .await
+            {
+                Ok(settled) => settled,
+                Err(error) if recovery_departed::lost_room_claim(&error) => {
+                    tracing::debug!(
+                        %room,
+                        "ghost repair lost the room claim fence before it committed"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let copies = u64::try_from(occupants.len()).unwrap_or(u64::MAX);
+            waddle_xmpp::telemetry::reliability::add_ingress_maintenance_departed_occupant_copies(
+                copies,
+            );
+            tracing::info!(
+                ?key,
+                %room,
+                copies,
+                occupants = ?occupants,
+                "maintenance settled groupchat copies for ghost MUC occupants"
+            );
+            settled_any = true;
+            receipted_any |= !settled.is_empty();
+            // Sequential on purpose: each sweep MUTATES the room, and the
+            // empty-room destroy one of them triggers must not race the next.
+            for (occupant, generation) in ghosts {
+                if evict(state, &actor, &occupant, generation).await {
+                    // Ticked per eviction, immediately: a budget timeout later
+                    // in this loop must not lose the ones already performed.
+                    waddle_xmpp::telemetry::reliability::add_muc_ghost_occupants_evicted(1);
+                    // A ghost means a cleanup leak happened upstream; keep it
+                    // visible rather than silently repairing it forever.
+                    tracing::warn!(
+                        ?key,
+                        %room,
+                        %occupant,
+                        "evicting a ghost MUC occupant that pinned a stalled groupchat obligation"
+                    );
+                    #[cfg(test)]
+                    enter_eviction_window(key, &occupant).await;
+                } else {
+                    // The copy is settled either way — nothing can take it —
+                    // but the XEP-0045 removal did not happen yet. A sweep
+                    // that could not enumerate or resolve the rooms left the
+                    // local-departure janitor a `FullJidSweep` to retry; a
+                    // per-room failure is retained by the sweep itself.
+                    tracing::warn!(
+                        ?key,
+                        %room,
+                        %occupant,
+                        "settled a ghost MUC occupant's copy but could not unseat it"
+                    );
+                }
             }
         }
     }
@@ -295,6 +300,32 @@ pub(super) async fn repair_stalled_row(
     Ok(settled_any)
 }
 
+/// Prove one chunk of owed occupants CONCURRENTLY.
+///
+/// Each occupant's evidence is independent and every probe inside it is
+/// bounded, so the chunk costs one fan-out budget rather than one per
+/// occupant. The generation is still pinned FIRST inside each occupant's own
+/// future, which is what makes a rejoin during the probes `Superseded` rather
+/// than evicted — see [`abandoned_occupancy`].
+async fn probe_chunk(
+    actor: &ActorRef<RoomActor>,
+    deps: &Deps<'_>,
+    key: MessageKey,
+    chunk: &[FullJid],
+) -> Vec<(FullJid, OccupancySessionGeneration)> {
+    let probed = futures::future::join_all(
+        chunk
+            .iter()
+            .map(|occupant| abandoned_occupancy(actor, deps, key, occupant)),
+    )
+    .await;
+    chunk
+        .iter()
+        .zip(probed)
+        .filter_map(|(occupant, generation)| Some((occupant.clone(), generation?)))
+        .collect()
+}
+
 /// Re-ask the room about every proven ghost, immediately before the write.
 ///
 /// The probes above may have spent the whole fan-out budget, and the roster is
@@ -306,19 +337,26 @@ pub(super) async fn repair_stalled_row(
 /// its own (`None`) is an ordinary departure, which the departed-copy
 /// settlement discharges with its own proof; a room that cannot answer proves
 /// nothing.
+///
+/// The recheck is concurrent for the same reason the probes are: it sits
+/// between the evidence and the write, and one roster question per ghost in
+/// series would re-open the budget overrun the chunking closes.
 async fn still_abandoned(
     actor: &ActorRef<RoomActor>,
     ghosts: Vec<(FullJid, OccupancySessionGeneration)>,
 ) -> Vec<(FullJid, OccupancySessionGeneration)> {
-    let mut proven = Vec::with_capacity(ghosts.len());
-    for (occupant, generation) in ghosts {
-        match actor
+    let seated = futures::future::join_all(ghosts.iter().map(|(occupant, _)| async {
+        actor
             .ask(GetOccupantSessionGeneration {
                 jid: occupant.clone(),
             })
             .reply_timeout(recovery_departed::PROBE_TIMEOUT)
             .await
-        {
+    }))
+    .await;
+    let mut proven = Vec::with_capacity(ghosts.len());
+    for ((occupant, generation), answer) in ghosts.into_iter().zip(seated) {
+        match answer {
             Ok(Some(seated)) if seated == generation => proven.push((occupant, generation)),
             Ok(Some(_)) => tracing::debug!(
                 %occupant,

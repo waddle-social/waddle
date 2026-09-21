@@ -444,6 +444,29 @@ paired!(
     Case::OccupantPm
 );
 
+/// A maintenance pass whose per-row deadline is `recovery_row` rather than the
+/// generous one the rest of these tests run under: the #1803 probe loops are
+/// bounded by exactly that deadline, so a test that measures them has to use
+/// the production value.
+async fn pass_with_row_deadline(
+    f: &IngressFixture,
+    env: &Arc<dyn RecoveryEnvironment>,
+    cursor: &MaintenanceCursor,
+    recovery_row: Duration,
+) -> MaintenanceOutcome {
+    run_maintenance_pass_with_cursor(
+        &f.db,
+        &f.uow,
+        MaintenanceBudget {
+            recovery_row,
+            ..immediate_recovery_budget()
+        },
+        cursor,
+        Some(env.clone()),
+    )
+    .await
+}
+
 #[path = "recovery_muc_pin_tests.rs"]
 mod pin;
 

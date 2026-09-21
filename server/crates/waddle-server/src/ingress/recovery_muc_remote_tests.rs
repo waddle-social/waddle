@@ -937,6 +937,279 @@ async fn departed_occupant_cluster_recovery(f: IngressFixture, case: DepartedEls
     f.close().await;
 }
 
+/// A healthy peer that is simply SLOW: it answers the only thing that permits
+/// a settlement — `Absent` — but not before `delay`. That is what turns a
+/// serial per-occupant probe loop into a budget overrun while every individual
+/// probe stays well inside its own fan-out budget.
+struct SlowAbsentPeer {
+    delay: Duration,
+    asks: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::clustering::resource_presence::ResourcePresenceAsker for SlowAbsentPeer {
+    async fn resource_presence(
+        &self,
+        _peer: &NodeIdentity,
+        _target: &jid::FullJid,
+    ) -> Result<
+        crate::clustering::relay::RelayResourcePresenceReply,
+        crate::clustering::relay::RelayAskError,
+    > {
+        self.asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        Ok(crate::clustering::relay::RelayResourcePresenceReply::Absent)
+    }
+}
+
+/// A clustered node that authoritatively hosts the room and has exactly one
+/// unexpired peer, which `asker` answers for.
+async fn one_peer_room(
+    sm: Arc<InMemorySmSessionRegistry>,
+    asker: Arc<dyn crate::clustering::resource_presence::ResourcePresenceAsker>,
+) -> (
+    Arc<WebSocketState>,
+    kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+) {
+    let local = NodeIdentity::new("recovering-node", "local-epoch");
+    let peer = NodeIdentity::new("socket-node", "foreign-epoch");
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    let claims = Arc::new(InProcessClaimStore::new());
+    let state = socket_tests::create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
+            node_identity: Some(SharedNodeIdentity::new(local.clone())),
+            ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+            resource_presence: Some(asker),
+            cluster_membership: Some(ScriptedMembership::new(vec![peer], true).0),
+            ..Default::default()
+        },
+        sm,
+    )
+    .await;
+    wire_for_test(
+        &bridge,
+        &state,
+        claims as Arc<dyn ClaimStore>,
+        SharedNodeIdentity::new(local),
+    )
+    .await;
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: "recovery@muc.example.com".parse().expect("room"),
+            waddle_id: "recovery".into(),
+            channel_id: "recovery".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room");
+    (state, actor)
+}
+
+/// #1803 review, settlement half: several roster-absent occupants on ONE route
+/// behind a healthy but slow peer. Probed serially, the route spends
+/// `recover_row`'s row deadline before `record_delivery_progress` ever runs —
+/// the attempt is cancelled, nothing is persisted, and every later pass
+/// repeats it. The occupants of a route are therefore probed concurrently, so
+/// the wall-clock cost is one fan-out budget however many of them there are.
+#[tokio::test]
+async fn sqlite_departed_occupants_of_one_route_settle_within_the_row_deadline() {
+    const OCCUPANTS: usize = 5;
+    /// Comfortably inside `SETTLEMENT_FANOUT_BUDGET`, so every individual
+    /// probe succeeds; five of them in series are not.
+    const PEER_DELAY: Duration = Duration::from_millis(400);
+
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let planning_state = state_for(&f, sm.clone()).await;
+    let occupants: Vec<jid::FullJid> = (0..OCCUPANTS)
+        .map(|index| {
+            format!("ghost{index}@example.com/phone")
+                .parse()
+                .expect("occupant")
+        })
+        .collect();
+    let submission = planned_room(&f, &planning_state, Case::Lost, &occupants).await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("room fanout intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+
+    let asks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // The recovering incarnation hosts the room with an EMPTY roster, exactly
+    // as a room host that just restarted does.
+    let (state, _room) = one_peer_room(
+        sm.clone(),
+        Arc::new(SlowAbsentPeer {
+            delay: PEER_DELAY,
+            asks: Arc::clone(&asks),
+        }),
+    )
+    .await;
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
+    assert_eq!(
+        pass_with_row_deadline(
+            &f,
+            &env,
+            &MaintenanceCursor::default(),
+            Duration::from_secs(1),
+        )
+        .await,
+        MaintenanceOutcome::Complete
+    );
+
+    assert_eq!(
+        asks.load(std::sync::atomic::Ordering::SeqCst),
+        OCCUPANTS,
+        "every occupant is asked about exactly once"
+    );
+    let mut expected = occupants.clone();
+    expected.sort();
+    let mut tx = f.uow.begin().await.expect("inspect recovered row");
+    let mut progress = DeliveryProgressRepository::load(&mut tx, key, &receipt)
+        .await
+        .expect("delivery progress");
+    progress.sort();
+    assert_eq!(
+        progress, expected,
+        "one row deadline settles every occupant of the route"
+    );
+    assert!(
+        EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash
+        )
+        .await
+        .expect("aggregate receipt"),
+        "the frozen fanout is complete"
+    );
+    assert!(CanonicalMessageRepository::is_terminal(&mut tx, key)
+        .await
+        .expect("terminal"));
+    tx.commit().await.expect("read commit");
+    f.close().await;
+}
+
+/// #1803 review, ghost half: `abandoned_occupancy` may spend the whole 1.5 s
+/// ghost fan-out budget per owed occupant, and the whole repair runs inside
+/// maintenance's 5 s `GHOST_REPAIR_BUDGET`. Probed serially, a handful of
+/// seated ghosts behind one slow peer discard the proven prefix and the row is
+/// parked and repeated forever; probed concurrently the repair costs one
+/// fan-out budget.
+#[tokio::test]
+async fn sqlite_stalled_ghosts_of_one_room_are_repaired_within_the_repair_budget() {
+    const GHOSTS: usize = 6;
+    /// Inside `GHOST_FANOUT_BUDGET`, so each probe proves absence; six of them
+    /// in series outrun the 5 s repair budget.
+    const PEER_DELAY: Duration = Duration::from_millis(1_100);
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before = metrics
+        .counter_sum("muc.ghost_occupants.evicted", &[])
+        .unwrap_or(0);
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let planning_state = state_for(&f, sm.clone()).await;
+    let ghosts: Vec<jid::FullJid> = (0..GHOSTS)
+        .map(|index| {
+            format!("ghost{index}@example.com/phone")
+                .parse()
+                .expect("ghost")
+        })
+        .collect();
+    let submission = planned_room(&f, &planning_state, Case::Lost, &ghosts).await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("room fanout intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+
+    let asks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (state, actor) = one_peer_room(
+        sm.clone(),
+        Arc::new(SlowAbsentPeer {
+            delay: PEER_DELAY,
+            asks: Arc::clone(&asks),
+        }),
+    )
+    .await;
+    // Every ghost is SEATED here, so only the ghost repair — never the
+    // departed-copy settlement — can discharge its copy.
+    for ghost in &ghosts {
+        actor
+            .ask(Join {
+                nick: ghost.node().expect("node").to_string(),
+                real_jid: ghost.clone(),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let cursor = MaintenanceCursor::default();
+    for _ in 0..3 {
+        assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+        cursor.wait_for_recovery_accounting().await;
+    }
+
+    for ghost in &ghosts {
+        assert!(
+            actor
+                .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid { jid: ghost.clone() })
+                .await
+                .expect("occupancy probe")
+                .is_none(),
+            "every proven ghost is unseated: {ghost}"
+        );
+    }
+    assert_eq!(
+        metrics
+            .counter_sum("muc.ghost_occupants.evicted", &[])
+            .unwrap_or(0),
+        before + u64::try_from(GHOSTS).expect("ghost count"),
+    );
+    let mut expected = ghosts.clone();
+    expected.sort();
+    let mut tx = f.uow.begin().await.expect("inspect repaired row");
+    let mut progress = DeliveryProgressRepository::load(&mut tx, key, &receipt)
+        .await
+        .expect("delivery progress");
+    progress.sort();
+    assert_eq!(progress, expected, "one repair settles every ghost's copy");
+    assert!(CanonicalMessageRepository::is_terminal(&mut tx, key)
+        .await
+        .expect("terminal"));
+    tx.commit().await.expect("read commit");
+    f.close().await;
+}
+
 /// THE R2-1 REGRESSION: the room host restarted, so its roster is empty and it
 /// knows nothing about the occupant — but the occupant has a LIVE socket on the
 /// other replica, which delivers the copy in its own maintenance pass. Dropping
