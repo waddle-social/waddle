@@ -413,6 +413,22 @@ pub async fn cleanup_muc_presence_for_jid(
     }
 }
 
+/// A fresh full-JID leave sweep for an occupancy maintenance proved abandoned
+/// (#1803). Unlike [`redrive_local_muc_cleanup`] it is not replaying a sweep the
+/// janitor already holds, so a room enumeration or lookup failure records a
+/// `FullJidSweep` and the local-departure janitor retries the eviction.
+pub(crate) async fn sweep_abandoned_muc_occupancy(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+) -> MucCleanupOutcome {
+    if cleanup_muc_presence(state, jid, session).await {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
+}
+
 /// Re-drive the local room traversal after a retained departure becomes due.
 pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
@@ -4670,6 +4686,43 @@ mod local_departure_cleanup_tests {
             .pending_local_muc_departures
             .take_due(Instant::now());
         assert_eq!(due.len(), 1);
+        assert!(
+            matches!(
+                &due[0].item,
+                LocalDepartureItem::FullJidSweep { jid: sweep_jid, .. } if sweep_jid == &jid
+            ),
+            "enumeration failure retains a full-JID sweep: {:?}",
+            due[0].item
+        );
+    }
+
+    /// #1803: the ghost eviction is a fresh pass, so a registry that cannot
+    /// enumerate the rooms must leave the janitor a full-JID sweep to retry.
+    /// The janitor-redrive entry point would retain nothing here.
+    #[tokio::test]
+    async fn abandoned_occupancy_sweep_enumeration_failure_records_full_jid_sweep() {
+        let state = create_test_websocket_state().await;
+        state.deps.protocol.room_registry.kill();
+        state.deps.protocol.room_registry.wait_for_shutdown().await;
+
+        let jid = full_jid("ghost@example.com/web");
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        assert_eq!(
+            sweep_abandoned_muc_occupancy(
+                state.as_ref(),
+                &jid,
+                LeaveSessionSelector::Generation(generation),
+            )
+            .await,
+            MucCleanupOutcome::Failed
+        );
+
+        let due = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(due.len(), 1, "the failed eviction is retained for retry");
         assert!(
             matches!(
                 &due[0].item,

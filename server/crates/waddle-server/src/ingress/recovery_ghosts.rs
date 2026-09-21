@@ -72,9 +72,7 @@ use jid::FullJid;
 use kameo::actor::ActorRef;
 use waddle_xmpp::{
     ingress::MessageKey,
-    muc::room_actor::{
-        GetOccupantSessionGeneration, LeaveAttemptId, LeaveSessionSelector, RoomActor,
-    },
+    muc::room_actor::{GetOccupantSessionGeneration, LeaveSessionSelector, RoomActor},
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
 
@@ -85,7 +83,7 @@ use crate::{
     },
     server::routes::{
         interpret::{DeliveryExecutionContext, Deps},
-        websocket::{redrive_local_muc_cleanup, MucCleanupOutcome, WebSocketState},
+        websocket::{sweep_abandoned_muc_occupancy, MucCleanupOutcome, WebSocketState},
     },
 };
 
@@ -273,8 +271,10 @@ pub(super) async fn repair_stalled_row(
                 enter_eviction_window(key, &occupant).await;
             } else {
                 // The copy is settled either way — nothing can take it — but
-                // the XEP-0045 removal did not happen, so the leaked occupancy
-                // is still sitting in the roster for another path to clear.
+                // the XEP-0045 removal did not happen yet. A sweep that could
+                // not enumerate or resolve the rooms left the local-departure
+                // janitor a `FullJidSweep` to retry; a per-room failure is
+                // retained by the sweep itself.
                 tracing::warn!(
                     ?key,
                     %room,
@@ -416,19 +416,15 @@ async fn evict(
     occupant: &FullJid,
     generation: OccupancySessionGeneration,
 ) -> bool {
-    // A fresh pass mints its own remote-membership ceiling, exactly as the
-    // disconnect-time sweep does.
-    let remote_ceiling = state
-        .deps
-        .protocol
-        .remote_muc_memberships
-        .generation_watermark();
-    if redrive_local_muc_cleanup(
+    // A FRESH pass, not a janitor redrive: if the registry cannot enumerate or
+    // resolve the rooms, the sweep records a `FullJidSweep` and the
+    // local-departure janitor retries the eviction. The copy is already
+    // settled by now, so nothing else would come back for this ghost until
+    // another message stalled on it.
+    if sweep_abandoned_muc_occupancy(
         state,
         occupant,
         LeaveSessionSelector::Generation(generation),
-        LeaveAttemptId::generate(),
-        remote_ceiling,
     )
     .await
         != MucCleanupOutcome::Completed
