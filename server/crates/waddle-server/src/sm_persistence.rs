@@ -543,6 +543,44 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         Ok(out)
     }
 
+    /// Exact-predicate variant of [`Self::list_all_sessions`] for the #1803
+    /// resource-presence probe. The predicate runs in the database, so the
+    /// probe no longer loads and decodes every row; an index on `full_jid`
+    /// needs a versioned migration and is tracked in #1812.
+    ///
+    /// Same decoder and same fail-closed decode policy as the unscoped
+    /// listing: a matching row this node cannot decode propagates as an error
+    /// so the probe reports `Failed`, never `Absent`. The caller is an
+    /// eviction guard deciding whether to permanently drop a durable copy, so
+    /// skipping a poison row the way the best-effort cold-start listing does
+    /// would turn "cannot tell" into "provably gone".
+    async fn list_sessions_for_full_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        let mut rows = self
+            .query(
+                "SELECT stream_id, user_id, full_jid, occupancy_session, inbound_count, \
+                        outbound_count, \
+                        last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
+                        carbons_enabled, roster_interested, blocklist_interested, presence_available, \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
+                 FROM sm_sessions WHERE full_jid = ?",
+                crate::db_params![jid.to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
+        {
+            out.push(decode_session(&row)?);
+        }
+        Ok(out)
+    }
+
     /// Single-query JOIN that fetches every persisted SM session
     /// AND its unacked queue in one round-trip (issue #209 PR #405).
     async fn list_all_sessions_with_unacked(

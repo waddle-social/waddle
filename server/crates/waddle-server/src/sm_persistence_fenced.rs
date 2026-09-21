@@ -1061,6 +1061,42 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         Ok(out)
     }
 
+    /// Exact-predicate variant of [`Self::list_all_sessions`] for the #1803
+    /// resource-presence probe. The predicate runs in the database, so the
+    /// probe no longer loads and decodes every row; `sm_sessions` holds only
+    /// detached sessions inside their resume window, and an index on
+    /// `full_jid` is tracked in #1812 (it needs a versioned migration).
+    ///
+    /// Read-only and unfenced for the same reason `list_all_sessions` is: it
+    /// spans every node's sessions, not just this node's claims. Decode
+    /// failures propagate exactly as they do there, so the probe backing an
+    /// eviction reports `Failed` rather than `Absent` for a row it cannot read.
+    async fn list_sessions_for_full_jid(
+        &self,
+        jid: &jid::FullJid,
+    ) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        let mut rows = self
+            .guard_query(
+                "SELECT stream_id, user_id, full_jid, occupancy_session, inbound_count, outbound_count, \
+                        last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
+                        carbons_enabled, roster_interested, blocklist_interested, presence_available, \
+                        presence_show, presence_status, presence_priority, replay_gap_through, \
+                        presence_payloads \
+                 FROM sm_sessions WHERE full_jid = ?",
+                crate::db_params![jid.to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
+        {
+            out.push(decode_session(&row)?);
+        }
+        Ok(out)
+    }
+
     async fn list_all_sessions_with_unacked(
         &self,
     ) -> Result<Vec<(PersistedSession, Vec<PersistedUnackedStanza>)>, SmPersistenceError> {

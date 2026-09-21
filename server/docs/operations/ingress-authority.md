@@ -947,7 +947,20 @@ Two properties bound that settlement, because it permanently drops a copy:
 
   The roster is read FIRST, so a still-seated occupant costs one actor ask and
   nothing else: no per-occupant `sm_sessions` read and no cross-node fan-out
-  on the recovery hot path.
+  on the recovery hot path. The durable `sm_sessions` read that a roster-absent
+  occupant does cost is filtered to the exact full JID in the database, so the
+  probe never loads and decodes the whole table. `sm_sessions` holds only
+  detached sessions inside their resume window; an index on `full_jid` needs
+  a versioned migration and is tracked in #1812.
+
+  The roster is then asked a SECOND time immediately before the write, after
+  the probes have spent whatever they spend of the 500 ms budget. That
+  **narrows** the evidence-to-commit window; it does not close it, because the
+  roster is actor memory and no transaction can fence it. A resource that
+  rejoins after the recheck still has its frozen copy settled, and that is
+  accepted: the rejoin is a NEW occupancy, XEP-0045 §7.2.14 gives a new
+  occupant discussion history on join rather than the traffic that predates
+  it, and the message remains in the room's XEP-0313 archive regardless.
 
   **Rollout note:** because a peer that predates
   `waddle.clustering.relay.resource_presence.v1` answers `UnknownMessage`,

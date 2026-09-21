@@ -240,6 +240,143 @@ async fn postgres_departed_occupant_copy_settles() {
     }
 }
 
+/// #1803 review: the reachability probes can spend the whole 500 ms fan-out
+/// budget, and the web client reuses its `web-<uuid>` resource across
+/// reconnects within a page — so the same full JID can rejoin between the
+/// probes and the write. The roster is asked once more immediately before the
+/// write, and a rejoined resource keeps its copy: the rejoin is a NEW
+/// occupancy, and the frozen copy is left to the ordinary rebuild.
+#[tokio::test]
+async fn sqlite_rejoin_before_the_settlement_write_keeps_its_copy() {
+    use crate::ingress::recovery_departed::{hook_settlement_write_window, SettlementWriteWindow};
+
+    /// Rejoins the departed occupant's full JID exactly once, from inside the
+    /// window between the reachability probes and the settlement write.
+    struct RejoinOnce {
+        room: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        occupant: jid::FullJid,
+        done: std::sync::atomic::AtomicBool,
+        ran: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl SettlementWriteWindow for RejoinOnce {
+        async fn enter(&self, occupants: &[jid::FullJid]) {
+            if !occupants.contains(&self.occupant)
+                || self.done.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            let admission_revision = self
+                .room
+                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .await
+                .expect("room snapshot")
+                .admission_revision;
+            self.room
+                .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                    sender_jid: self.occupant.clone(),
+                    nick: "alice".to_owned(),
+                    affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                        waddle_xmpp::Affiliation::Member,
+                    ),
+                    local_domain: "example.com".to_owned(),
+                    admission_revision,
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                })
+                .await
+                .expect("the client rebinds the same resource and rejoins");
+        }
+    }
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before = metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0);
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let state = state_for(&f, sm.clone()).await;
+    let occupant: jid::FullJid = "alice@example.com/phone".parse().expect("occupant");
+    let submission = planned_room(&f, &state, Case::Lost, std::slice::from_ref(&occupant)).await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .cloned()
+        .expect("room fanout intent");
+    let receipt = receipt_key(&muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("room commit");
+    let key = decision.message_key.expect("key");
+    settle_non_delivery_effects(&f, &state, &decision).await;
+    depart(&state, &occupant).await;
+
+    let room = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: "recovery@muc.example.com".parse().expect("room"),
+        })
+        .await
+        .expect("registry lookup")
+        .expect("local room actor");
+    let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    hook_settlement_write_window(
+        key,
+        std::sync::Arc::new(RejoinOnce {
+            room,
+            occupant: occupant.clone(),
+            done: std::sync::atomic::AtomicBool::new(false),
+            ran: std::sync::Arc::clone(&hook_ran),
+        }) as std::sync::Arc<dyn SettlementWriteWindow>,
+    );
+
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(RoomOverrideEnvironment {
+        state: state.clone(),
+        registry: None,
+    });
+    assert_eq!(
+        pass(&f, &env, &MaintenanceCursor::default()).await,
+        MaintenanceOutcome::Complete
+    );
+
+    assert!(
+        hook_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the settlement-write hook must have run"
+    );
+    let mut tx = f.uow.begin().await.expect("inspect recovered row");
+    assert!(
+        DeliveryProgressRepository::load(&mut tx, key, &receipt)
+            .await
+            .expect("delivery progress")
+            .is_empty(),
+        "a resource that rejoined before the write is owed its copy"
+    );
+    assert!(
+        !EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash
+        )
+        .await
+        .expect("aggregate receipt"),
+        "the frozen fanout is not complete"
+    );
+    assert!(!CanonicalMessageRepository::is_terminal(&mut tx, key)
+        .await
+        .expect("terminal"));
+    tx.commit().await.expect("read commit");
+    assert_eq!(
+        metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0),
+        before,
+        "nothing was settled"
+    );
+    f.close().await;
+}
+
 #[tokio::test]
 async fn sqlite_departed_joined_occupant_stays_pending() {
     departed_recovery(IngressFixture::sqlite().await, DepartedCase::StillJoined).await;

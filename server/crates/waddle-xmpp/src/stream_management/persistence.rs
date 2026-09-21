@@ -351,6 +351,33 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// before the most recent restart.
     async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError>;
 
+    /// Enumerate the persisted sessions for one EXACT full JID.
+    ///
+    /// Separate from [`Self::list_all_sessions`] because its caller is an
+    /// eviction guard, not a startup rebuild: the #1803 resource-presence
+    /// probe runs per roster-absent occupant, locally and on every cluster
+    /// peer, inside a bounded fan-out budget. Answering it by loading and
+    /// decoding the whole `sm_sessions` table costs
+    /// `occupants x peers x stored sessions` decodes per maintenance pass.
+    ///
+    /// Decode semantics match [`Self::list_all_sessions`]: a row that matches
+    /// the JID but cannot be decoded is an error, never an omission. A caller
+    /// deciding whether to drop a durable obligation must read an undecodable
+    /// row as "cannot tell", so implementations MUST NOT skip poison rows here
+    /// even where a best-effort listing does.
+    ///
+    /// Default impl filters [`Self::list_all_sessions`] so in-memory backends
+    /// and test fakes keep working unchanged; SQL backends override it with an
+    /// exact `WHERE full_jid = ?` predicate over an index.
+    async fn list_sessions_for_full_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        let mut rows = self.list_all_sessions().await?;
+        rows.retain(|row| row.jid == *jid);
+        Ok(rows)
+    }
+
     /// Enumerate every persisted session AND its unacked queue in a
     /// single round-trip. Used by `restore_from_persistence` so cold
     /// startup doesn't issue an N+1 (1 list_all_sessions + N

@@ -375,6 +375,21 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for Unrea
         )
     }
 
+    /// The probe reads this method now, so the simulated outage has to reach
+    /// it — inheriting the default (which delegates to the scan above) would
+    /// leave the fail-closed assertion below passing for the wrong reason the
+    /// moment a backend overrides it.
+    async fn list_sessions_for_full_jid(
+        &self,
+        _jid: &jid::FullJid,
+    ) -> SmResult<Vec<waddle_xmpp::stream_management::persistence::PersistedSession>> {
+        Err(
+            waddle_xmpp::stream_management::persistence::SmPersistenceError::Other(
+                "simulated durable read failure".to_string(),
+            ),
+        )
+    }
+
     async fn store_session_atomic_with_principal(
         &self,
         principal: &waddle_xmpp::auth::AuthenticatedPrincipalRef,

@@ -5966,6 +5966,24 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         self.inner.list_all_sessions().await
     }
 
+    /// Fails under the same `fail_reads` arming as the unscoped listing: the
+    /// probe asks this method now, and a double that answered it happily while
+    /// only the scan failed would stop proving anything about fail-closed.
+    async fn list_sessions_for_full_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "simulated session-list failure".into(),
+            ));
+        }
+        self.inner.list_sessions_for_full_jid(jid).await
+    }
+
     async fn store_session_atomic(
         &self,
         session: super::super::persistence::PersistedSession,
@@ -7246,6 +7264,256 @@ async fn typed_resumable_session_probe_surfaces_durable_read_failure() {
     let storage = std::sync::Arc::new(FailingSnapshotPersistence::new());
     storage
         .fail_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
+    let jid: FullJid = "roamer@example.com/laptop".parse().expect("jid");
+
+    assert_eq!(
+        registry.probe_resumable_session_for_full_jid(&jid).await,
+        super::ResumableSessionProbe::Failed
+    );
+    assert!(registry.any_resumable_session_for_full_jid(&jid).await);
+}
+
+/// Durable store that refuses the whole-table scan. #1803 runs this probe per
+/// roster-absent occupant, locally and on every cluster peer, inside a bounded
+/// fan-out budget, so an implementation that answers by loading and decoding
+/// every `sm_sessions` row costs `occupants x peers x stored sessions` decodes
+/// per maintenance pass. Every other operation delegates, so the registry
+/// behaves normally otherwise.
+struct ScopedProbePersistence {
+    inner: super::super::persistence::InMemorySmPersistence,
+    fail_scoped: std::sync::atomic::AtomicBool,
+}
+
+impl ScopedProbePersistence {
+    fn new() -> Self {
+        Self {
+            inner: super::super::persistence::InMemorySmPersistence::new(),
+            fail_scoped: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl super::super::persistence::SmPersistenceStorage for ScopedProbePersistence {
+    async fn upsert_session(
+        &self,
+        session: super::super::persistence::PersistedSession,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.upsert_session(session).await
+    }
+
+    async fn get_session(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Option<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_session(stream_id).await
+    }
+
+    async fn delete_session(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.delete_session(stream_id).await
+    }
+
+    async fn append_unacked(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner.append_unacked(stanza).await
+    }
+
+    async fn ack_through(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        up_to_sequence: u32,
+    ) -> Result<u64, super::super::persistence::SmPersistenceError> {
+        self.inner.ack_through(stream_id, up_to_sequence).await
+    }
+
+    async fn delete_unacked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, super::super::persistence::SmPersistenceError> {
+        self.inner.delete_unacked(stream_id, sequences).await
+    }
+
+    async fn list_unacked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedUnackedStanza>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_unacked(stream_id).await
+    }
+
+    async fn list_expired_sessions(
+        &self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_expired_sessions(now).await
+    }
+
+    async fn list_all_sessions(
+        &self,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        panic!("the resource-presence probe must not scan every persisted session");
+    }
+
+    async fn list_sessions_for_full_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<
+        Vec<super::super::persistence::PersistedSession>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        if self.fail_scoped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "simulated scoped session-read failure".into(),
+            ));
+        }
+        self.inner.list_sessions_for_full_jid(jid).await
+    }
+
+    async fn store_session_atomic_with_principal(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+    ) -> Result<(), super::super::persistence::SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_principal(principal, session, unacked)
+            .await
+    }
+
+    async fn get_session_principal(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<Option<AuthenticatedPrincipalRef>, super::super::persistence::SmPersistenceError>
+    {
+        self.inner.get_session_principal(stream_id).await
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn store_session_atomic_with_principal_and_ingress_appends(
+        &self,
+        principal: &AuthenticatedPrincipalRef,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        appends: Vec<super::super::persistence::PersistedIngressAppend>,
+    ) -> Result<Vec<super::super::SmIngressAppendKey>, super::super::persistence::SmPersistenceError>
+    {
+        self.inner
+            .store_session_atomic_with_principal_and_ingress_appends(
+                principal, session, unacked, appends,
+            )
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &super::super::SmIngressAppendKey,
+    ) -> Result<
+        Option<super::super::persistence::PersistedIngressAppend>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
+    }
+}
+
+fn scoped_probe_row(stream_id: &str, jid: &FullJid) -> super::super::persistence::PersistedSession {
+    super::super::persistence::PersistedSession {
+        stream_id: crate::pending_delivery::SmSessionId::new(stream_id),
+        user_id: jid.to_bare().to_string(),
+        jid: jid.clone(),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        max_resume_time: Some(120),
+        detached_at: Utc::now(),
+        max_resume_duration: std::time::Duration::from_secs(120),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+    }
+}
+
+/// #1803: the probe asks the durable store about the EXACT full JID and never
+/// enumerates the table. The store panics on the scan, so a regression back to
+/// `list_all_sessions` fails loudly rather than merely slowly.
+#[tokio::test]
+async fn typed_resumable_session_probe_never_scans_every_session() {
+    let storage = std::sync::Arc::new(ScopedProbePersistence::new());
+    let mine: FullJid = "roamer@example.com/laptop".parse().expect("jid");
+    let sibling: FullJid = "roamer@example.com/phone".parse().expect("jid");
+    let stranger: FullJid = "other@example.com/laptop".parse().expect("jid");
+    for (stream_id, jid) in [
+        ("scoped-mine", &mine),
+        ("scoped-sibling", &sibling),
+        ("scoped-stranger", &stranger),
+    ] {
+        storage
+            .upsert_session(scoped_probe_row(stream_id, jid))
+            .await
+            .expect("upsert row");
+    }
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
+
+    assert_eq!(
+        registry.probe_resumable_session_for_full_jid(&mine).await,
+        super::ResumableSessionProbe::Present
+    );
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_full_jid(
+                &"roamer@example.com/tablet".parse::<FullJid>().expect("jid")
+            )
+            .await,
+        super::ResumableSessionProbe::Absent,
+        "a sibling resource's row is not this resource's session"
+    );
+}
+
+/// Fail-closed is bound to the scoped read the probe actually issues: a store
+/// that cannot answer it reports `Failed`, never `Absent`.
+#[tokio::test]
+async fn typed_resumable_session_probe_fails_closed_on_scoped_read_error() {
+    let storage = std::sync::Arc::new(ScopedProbePersistence::new());
+    storage
+        .fail_scoped
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
     let jid: FullJid = "roamer@example.com/laptop".parse().expect("jid");

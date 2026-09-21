@@ -33,6 +33,19 @@
 //! be absent from this node's own state AND denied by every unexpired
 //! cluster peer before its copy is dropped.
 //!
+//! Those probes take time — up to the whole fan-out budget — and the roster,
+//! unlike the room claim, cannot be fenced against it: it is actor memory,
+//! not durable state, so no transaction can hold it still. The roster is
+//! therefore asked a SECOND time immediately before the write. That NARROWS
+//! the window between the evidence and the commit; it does not close it, and
+//! a resource that rejoins after the recheck still has its frozen copy
+//! settled. What makes that acceptable is XEP-0045 itself: the rejoin is a
+//! NEW occupancy, and §7.2.14 gives a new occupant the room's discussion
+//! history on join rather than the traffic that predates it — the copy frozen
+//! against the previous occupancy was never owed to the new one. The message
+//! also stays in the room's XEP-0313 archive either way, so nothing leaves
+//! the room's record.
+//!
 //! Where such a copy is then delivered depends on who holds the socket:
 //!
 //! - A socket or resumable session on THIS node: the ordinary rebuild in this
@@ -67,6 +80,50 @@ use super::{recovery_executor::AttemptClassification, recovery_reachability, Rou
 /// Bounded budget for one room probe, matching the statement budget every
 /// recovery transaction runs under. A slower answer is not proof of absence.
 pub(super) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Test seam for the window [`still_departed`] narrows: between the
+/// reachability probes, which may spend the whole fan-out budget, and the
+/// settlement write.
+///
+/// Registered per canonical row rather than per task, for the same reason as
+/// `recovery_ghosts::GhostProbeWindow`: the settlement runs on the
+/// recovery-accounting worker task, so a `task_local` set around a
+/// maintenance pass never reaches it.
+#[cfg(test)]
+#[async_trait::async_trait]
+pub(crate) trait SettlementWriteWindow: Send + Sync {
+    async fn enter(&self, occupants: &[FullJid]);
+}
+
+#[cfg(test)]
+static SETTLEMENT_WRITE_WINDOWS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<MessageKey, std::sync::Arc<dyn SettlementWriteWindow>>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn hook_settlement_write_window(
+    key: MessageKey,
+    hook: std::sync::Arc<dyn SettlementWriteWindow>,
+) {
+    SETTLEMENT_WRITE_WINDOWS
+        .lock()
+        .expect("settlement write hooks")
+        .insert(key, hook);
+}
+
+#[cfg(test)]
+async fn enter_settlement_window(key: MessageKey, occupants: &[FullJid]) {
+    let hook = SETTLEMENT_WRITE_WINDOWS
+        .lock()
+        .expect("settlement write hooks")
+        .get(&key)
+        .map(std::sync::Arc::clone);
+    if let Some(hook) = hook {
+        hook.enter(occupants).await;
+    }
+}
 
 /// What one recovery attempt's departed-occupant settlement discharged.
 pub(super) struct DepartedSettlement {
@@ -173,6 +230,22 @@ pub(super) async fn settle_departed_occupants(
                 }
             }
         }
+        if departed.is_empty() {
+            continue;
+        }
+        #[cfg(test)]
+        enter_settlement_window(key, &departed).await;
+        // The probes above may have spent the whole fan-out budget. Ask the
+        // roster once more, immediately before the write, so a resource that
+        // rejoined inside that window keeps its copy.
+        let rechecked = still_departed(actor, departed).await;
+        if matches!(
+            rechecked.classification,
+            AttemptClassification::Inconclusive
+        ) {
+            settlement.classification = AttemptClassification::Inconclusive;
+        }
+        let departed = rechecked.occupants;
         if departed.is_empty() {
             continue;
         }
@@ -370,6 +443,44 @@ async fn proven_fence(
     _room: &BareJid,
 ) -> RoomAuthority {
     RoomAuthority::Local { actor, fence: None }
+}
+
+/// The outcome of the pre-write roster recheck.
+struct RecheckedDeparted {
+    /// Occupants the roster still does not list, and only those.
+    occupants: Vec<FullJid>,
+    /// `Inconclusive` when any recheck failed to answer: this attempt then
+    /// proved nothing about the occupants it dropped.
+    classification: AttemptClassification,
+}
+
+/// Re-ask the roster about every occupant this attempt is about to settle.
+///
+/// `Present` drops the occupant from the departed set — it rejoined during the
+/// probes, which makes it a NEW occupancy owed traffic from its join onward,
+/// and the ordinary rebuild handles the frozen copy. `Unknown` drops it too,
+/// and marks the attempt inconclusive: an unanswered recheck is not the
+/// second proof this settlement needs.
+async fn still_departed(actor: &ActorRef<RoomActor>, departed: Vec<FullJid>) -> RecheckedDeparted {
+    let mut rechecked = RecheckedDeparted {
+        occupants: Vec::with_capacity(departed.len()),
+        classification: AttemptClassification::Evaluable,
+    };
+    for occupant in departed {
+        match occupancy(actor, &occupant).await {
+            Occupancy::Absent => rechecked.occupants.push(occupant),
+            Occupancy::Present => {
+                tracing::debug!(
+                    %occupant,
+                    "departed occupant rejoined before the settlement committed; keeping its copy"
+                );
+            }
+            Occupancy::Unknown => {
+                rechecked.classification = AttemptClassification::Inconclusive;
+            }
+        }
+    }
+    rechecked
 }
 
 enum Occupancy {
