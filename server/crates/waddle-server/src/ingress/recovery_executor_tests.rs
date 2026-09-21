@@ -816,7 +816,17 @@ mod family_tests {
                     1,
                     "the successful sibling ran once and its receipt is part of the cached evidence"
                 );
-                assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+                assert_eq!(
+                    fixture.count("ingress_effect_receipts").await,
+                    2,
+                    // #1803: the synthetic legacy MUC sibling names a room NO
+                    // node hosts, and its single frozen occupant is reachable
+                    // nowhere, so maintenance settles that copy and the
+                    // fanout's aggregate receipt lands on the first pass. The
+                    // warning-only observer is still the reason the row stays
+                    // pending, and is still cached rather than re-invoked.
+                    "the successful sibling's receipt, plus the settled legacy MUC fanout's"
+                );
             } else {
                 family_recovered(&fixture, key, 1).await;
             }

@@ -56,6 +56,45 @@ fn muc_status_codes(
     statuses
 }
 
+/// Why an unavailable presence is leaving the room, for the XEP-0045
+/// §"Service removes user because of error response" (`#service-error-kick`)
+/// OPTIONAL status code 333.
+///
+/// Typed rather than a bare status string at the call sites: the code belongs
+/// to a closed vocabulary this module owns, and the callers that know the
+/// reason (the disconnect sweep, the #1803 ghost repair) are nowhere near the
+/// XML. Deliberately distinct from
+/// [`crate::muc::durable::OccupancyLeaveCause`], which is fingerprinted into
+/// the durable room lifecycle: this one is presentational only and never
+/// reaches a durable encoding or a clustering wire type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MucRemovalCause {
+    /// The occupant's own departure — an explicit `<presence
+    /// type='unavailable'/>`, or a session that ended. The §7.14 shape, with
+    /// no removal status code.
+    #[default]
+    Voluntary,
+    /// The SERVICE removed the occupant because of a technical problem it
+    /// detected, not because of any user action: XEP-0045
+    /// `#service-error-kick`'s status 333. Waddle's case is the "Ghost Users"
+    /// availability check — maintenance proved no socket, no resumable
+    /// session and no cluster peer can reach the occupant, so the service
+    /// treats it "as if the user had itself sent unavailable presence". 307 is
+    /// deliberately NOT emitted alongside it: the XEP calls that "generally
+    /// not advisable", since such removals are linked to no moderator action.
+    TechnicalProblem,
+}
+
+impl MucRemovalCause {
+    /// The removal status code this cause contributes, if any.
+    const fn status_code(self) -> Option<&'static str> {
+        match self {
+            Self::Voluntary => None,
+            Self::TechnicalProblem => Some("333"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MucPresenceStatus {
     pub is_self: bool,
@@ -63,6 +102,9 @@ pub struct MucPresenceStatus {
     /// True only for the joiner's initial self-presence: adds the
     /// XEP-0045 §7.2.3 status 100 non-anonymous warning.
     pub warn_nonanonymous_join: bool,
+    /// Only [`build_leave_presence`] reads this: why the occupant is being
+    /// removed, which decides the `#service-error-kick` status 333.
+    pub removal: MucRemovalCause,
 }
 
 impl MucPresenceStatus {
@@ -71,6 +113,7 @@ impl MucPresenceStatus {
             is_self,
             room_created: false,
             warn_nonanonymous_join,
+            removal: MucRemovalCause::Voluntary,
         }
     }
 
@@ -79,7 +122,15 @@ impl MucPresenceStatus {
             is_self: true,
             room_created: true,
             warn_nonanonymous_join,
+            removal: MucRemovalCause::Voluntary,
         }
+    }
+
+    /// The same status with a service-side removal cause, for the unavailable
+    /// presence a leave sweep sends the leaver and broadcasts to the room.
+    pub const fn removed_by(mut self, removal: MucRemovalCause) -> Self {
+        self.removal = removal;
+        self
     }
 }
 
@@ -253,6 +304,12 @@ pub fn build_leave_presence(
     let mut status_codes: Vec<&str> = Vec::new();
     if status.is_self {
         status_codes.push("110");
+    }
+    // XEP-0045 `#service-error-kick`: when the service supports the OPTIONAL
+    // 333 code it MUST appear both in the presence to the removed user (next
+    // to 110) and in the presences to the other occupants.
+    if let Some(code) = status.removal.status_code() {
+        status_codes.push(code);
     }
 
     let item = build_muc_user_item(affiliation, "none", identity.real_jid, None, None);

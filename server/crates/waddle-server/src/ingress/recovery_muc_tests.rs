@@ -26,25 +26,64 @@ async fn planned_room(
     case: Case,
     resources: &[jid::FullJid],
 ) -> IngressSubmission {
+    planned_room_with_origin(f, state, case, resources, "muc-recovery").await
+}
+
+/// The same planning pass under a caller-chosen XEP-0359 origin id, so one
+/// test can commit SEVERAL distinct canonical rows for the same room and the
+/// same occupants — the shape one ghost pinning several rows takes (#1803).
+async fn planned_room_with_origin(
+    f: &IngressFixture,
+    state: &WebSocketState,
+    case: Case,
+    resources: &[jid::FullJid],
+    origin: &str,
+) -> IngressSubmission {
     let room: jid::BareJid = "recovery@muc.example.com".parse().expect("room");
-    let mut submission = f.submission(Some("muc-recovery"), "frozen original content");
-    let actor = state
+    let mut submission = f.submission(Some(origin), "frozen original content");
+    // Get-or-create: a second obligation for the SAME room reuses the live
+    // incarnation, exactly as a second client message would.
+    let existing = state
         .deps
         .protocol
         .room_registry
-        .ask(CreateRoom {
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
             room_jid: room.clone(),
-            waddle_id: "recovery".into(),
-            channel_id: "recovery".into(),
-            config: Default::default(),
         })
         .await
-        .expect("room");
+        .expect("registry lookup");
+    let actor = match existing {
+        Some(actor) => actor,
+        None => state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "recovery".into(),
+                channel_id: "recovery".into(),
+                config: Default::default(),
+            })
+            .await
+            .expect("room"),
+    };
     for (resource, nick) in resources
         .iter()
         .map(|r| (r, r.node().expect("node").as_str()))
         .chain(std::iter::once((&submission.sender, "romeo")))
     {
+        // A reused room already seats these occupants; re-joining them would
+        // only collide on the nick.
+        if actor
+            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+                jid: resource.clone(),
+            })
+            .await
+            .expect("occupancy probe")
+            .is_some()
+        {
+            continue;
+        }
         actor
             .ask(Join {
                 nick: nick.into(),
@@ -444,8 +483,37 @@ paired!(
     Case::OccupantPm
 );
 
+/// A maintenance pass whose per-row deadline is `recovery_row` rather than the
+/// generous one the rest of these tests run under: the #1803 probe loops are
+/// bounded by exactly that deadline, so a test that measures them has to use
+/// the production value.
+async fn pass_with_row_deadline(
+    f: &IngressFixture,
+    env: &Arc<dyn RecoveryEnvironment>,
+    cursor: &MaintenanceCursor,
+    recovery_row: Duration,
+) -> MaintenanceOutcome {
+    run_maintenance_pass_with_cursor(
+        &f.db,
+        &f.uow,
+        MaintenanceBudget {
+            recovery_row,
+            ..immediate_recovery_budget()
+        },
+        cursor,
+        Some(env.clone()),
+    )
+    .await
+}
+
 #[path = "recovery_muc_pin_tests.rs"]
 mod pin;
+
+#[path = "recovery_departed_tests.rs"]
+mod departed;
+
+#[path = "recovery_ghosts_tests.rs"]
+mod ghosts;
 
 #[cfg(feature = "clustering")]
 #[path = "recovery_muc_remote_tests.rs"]
@@ -466,6 +534,14 @@ async fn sqlite_muc_occupant_progress_resets_streak_and_parked_copy_recovers_aft
         .into_iter()
         .map(|resource| resource.parse().expect("occupant"))
         .collect();
+    // Both occupants keep a resumable session in the SHARED DURABLE store and
+    // none in this node's memory, so the row stalls on delivery alone: a
+    // seated occupant with no session anywhere would be evicted as an
+    // XEP-0045 ghost (#1803) and the row would never reach its cooldown.
+    let elsewhere = persistent_sm(&fixture).await;
+    for resource in &resources {
+        store_detached(&elsewhere, resource).await;
+    }
     let submission = planned_room(&fixture, &state, Case::Unavailable, &resources).await;
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await

@@ -2087,6 +2087,34 @@ impl kameo::message::Message<GetOccupantByJid> for RoomActor {
     }
 }
 
+/// The exact occupancy session a cleanup must target to remove `jid` from
+/// this room, in one round-trip with the presence check.
+///
+/// A caller that evicts an abandoned occupancy (XEP-0045 "Ghost Users") must
+/// pin the generation it observed: with
+/// [`LeaveSessionSelector::Any`](LeaveSessionSelector) a same-full-JID session
+/// that joined in the meantime would be evicted instead. Two asks —
+/// [`GetOccupantByJid`] then a snapshot — could straddle exactly that rejoin,
+/// so presence and generation are read from one consistent state here.
+/// `None` means "not seated, or no generation to pin": either way there is
+/// nothing this caller may evict.
+pub struct GetOccupantSessionGeneration {
+    pub jid: FullJid,
+}
+
+impl kameo::message::Message<GetOccupantSessionGeneration> for RoomActor {
+    type Reply = Option<waddle_xmpp_core::OccupancySessionGeneration>;
+
+    async fn handle(
+        &mut self,
+        msg: GetOccupantSessionGeneration,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.room.find_occupant_by_real_jid(&msg.jid)?;
+        self.room.session_generation(&msg.jid)
+    }
+}
+
 /// Resolve the SFU media-grant inputs for `jid` in one round-trip:
 /// whether they are a current occupant, and if so their XEP-0045
 /// voice (which needs both the role and the room's moderation).

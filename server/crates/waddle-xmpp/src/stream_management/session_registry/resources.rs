@@ -670,13 +670,16 @@ impl InMemorySmSessionRegistry {
         let Some(persistence) = self.persistence.as_ref() else {
             return ResumableSessionProbe::Absent;
         };
-        match persistence.list_all_sessions().await {
+        // Scoped to the exact full JID: #1803 runs this probe per roster-absent
+        // occupant, locally and on every cluster peer, inside a bounded fan-out
+        // budget, so enumerating `sm_sessions` here would cost
+        // `occupants x peers x stored sessions` row decodes per pass.
+        match persistence.list_sessions_for_full_jid(jid).await {
             Ok(rows) => {
                 let now = chrono::Utc::now();
                 if rows.iter().any(|row| {
-                    row.jid == *jid
-                        && now.signed_duration_since(row.detached_at).to_std().ok()
-                            <= Some(row.max_resume_duration)
+                    now.signed_duration_since(row.detached_at).to_std().ok()
+                        <= Some(row.max_resume_duration)
                 }) {
                     ResumableSessionProbe::Present
                 } else {

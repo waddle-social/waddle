@@ -16,7 +16,7 @@ use waddle_xmpp::muc::room_actor::{
     LeaveDisposition, LeaveOutcome, LeaveSessionSelector, SealGuard,
 };
 use waddle_xmpp::muc::room_registry_actor::{RoomAcquisition, RoomRegistryError};
-use waddle_xmpp::muc::RoomRegistry;
+use waddle_xmpp::muc::{MucRemovalCause, RoomRegistry};
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -235,6 +235,7 @@ pub(crate) async fn echo_muc_self_unavailable(
     sender_jid: &FullJid,
     leaving_room_jid: &FullJid,
     affiliation: waddle_xmpp_core::Affiliation,
+    removal: MucRemovalCause,
 ) {
     let from_jid = leaving_room_jid.clone();
     let sender_bare = sender_jid.to_bare();
@@ -247,7 +248,7 @@ pub(crate) async fn echo_muc_self_unavailable(
         &from_jid,
         sender_jid,
         affiliation,
-        waddle_xmpp::muc::MucPresenceStatus::new(true, false),
+        waddle_xmpp::muc::MucPresenceStatus::new(true, false).removed_by(removal),
         &identity,
     );
     super::handlers::presence::route_room_presence_to_occupant(
@@ -293,6 +294,7 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     outcome: &LeaveOutcome,
+    removal: MucRemovalCause,
     progress: Option<LeaveFanOutProgress<'_>>,
 ) {
     if !outcome.removed_last_session {
@@ -316,7 +318,7 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
             &from_jid,
             occupant_jid,
             outcome.affiliation,
-            waddle_xmpp::muc::MucPresenceStatus::new(false, false),
+            waddle_xmpp::muc::MucPresenceStatus::new(false, false).removed_by(removal),
             &identity,
         );
         super::handlers::presence::route_room_presence_to_occupant(
@@ -406,7 +408,57 @@ pub async fn cleanup_muc_presence_for_jid(
     jid: &FullJid,
     session: LeaveSessionSelector,
 ) -> MucCleanupOutcome {
-    if cleanup_muc_presence(state, jid, session).await {
+    if cleanup_muc_presence(state, jid, session, MucRemovalCause::Voluntary).await {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
+}
+
+/// Hand the local-departure janitor responsibility for unseating an occupancy
+/// maintenance proved abandoned (#1803), BEFORE any inline sweep runs.
+///
+/// Synchronous on purpose: the ghost repair settles a whole chunk of copies and
+/// then sweeps the ghosts one by one under a bounded budget, and a cancellation
+/// between two sweeps must not leave an already-settled ghost with nobody owing
+/// its removal. The inline sweep that follows is an optimization; when it has
+/// already unseated the occupancy the janitor's redrive is a generation-scoped
+/// leave that answers `NotOccupant` and completes.
+pub(crate) fn retain_abandoned_muc_occupancy_sweep(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+    removal: MucRemovalCause,
+) {
+    let remote_ceiling = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .generation_watermark();
+    state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .record(LocalDepartureItem::FullJidSweep {
+            jid: jid.clone(),
+            selector: session,
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            remote_ceiling,
+            removal,
+        });
+}
+
+/// A fresh full-JID leave sweep for an occupancy maintenance proved abandoned
+/// (#1803). Unlike [`redrive_local_muc_cleanup`] it is not replaying a sweep the
+/// janitor already holds, so a room enumeration or lookup failure records a
+/// `FullJidSweep` and the local-departure janitor retries the eviction.
+pub(crate) async fn sweep_abandoned_muc_occupancy(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+    removal: MucRemovalCause,
+) -> MucCleanupOutcome {
+    if cleanup_muc_presence(state, jid, session, removal).await {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -420,6 +472,7 @@ pub(crate) async fn redrive_local_muc_cleanup(
     session: LeaveSessionSelector,
     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
     remote_ceiling: u64,
+    removal: MucRemovalCause,
 ) -> MucCleanupOutcome {
     // The redrive re-uses the ORIGINAL sweep's attempt as its occupancy-order
     // ceiling: sessions that (re)joined since are classified `Superseded` by
@@ -430,9 +483,12 @@ pub(crate) async fn redrive_local_muc_cleanup(
         jid,
         session,
         None,
-        attempt,
-        SweepFailureRecording::JanitorRequeues { remote_ceiling },
-        LocalRoomSweepScope::EveryRoom,
+        LocalSweep {
+            attempt,
+            recording: SweepFailureRecording::JanitorRequeues { remote_ceiling },
+            scope: LocalRoomSweepScope::EveryRoom,
+            removal,
+        },
     )
     .await
     {
@@ -456,9 +512,12 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
         jid,
         session,
         Some(&origin),
-        waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-        SweepFailureRecording::RecordSweep,
-        LocalRoomSweepScope::EveryRoom,
+        LocalSweep {
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            recording: SweepFailureRecording::RecordSweep,
+            scope: LocalRoomSweepScope::EveryRoom,
+            removal: MucRemovalCause::Voluntary,
+        },
     )
     .await
     {
@@ -505,13 +564,16 @@ pub(crate) async fn redrive_remote_muc_cleanup(
         jid,
         LeaveSessionSelector::Any,
         None,
-        waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-        // The remote-membership reconciler already re-drives from the
-        // authoritative membership snapshots, so this retry must not widen a
-        // failed pass into a local `FullJidSweep` with selector `Any`.
-        SweepFailureRecording::JanitorRequeues { remote_ceiling },
-        LocalRoomSweepScope::MembershipBacked {
-            except: live_generation,
+        LocalSweep {
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            // The remote-membership reconciler already re-drives from the
+            // authoritative membership snapshots, so this retry must not widen
+            // a failed pass into a local `FullJidSweep` with selector `Any`.
+            recording: SweepFailureRecording::JanitorRequeues { remote_ceiling },
+            scope: LocalRoomSweepScope::MembershipBacked {
+                except: live_generation,
+            },
+            removal: MucRemovalCause::Voluntary,
         },
     )
     .await
@@ -1325,9 +1387,12 @@ async fn cleanup_connection_shutdown_inner(
                             &jid,
                             LeaveSessionSelector::Generation(conn.occupancy_session),
                             cleanup_origin.as_ref(),
-                            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                            SweepFailureRecording::RecordSweep,
-                            LocalRoomSweepScope::EveryRoom,
+                            LocalSweep {
+                                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                                recording: SweepFailureRecording::RecordSweep,
+                                scope: LocalRoomSweepScope::EveryRoom,
+                                removal: MucRemovalCause::Voluntary,
+                            },
                         )
                         .await;
                         // ADR-0017 Phase 1: mirror the unregister into the
@@ -1367,6 +1432,7 @@ async fn cleanup_connection_shutdown_inner(
                             state,
                             &jid,
                             LeaveSessionSelector::Generation(conn.occupancy_session),
+                            MucRemovalCause::Voluntary,
                         )
                         .await;
                     }
@@ -1404,9 +1470,12 @@ async fn cleanup_connection_shutdown_inner(
             &jid,
             LeaveSessionSelector::Generation(conn.occupancy_session),
             cleanup_origin.as_ref(),
-            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-            SweepFailureRecording::RecordSweep,
-            LocalRoomSweepScope::EveryRoom,
+            LocalSweep {
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                recording: SweepFailureRecording::RecordSweep,
+                scope: LocalRoomSweepScope::EveryRoom,
+                removal: MucRemovalCause::Voluntary,
+            },
         )
         .await;
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
@@ -2289,9 +2358,12 @@ async fn refuse_detach_without_principal(
             jid,
             LeaveSessionSelector::Generation(conn.occupancy_session),
             cleanup_origin.as_ref(),
-            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-            SweepFailureRecording::RecordSweep,
-            LocalRoomSweepScope::EveryRoom,
+            LocalSweep {
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                recording: SweepFailureRecording::RecordSweep,
+                scope: LocalRoomSweepScope::EveryRoom,
+                removal: MucRemovalCause::Voluntary,
+            },
         )
         .await;
         if !replacement_took_over {
@@ -2376,15 +2448,19 @@ async fn cleanup_muc_presence(
     state: &WebSocketState,
     jid: &FullJid,
     session: LeaveSessionSelector,
+    removal: MucRemovalCause,
 ) -> bool {
     cleanup_muc_presence_with_origin(
         state,
         jid,
         session,
         None,
-        waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-        SweepFailureRecording::RecordSweep,
-        LocalRoomSweepScope::EveryRoom,
+        LocalSweep {
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            recording: SweepFailureRecording::RecordSweep,
+            scope: LocalRoomSweepScope::EveryRoom,
+            removal,
+        },
     )
     .await
 }
@@ -2429,6 +2505,7 @@ fn retain_remote_membership_departure(
     jid: &FullJid,
     occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    removal: MucRemovalCause,
 ) {
     state
         .deps
@@ -2441,7 +2518,20 @@ fn retain_remote_membership_departure(
             selector: LeaveSessionSelector::Generation(occupant_session),
             attempt,
             notified: HashSet::new(),
+            removal,
         });
+}
+
+/// Everything one full-JID leave sweep needs beyond "which JID, which
+/// session": its occupancy-order fence, what it does with a failure, which
+/// local rooms it covers, and what the §7.14 broadcast says about WHY.
+#[derive(Clone, Copy)]
+struct LocalSweep {
+    /// The occupancy-order ceiling shared by every room in this pass.
+    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    recording: SweepFailureRecording,
+    scope: LocalRoomSweepScope,
+    removal: MucRemovalCause,
 }
 
 async fn cleanup_muc_presence_with_origin(
@@ -2449,10 +2539,14 @@ async fn cleanup_muc_presence_with_origin(
     jid: &FullJid,
     session: LeaveSessionSelector,
     origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-    sweep_attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
-    sweep_recording: SweepFailureRecording,
-    sweep_scope: LocalRoomSweepScope,
+    sweep: LocalSweep,
 ) -> bool {
+    let LocalSweep {
+        attempt: sweep_attempt,
+        recording: sweep_recording,
+        scope: sweep_scope,
+        removal,
+    } = sweep;
     let remote_ceiling = match sweep_recording {
         SweepFailureRecording::RecordSweep => state
             .deps
@@ -2509,6 +2603,7 @@ async fn cleanup_muc_presence_with_origin(
                     jid,
                     *occupant_session,
                     sweep_attempt,
+                    removal,
                 );
             }
             if sweep_recording == SweepFailureRecording::RecordSweep {
@@ -2518,6 +2613,7 @@ async fn cleanup_muc_presence_with_origin(
                         selector: session,
                         attempt: sweep_attempt,
                         remote_ceiling,
+                        removal,
                     },
                 );
             }
@@ -2544,6 +2640,7 @@ async fn cleanup_muc_presence_with_origin(
                         jid,
                         *occupant_session,
                         sweep_attempt,
+                        removal,
                     );
                 } else if sweep_recording == SweepFailureRecording::RecordSweep {
                     state.deps.protocol.pending_local_muc_departures.record(
@@ -2552,6 +2649,7 @@ async fn cleanup_muc_presence_with_origin(
                             selector: session,
                             attempt: sweep_attempt,
                             remote_ceiling,
+                            removal,
                         },
                     );
                 }
@@ -2571,6 +2669,7 @@ async fn cleanup_muc_presence_with_origin(
             selector: session,
             attempt,
             notified: HashSet::new(),
+            removal,
         };
         state
             .deps
@@ -2661,6 +2760,7 @@ async fn cleanup_muc_presence_with_origin(
                     &room_jid,
                     jid,
                     &outcome,
+                    removal,
                     Some(LeaveFanOutProgress {
                         skip: &NO_SKIP,
                         record: Some((
@@ -2718,6 +2818,7 @@ async fn cleanup_muc_presence_with_origin(
                         },
                         attempt,
                         notified: HashSet::new(),
+                        removal,
                     },
                 );
             }
@@ -2759,6 +2860,7 @@ async fn cleanup_muc_presence_with_origin(
                         selector: session,
                         attempt,
                         notified: HashSet::new(),
+                        removal,
                     },
                 );
                 warn!(room = %room_jid, jid = %jid, "MUC leave ask timed out on disconnect; retained for retry");
@@ -2779,6 +2881,7 @@ async fn cleanup_muc_presence_with_origin(
                         selector: session,
                         attempt,
                         notified: HashSet::new(),
+                        removal,
                     },
                 );
                 warn!(
@@ -3379,6 +3482,7 @@ pub(super) async fn cleanup_invalidated_detached_session(
         state,
         &detached.jid,
         LeaveSessionSelector::Generation(detached.occupancy_session),
+        MucRemovalCause::Voluntary,
     )
     .await;
 }
@@ -4585,6 +4689,205 @@ mod local_departure_cleanup_tests {
         super::cleanup_muc_presence_for_jid(state, jid, LeaveSessionSelector::Any).await
     }
 
+    /// #1814 (Greptile on #1803): a sweep whose per-ROOM leave could not
+    /// complete retains a `RoomDeparture`, and the local-departure janitor —
+    /// not the sweep — is what finally unseats the occupancy and tells the
+    /// remaining occupants. The retained item therefore has to carry WHY, or
+    /// the delayed §7.14 broadcast silently drops XEP-0045
+    /// `#service-error-kick`'s status 333 that the inline path emits.
+    ///
+    /// Drives the whole path: a ghost-eviction sweep whose room leave defers,
+    /// then the janitor's replay, and asserts the exact status codes the
+    /// remaining occupant sees.
+    async fn assert_deferred_sweep_replay_carries(
+        room_name: &str,
+        removal: MucRemovalCause,
+        expected_codes: Vec<String>,
+    ) {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room_jid = room_jid(room_name);
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let ghost = full_jid("ghost@example.com/web");
+        let watcher = full_jid("watcher@example.com/phone");
+        join_member(&room_actor, &ghost, "ghost").await;
+        join_member(&room_actor, &watcher, "watcher").await;
+        let (watcher_tx, mut watcher_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &watcher, watcher_tx).await;
+        while watcher_rx.try_recv().is_ok() {}
+
+        // The room's leave projection cannot commit: the actor answers
+        // `Deferred` and the sweep retains the departure instead.
+        store.set_leave_mode(LeaveProjectionMode::OwnershipUnavailable);
+        assert_eq!(
+            sweep_abandoned_muc_occupancy(
+                state.as_ref(),
+                &ghost,
+                LeaveSessionSelector::Any,
+                removal,
+            )
+            .await,
+            MucCleanupOutcome::Failed
+        );
+        assert!(
+            watcher_rx.try_recv().is_err(),
+            "a deferred leave broadcasts nothing yet"
+        );
+
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(retained.len(), 1, "one deferred room departure is retained");
+        let LocalDepartureItem::RoomDeparture {
+            removal: retained_removal,
+            ..
+        } = &retained[0].item
+        else {
+            panic!(
+                "expected a retained room departure, got {:?}",
+                retained[0].item
+            );
+        };
+        assert_eq!(
+            *retained_removal, removal,
+            "the retained retry must remember why the occupancy is being removed"
+        );
+
+        // Hand the item back to the inventory exactly as it was retained and
+        // let the janitor drive the replay against a healthy store.
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record(retained[0].item.clone());
+        store.set_leave_mode(LeaveProjectionMode::Succeed);
+        crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
+
+        let unavailable = std::iter::from_fn(|| watcher_rx.try_recv().ok())
+            .find_map(|outbound| match outbound.stanza {
+                Stanza::Presence(presence)
+                    if presence.type_ == xmpp_parsers::presence::Type::Unavailable =>
+                {
+                    Some(presence)
+                }
+                _ => None,
+            })
+            .expect("the janitor replay tells the remaining occupant");
+        let x = unavailable
+            .payloads
+            .iter()
+            .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))
+            .expect("muc#user payload");
+        let codes: Vec<String> = x
+            .children()
+            .filter(|child| child.is("status", waddle_xmpp::muc::presence::NS_MUC_USER))
+            .filter_map(|child| child.attr("code").map(str::to_owned))
+            .collect();
+        assert_eq!(
+            codes, expected_codes,
+            "a delayed replay must emit the same XEP-0045 status codes the inline sweep would"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_ghost_eviction_replays_with_status_333() {
+        assert_deferred_sweep_replay_carries(
+            "deferred-ghost",
+            MucRemovalCause::TechnicalProblem,
+            vec!["333".to_owned()],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn deferred_ordinary_disconnect_replays_without_a_removal_status() {
+        assert_deferred_sweep_replay_carries(
+            "deferred-disconnect",
+            MucRemovalCause::Voluntary,
+            Vec::new(),
+        )
+        .await;
+    }
+
+    /// The other retention path into the same replay: the leave ask itself
+    /// never answers, so the sweep retains a `RoomDeparture` from its
+    /// `LeaveAskFailure::Timeout` arm. That arm must preserve the cause too.
+    async fn assert_timed_out_sweep_retains(room_name: &str, removal: MucRemovalCause) {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room_jid = room_jid(room_name);
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let ghost = full_jid("ghost@example.com/web");
+        join_member(&room_actor, &ghost, "ghost").await;
+        // The projection never completes, so the whole ask outruns
+        // `LEAVE_ASK_TIMEOUT` and the sweep takes its timeout arm.
+        store.set_leave_mode(LeaveProjectionMode::Hang);
+        assert_eq!(
+            sweep_abandoned_muc_occupancy(
+                state.as_ref(),
+                &ghost,
+                LeaveSessionSelector::Any,
+                removal,
+            )
+            .await,
+            MucCleanupOutcome::Failed
+        );
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(retained.len(), 1, "the timed-out departure is retained");
+        let LocalDepartureItem::RoomDeparture {
+            removal: retained_removal,
+            ..
+        } = &retained[0].item
+        else {
+            panic!(
+                "expected a retained room departure, got {:?}",
+                retained[0].item
+            );
+        };
+        assert_eq!(
+            *retained_removal, removal,
+            "the timeout arm must remember why the occupancy is being removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_ghost_eviction_retains_the_service_removal_cause() {
+        assert_timed_out_sweep_retains("timeout-ghost", MucRemovalCause::TechnicalProblem).await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_ordinary_disconnect_retains_the_voluntary_cause() {
+        assert_timed_out_sweep_retains("timeout-disconnect", MucRemovalCause::Voluntary).await;
+    }
+
     #[tokio::test]
     async fn disconnect_cleanup_deferred_leave_records_room_departure_and_does_not_broadcast() {
         let store = CleanupProjectionStore::new();
@@ -4670,6 +4973,44 @@ mod local_departure_cleanup_tests {
             .pending_local_muc_departures
             .take_due(Instant::now());
         assert_eq!(due.len(), 1);
+        assert!(
+            matches!(
+                &due[0].item,
+                LocalDepartureItem::FullJidSweep { jid: sweep_jid, .. } if sweep_jid == &jid
+            ),
+            "enumeration failure retains a full-JID sweep: {:?}",
+            due[0].item
+        );
+    }
+
+    /// #1803: the ghost eviction is a fresh pass, so a registry that cannot
+    /// enumerate the rooms must leave the janitor a full-JID sweep to retry.
+    /// The janitor-redrive entry point would retain nothing here.
+    #[tokio::test]
+    async fn abandoned_occupancy_sweep_enumeration_failure_records_full_jid_sweep() {
+        let state = create_test_websocket_state().await;
+        state.deps.protocol.room_registry.kill();
+        state.deps.protocol.room_registry.wait_for_shutdown().await;
+
+        let jid = full_jid("ghost@example.com/web");
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        assert_eq!(
+            sweep_abandoned_muc_occupancy(
+                state.as_ref(),
+                &jid,
+                LeaveSessionSelector::Generation(generation),
+                MucRemovalCause::TechnicalProblem,
+            )
+            .await,
+            MucCleanupOutcome::Failed
+        );
+
+        let due = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(due.len(), 1, "the failed eviction is retained for retry");
         assert!(
             matches!(
                 &due[0].item,
@@ -4797,9 +5138,12 @@ mod local_departure_cleanup_tests {
                 &alice,
                 LeaveSessionSelector::Generation(generation),
                 None,
-                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                SweepFailureRecording::RecordSweep,
-                LocalRoomSweepScope::EveryRoom,
+                LocalSweep {
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    recording: SweepFailureRecording::RecordSweep,
+                    scope: LocalRoomSweepScope::EveryRoom,
+                    removal: MucRemovalCause::Voluntary,
+                },
             )
             .await
         );
@@ -4843,9 +5187,12 @@ mod local_departure_cleanup_tests {
                 &alice,
                 LeaveSessionSelector::Generation(first_generation),
                 None,
-                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                SweepFailureRecording::RecordSweep,
-                LocalRoomSweepScope::EveryRoom,
+                LocalSweep {
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    recording: SweepFailureRecording::RecordSweep,
+                    scope: LocalRoomSweepScope::EveryRoom,
+                    removal: MucRemovalCause::Voluntary,
+                },
             )
             .await
         );
@@ -4906,9 +5253,12 @@ mod local_departure_cleanup_tests {
                 &alice,
                 LeaveSessionSelector::Generation(first_generation),
                 None,
-                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                SweepFailureRecording::RecordSweep,
-                LocalRoomSweepScope::EveryRoom,
+                LocalSweep {
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    recording: SweepFailureRecording::RecordSweep,
+                    scope: LocalRoomSweepScope::EveryRoom,
+                    removal: MucRemovalCause::Voluntary,
+                },
             )
             .await
         );
@@ -4963,9 +5313,12 @@ mod local_departure_cleanup_tests {
                 &alice,
                 LeaveSessionSelector::Generation(generation),
                 None,
-                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                SweepFailureRecording::RecordSweep,
-                LocalRoomSweepScope::EveryRoom,
+                LocalSweep {
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    recording: SweepFailureRecording::RecordSweep,
+                    scope: LocalRoomSweepScope::EveryRoom,
+                    removal: MucRemovalCause::Voluntary,
+                },
             )
             .await
         );
@@ -5022,9 +5375,12 @@ mod local_departure_cleanup_tests {
                 &alice,
                 LeaveSessionSelector::Generation(first_generation),
                 None,
-                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                SweepFailureRecording::RecordSweep,
-                LocalRoomSweepScope::EveryRoom,
+                LocalSweep {
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    recording: SweepFailureRecording::RecordSweep,
+                    scope: LocalRoomSweepScope::EveryRoom,
+                    removal: MucRemovalCause::Voluntary,
+                },
             )
             .await
         );

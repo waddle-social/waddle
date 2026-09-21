@@ -146,6 +146,16 @@ impl RouteProgress {
         matches!(self.obligation, ProgressObligation::Direct { .. })
     }
 
+    /// The room whose occupancy owns this frozen fanout, or `None` for a
+    /// direct route, whose audience no room roster can decide.
+    pub(crate) fn room(&self) -> Option<&BareJid> {
+        match &self.obligation {
+            ProgressObligation::Direct { .. } => None,
+            ProgressObligation::MucGroupchat { room, .. }
+            | ProgressObligation::MucSystemBroadcast { room, .. } => Some(room),
+        }
+    }
+
     /// Correlation includes drifted/completed occupants for replay filtering,
     /// but excludes sender reflection, which never carries aggregate evidence.
     pub(crate) fn correlates(&self, effect: &ExternalEffect) -> bool {

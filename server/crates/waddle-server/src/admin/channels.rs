@@ -2287,6 +2287,7 @@ async fn run_group_dm_leave(
                 selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 attempt,
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             };
             pending_local_muc_departures.record_in_flight(in_flight.clone());
             let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
@@ -2347,6 +2348,7 @@ async fn run_group_dm_leave(
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
+                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                         },
                     );
                 }
@@ -2362,6 +2364,7 @@ async fn run_group_dm_leave(
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
+                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                         },
                     );
                 }
@@ -2378,6 +2381,7 @@ async fn run_group_dm_leave(
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
+                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                         },
                     );
                 }
@@ -2391,6 +2395,7 @@ async fn run_group_dm_leave(
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
+                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                         },
                     );
                 }

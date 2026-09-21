@@ -94,6 +94,18 @@ enum ClassificationEpisode {
     Classified,
 }
 
+/// What one accounted attempt asks the maintenance worker to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StallVerdict {
+    /// Nothing to decide: the row made progress, its attempt was
+    /// inconclusive, or its streak has not reached the threshold.
+    Open,
+    /// The streak just reached the threshold. The row is neither suppressed
+    /// nor classified yet: the caller gets one bounded repair attempt, then
+    /// calls [`StalledRows::repaired`] or [`StalledRows::park`].
+    Stalled,
+}
+
 struct StalledRow {
     evidence: RecoveryEvidence,
     consecutive: u32,
@@ -111,16 +123,18 @@ pub(super) struct StalledRows {
 }
 
 impl StalledRows {
+    /// Account for one attempt, without deciding the row's fate: parking and
+    /// classification are the caller's, after its repair attempt.
     pub(super) fn account(
         &mut self,
         attempt: &RecoveryAttempt,
         fresh: RecoveryEvidence,
         budget: MaintenanceBudget,
         suppressed: &mut UnsupportedRows,
-    ) {
+    ) -> StallVerdict {
         if let Some(previous) = self.rows.get(&attempt.key) {
             if attempt.generation <= previous.generation {
-                return;
+                return StallVerdict::Open;
             }
         } else {
             if self.order.len() == 4096 {
@@ -153,7 +167,7 @@ impl StalledRows {
             // A newer attempt can start before an older accounting worker parks
             // the row. Its uncertainty invalidates that older parking decision.
             suppressed.remove_stalled(attempt.key);
-            return;
+            return StallVerdict::Open;
         }
         // Maintenance also runs at startup and after every committed decision.
         // Only one attempt per sample interval counts, so the streak measures
@@ -162,28 +176,73 @@ impl StalledRows {
             if attempt.attempted_at.saturating_duration_since(last)
                 < budget.recovery_stall_sample_interval
             {
-                return;
+                return StallVerdict::Open;
             }
         }
         row.last_counted = Some(attempt.attempted_at);
         row.consecutive = row.consecutive.saturating_add(1);
         if row.consecutive < budget.recovery_stall_attempts {
-            return;
+            return StallVerdict::Open;
         }
+        StallVerdict::Stalled
+    }
+
+    /// Suppress the row for a cooldown and classify its pending obligations:
+    /// nothing this node can do moves it until its evidence changes.
+    pub(super) fn park(
+        &mut self,
+        attempt: &RecoveryAttempt,
+        fresh: RecoveryEvidence,
+        budget: MaintenanceBudget,
+        suppressed: &mut UnsupportedRows,
+    ) {
         suppressed.insert(
             attempt.key,
             fresh,
             Suppression::StalledUntil(Instant::now() + budget.recovery_stall_cooldown),
         );
-        if row.classified == ClassificationEpisode::Unclassified {
-            row.classified = ClassificationEpisode::Classified;
-            for kind in &attempt.pending {
-                increment_ingress_maintenance_unrecoverable_obligations(
-                    1,
-                    *kind,
-                    IngressUnrecoverableReason::NoDurableProgress,
-                );
-            }
+        let Some(row) = self.rows.get_mut(&attempt.key) else {
+            return;
+        };
+        if row.classified == ClassificationEpisode::Classified {
+            return;
+        }
+        row.classified = ClassificationEpisode::Classified;
+        for kind in &attempt.pending {
+            increment_ingress_maintenance_unrecoverable_obligations(
+                1,
+                *kind,
+                IngressUnrecoverableReason::NoDurableProgress,
+            );
+        }
+    }
+
+    /// A repair made durable progress on a stalled row. The streak restarts
+    /// exactly as a delivered copy restarts it, so the row is neither
+    /// suppressed nor classified `no_durable_progress` for this episode.
+    pub(super) fn repaired(&mut self, key: MessageKey, suppressed: &mut UnsupportedRows) {
+        suppressed.remove_stalled(key);
+        let Some(row) = self.rows.get_mut(&key) else {
+            return;
+        };
+        row.consecutive = 0;
+        row.last_counted = None;
+        row.classified = ClassificationEpisode::Unclassified;
+    }
+
+    /// Account for one attempt and park the row when that completes a stall
+    /// streak. The maintenance worker splits the two so it can attempt a
+    /// ghost-occupant repair in between.
+    #[cfg(test)]
+    pub(super) fn account_and_park(
+        &mut self,
+        attempt: &RecoveryAttempt,
+        fresh: RecoveryEvidence,
+        budget: MaintenanceBudget,
+        suppressed: &mut UnsupportedRows,
+    ) {
+        if self.account(attempt, fresh, budget, suppressed) == StallVerdict::Stalled {
+            self.park(attempt, fresh, budget, suppressed);
         }
     }
 }

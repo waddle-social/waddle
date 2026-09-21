@@ -263,14 +263,14 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
             summary: 'Unresolved effects from live ingress executions increased in the last hour. Repair and stream-retirement attributions are excluded; inspect ingress_effects_unresolved_total with phase="maintenance_recovery", phase="maintenance_terminalization", or phase="stream_retirement" for those paths. See IngressNonTerminalBacklog for the canonical row-level view and ingress_maintenance_unrecoverable_obligations_total for recovery classifications.'
         - alert: IngressNonTerminalBacklog
-          expr: max by (kind) (cnpg_waddle_ingress_nonterminal_messages) > 0
+          expr: max by (kind) (cnpg_waddle_ingress_nonterminal_messages{kind!="none"}) > (max by (kind) (cnpg_waddle_ingress_nonterminal_messages offset 1h) or max by (kind) (cnpg_waddle_ingress_nonterminal_messages) * 0)
           for: 10m
           labels:
             severity: warning
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
-            summary: "Canonical ingress rows have stayed non-terminal for more than 10 minutes; kind is the unreceipted intent kind family, or terminalization when only terminalization is missing. Maintenance recovery re-executes recoverable recorded families; deferred and unrecoverable work stays pending. Check ingress_maintenance_unrecoverable_obligations_total alongside ingress_maintenance_runs_total with outcome!=complete; a complete recovery sweep can still leave unsupported backlog. GC cannot reclaim these rows."
+            summary: "The count of canonical ingress rows that stayed non-terminal for more than 10 minutes grew over the last hour (#1803: growth, not a standing floor, is the signal; read the gauge itself for the absolute backlog); kind is the unreceipted intent kind family, or terminalization when only terminalization is missing. Maintenance recovery re-executes recoverable recorded families; deferred and unrecoverable work stays pending. Check ingress_maintenance_unrecoverable_obligations_total alongside ingress_maintenance_runs_total with outcome!=complete; a complete recovery sweep can still leave unsupported backlog. GC cannot reclaim these rows."
         - alert: IngressCnpgQueriesMissing
           expr: absent(cnpg_waddle_ingress_gc_eligible_messages) or absent(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds) or absent(cnpg_waddle_ingress_nonterminal_age_oldest_seconds) or absent(cnpg_waddle_ingress_nonterminal_messages{kind="none"})
           for: 15m

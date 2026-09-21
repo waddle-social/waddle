@@ -31,10 +31,25 @@ use super::user_registry::{GetUser, UserRegistryActor};
 /// to the identical `GetUser` + per-actor ask pattern.
 const SELECTION_ASK_TIMEOUT: Duration = Duration::from_secs(2);
 
-async fn resolve_user_actor(
+/// Why a resource lookup could not answer authoritatively.
+///
+/// Routing degrades an unanswered lookup to "no local resource"; callers that
+/// must PROVE a resource is absent (occupancy eviction) cannot, so they take
+/// this typed answer from [`try_get_resources_for_user`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ResourceLookupError {
+    #[error("the user registry did not answer the resource lookup")]
+    RegistryUnavailable,
+    #[error("the user actor did not answer the resource lookup")]
+    UserActorUnavailable,
+}
+
+/// The user actor for `bare_jid`, distinguishing "no such actor" (`Ok(None)`)
+/// from "the registry did not answer".
+async fn try_resolve_user_actor(
     user_registry: &ActorRef<UserRegistryActor>,
     bare_jid: &BareJid,
-) -> Option<ActorRef<UserActor>> {
+) -> Result<Option<ActorRef<UserActor>>, ResourceLookupError> {
     match user_registry
         .ask(GetUser {
             bare_jid: bare_jid.clone(),
@@ -43,17 +58,53 @@ async fn resolve_user_actor(
         .reply_timeout(SELECTION_ASK_TIMEOUT)
         .await
     {
-        Ok(Some(actor)) => Some(actor),
-        Ok(None) => None,
+        Ok(actor) => Ok(actor),
         Err(error) => {
             warn!(
                 bare_jid = %bare_jid,
                 %error,
-                "actor selection: GetUser failed; degrading to no local resources"
+                "actor selection: GetUser failed"
             );
-            None
+            Err(ResourceLookupError::RegistryUnavailable)
         }
     }
+}
+
+async fn resolve_user_actor(
+    user_registry: &ActorRef<UserRegistryActor>,
+    bare_jid: &BareJid,
+) -> Option<ActorRef<UserActor>> {
+    try_resolve_user_actor(user_registry, bare_jid)
+        .await
+        .unwrap_or_else(|_| {
+            warn!(bare_jid = %bare_jid, "actor selection: degrading to no local resources");
+            None
+        })
+}
+
+/// [`get_resources_for_user`] without the degradation: an actor that does not
+/// answer is reported as [`ResourceLookupError`] rather than as an empty
+/// selection. A bare JID with no actor at all is an authoritative `Ok(vec![])`.
+pub async fn try_get_resources_for_user(
+    user_registry: &ActorRef<UserRegistryActor>,
+    bare_jid: &BareJid,
+) -> Result<Vec<FullJid>, ResourceLookupError> {
+    let Some(user_actor) = try_resolve_user_actor(user_registry, bare_jid).await? else {
+        return Ok(Vec::new());
+    };
+    user_actor
+        .ask(GetResources)
+        .mailbox_timeout(SELECTION_ASK_TIMEOUT)
+        .reply_timeout(SELECTION_ASK_TIMEOUT)
+        .await
+        .map_err(|error| {
+            warn!(
+                bare_jid = %bare_jid,
+                %error,
+                "actor selection: GetResources failed"
+            );
+            ResourceLookupError::UserActorUnavailable
+        })
 }
 
 /// Every currently-connected resource of `bare_jid`, sourced from the

@@ -14,6 +14,7 @@ use tracing::warn;
 use waddle_xmpp::muc::{
     durable::OccupancyLeaveCause,
     room_actor::{LeaveAttemptId, LeaveSessionSelector},
+    MucRemovalCause,
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
 
@@ -59,6 +60,11 @@ pub enum LocalDepartureItem {
         /// below it, so a replacement session's later remote registrations
         /// are never relayed as this sweep's departures (#1647, round 26).
         remote_ceiling: u64,
+        /// Why the occupancy is being removed, so the redrive's §7.14
+        /// broadcast carries the SAME XEP-0045 status codes the inline sweep
+        /// would have (#1803): a ghost eviction is a service-side removal and
+        /// must carry `#service-error-kick`'s status 333 on either path.
+        removal: MucRemovalCause,
     },
     RoomDeparture {
         room: BareJid,
@@ -72,6 +78,12 @@ pub enum LocalDepartureItem {
         /// (carried over from a died task's write-ahead entry): a resumed
         /// replay skips them instead of announcing the departure twice.
         notified: HashSet<FullJid>,
+        /// Why the occupancy is being removed, so a DELAYED replay emits the
+        /// same XEP-0045 status codes the inline sweep would have (#1803 /
+        /// #1814). Distinct from `cause`, which is the durable
+        /// `OccupancyLeaveCause` the room projection fingerprints: this one is
+        /// presentational and never reaches a durable encoding.
+        removal: MucRemovalCause,
     },
     ConfirmRetired {
         room: BareJid,
@@ -83,6 +95,8 @@ pub enum LocalDepartureItem {
         /// Fan-out progress carried through the retirement watch so the
         /// successor's retry resumes where the dead task stopped.
         notified: HashSet<FullJid>,
+        /// See [`LocalDepartureItem::RoomDeparture::removal`].
+        removal: MucRemovalCause,
     },
     /// A departure whose reply WAS delivered and whose effects ran, but whose
     /// receipt acknowledgement could not be handed to the actor in time: the
@@ -103,6 +117,11 @@ pub enum LocalDepartureItem {
         attempt: LeaveAttemptId,
         /// Per-recipient fan-out progress (see `RoomDeparture::notified`).
         notified: HashSet<FullJid>,
+        /// See [`LocalDepartureItem::RoomDeparture::removal`]. Carried here
+        /// too because the janitor converts a lapsed write-ahead entry into a
+        /// `RoomDeparture`: a task that died mid-sweep must not lose the
+        /// reason its replacement broadcasts.
+        removal: MucRemovalCause,
     },
     /// A guarded empty-room destroy whose bounded registry ask failed: the
     /// destroy is owed until the registry answers definitively (destroyed,
@@ -200,6 +219,16 @@ impl LocalDepartureItem {
         };
         let merged_selector = merged_selector.unwrap_or(LeaveSessionSelector::Any);
         let merged_attempt = merged_attempt.unwrap_or_else(LeaveAttemptId::generate);
+        // A service-side removal is never downgraded by a coalescing
+        // voluntary item: one of the two DID prove the occupancy abandoned,
+        // and XEP-0045 `#service-error-kick` requires 333 on the resulting
+        // presence once the service supports it. The dedup KEY deliberately
+        // ignores `removal`, so a `Voluntary` and a `TechnicalProblem` item
+        // for the same (room, JID, cause, generation) still coalesce.
+        let merged_removal = merge_removal(
+            existing.item.removal().unwrap_or_default(),
+            self.removal().unwrap_or_default(),
+        );
         // Fan-out progress belongs to ONE attempt: when a newer attempt
         // supersedes, the older attempt's recipients are not "already
         // notified" of the new departure (they may have seen a re-join in
@@ -233,6 +262,7 @@ impl LocalDepartureItem {
                 selector: merged_selector,
                 attempt: merged_attempt,
                 notified: merged_notified.clone(),
+                removal: merged_removal,
             },
             (
                 LocalDepartureItem::RoomDeparture {
@@ -246,6 +276,7 @@ impl LocalDepartureItem {
                 selector: merged_selector,
                 attempt: merged_attempt,
                 notified: merged_notified,
+                removal: merged_removal,
             },
             (
                 LocalDepartureItem::ConfirmRetired {
@@ -264,6 +295,7 @@ impl LocalDepartureItem {
                 selector: merged_selector,
                 attempt: merged_attempt,
                 notified: merged_notified.clone(),
+                removal: merged_removal,
             },
             // A newer disconnect's ceilings cover the older sweep's rooms
             // too (their sessions joined even earlier), so the newest
@@ -274,6 +306,7 @@ impl LocalDepartureItem {
                     selector: _,
                     attempt: existing_attempt,
                     remote_ceiling: existing_ceiling,
+                    ..
                 },
                 LocalDepartureItem::FullJidSweep {
                     selector: _,
@@ -290,6 +323,7 @@ impl LocalDepartureItem {
                 } else {
                     existing_ceiling
                 },
+                removal: merged_removal,
             },
             (
                 LocalDepartureItem::FullJidSweep {
@@ -297,6 +331,7 @@ impl LocalDepartureItem {
                     selector,
                     attempt,
                     remote_ceiling,
+                    removal,
                 },
                 _,
             ) => LocalDepartureItem::FullJidSweep {
@@ -304,6 +339,7 @@ impl LocalDepartureItem {
                 selector,
                 attempt,
                 remote_ceiling,
+                removal,
             },
             (
                 LocalDepartureItem::EvictEmptyRoom {
@@ -330,6 +366,18 @@ impl LocalDepartureItem {
             | Self::RoomDeparture { attempt, .. }
             | Self::ConfirmRetired { attempt, .. }
             | Self::InFlight { attempt, .. } => Some(*attempt),
+        }
+    }
+
+    /// The presentational removal cause, for the item kinds whose replay
+    /// builds a §7.14 leave broadcast.
+    fn removal(&self) -> Option<MucRemovalCause> {
+        match self {
+            Self::FullJidSweep { removal, .. }
+            | Self::RoomDeparture { removal, .. }
+            | Self::ConfirmRetired { removal, .. }
+            | Self::InFlight { removal, .. } => Some(*removal),
+            Self::AckReceipt { .. } | Self::EvictEmptyRoom { .. } => None,
         }
     }
 
@@ -363,6 +411,19 @@ const fn selector_generation(selector: LeaveSessionSelector) -> Option<Occupancy
 /// A re-recorded departure widens responsibility: `Any` dominates, otherwise
 /// the NEWEST watermark wins (a later disconnect of a re-joined session must
 /// not be judged `Superseded` by an older attempt's watermark).
+/// Coalescing two retained sweeps must never weaken the XEP-0045 shape the
+/// redrive will emit. A service-side removal (#1803 ghost eviction) stays
+/// service-side: one of the two sweeps proved the occupancy abandoned, and
+/// `#service-error-kick` requires status 333 on the resulting presence.
+fn merge_removal(existing: MucRemovalCause, incoming: MucRemovalCause) -> MucRemovalCause {
+    match (existing, incoming) {
+        (MucRemovalCause::TechnicalProblem, _) | (_, MucRemovalCause::TechnicalProblem) => {
+            MucRemovalCause::TechnicalProblem
+        }
+        (MucRemovalCause::Voluntary, MucRemovalCause::Voluntary) => MucRemovalCause::Voluntary,
+    }
+}
+
 fn merge_selectors(
     existing: Option<LeaveSessionSelector>,
     incoming: Option<LeaveSessionSelector>,
@@ -980,6 +1041,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(first_generation),
                 attempt: LeaveAttemptId::generate(),
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -991,6 +1053,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(second_generation),
                 attempt: LeaveAttemptId::generate(),
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1039,6 +1102,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(first_generation),
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: 11,
+                removal: MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1048,6 +1112,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(second_generation),
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: 22,
+                removal: MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1091,6 +1156,7 @@ mod tests {
             selector,
             attempt: LeaveAttemptId::generate(),
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
 
         inventory.record_in_flight(item.clone());
@@ -1122,6 +1188,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1135,6 +1202,7 @@ mod tests {
             selector: LeaveSessionSelector::JoinedAtOrBefore(OccupancyWatermark::from_revision(9)),
             attempt: LeaveAttemptId::generate(),
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         });
         let entry = inventory
             .entries
@@ -1168,6 +1236,7 @@ mod tests {
             selector,
             attempt,
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         let attempt_a = LeaveAttemptId::generate();
         let attempt_b = LeaveAttemptId::generate();
@@ -1275,6 +1344,7 @@ mod tests {
                 ),
                 attempt: attempt_b,
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1302,6 +1372,7 @@ mod tests {
             selector,
             attempt,
             remote_ceiling: u64::MAX,
+            removal: MucRemovalCause::Voluntary,
         };
         let attempt_a = LeaveAttemptId::generate();
         let attempt_b = LeaveAttemptId::generate();
@@ -1364,6 +1435,7 @@ mod tests {
             selector,
             attempt: LeaveAttemptId::generate(),
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
 
         inventory.record_at(
@@ -1421,6 +1493,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
             attempts,
             not_before: due,
@@ -1467,6 +1540,7 @@ mod tests {
             selector,
             attempt,
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         let inventory = PendingLocalMucDepartures::default();
         let older = LeaveAttemptId::generate();
@@ -1502,6 +1576,7 @@ mod tests {
             selector,
             attempt,
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
 
         let inventory = PendingLocalMucDepartures::default();
@@ -1654,6 +1729,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(g2),
                 attempt: attempt_g2,
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1665,6 +1741,7 @@ mod tests {
                 selector: LeaveSessionSelector::Generation(g1),
                 attempt: attempt_g1,
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
             now,
         );
@@ -1705,6 +1782,7 @@ mod tests {
             selector: LeaveSessionSelector::Generation(generation),
             attempt: LeaveAttemptId::generate(),
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         assert_ne!(
             departure(g1).key(),
@@ -1731,6 +1809,7 @@ mod tests {
                     selector: LeaveSessionSelector::Generation(generation),
                     attempt: LeaveAttemptId::generate(),
                     notified: HashSet::new(),
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
                 now + Duration::from_secs(index as u64),
             );
@@ -1763,6 +1842,7 @@ mod tests {
             selector: LeaveSessionSelector::Generation(generation),
             attempt: LeaveAttemptId::generate(),
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         // A much-retried responsibility is drained for processing …
         let stuck = generation();
@@ -1804,6 +1884,7 @@ mod tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
+                    removal: MucRemovalCause::Voluntary,
                 },
                 now + Duration::from_secs(index as u64),
             );
@@ -1835,6 +1916,7 @@ mod tests {
             selector: LeaveSessionSelector::Any,
             attempt: first,
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         });
         pending.record(LocalDepartureItem::AckReceipt {
             room: room.clone(),
@@ -1875,6 +1957,7 @@ mod tests {
             selector: LeaveSessionSelector::Any,
             attempt,
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         pending.record_in_flight(in_flight(first));
         pending.record_in_flight(in_flight(second));
@@ -1912,6 +1995,7 @@ mod tests {
             selector: LeaveSessionSelector::Any,
             attempt,
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         pending.record_in_flight(in_flight.clone());
         pending.convert_in_flight_to_ack(&in_flight, acknowledge);
@@ -1941,6 +2025,7 @@ mod tests {
             selector: LeaveSessionSelector::Any,
             attempt,
             notified,
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         let carol: FullJid = "carol@example.com/tablet".parse().expect("carol");
         pending.record(departure(older, HashSet::from([bob.clone()])));
@@ -1965,6 +2050,7 @@ mod tests {
             selector: LeaveSessionSelector::Any,
             attempt: newer,
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         });
         let retained = pending
             .take_for_test(&departure(newer, HashSet::new()))
@@ -2000,6 +2086,7 @@ mod tests {
             selector: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
             notified: HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         pending.record_in_flight(item.clone());
         let before = pending.not_before_for_test(&item).expect("entry");
@@ -2030,6 +2117,53 @@ mod tests {
         );
     }
 
+    /// #1814: coalescing must never weaken the XEP-0045 shape the replay
+    /// emits. A voluntary disconnect retained for the same (room, JID, cause,
+    /// generation) as a proven ghost eviction still merges — the dedup key
+    /// ignores `removal` — but the merged item keeps the service-side cause,
+    /// in either arrival order.
+    #[test]
+    fn coalescing_never_downgrades_a_service_side_removal() {
+        let room = room("coven");
+        let jid = jid("ghost@example.com/web");
+        let attempt = LeaveAttemptId::generate();
+        let departure = |removal| LocalDepartureItem::RoomDeparture {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Any,
+            attempt,
+            notified: HashSet::new(),
+            removal,
+        };
+        assert_eq!(
+            departure(MucRemovalCause::Voluntary).key(),
+            departure(MucRemovalCause::TechnicalProblem).key(),
+            "the dedup key must ignore the removal cause"
+        );
+        for (first, second) in [
+            (
+                MucRemovalCause::Voluntary,
+                MucRemovalCause::TechnicalProblem,
+            ),
+            (
+                MucRemovalCause::TechnicalProblem,
+                MucRemovalCause::Voluntary,
+            ),
+        ] {
+            let inventory = PendingLocalMucDepartures::default();
+            inventory.record(departure(first));
+            inventory.record(departure(second));
+            let due = inventory.take_due(Instant::now());
+            assert_eq!(due.len(), 1, "both items share one inventory entry");
+            assert_eq!(
+                due[0].item.removal(),
+                Some(MucRemovalCause::TechnicalProblem),
+                "a proven service-side removal survives the merge ({first:?} then {second:?})"
+            );
+        }
+    }
+
     #[test]
     fn backoff_grows_and_caps() {
         assert_eq!(backoff(1), Duration::from_secs(2));
@@ -2048,6 +2182,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: u64::MAX,
+                removal: MucRemovalCause::Voluntary,
             },
             now + Duration::from_secs(2),
         );
@@ -2057,6 +2192,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: u64::MAX,
+                removal: MucRemovalCause::Voluntary,
             },
             now + Duration::from_secs(1),
         );

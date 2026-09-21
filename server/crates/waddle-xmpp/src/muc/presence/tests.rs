@@ -190,6 +190,7 @@ fn test_build_occupant_presence_created_room_self_includes_201() {
             is_self: false,
             room_created: true,
             warn_nonanonymous_join: false,
+            removal: MucRemovalCause::Voluntary,
         },
         &identity,
     );
@@ -660,4 +661,132 @@ fn test_build_destroy_notification_not_self_minimal() {
             .all(|s| s.attr("code") != Some("110")),
         "non-self destroy must not carry status code 110"
     );
+}
+
+/// XEP-0045 §"Service removes user because of error response"
+/// (`#service-error-kick`), normative:
+///
+/// > A MUC service MAY support adding the 333 status code to presences when a
+/// > user gets removed by the service due to a technical problem [...] If a
+/// > MUC service supports this OPTIONAL feature, it MUST include the 333
+/// > status code in the resulting presence [...] The status code MUST also be
+/// > included in presences sent to other occupants.
+///
+/// The wire form to a remaining occupant is `<presence type='unavailable'
+/// from='room/nick'><x xmlns='muc#user'><item affiliation='…' role='none'/>
+/// <status code='333'/></x></presence>` — and, per the same section's note,
+/// WITHOUT 307: a technical removal is "not linked to any user (e.g.
+/// moderator) action that the 307 code usually indicates".
+#[test]
+fn xep0045_service_error_removal_marks_the_other_occupants_presence_with_333() {
+    let from: FullJid = "room@muc.example.com/ghost".parse().expect("room nick");
+    let to: FullJid = "watcher@example.com/desk"
+        .parse()
+        .expect("remaining occupant");
+    let occupant_jid: FullJid = "ghost@example.com/web".parse().expect("removed occupant");
+    let secret = test_secret();
+    let occupant_bare = occupant_jid.to_bare();
+
+    let presence = build_leave_presence(
+        &from,
+        &to,
+        Affiliation::Member,
+        MucPresenceStatus::new(false, false).removed_by(MucRemovalCause::TechnicalProblem),
+        &OccupantIdentity {
+            bare_jid: &occupant_bare,
+            real_jid: Some(&occupant_jid),
+            secret: &secret,
+        },
+    );
+
+    assert_eq!(presence.type_, PresenceType::Unavailable);
+    let muc_user = presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("MUC user payload");
+    let item = muc_user
+        .get_child("item", NS_MUC_USER)
+        .expect("MUC item payload");
+    assert_eq!(item.attr("affiliation"), Some("member"));
+    assert_eq!(item.attr("role"), Some("none"));
+    assert_eq!(
+        status_codes(muc_user),
+        vec!["333"],
+        "a removal broadcast to the other occupants carries 333 and nothing else"
+    );
+}
+
+/// The same section's first example: the presence to the REMOVED user carries
+/// 110 (self) alongside 333.
+#[test]
+fn xep0045_service_error_removal_marks_the_removed_users_own_presence_with_110_and_333() {
+    let from: FullJid = "room@muc.example.com/ghost".parse().expect("room nick");
+    let to: FullJid = "ghost@example.com/web".parse().expect("removed occupant");
+    let secret = test_secret();
+    let occupant_bare = to.to_bare();
+
+    let presence = build_leave_presence(
+        &from,
+        &to,
+        Affiliation::Member,
+        MucPresenceStatus::new(true, false).removed_by(MucRemovalCause::TechnicalProblem),
+        &OccupantIdentity {
+            bare_jid: &occupant_bare,
+            real_jid: Some(&to),
+            secret: &secret,
+        },
+    );
+
+    let muc_user = presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("MUC user payload");
+    assert_eq!(status_codes(muc_user), vec!["110", "333"]);
+}
+
+/// The OPTIONAL feature must not leak onto an ordinary departure: a §7.14
+/// leave the occupant caused itself carries no removal code at all.
+#[test]
+fn xep0045_voluntary_leave_carries_no_removal_status_code() {
+    let from: FullJid = "room@muc.example.com/leaver".parse().expect("room nick");
+    let to: FullJid = "watcher@example.com/desk"
+        .parse()
+        .expect("remaining occupant");
+    let occupant_jid: FullJid = "leaver@example.com/phone"
+        .parse()
+        .expect("departing occupant");
+    let secret = test_secret();
+    let occupant_bare = occupant_jid.to_bare();
+
+    let presence = build_leave_presence(
+        &from,
+        &to,
+        Affiliation::Member,
+        MucPresenceStatus::new(false, false),
+        &OccupantIdentity {
+            bare_jid: &occupant_bare,
+            real_jid: Some(&occupant_jid),
+            secret: &secret,
+        },
+    );
+
+    let muc_user = presence
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", NS_MUC_USER))
+        .expect("MUC user payload");
+    assert!(
+        status_codes(muc_user).is_empty(),
+        "a voluntary departure is the bare §7.14 shape"
+    );
+}
+
+fn status_codes(muc_user: &Element) -> Vec<String> {
+    muc_user
+        .children()
+        .filter(|child| child.is("status", NS_MUC_USER))
+        .filter_map(|child| child.attr("code").map(str::to_owned))
+        .collect()
 }

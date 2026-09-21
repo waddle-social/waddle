@@ -101,6 +101,8 @@ pub(crate) use cleanup::redrive_local_muc_cleanup;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
+pub(crate) use cleanup::retain_abandoned_muc_occupancy_sweep;
+pub(crate) use cleanup::sweep_abandoned_muc_occupancy;
 pub use cleanup::MucCleanupOutcome;
 pub(crate) use cleanup::{
     ack_departure_receipt, acknowledge_in_flight, ask_leave_bounded, echo_muc_self_unavailable,

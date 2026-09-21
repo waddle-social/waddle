@@ -211,7 +211,7 @@ pub(super) async fn run_maintenance_pass_with_cursor(
             )
             .await
             .unwrap_or(MaintenanceOutcome::TimedOut);
-            spawn_recovery_accounting(database, cursor, budget);
+            spawn_recovery_accounting(database, uow, cursor, budget, Some(environment));
             record(IngressMaintenancePhase::Recovery, outcome)
         } else {
             MaintenanceOutcome::Complete
@@ -546,8 +546,10 @@ async fn recover_candidates(
 /// telemetry, not an audit log.
 fn spawn_recovery_accounting(
     database: &Database,
+    uow: &IngressUnitOfWork,
     cursor: &MaintenanceCursor,
     budget: MaintenanceBudget,
+    environment: Option<Arc<dyn RecoveryEnvironment>>,
 ) {
     let attempted: Vec<RecoveryAttempt> = std::mem::take(
         &mut *cursor
@@ -559,6 +561,7 @@ fn spawn_recovery_accounting(
         return;
     }
     let database = database.clone();
+    let uow = uow.clone();
     let worker = Arc::clone(&cursor.recovery_accounting_worker);
     let credited = Arc::clone(&cursor.recovery_credited);
     let queue = Arc::clone(&cursor.recovery_accounting);
@@ -599,7 +602,7 @@ fn spawn_recovery_accounting(
                     attempt.observed
                 }
             };
-            stalled
+            let verdict = stalled
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .account(
@@ -610,6 +613,26 @@ fn spawn_recovery_accounting(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 );
+            if verdict == stalls::StallVerdict::Open {
+                continue;
+            }
+            // Last resort before the row is parked for a cooldown: a
+            // `route_muc` obligation can be pinned by an occupant whose
+            // session leaked, and XEP-0045 says such a ghost is removed from
+            // the room rather than owed a copy forever (#1803).
+            let repaired =
+                repair_stalled_row(&uow, environment.as_deref(), key, &attempt.pending).await;
+            let mut stalled = stalled
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut suppressed = suppressed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if repaired {
+                stalled.repaired(key, &mut suppressed);
+            } else {
+                stalled.park(&attempt, fresh, budget, &mut suppressed);
+            }
         }
         if recovered > 0 {
             increment_ingress_maintenance_recovered_obligations(recovered);
@@ -681,6 +704,48 @@ impl CreditedRows {
 
 /// Upper bound for the detached receipt-count read behind the recovered counter.
 const RECOVERY_ACCOUNTING_BUDGET: Duration = Duration::from_secs(1);
+
+/// Upper bound for one stalled row's ghost-occupant repair: a handful of
+/// bounded actor probes plus one local leave sweep. The accounting worker is
+/// serialized across passes, so a wedged room must not hold its queue open.
+const GHOST_REPAIR_BUDGET: Duration = Duration::from_secs(5);
+
+/// One bounded repair attempt for a row that just completed a stall streak,
+/// before it is parked for a cooldown. Anything other than a proven repair —
+/// no environment, an error, the budget — leaves the row to be parked exactly
+/// as it was before.
+async fn repair_stalled_row(
+    uow: &IngressUnitOfWork,
+    environment: Option<&dyn RecoveryEnvironment>,
+    key: MessageKey,
+    pending: &[waddle_xmpp::ingress::IngressEffectKind],
+) -> bool {
+    // Only a frozen groupchat fanout can be pinned by a ghost occupant, so no
+    // other stalled row pays for the repair's reads.
+    if !pending.contains(&waddle_xmpp::ingress::IngressEffectKind::RouteMucGroupchat) {
+        return false;
+    }
+    let Some(environment) = environment else {
+        return false;
+    };
+    let deps = environment.recovery_deps();
+    match tokio::time::timeout(
+        GHOST_REPAIR_BUDGET,
+        super::recovery_ghosts::repair_stalled_row(uow, &deps, key),
+    )
+    .await
+    {
+        Ok(Ok(repaired)) => repaired,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, ?key, "ingress recovery ghost repair deferred");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(?key, "ingress recovery ghost repair timed out");
+            false
+        }
+    }
+}
 
 /// Account for the row after its future finished, failed or was cancelled by
 /// the row deadline: recovered obligations are the receipts that appeared since

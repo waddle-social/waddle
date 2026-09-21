@@ -71,6 +71,11 @@ pub mod ordered_relay;
 /// builds on the relay message set.
 #[cfg(feature = "clustering")]
 pub mod relay;
+/// The `ResourcePresenceAsker` seam and its `RelayHandle` implementation
+/// (#1803) — the room host's side of the cross-node "does the claim owner
+/// know this exact resource?" probe that gates ghost-occupant eviction.
+#[cfg(feature = "clustering")]
+pub mod resource_presence;
 /// The `RemoteResumeAsker` implementation over `RelayHandle` (ADR-0017
 /// Phase 3 Slice 6) — the resuming node's side of the cross-node XEP-0198
 /// resume live-steal handshake. Public so `server/http.rs` can construct it.
@@ -818,6 +823,21 @@ pub struct ClusteringHandles {
     /// sequence allocator used by origin routing calls.
     #[cfg(feature = "clustering")]
     pub ordered_relay_delivery_bridge: Option<Arc<route_bridge::OrderedRelayDeliveryBridge>>,
+    /// #1803: the seam ghost-occupant eviction asks ONE cluster peer through
+    /// — "do you know this exact full JID?". A socket is known only to the
+    /// node that holds it, so the question goes to every peer
+    /// `cluster_membership` names. `None` under the same conditions
+    /// `claim_store` is `None`.
+    #[cfg(feature = "clustering")]
+    pub resource_presence: Option<Arc<dyn resource_presence::ResourcePresenceAsker>>,
+    /// #1803: which peers `resource_presence` must clear an eviction with —
+    /// the `clustering_nodes` rows the control plane has not
+    /// committed-expired. Both this and `resource_presence` being `None` is
+    /// the single-node configuration (nothing else can be holding the
+    /// socket); exactly one of the two missing fails closed, because a
+    /// half-wired cluster cannot prove anything.
+    #[cfg(feature = "clustering")]
+    pub cluster_membership: Option<Arc<dyn resource_presence::ClusterMembership>>,
     /// This node's clustering-scope cancellation token (the same child
     /// token every clustering task races against — see
     /// `clustering_scope_token`'s doc comment). Exposed so a caller outside
@@ -1123,11 +1143,18 @@ pub async fn start_if_enabled(
             room_local_claims: Some(Arc::clone(&room_local_claims)),
             user_local_claims: Some(Arc::clone(&user_local_claims)),
             muc_durable_store: Some(muc_durable_store),
+            cluster_membership: Some(resource_presence::NodeLeaseClusterMembership::new(
+                Arc::clone(&node_lease_handle),
+                live_identity.clone(),
+            )),
             node_lease: Some(node_lease_handle),
             lease_ttl: Some(config.node_lease.lease_ttl),
             pod_template_hash: pod_template_hash.clone(),
             resume_bridge: Some(resume_bridge),
             ordered_relay_delivery_bridge: Some(ordered_relay_delivery_bridge),
+            resource_presence: Some(resource_presence::RelayResourcePresenceAsker::new(
+                clustering_stop.clone(),
+            )),
             stop_token: Some(clustering_stop.clone()),
             fatal_fence: Some(fatal_fence.clone()),
             resume_handshake_timeout: Some(config.resume_handshake.timeout),

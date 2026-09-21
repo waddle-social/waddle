@@ -111,6 +111,7 @@ enum RelayDispatchKind {
     ResumeSteal,
     Demote,
     ReassertMediaGrants,
+    ResourcePresence,
 }
 
 impl RelayDispatchKind {
@@ -128,6 +129,7 @@ impl RelayDispatchKind {
             Self::ResumeSteal => "resume_steal",
             Self::Demote => "demote",
             Self::ReassertMediaGrants => "reassert_media_grants",
+            Self::ResourcePresence => "resource_presence",
         }
     }
 }
@@ -1114,6 +1116,77 @@ impl Message<RelayReassertMediaGrants> for RelayActor {
                 LocalMediaGrantReassertion::Unavailable => {
                     RelayReassertMediaGrantsReply::Unavailable
                 }
+            }
+        })
+    }
+}
+
+/// #1803: does the RECEIVING node know this ONE exact full JID?
+///
+/// Asked of every unexpired cluster member, because a socket is known only to
+/// the node that holds it. A `UserActor` claim is routing authority, not
+/// socket liveness: nothing re-registers an idle socket anywhere when that
+/// claim's owner dies or moves, so the claim can neither vouch for a resource
+/// nor deny one. The receiver answers only about its own connection registry,
+/// actor tree and SM store, which it is unconditionally authoritative about.
+///
+/// Strictly read-only: the handler reads no claim, spawns no actor and
+/// performs no side effect, so an ask that times out or is answered twice
+/// changes nothing.
+///
+/// Rolling deploys need no `deliver_ordered.vN` bump (#1597): this is a NEW
+/// message id, and neither [`RemoteStanzaEnvelope`] nor any ordered reply type
+/// changes. A peer that predates it fails the ask with `UnknownMessage`, which
+/// the caller treats exactly like a timeout or a transport error — as "could
+/// not prove absence", leaving the occupant seated. Every failure mode is
+/// therefore fail-closed, so both orders of a rolling update are safe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayResourcePresence {
+    /// The exact resource being asked about — never a bare JID.
+    pub target: jid::FullJid,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+/// Reply to [`RelayResourcePresence`]. Only [`Self::Absent`] is proof, and
+/// only about the answering node: the asker must collect an `Absent` from
+/// EVERY peer before it may treat the resource as gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayResourcePresenceReply {
+    /// The receiver hosts a socket for that exact full JID, its `UserActor`
+    /// tree lists it (a local socket, or a registered-remote resource it
+    /// mirrors for a peer), or it holds a resumable/detached XEP-0198 session
+    /// for it — including a read that could not answer.
+    Present,
+    /// The receiver knows nothing about that resource: no socket, no
+    /// actor-tree entry, no resumable session. The only authoritative
+    /// negative, and only for this one node.
+    Absent,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.resource_presence.v1")]
+impl Message<RelayResourcePresence> for RelayActor {
+    // Delegated for the same reason as [`RelayReassertMediaGrants`]: the
+    // actor-tree ask and durable session probe are bounded but must not
+    // head-of-line block this node's relay mailbox while they resolve.
+    type Reply = kameo::reply::DelegatedReply<RelayResourcePresenceReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayResourcePresence,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::ResourcePresence, &msg.trace);
+        span.record("jid", tracing::field::display(msg.target.to_bare()));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            use super::route_bridge::LocalResourcePresence;
+            match bridge.resource_presence_local(&msg.target).await {
+                LocalResourcePresence::Present => RelayResourcePresenceReply::Present,
+                LocalResourcePresence::Absent => RelayResourcePresenceReply::Absent,
             }
         })
     }
@@ -2170,6 +2243,53 @@ impl RelayHandle {
             participant,
             trace,
         };
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_stale_ref_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    /// #1803: ask the account's claim owner whether it knows one exact full
+    /// JID. Strictly read-only on the receiver, so it shares
+    /// [`Self::demote`]'s stale-ref refresh-and-retry-once behaviour and
+    /// `stop_token`-raced cancellation-safety. Every `Err` — including the
+    /// `UnknownMessage` a peer that predates this message id answers with —
+    /// means "could not prove absence", never "absent".
+    pub async fn resource_presence(
+        &mut self,
+        target: jid::FullJid,
+    ) -> Result<RelayResourcePresenceReply, RelayAskError> {
+        let trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.resource_presence_inner(target, trace) => result,
+        }
+    }
+
+    async fn resource_presence_inner(
+        &mut self,
+        target: jid::FullJid,
+        trace: RelayTraceContext,
+    ) -> Result<RelayResourcePresenceReply, RelayAskError> {
+        let message = RelayResourcePresence { target, trace };
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&message)

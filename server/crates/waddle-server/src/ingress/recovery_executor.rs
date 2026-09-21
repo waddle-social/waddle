@@ -58,7 +58,7 @@ pub(super) async fn recover_row(
 ) -> Result<RowRecovery, IngressUowError> {
     #[cfg(test)]
     record_attempt(key);
-    let Some(frozen) = freeze(uow, key).await? else {
+    let Some(mut frozen) = freeze(uow, key).await? else {
         return Ok(RowRecovery::Vanished);
     };
     if frozen.unreceipted.is_empty() {
@@ -66,8 +66,12 @@ pub(super) async fn recover_row(
     }
     #[cfg(test)]
     super::execute::test_hooks::after_recovery_freeze(key).await;
-    let pending = pending_kinds(&frozen.unreceipted);
     let mut classification = AttemptClassification::Evaluable;
+    let departed = discharge_departed_copies(uow, deps, key, &mut frozen).await?;
+    if departed.classification == AttemptClassification::Inconclusive {
+        classification = AttemptClassification::Inconclusive;
+    }
+    let pending = pending_kinds(&frozen.unreceipted);
     let blocked_recipients = blocked_recipients(deps, &frozen).await?;
     let host_owned_resources = frozen
         .route_progress
@@ -84,6 +88,7 @@ pub(super) async fn recover_row(
         unreceipted: &frozen.unreceipted,
         route_progress: frozen.route_progress,
         host_owned_resources,
+        departed_occupants: departed.occupants,
         blocked_recipients: &blocked_recipients,
     })?;
     record_discarded_receipts(uow, key, &rebuilt.discarded_receipts).await?;
@@ -106,7 +111,12 @@ pub(super) async fn recover_row(
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
-        classification = classify_report(&report);
+        // Downgrade only: a settlement probe that could not gather its
+        // evidence already made this attempt inconclusive, and an evaluable
+        // effect report must not restore the stall streak it suspended.
+        if classify_report(&report) == AttemptClassification::Inconclusive {
+            classification = AttemptClassification::Inconclusive;
+        }
         // Frames belong to the sender's connection, which no longer exists
         // during recovery. A warning reply an observer produced cannot be
         // delivered; retrying every tick would only re-invoke the plugin.
@@ -153,6 +163,38 @@ pub(super) async fn recover_row(
         classification,
         unsupported,
     })
+}
+
+/// Settle the frozen copies this node can prove the room no longer owes, then
+/// drop every obligation the settlement discharged from the frozen authority so
+/// the rebuild neither replays those copies nor reports them unrecoverable.
+async fn discharge_departed_copies(
+    uow: &IngressUnitOfWork,
+    deps: &Deps<'_>,
+    key: MessageKey,
+    frozen: &mut FrozenRecovery,
+) -> Result<super::recovery_departed::DepartedSettlement, IngressUowError> {
+    let departed =
+        super::recovery_departed::settle_departed_occupants(uow, deps, key, &frozen.route_progress)
+            .await?;
+    if departed.settled.is_empty() {
+        return Ok(departed);
+    }
+    frozen
+        .unreceipted
+        .retain(|intent| !departed.settled.contains(intent));
+    frozen
+        .route_progress
+        .retain(|progress| !departed.settled.contains(&progress.settle_evidence()));
+    // A row whose last obligation the settlement discharged must leave the
+    // backlog in this pass rather than wait for the next terminalization phase.
+    super::execute::terminalize_if_complete_outcome(
+        uow,
+        key,
+        DeliveryExecutionContext::MaintenanceRecovery.into(),
+    )
+    .await?;
+    Ok(departed)
 }
 
 fn pending_kinds(intents: &[IngressEffectIntent]) -> Vec<IngressEffectKind> {

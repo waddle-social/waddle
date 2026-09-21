@@ -103,7 +103,9 @@ pub(super) async fn execute(
             completion = SettledCompletion::Uncertain;
         }
         if accepted(outcome) {
-            match record_resource(uow, key, progress, resource).await {
+            match record_delivery_progress(uow, key, progress, std::slice::from_ref(resource), None)
+                .await
+            {
                 Ok(settled) => {
                     if !settled.is_empty() {
                         persisted = settled;
@@ -212,11 +214,28 @@ async fn append_resource(
     ResourceDelivery { outcome, certainty }
 }
 
-async fn record_resource(
+/// Commit one obligation's newly discharged resources and, once the frozen
+/// fanout is complete, its aggregate receipt — atomically, under the canonical
+/// lock. Shared by live delivery (one appended resource) and by maintenance
+/// recovery settling copies the room no longer owes.
+///
+/// `room_fence` is the durable room claim the caller's evidence rests on
+/// (#1803). A departed-occupant settlement permanently drops a copy on the
+/// strength of an in-memory roster, so wherever the unit of work is clustered
+/// that exact claim is asserted under `FOR SHARE` inside this transaction: a
+/// steal committing between the roster probe and this write makes the
+/// assertion fail, rolls the transaction back, and settles nothing. Live
+/// delivery passes `None` — it records a copy it actually handed over, which
+/// rests on no room authority at all.
+pub(in crate::ingress) async fn record_delivery_progress(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     progress: &RouteProgress,
-    resource: &FullJid,
+    resources: &[FullJid],
+    room_fence: Option<(
+        &jid::BareJid,
+        &waddle_xmpp::muc::durable::RoomClaimFenceContext,
+    )>,
 ) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
     let mut tx = uow
         .begin_with_timeouts(
@@ -227,13 +246,27 @@ async fn record_resource(
     if !CanonicalMessageRepository::lock(&mut tx, key).await? {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
-    DeliveryProgressRepository::record(
-        &mut tx,
-        key,
-        &progress.receipt,
-        std::slice::from_ref(resource),
-    )
-    .await?;
+    #[cfg(feature = "clustering")]
+    if let Some((room, fence)) = room_fence {
+        // Only a clustered unit of work has a bound node identity to assert
+        // against; an unclustered one is not racing a cross-node steal, so
+        // the store-side proof the caller already took stands alone there.
+        if matches!(
+            tx.fencing(),
+            crate::ingress_uow::IngressFencing::Clustered(_)
+        ) {
+            crate::ingress_uow::ClaimRepository::assert_room_claim(
+                &mut tx,
+                room,
+                &fence.owner,
+                fence.epoch,
+            )
+            .await?;
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    let _ = room_fence;
+    DeliveryProgressRepository::record(&mut tx, key, &progress.receipt, resources).await?;
     #[cfg(test)]
     if FAIL_DELIVERY_PROGRESS_TX
         .try_with(|fail| *fail)

@@ -1923,6 +1923,14 @@ mod tests {
         ) -> Result<usize, ClaimError> {
             Ok(self.other_live_nodes.load(Ordering::SeqCst) as usize)
         }
+
+        async fn list_other_unexpired_nodes(
+            &self,
+            _me: &NodeIdentity,
+            _limit: usize,
+        ) -> Result<Vec<NodeIdentity>, ClaimError> {
+            Ok(Vec::new())
+        }
         async fn reconcile(
             &self,
             _me: &NodeIdentity,

@@ -74,6 +74,14 @@ impl NodeLeaseStore for StaticNodeLease {
         Ok(0)
     }
 
+    async fn list_other_unexpired_nodes(
+        &self,
+        _me: &NodeIdentity,
+        _limit: usize,
+    ) -> Result<Vec<NodeIdentity>, ClaimError> {
+        Ok(Vec::new())
+    }
+
     async fn reconcile(
         &self,
         _me: &NodeIdentity,
@@ -344,4 +352,5 @@ pub(crate) mod delivery;
 mod ingress_append;
 pub(crate) mod muc_refresh;
 mod nack_channels;
+mod presence;
 mod reassert;

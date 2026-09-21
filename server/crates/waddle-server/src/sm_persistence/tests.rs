@@ -1314,6 +1314,129 @@ async fn postgres_schema_has_no_shadow_ordinal() {
     assert_eq!(count, 0);
 }
 
+/// #1803: the resource-presence probe asks about ONE full JID, per
+/// roster-absent occupant and on every cluster peer, inside a bounded fan-out
+/// budget. The backend must answer with an exact predicate — a same-bare-JID
+/// sibling resource and another user's session are both non-answers — and the
+/// registry probe on top of it must read the result as Present/Absent.
+async fn full_jid_scoped_listing(storage: DatabaseSmPersistence, tag: &str) {
+    let target = full(&format!("scoped{tag}@example.com/web"));
+    let sibling = full(&format!("scoped{tag}@example.com/phone"));
+    let stranger = full(&format!("other{tag}@example.com/web"));
+    let unknown_resource = full(&format!("scoped{tag}@example.com/tablet"));
+    let rows = [
+        (format!("scoped-target-{tag}"), &target),
+        (format!("scoped-sibling-{tag}"), &sibling),
+        (format!("scoped-stranger-{tag}"), &stranger),
+    ];
+    for (stream_id, jid) in &rows {
+        let mut session = fixture_session(stream_id);
+        session.user_id = jid.to_bare().to_string();
+        session.jid = (*jid).clone();
+        // The probe's resumability window is evaluated against wall-clock now.
+        session.detached_at = Utc::now();
+        storage
+            .upsert_session(session)
+            .await
+            .expect("persist session");
+    }
+
+    let listed = storage
+        .list_sessions_for_full_jid(&target)
+        .await
+        .expect("scoped listing");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| row.stream_id.as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec![format!("scoped-target-{tag}")],
+        "only the exact full JID's row is returned"
+    );
+    assert_eq!(listed[0].jid, target);
+    assert!(
+        storage
+            .list_sessions_for_full_jid(&unknown_resource)
+            .await
+            .expect("scoped listing for an unknown resource")
+            .is_empty(),
+        "a sibling resource's row is not this resource's session"
+    );
+
+    let registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::new(storage.clone()));
+    assert_eq!(
+        registry.probe_resumable_session_for_full_jid(&target).await,
+        waddle_xmpp::stream_management::ResumableSessionProbe::Present
+    );
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_full_jid(&unknown_resource)
+            .await,
+        waddle_xmpp::stream_management::ResumableSessionProbe::Absent
+    );
+
+    for (stream_id, _) in &rows {
+        storage
+            .delete_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("clean up scoped listing rows");
+    }
+}
+
+#[tokio::test]
+async fn sqlite_lists_sessions_for_one_full_jid() {
+    let storage = DatabaseSmPersistence::open(None)
+        .await
+        .expect("open in-memory sm persistence");
+    full_jid_scoped_listing(storage, "sqlite").await;
+}
+
+#[tokio::test]
+async fn postgres_lists_sessions_for_one_full_jid() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed full-JID scoped session listing)"
+        );
+        return;
+    };
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    full_jid_scoped_listing(storage, &format!("pg{}", uuid::Uuid::new_v4().simple())).await;
+}
+
+/// The scoped read backs an eviction guard, so an undecodable row that MATCHES
+/// the JID must read as "cannot tell", never as absence. `list_all_sessions`
+/// already propagates a decode failure rather than skipping the row; this pins
+/// the same policy for the scoped query.
+#[tokio::test]
+async fn sqlite_scoped_listing_fails_closed_on_an_undecodable_matching_row() {
+    let storage = DatabaseSmPersistence::open(None)
+        .await
+        .expect("open in-memory sm persistence");
+    let jid = full("poison@example.com/web");
+    let mut session = fixture_session("scoped-poison");
+    session.jid = jid.clone();
+    storage
+        .upsert_session(session)
+        .await
+        .expect("persist session");
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-generation".to_string(), "scoped-poison".to_string()],
+        )
+        .await
+        .expect("corrupt the row");
+
+    storage
+        .list_sessions_for_full_jid(&jid)
+        .await
+        .expect_err("a matching row that cannot be decoded is not proof of absence");
+}
+
 #[path = "ingress_receipt_tests.rs"]
 mod ingress_receipt_tests;
 

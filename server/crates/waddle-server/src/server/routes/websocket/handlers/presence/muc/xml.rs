@@ -54,6 +54,8 @@ pub(super) fn build_muc_join_presence_stanza(
             is_self: params.include_self_status,
             room_created: params.room_created,
             warn_nonanonymous_join: params.warn_nonanonymous_join,
+            // Availability presence, never a removal.
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         },
         &waddle_xmpp::xep::xep0421::OccupantIdentity {
             bare_jid: &real_bare,

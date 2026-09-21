@@ -142,6 +142,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     selector,
                     attempt,
                     remote_ceiling,
+                    removal,
                 } => {
                     // A live registration of the same full JID does NOT drop
                     // the sweep: the new connection has not necessarily
@@ -155,6 +156,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         selector,
                         attempt,
                         remote_ceiling,
+                        removal,
                     )
                     .await
                     {
@@ -177,6 +179,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         selector,
                                         attempt,
                                         remote_ceiling,
+                                        removal,
                                     },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
@@ -195,6 +198,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     selector,
                     attempt,
                     notified,
+                    removal,
                 } => {
                     // A reconnected JID does NOT short-circuit the retry:
                     // the retained attempt predates the rejoin, so the
@@ -224,6 +228,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         selector,
                                         attempt,
                                         notified: notified.clone(),
+                                        removal,
                                     },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
@@ -274,6 +279,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     selector,
                                     attempt,
                                     notified: notified.clone(),
+                                    removal,
                                 },
                                 attempts: pending.attempts,
                                 not_before: pending.not_before,
@@ -307,6 +313,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     selector,
                                     attempt,
                                     notified: notified.clone(),
+                                    removal,
                                 },
                                 attempts: pending.attempts,
                                 not_before: pending.not_before,
@@ -374,6 +381,12 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &room,
                                         &jid,
                                         &outcome,
+                                        // The retained item carries WHY, so a
+                                        // delayed replay emits the same
+                                        // XEP-0045 status codes the inline
+                                        // sweep would have (#1814): a ghost
+                                        // eviction still says 333 here.
+                                        removal,
                                         Some(LeaveFanOutProgress {
                                             skip: &notified,
                                             record: None,
@@ -418,6 +431,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &jid,
                                         &outcome.leaving_room_jid,
                                         outcome.affiliation,
+                                        removal,
                                     )
                                     .await;
                                     broadcast_muc_leave_to_remaining_resumable(
@@ -425,6 +439,12 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &room,
                                         &jid,
                                         &outcome,
+                                        // The retained item carries WHY, so a
+                                        // delayed replay emits the same
+                                        // XEP-0045 status codes the inline
+                                        // sweep would have (#1814): a ghost
+                                        // eviction still says 333 here.
+                                        removal,
                                         Some(LeaveFanOutProgress {
                                             skip: &notified,
                                             record: None,
@@ -502,6 +522,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     selector,
                                     attempt,
                                     notified: std::collections::HashSet::new(),
+                                    removal,
                                 };
                                 continue;
                             }
@@ -521,6 +542,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         selector,
                                         attempt,
                                         notified: std::collections::HashSet::new(),
+                                        removal,
                                     },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
@@ -549,6 +571,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         },
                                         attempt,
                                         notified: notified.clone(),
+                                        removal,
                                     },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
@@ -593,6 +616,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     selector,
                                     attempt,
                                     notified: std::collections::HashSet::new(),
+                                    removal,
                                 };
                                 continue;
                             }
@@ -612,6 +636,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     &jid,
                                     &nick.occupant_jid(&room),
                                     affiliation,
+                                    removal,
                                 )
                                 .await;
                             }
@@ -661,6 +686,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         selector,
                                         attempt,
                                         notified: notified.clone(),
+                                        removal,
                                     },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
@@ -679,6 +705,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 selector,
                                 attempt,
                                 notified,
+                                removal,
                             };
                         }
                     }
@@ -690,6 +717,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     selector,
                     attempt,
                     notified,
+                    removal,
                 } => {
                     // The live task never completed its write-ahead entry:
                     // retry as a retained departure under the same attempt so
@@ -702,6 +730,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         selector,
                         attempt,
                         notified,
+                        removal,
                     };
                 }
                 LocalDepartureItem::EvictEmptyRoom {
@@ -830,6 +859,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     selector,
                     attempt,
                     notified,
+                    removal,
                 } => match get_room_actor_result(state, &room).await {
                     Ok(None) => {
                         crate::metrics::record_local_departure_retry(
@@ -845,6 +875,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             selector,
                             attempt,
                             notified,
+                            removal,
                         };
                     }
                     Ok(Some(_)) | Err(_) => {
@@ -864,6 +895,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     selector,
                                     attempt,
                                     notified,
+                                    removal,
                                 },
                                 attempts: pending.attempts,
                                 not_before: pending.not_before,
@@ -6599,6 +6631,8 @@ mod orphan_reaper_sweep_tests {
             pod_template_hash: None,
             resume_bridge: None,
             ordered_relay_delivery_bridge: None,
+            resource_presence: None,
+            cluster_membership: None,
             stop_token: None,
             fatal_fence: None,
             resume_handshake_timeout: None,
@@ -9509,6 +9543,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -9576,6 +9611,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -9636,6 +9672,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -9710,6 +9747,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -9795,6 +9833,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Generation(first_generation),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -9864,6 +9903,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Generation(generation),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -10064,6 +10104,7 @@ mod local_muc_departure_tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     notified: std::collections::HashSet::new(),
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
                 attempts: 1,
                 not_before: std::time::Instant::now() - std::time::Duration::from_secs(5),
@@ -10171,6 +10212,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -10278,6 +10320,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 3);
@@ -10396,6 +10439,7 @@ mod local_muc_departure_tests {
             selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         state
             .deps
@@ -10471,6 +10515,7 @@ mod local_muc_departure_tests {
             selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         state
             .deps
@@ -10501,6 +10546,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             });
         state
             .deps
@@ -10518,6 +10564,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 2);
@@ -10549,6 +10596,7 @@ mod local_muc_departure_tests {
             selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         state
             .deps
@@ -10643,6 +10691,7 @@ mod local_muc_departure_tests {
             selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
+            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
         };
         state
             .deps
@@ -10671,6 +10720,7 @@ mod local_muc_departure_tests {
             &room,
             &alice,
             &outcome,
+            waddle_xmpp::muc::MucRemovalCause::Voluntary,
             Some(crate::server::routes::websocket::LeaveFanOutProgress {
                 skip: &skip_carol,
                 record: Some((
@@ -10895,6 +10945,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -10961,6 +11012,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::JoinedAtOrBefore(first),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
         actor
@@ -11006,6 +11058,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::JoinedAtOrBefore(second),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11069,6 +11122,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Generation(generation),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11160,6 +11214,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: third_attempt,
                 notified: HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11212,6 +11267,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 remote_ceiling: u64::MAX,
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11266,6 +11322,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11306,6 +11363,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 notified: notified_bob.clone(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11329,6 +11387,7 @@ mod local_muc_departure_tests {
                         selector: LeaveSessionSelector::Any,
                         attempt,
                         notified: notified_bob,
+                        removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                     }
                 ),
             "the awaiting-reap requeue carries the fan-out progress"
@@ -11444,6 +11503,7 @@ mod local_muc_departure_tests {
                 // The dead task had already notified bob before the retirement
                 // watch: the successor's resumed fan-out must skip bob.
                 notified: HashSet::from([bob.clone()]),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11515,6 +11575,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11571,6 +11632,7 @@ mod local_muc_departure_tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 remote_ceiling: u64::MAX,
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
 
@@ -11617,6 +11679,7 @@ mod local_muc_departure_tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
             );
 
@@ -11660,6 +11723,7 @@ mod local_muc_departure_tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
                 attempts: requeued.attempts,
                 // Model the janitor's next pass after the retained item's
@@ -11716,6 +11780,7 @@ mod local_muc_departure_tests {
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     notified: std::collections::HashSet::new(),
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
                 attempts: 10,
                 not_before: Instant::now(),
