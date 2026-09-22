@@ -1,3 +1,10 @@
+#[cfg(feature = "clustering")]
+mod remote_owner;
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use remote_owner::remote_owner_mirror_ticker;
+#[cfg(feature = "clustering")]
+pub(crate) use remote_owner::spawn_remote_owner_mirror_janitor;
+
 use crate::room_policy::RoomRegistryActorPolicy;
 use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
@@ -8354,6 +8361,19 @@ pub(crate) struct UserReaperSweepCounts {
     pub examined: usize,
     pub remaining: usize,
     failed: bool,
+    deferred: bool,
+}
+
+impl UserReaperSweepCounts {
+    fn outcome(&self) -> SweepOutcome {
+        if self.failed {
+            SweepOutcome::Failed
+        } else if self.deferred {
+            SweepOutcome::Deferred
+        } else {
+            SweepOutcome::Completed
+        }
+    }
 }
 
 async fn record_user_registry_convergence_status(
@@ -8368,12 +8388,22 @@ async fn record_user_registry_convergence_status(
         .reply_timeout(REAPER_ASK_TIMEOUT)
         .await
     {
-        Ok((pending_unregisters, terminal_releases)) => {
-            if pending_unregisters > 0 || terminal_releases > 0 {
+        Ok(report) => {
+            let pending_unregisters = report.pending_unregisters;
+            let terminal_releases = report.terminal_releases;
+            counts.deferred = pending_unregisters > 0 || terminal_releases > 0;
+            if report.failed_operations > 0 {
                 counts.failed = true;
                 warn!(
+                    failed_operations = report.failed_operations,
                     pending_unregisters,
-                    terminal_releases, "user actor reaper: registry convergence remains pending"
+                    terminal_releases,
+                    "user actor reaper: convergence retry operations failed"
+                );
+            } else if counts.deferred {
+                debug!(
+                    pending_unregisters,
+                    terminal_releases, "user actor reaper: registry convergence deferred"
                 );
             }
         }
@@ -8406,18 +8436,6 @@ pub(crate) async fn sweep_empty_user_actors_once(
     let mut counts = UserReaperSweepCounts::default();
     let user_registry = &websocket_state.deps.protocol.user_registry;
     record_user_registry_convergence_status(user_registry, &mut counts).await;
-    #[cfg(feature = "clustering")]
-    if let Some(bridge) = websocket_state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    {
-        if !bridge.sweep_remote_owner_resources().await {
-            counts.failed = true;
-        }
-    }
     let users = match user_registry
         .ask(ListUsers)
         .mailbox_timeout(REAPER_ASK_TIMEOUT)
@@ -8530,11 +8548,7 @@ async fn run_user_actor_reaper_sweep(state: &WebSocketState) {
         }
         waddle_xmpp::telemetry::reliability::record_janitor_sweep(
             Janitor::UserActorReaper,
-            if counts.failed {
-                SweepOutcome::Failed
-            } else {
-                SweepOutcome::Completed
-            },
+            counts.outcome(),
         );
     }
     .instrument(janitor_sweep_span(Janitor::UserActorReaper))
@@ -8950,6 +8964,92 @@ mod user_reaper_tests {
         msg.bodies
             .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
         waddle_xmpp::Stanza::Message(msg)
+    }
+
+    struct HoldReaperUser {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl kameo::message::Message<HoldReaperUser> for waddle_xmpp::registry::user_actor::UserActor {
+        type Reply = ();
+
+        async fn handle(
+            &mut self,
+            msg: HoldReaperUser,
+            _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+        ) {
+            msg.entered.notify_one();
+            msg.release.notified().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_user_unregister_is_deferred_without_failed_heartbeat() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let registry = &state.deps.protocol.user_registry;
+        let jid = full_jid("busy-reaper@example.com/web");
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        registry
+            .ask(RegisterUserResource {
+                jid: jid.clone(),
+                entry: ConnectionEntry::new(tx),
+            })
+            .await
+            .expect("register resource awaiting cleanup");
+        let actor = registry
+            .ask(GetUser {
+                bare_jid: jid.to_bare(),
+            })
+            .await
+            .expect("look up registered user")
+            .expect("registered actor exists");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        actor
+            .tell(HoldReaperUser {
+                entered: entered.clone(),
+                release: release.clone(),
+            })
+            .await
+            .expect("hold user actor busy");
+        entered.notified().await;
+        registry
+            .ask(waddle_xmpp::registry::RecordPendingUserUnregister {
+                jid: jid.clone(),
+                owner: None,
+            })
+            .await
+            .expect("record owed resource cleanup");
+
+        // Database setup needs real time; only the gated actor retry is virtual.
+        tokio::time::pause();
+        run_user_actor_reaper_sweep(&state).await;
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.janitor.sweeps",
+                &[("janitor", "user_actor_reaper"), ("outcome", "deferred"),]
+            ),
+            Some(1),
+            "busy child actors defer work without failing the reaper"
+        );
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.janitor.sweeps",
+                &[("janitor", "user_actor_reaper"), ("outcome", "failed"),]
+            ),
+            Some(0)
+        );
+
+        release.notify_one();
+        actor
+            .ask(waddle_xmpp::registry::user_actor::ResourceCount)
+            .await
+            .expect("drain prior child asks after releasing the gate");
+        let recovered = sweep_empty_user_actors_once(&state).await;
+        assert_eq!(recovered.outcome(), super::SweepOutcome::Completed);
+        assert_eq!(recovered.remaining, 0);
     }
 
     struct CountingReleaseFailureClaimStore {

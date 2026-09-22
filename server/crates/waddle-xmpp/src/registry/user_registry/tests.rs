@@ -2110,15 +2110,76 @@ async fn force_detach_release_failure_converges_through_registry_retry() {
     assert_eq!(outcome, UnregisterAndReleaseOutcome::Released);
     assert!(store.current_claim(&entity).await.expect("claim").is_some());
 
+    let failed = registry
+        .ask(RetryUserRegistryConvergence)
+        .await
+        .expect("observe failing durable release retry");
+    assert_eq!(failed.pending_unregisters, 0);
+    assert_eq!(failed.terminal_releases, 1);
+    assert_eq!(failed.failed_operations, 1);
+
     store.set_fail_releases(false);
     assert_eq!(
         registry
             .ask(RetryUserRegistryConvergence)
             .await
             .expect("retry"),
-        (0, 0)
+        UserRegistryConvergenceReport::default()
     );
     assert!(store.current_claim(&entity).await.expect("claim").is_none());
+}
+
+#[tokio::test]
+async fn convergence_reports_release_errors_even_when_resource_removal_succeeds() {
+    let registry = spawn_registry().await;
+    let store = Arc::new(RecordingClaimStore::empty());
+    store.set_fail_releases(true);
+    wire_claims(&registry, store.clone(), this_identity()).await;
+    let jid = full("retry-release-report", "phone");
+    let entity = user_entity(&jid.to_bare());
+    let (tx, _rx) = outbound_channel();
+    registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry: ConnectionEntry::new(tx),
+        })
+        .await
+        .expect("register pending resource");
+    registry
+        .ask(RecordPendingUserUnregister { jid, owner: None })
+        .await
+        .expect("record cleanup before its retry turn");
+
+    let report = registry
+        .ask(RetryUserRegistryConvergence)
+        .await
+        .expect("retry resource and durable claim cleanup");
+    assert_eq!(report.pending_unregisters, 0, "resource removal completed");
+    assert_eq!(report.terminal_releases, 1, "claim release is still owed");
+    assert_eq!(
+        report.failed_operations, 2,
+        "both the removal's release and its queued retry failed"
+    );
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("retained claim")
+        .is_some());
+
+    store.set_fail_releases(false);
+    assert_eq!(
+        registry
+            .ask(RetryUserRegistryConvergence)
+            .await
+            .expect("retry after backend recovery"),
+        UserRegistryConvergenceReport::default(),
+        "old failure counts must not contaminate later successful turns"
+    );
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("released claim")
+        .is_none());
 }
 
 /// `ensure_claimed` can self-reacquire with the same epoch.  A terminal
@@ -2268,7 +2329,11 @@ async fn terminal_release_retry_times_out_without_blocking_the_janitor_turn() {
         .await
         .expect("janitor retry must stop waiting once claim release times out")
         .expect("retry result"),
-        (0, 1),
+        UserRegistryConvergenceReport {
+            pending_unregisters: 0,
+            terminal_releases: 1,
+            failed_operations: 1
+        },
         "timed-out janitor retries must preserve the terminal release backlog"
     );
     store.release_entered.notified().await;
@@ -2279,7 +2344,7 @@ async fn terminal_release_retry_times_out_without_blocking_the_janitor_turn() {
             .ask(RetryUserRegistryConvergence)
             .await
             .expect("follow-up retry"),
-        (0, 0)
+        UserRegistryConvergenceReport::default()
     );
     assert!(store.current_claim(&entity).await.expect("claim").is_none());
 }
@@ -2363,7 +2428,7 @@ async fn busy_force_detach_records_pending_unregister_and_retry_frees_slot() {
             .ask(RetryUserRegistryConvergence)
             .await
             .expect("retry"),
-        (0, 0)
+        UserRegistryConvergenceReport::default()
     );
     assert!(
         registry
@@ -2569,7 +2634,11 @@ async fn retry_user_registry_convergence_batches_pending_unregister_retries_per_
             .reply_timeout(Duration::from_secs(5))
             .await
             .expect("convergence retry should stay within the reaper ask budget"),
-        (3, 0),
+        UserRegistryConvergenceReport {
+            pending_unregisters: 3,
+            terminal_releases: 0,
+            failed_operations: 0
+        },
         "one turn should retry only a bounded batch and leave the remaining work queued"
     );
     assert_eq!(
@@ -2579,7 +2648,11 @@ async fn retry_user_registry_convergence_batches_pending_unregister_retries_per_
             .reply_timeout(Duration::from_secs(5))
             .await
             .expect("next sweep should see the preserved backlog"),
-        (3, 0),
+        UserRegistryConvergenceReport {
+            pending_unregisters: 3,
+            terminal_releases: 0,
+            failed_operations: 0
+        },
         "the retries that did not converge in the prior turn must remain queued for the next sweep"
     );
 
@@ -2691,7 +2764,7 @@ async fn pending_unregister_state_loss_converges_without_retrying_forever() {
             .ask(RetryUserRegistryConvergence)
             .await
             .expect("janitor retry"),
-        (0, 0),
+        UserRegistryConvergenceReport::default(),
         "the poison-path cleanup drains queued unregisters"
     );
     assert_eq!(
@@ -2699,7 +2772,7 @@ async fn pending_unregister_state_loss_converges_without_retrying_forever() {
             .ask(RetryUserRegistryConvergence)
             .await
             .expect("second janitor retry"),
-        (0, 0),
+        UserRegistryConvergenceReport::default(),
         "no stale unregister remains to fail subsequent sweeps"
     );
     assert!(matches!(

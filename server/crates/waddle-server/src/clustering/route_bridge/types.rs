@@ -416,6 +416,8 @@ pub(super) struct RemoteOwnerResources {
     registrations: BTreeMap<jid::FullJid, RemoteOwnerRegistration>,
     current_round: BTreeSet<jid::FullJid>,
     next_round: BTreeSet<jid::FullJid>,
+    pending_since: BTreeMap<jid::FullJid, tokio::time::Instant>,
+    pending_by_age: BTreeSet<(tokio::time::Instant, jid::FullJid)>,
 }
 
 // Expose map reads only: all key mutations must also maintain the sweep rounds.
@@ -436,17 +438,51 @@ impl RemoteOwnerResources {
         if !self.current_round.contains(&jid) {
             self.next_round.insert(jid.clone());
         }
+        self.clear_pending_age(&jid);
+        if registration.unregister_pending {
+            self.mark_pending(&jid);
+        }
         self.registrations.insert(jid, registration)
     }
 
     pub(super) fn remove(&mut self, jid: &jid::FullJid) -> Option<RemoteOwnerRegistration> {
         self.current_round.remove(jid);
         self.next_round.remove(jid);
+        self.clear_pending_age(jid);
         self.registrations.remove(jid)
     }
 
     pub(super) fn get_mut(&mut self, jid: &jid::FullJid) -> Option<&mut RemoteOwnerRegistration> {
         self.registrations.get_mut(jid)
+    }
+
+    fn clear_pending_age(&mut self, jid: &jid::FullJid) {
+        if let Some(since) = self.pending_since.remove(jid) {
+            self.pending_by_age.remove(&(since, jid.clone()));
+        }
+    }
+
+    pub(super) fn mark_pending(&mut self, jid: &jid::FullJid) {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.pending_since.entry(jid.clone())
+        {
+            let since = tokio::time::Instant::now();
+            entry.insert(since);
+            self.pending_by_age.insert((since, jid.clone()));
+        }
+    }
+
+    /// Inventory is all mirrors, pending is only known owed retirements; age
+    /// begins at local detection, not at the remote node's expiry timestamp.
+    /// The ordered age index avoids scanning an unbounded inventory each tick.
+    pub(super) fn sweep_backlog(&self) -> (usize, usize, Duration) {
+        (
+            self.registrations.len(),
+            self.pending_since.len(),
+            self.pending_by_age
+                .first()
+                .map_or(Duration::ZERO, |(since, _)| since.elapsed()),
+        )
     }
 
     pub(super) fn sweep_page(

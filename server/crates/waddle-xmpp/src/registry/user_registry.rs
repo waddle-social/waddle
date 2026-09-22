@@ -134,6 +134,9 @@ pub struct UserRegistryActor {
     prioritized_stale_retirements: VecDeque<BareJid>,
     stale_retirement_queue_retries: HashMap<BareJid, u8>,
     stale_retirement_retry_scheduled: bool,
+    // A retry turn must observe failed releases even when resource removal
+    // succeeds and its newly queued release lies beyond this turn's batch.
+    claim_release_failures: usize,
 }
 
 impl UserRegistryActor {
@@ -151,6 +154,7 @@ impl UserRegistryActor {
             prioritized_stale_retirements: VecDeque::new(),
             stale_retirement_queue_retries: HashMap::new(),
             stale_retirement_retry_scheduled: false,
+            claim_release_failures: 0,
         }
     }
 
@@ -463,6 +467,7 @@ impl UserRegistryActor {
                 // failure leaves ownership behind and must remain visible in
                 // trace queries.
                 crate::telemetry::mark_span_error();
+                self.claim_release_failures = self.claim_release_failures.saturating_add(1);
                 error!(
                     jid = %bare_jid,
                     owner = %claim.owner.node_id,
@@ -475,6 +480,7 @@ impl UserRegistryActor {
             }
             Err(_elapsed) => {
                 crate::telemetry::mark_span_error();
+                self.claim_release_failures = self.claim_release_failures.saturating_add(1);
                 warn!(
                     jid = %bare_jid,
                     owner = %claim.owner.node_id,
@@ -1395,6 +1401,17 @@ impl kameo::message::Message<UnregisterAndReleaseIfEmptyWithoutPendingRecord>
 /// monopolize the registry and time out the janitor's ask budget.
 pub struct RetryUserRegistryConvergence;
 
+/// Backlog remaining after one bounded retry turn, with failures distinguished
+/// from normal batching or a temporarily busy child actor.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub struct UserRegistryConvergenceReport {
+    pub pending_unregisters: usize,
+    pub terminal_releases: usize,
+    /// Retry operations that failed during this turn. Busy child actors do not
+    /// count; unavailable state and failed/timed-out durable releases do.
+    pub failed_operations: usize,
+}
+
 /// Finalize an asynchronously queued stale-actor retirement once its
 /// force-detach acknowledgements settled (or their bounded wait elapsed).
 /// Sent by the ack-waiter task the retirement spawned; a no-op when the
@@ -1416,26 +1433,27 @@ impl kameo::message::Message<FinalizeStaleActorRetirement> for UserRegistryActor
 }
 
 impl kameo::message::Message<RetryUserRegistryConvergence> for UserRegistryActor {
-    type Reply = (usize, usize);
+    type Reply = UserRegistryConvergenceReport;
 
     async fn handle(
         &mut self,
         _msg: RetryUserRegistryConvergence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let release_failures_before = self.claim_release_failures;
         let pending = Self::take_retry_batch(&mut self.pending_unregisters);
         let mut pending_remaining = self.pending_unregisters.len();
+        let mut failed_operations = 0;
         for pending_unregister in pending {
             let retry_jid = pending_unregister.jid.clone();
             let retry_owner = pending_unregister.owner.clone();
-            if matches!(
-                self.unregister_and_release_if_empty(
-                    pending_unregister.jid,
-                    pending_unregister.owner
-                )
-                .await,
-                UnregisterAndReleaseOutcome::RetryableFailure(_)
-            ) {
+            if let UnregisterAndReleaseOutcome::RetryableFailure(reason) = self
+                .unregister_and_release_if_empty(pending_unregister.jid, pending_unregister.owner)
+                .await
+            {
+                if reason != UnregisterAndReleaseRetryableFailure::UserActorBusy {
+                    failed_operations += 1;
+                }
                 self.remember_pending_unregister(retry_jid, retry_owner);
                 pending_remaining += 1;
             }
@@ -1459,7 +1477,14 @@ impl kameo::message::Message<RetryUserRegistryConvergence> for UserRegistryActor
                 releases_remaining += 1;
             }
         }
-        (pending_remaining, releases_remaining)
+        failed_operations += self
+            .claim_release_failures
+            .saturating_sub(release_failures_before);
+        UserRegistryConvergenceReport {
+            pending_unregisters: pending_remaining,
+            terminal_releases: releases_remaining,
+            failed_operations,
+        }
     }
 }
 

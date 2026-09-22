@@ -274,6 +274,7 @@ reliability_counters! {
 /// tick" alert must keep its absent series.
 pub fn register_reliability_counters() {
     register_table_counters();
+    super::remote_owner::add_mirror_attempt(0, super::attributes::RemoteOwnerMirrorOutcome::Failed);
     for path in SmEvictionPath::ALL {
         add_sm_unacked_evicted(0, path);
     }
@@ -1094,7 +1095,11 @@ mod tests {
             .chain(REGISTERED_SM_COUNTERS.iter().copied())
             .chain(REGISTERED_INGRESS_COUNTERS.iter().copied())
             .chain(REGISTERED_PUSH_COUNTERS.iter().copied())
-            .chain(["xmpp.push.outbox_retry_scheduled", "xmpp.push.suppressed"])
+            .chain([
+                "xmpp.push.outbox_retry_scheduled",
+                "xmpp.push.suppressed",
+                "xmpp.remote_owner_mirror.attempts",
+            ])
             .chain([
                 "waddle.call.admin.call_failed",
                 "waddle.call.setup.attempted",

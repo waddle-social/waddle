@@ -1281,6 +1281,8 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_destroy_completion_janitor(websocket_state);
     spawn_room_dormancy_janitor(websocket_state);
     spawn_user_actor_reaper(websocket_state);
+    #[cfg(feature = "clustering")]
+    crate::server::session_janitors::spawn_remote_owner_mirror_janitor(websocket_state);
     crate::server::session_janitors::spawn_local_muc_departure_janitor(websocket_state);
     #[cfg(feature = "clustering")]
     crate::server::session_janitors::spawn_remote_muc_membership_reconciler(websocket_state);
