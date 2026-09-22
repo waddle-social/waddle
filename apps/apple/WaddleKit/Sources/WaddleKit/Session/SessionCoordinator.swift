@@ -263,7 +263,13 @@ public final class SessionCoordinator {
             cursors.forEach(applyDisplayedCursor)
             return
         }
-        guard let route = account.route(from: message.from, to: message.to, isGroupchat: message.isGroupchat) else {
+        // Error bounces are not conversation content.
+        guard message.type != .error,
+              let route = account.route(from: message.from, to: message.to, isGroupchat: message.isGroupchat)
+        else { return }
+        // MUC private messages (type chat from room/nick) are not 1:1
+        // conversations with the room; they are unsupported for now.
+        if route.conversation.kind == .direct, directory.isRoom(route.conversation.jid) {
             return
         }
         if let pin = message.pinEvent {

@@ -256,3 +256,18 @@ struct AppActivityTests {
         #expect(port.displayed.map(\.id) == ["s1"])
     }
 }
+
+@MainActor
+@Suite("Routing guards")
+struct RoutingGuardTests {
+    @Test func mucPrivateMessagesAndErrorsStayOutOfDMs() {
+        let coordinator = SessionCoordinator(account: me, port: FakePort())
+        coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
+        coordinator.route(directMessage("psst", from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/p"), id: "pm1"))
+        var bounce = directMessage("bounced", from: jid("bob@waddle.test"), to: jid("alice@waddle.test/p"), id: "e1")
+        bounce.type = .error
+        coordinator.route(bounce)
+        #expect(coordinator.directory.directConversations.isEmpty)
+        #expect(coordinator.unread.total == 0)
+    }
+}
