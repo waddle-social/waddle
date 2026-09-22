@@ -1,0 +1,68 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: livekit-egress
+  namespace: livekit
+spec:
+  driftDetection:
+    mode: enabled
+  interval: 30m
+  chart:
+    spec:
+      chart: livekit-egress
+      version: 0.1.x
+      sourceRef:
+        kind: HelmRepository
+        name: livekit-egress
+        namespace: livekit
+      interval: 12h
+  valuesFrom:
+    # Inject the secret material from the livekit-egress ExternalSecret
+    # into the chart values at render time (same mechanism the SFU uses
+    # for its webhook key), so no credential is committed to git. The
+    # chart renders these into the egress config Secret.
+    - kind: Secret
+      name: livekit-egress
+      valuesKey: apiKey
+      targetPath: egress.apiKey
+      optional: false
+    - kind: Secret
+      name: livekit-egress
+      valuesKey: apiSecret
+      targetPath: egress.apiSecret
+      optional: false
+    - kind: Secret
+      name: livekit-egress
+      valuesKey: s3AccessKey
+      targetPath: egress.s3.accessKey
+      optional: false
+    - kind: Secret
+      name: livekit-egress
+      valuesKey: s3Secret
+      targetPath: egress.s3.secret
+      optional: false
+  values:
+    image:
+      repository: livekit/egress
+      tag: v1.9.0
+    egress:
+      # SFU signalling endpoint — egress connects as an authenticated
+      # participant to capture the room. In-cluster service, never an
+      # external host.
+      wsUrl: ws://livekit-sfu.livekit.svc.cluster.local:7880
+      # Shared Redis message bus the SFU dispatches egress jobs over.
+      redisAddress: livekit-redis.livekit.svc.cluster.local:6379
+      # Cloudflare R2 upload target. Bucket + endpoint are kept in
+      # lockstep with waddle-server's s3Bucket/s3Endpoint; credentials
+      # arrive via the existingSecret (never committed to git).
+      s3:
+        region: auto
+        endpoint: https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com
+        bucket: waddle-social-files
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi

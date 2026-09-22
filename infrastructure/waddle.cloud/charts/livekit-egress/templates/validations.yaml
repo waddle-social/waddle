@@ -1,0 +1,30 @@
+{{- if not .Values.egress.wsUrl -}}
+{{- fail "egress.wsUrl is required (the in-cluster livekit-sfu signal URL)" -}}
+{{- end -}}
+{{- if not .Values.egress.redisAddress -}}
+{{- fail "egress.redisAddress is required: egress receives jobs over the shared Redis bus; without it the SFU cannot dispatch recordings" -}}
+{{- end -}}
+{{- if not .Values.egress.s3.bucket -}}
+{{- fail "egress.s3.bucket is required (the R2 upload target)" -}}
+{{- end -}}
+{{- if not .Values.egress.s3.endpoint -}}
+{{- fail "egress.s3.endpoint is required (the R2 S3 endpoint)" -}}
+{{- end -}}
+{{- /*
+  The four secret-bearing values are injected by the HelmRelease from the
+  livekit-egress ExternalSecret (valuesFrom). Fail at render time if any is
+  empty so a mis-wired injection surfaces as a clear chart error rather than
+  a deployed egress that silently fails SFU auth or R2 upload at runtime.
+*/ -}}
+{{- if not .Values.egress.apiKey -}}
+{{- fail "egress.apiKey is required (SFU auth key, injected from the livekit-egress secret)" -}}
+{{- end -}}
+{{- if not .Values.egress.apiSecret -}}
+{{- fail "egress.apiSecret is required (SFU auth secret, injected from the livekit-egress secret)" -}}
+{{- end -}}
+{{- if not .Values.egress.s3.accessKey -}}
+{{- fail "egress.s3.accessKey is required (R2 access key, injected from the livekit-egress secret)" -}}
+{{- end -}}
+{{- if not .Values.egress.s3.secret -}}
+{{- fail "egress.s3.secret is required (R2 secret, injected from the livekit-egress secret)" -}}
+{{- end -}}

@@ -1,0 +1,51 @@
+replicaCount: 1
+revisionHistoryLimit: 3
+
+image:
+  repository: livekit/egress
+  tag: v1.9.0
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# LiveKit Egress configuration. Connectivity (wsUrl/redisAddress) and the
+# R2 storage target (s3.region/endpoint/bucket) are set by the HelmRelease;
+# the secret-bearing fields (apiKey/apiSecret/s3.accessKey/s3.secret) are
+# injected from the livekit-egress Secret via the HelmRelease `valuesFrom`
+# (never committed to git).
+egress:
+  logLevel: info
+  # HTTP health server port. When set, egress binds a listener here early
+  # in startup; the Deployment tcpSocket-probes it so Flux `wait: true`
+  # reflects the egress process being up and serving, not merely that the
+  # container image started.
+  healthPort: 8080
+  wsUrl: ""
+  redisAddress: ""
+  apiKey: ""
+  apiSecret: ""
+  s3:
+    accessKey: ""
+    secret: ""
+    region: auto
+    endpoint: ""
+    bucket: ""
+
+# /dev/shm sizing for the headless-Chrome compositor used by room-composite
+# egress; the default 64Mi tmpfs is too small and crashes the renderer.
+shmSize: 1Gi
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi

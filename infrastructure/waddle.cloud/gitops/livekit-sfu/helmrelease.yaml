@@ -39,6 +39,11 @@ spec:
         - https://xmpp.waddle.social/api/v1/livekit/webhook
     livekit:
       log_level: info
+      # Shared message bus the SFU dispatches recording jobs over to the
+      # livekit-egress workers (#1023). Without it the SFU has no way to
+      # reach egress. Stateless coordination only — see gitops/livekit-redis.
+      redis:
+        address: livekit-redis.livekit.svc.cluster.local:6379
       rtc:
         use_external_ip: true
         tcp_port: 30881
