@@ -56,10 +56,23 @@ public final class SessionCoordinator {
     @ObservationIgnored var pendingDisplayed: Set<ConversationID> = []
     @ObservationIgnored var mdsPublishSupported: Bool?
 
-    public init(account: AccountIdentity, port: any XmppPort, reconnectPolicy: ReconnectPolicy = ReconnectPolicy()) {
+    @ObservationIgnored private let connectBudget: TimeInterval
+    @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
+    @ObservationIgnored private var attempt = 0
+
+    /// `connectBudget`: how long an attempt may take to reach the ready
+    /// state before it counts as failed (the core reports connect failures
+    /// only as diagnostics, never as a disconnect).
+    public init(
+        account: AccountIdentity,
+        port: any XmppPort,
+        reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
+        connectBudget: TimeInterval = 15
+    ) {
         self.account = account
         self.port = port
         self.reconnectPolicy = reconnectPolicy
+        self.connectBudget = connectBudget
         let directory = DirectoryStore()
         self.directory = directory
         self.timelines = TimelineStore()
@@ -100,6 +113,8 @@ public final class SessionCoordinator {
         typingSweepTask = nil
         readyTask?.cancel()
         readyTask = nil
+        connectWatchdog?.cancel()
+        connectWatchdog = nil
         await port.disconnect()
         eventTask?.cancel()
         eventTask = nil
@@ -123,8 +138,23 @@ public final class SessionCoordinator {
     private func connectNow() {
         guard !isStopped else { return }
         status.connection = .connecting
+        attempt += 1
+        let current = attempt
         let port = self.port
         Task { await port.connect() }
+        connectWatchdog?.cancel()
+        connectWatchdog = Task { [weak self, connectBudget] in
+            try? await Task.sleep(nanoseconds: UInt64(connectBudget * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.connectAttemptTimedOut(current)
+        }
+    }
+
+    private func connectAttemptTimedOut(_ timedOut: Int) async {
+        guard timedOut == attempt, status.connection == .connecting, !isStopped else { return }
+        await port.disconnect()
+        guard timedOut == attempt, status.connection == .connecting else { return }
+        scheduleReconnect()
     }
 
     private func scheduleReconnect() {
@@ -166,6 +196,8 @@ public final class SessionCoordinator {
     func handle(_ event: XmppEvent) {
         switch event {
         case .connected:
+            connectWatchdog?.cancel()
+            connectWatchdog = nil
             reconnectAttempt = 0
             status.connection = .online
             // Runs beside the event loop: the pipeline awaits server

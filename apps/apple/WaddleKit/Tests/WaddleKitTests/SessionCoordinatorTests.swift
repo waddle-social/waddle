@@ -203,3 +203,34 @@ struct SessionCoordinatorTests {
         #expect(coordinator.connection == .authenticationFailed)
     }
 }
+
+@MainActor
+@Suite("Connection lifecycle")
+struct ConnectionLifecycleTests {
+    @Test func attemptWithoutReadyRetries() async throws {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(
+            account: me,
+            port: port,
+            reconnectPolicy: ReconnectPolicy(base: 0.01, cap: 0.01),
+            connectBudget: 0.05
+        )
+        coordinator.start()
+        #expect(coordinator.connection == .connecting)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        // The silent failure was noticed and a new attempt started.
+        #expect(port.connectCount >= 2)
+        await coordinator.stop()
+    }
+
+    @Test func readyCancelsTheWatchdog() async throws {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
+        coordinator.start()
+        port.emit(.connected)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(coordinator.connection == .online)
+        #expect(port.connectCount == 1)
+        await coordinator.stop()
+    }
+}
