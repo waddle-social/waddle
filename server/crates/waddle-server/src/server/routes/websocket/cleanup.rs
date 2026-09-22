@@ -3503,18 +3503,6 @@ pub(super) async fn cleanup_invalidated_detached_session(
     // session's own availability unchanged and let the helper decide.
     broadcast_unavailable_if_no_replacement(state, &detached.jid, detached.presence_available)
         .await;
-    // MUC occupancy is keyed by FULL JID, so a live same-JID session
-    // shares the room occupancies this stale detached session would
-    // evict. Two cases (codex P1 on PR #1207):
-    //  - The live entry IS the invalidating caller (fresh bind / failed
-    //    resume registering right now): its new stream cannot have
-    //    joined any rooms yet, so the occupancies are certainly the
-    //    dead session's — clean them, or the fresh connection inherits
-    //    room fan-out without ever joining.
-    //  - A FOREIGN live entry (third-party replacement, janitor-driven
-    //    invalidation): it may have legitimately re-joined rooms under
-    //    the shared full JID — skip cleanup; its own disconnect path
-    //    cleans up when it ends.
     // Generation-scoped (#1703): a live same-FullJID replacement keeps the
     // rooms it re-joined (`Superseded`); the rooms it did not re-join are
     // only this detached session's to converge, so the sweep always runs.

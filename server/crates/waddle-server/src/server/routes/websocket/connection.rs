@@ -286,8 +286,9 @@ async fn handle_xmpp_websocket(
     }
     // Set when our own registry slot was replaced by a newer connection for
     // the same FullJid (detected via outbound_rx closing). In that case the
-    // cleanup block below must NOT touch the registry or MUC state — those
-    // belong to the newcomer now.
+    // cleanup must preserve the newcomer's registry slot and sweep only the
+    // departing occupancy generation. Rooms the newcomer already rejoined
+    // reject that old-generation leave; rooms it never rejoined still depart.
     let mut superseded = false;
 
     'connection: loop {
@@ -582,9 +583,9 @@ async fn handle_xmpp_websocket(
                         // registration is a replacement register for the same
                         // FullJid: the registry drops our entry (and with it
                         // the sender) to install the new session's sender.
-                        // Mark as superseded so the cleanup block skips
-                        // unregister/MUC-cleanup/detach — all of those would
-                        // target the newcomer's registry slot and occupant.
+                        // Superseded cleanup preserves the replacement's route
+                        // and does not detach this old stream. It still sweeps
+                        // this stream's occupancy generation in every room.
                         info!("Outbound channel closed; session superseded by replacement");
                         superseded = true;
                         break;
@@ -716,12 +717,10 @@ async fn handle_xmpp_websocket(
     // the departed client are recorded for XEP-0198 resume replay
     // instead of being written.
     //
-    // Skipped when superseded: the registry slot, MUC occupancy, and
-    // SM continuity now belong to the replacement session, and
-    // running handlers from the stale session here could still emit
-    // side effects (routing, inbound_count) against state the
-    // newcomer owns — the same reason the cleanup block below
-    // short-circuits.
+    // Skipped when superseded: running handlers from the stale session
+    // could emit side effects (routing, inbound_count) against the replacement's
+    // route. Terminal cleanup below still owes its generation-scoped MUC
+    // departure; it does not execute these stale inbound handlers.
     if !superseded {
         if let (Some(jid), Some(owner)) = (conn.phase.bound_jid(), conn.registry_owner.as_ref()) {
             superseded = state
@@ -786,13 +785,16 @@ async fn handle_xmpp_websocket(
     //      resume.
     //   B. Detach for resumption — for SM sessions with `resume='true'`,
     //      stash state into the SmSessionRegistry so a reconnecting client
-    //      can `<resume/>` without re-joining MUC or re-authenticating.
+    //      can authenticate and `<resume/>` without binding a new resource
+    //      or re-joining MUC.
     //      MUC occupants stay in place during the detach window so other
     //      users continue to see this user as present.
     //
-    // Short-circuit when this task was superseded: the registry and MUC
-    // occupant slots now belong to the newer connection for this FullJid,
-    // and any cleanup we do here would clobber the newcomer.
+    // A superseded task preserves the replacement's registry slot but still
+    // cleans its own MUC occupancy generation. If cleanup wins before a fresh
+    // rejoin, peers see unavailable then available; if the rejoin wins, the
+    // room rejects the stale departure. Successful SM resume retains the
+    // original generation and follows the detach/resume continuity path.
     if !pending_force_detach.is_empty() {
         if let Some(bound_bare) = conn.phase.bound_jid().map(|jid| jid.to_bare()) {
             pending_force_detach.extend(drain_ready_force_detach_requests(

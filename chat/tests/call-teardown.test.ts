@@ -276,6 +276,46 @@ afterEach(() => {
   __setFaroForTesting(null);
 });
 
+describe("MUC reconnect presence during a direct call", () => {
+  test("same-resource departure and rejoin changes participants without ending the direct call or emitting messages", async () => {
+    const send_jingle_session_terminate = mock(async () => undefined);
+    const events = wireClientEvents({ send_jingle_session_terminate });
+    (events.client as unknown as { currentRoom: string }).currentRoom = "chan@muc.test";
+    const roomMessage = mock(() => undefined);
+    const directMessage = mock(() => undefined);
+    events.client.setMessageHandler(roomMessage);
+    events.client.setDirectMessageHandler(directMessage);
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/phone",
+      sid: "direct-call-during-room-rejoin",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    const directCall = $callState.get();
+    const occupant = { from: "chan@muc.test/bob", muc_jid: "bob@waddle.test/phone" };
+    events.emitPresence({ ...occupant, presence_type: "available", muji: { preparing: false, active: true } });
+    expect($mucCallParticipants.get()["chan@muc.test"]).toEqual(["bob"]);
+
+    events.emitPresence({ ...occupant, presence_type: "unavailable" });
+    await flushCallSideEffects();
+    expect($mucCallParticipants.get()["chan@muc.test"]).toBeUndefined();
+    expect($callState.get()).toEqual(directCall);
+
+    events.emitPresence({ ...occupant, presence_type: "available" });
+    expect($mucCallParticipants.get()["chan@muc.test"]).toBeUndefined();
+    events.emitPresence({ ...occupant, presence_type: "available", muji: { preparing: false, active: true } });
+    await flushCallSideEffects();
+    expect($mucCallParticipants.get()["chan@muc.test"]).toEqual(["bob"]);
+    expect($callState.get()).toEqual(directCall);
+    expect(send_jingle_session_terminate).not.toHaveBeenCalled();
+    expect(roomMessage).not.toHaveBeenCalled();
+    expect(directMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("DM call outcome feed anchors", () => {
   test("live reject records a declined entry for the peer feed", () => {
     const events = wireClientEvents();

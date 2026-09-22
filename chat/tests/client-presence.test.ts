@@ -141,6 +141,46 @@ describe("PresenceManager MUC occupant tracking", () => {
     expect(revoked).toEqual([ROOM]);
   });
 
+  test("same-resource departure then rejoin restores the roster and authority without message events", () => {
+    const { manager, events } = createManager();
+    const presenceEmits: unknown[] = [];
+    const authorityEmits: unknown[] = [];
+    const hatsEmits: unknown[] = [];
+    const messageEmits: unknown[] = [];
+    const lastSeen: string[] = [];
+    events.on("presence", (presence) => presenceEmits.push(presence));
+    events.on("authority", (authority) => authorityEmits.push(authority));
+    events.on("hats", (hats) => hatsEmits.push(hats));
+    events.on("message", (message) => messageEmits.push(message));
+    events.on("lastSeen", (nick) => lastSeen.push(nick));
+    const occupant = directPresence({
+      from: `${ROOM}/bob`,
+      muc_jid: "bob@example.com/phone",
+      muc_affiliation: "member",
+      muc_role: "participant",
+      hats: [{ uri: "urn:example:hats:helper", title: "Helper" }],
+    });
+
+    manager.handle(occupant);
+    expect(manager.memberJidsFor(ROOM)).toEqual({ bob: "bob@example.com" });
+
+    // A fresh bind may retire the old generation before its replacement joins.
+    manager.handle({ ...occupant, presence_type: "unavailable", muc_role: "none", hats: [] });
+    expect(presenceEmits.at(-1)).toEqual({ bob: "offline" });
+    expect(authorityEmits.at(-1)).toEqual({});
+    expect(hatsEmits.at(-1)).toEqual({});
+    expect(manager.memberJidsFor(ROOM)).toEqual({});
+
+    manager.handle(occupant);
+    expect(presenceEmits).toEqual([{ bob: "online" }, { bob: "offline" }, { bob: "online" }]);
+    expect(authorityEmits.at(-1)).toEqual({ bob: { affiliation: "member", role: "participant" } });
+    expect(hatsEmits.at(-1)).toEqual({ bob: occupant.hats });
+    expect(manager.memberJidsFor(ROOM)).toEqual({ bob: "bob@example.com" });
+    expect(lastSeen).toEqual(["bob"]);
+    // Presence fan-out is observable, but does not fabricate transcript messages.
+    expect(messageEmits).toEqual([]);
+  });
+
   test("occupant departure marks them offline and stamps lastSeen", () => {
     const { manager, events } = createManager();
     const presenceEmits: unknown[] = [];
