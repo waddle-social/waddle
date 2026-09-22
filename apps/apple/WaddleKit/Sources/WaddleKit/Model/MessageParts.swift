@@ -150,7 +150,7 @@ public struct EncryptedFileSource: Hashable, Sendable {
     public let cipher: String
     public let keyBase64: String
     public let ivBase64: String
-    /// `algo` → base64 digest of the plaintext.
+    /// `algo` → base64 digest of the ciphertext (XEP-0448 `<encrypted>` hashes).
     public let hashes: [String: String]
     public let sources: [URL]
 
