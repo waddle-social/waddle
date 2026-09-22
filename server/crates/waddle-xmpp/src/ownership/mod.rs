@@ -282,8 +282,9 @@ impl NodeIdentity {
 /// (e.g. the Postgres-fenced `SmPersistenceStorage`, ADR-0017 Phase 3
 /// Slice 4) that only ever reads it, without forcing the reader to depend
 /// on the `clustering` Cargo feature.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SharedNodeIdentity {
+    rotation_notifications: tokio::sync::watch::Sender<()>,
     identity: std::sync::Arc<std::sync::RwLock<NodeIdentity>>,
     rotation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
 }
@@ -306,6 +307,7 @@ impl SharedNodeIdentity {
     pub fn new(initial: NodeIdentity) -> Self {
         Self {
             identity: std::sync::Arc::new(std::sync::RwLock::new(initial)),
+            rotation_notifications: tokio::sync::watch::channel(()).0,
             rotation_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
         }
     }
@@ -369,6 +371,12 @@ impl SharedNodeIdentity {
         std::sync::Arc::ptr_eq(&self.rotation_gate, &guard.rotation_gate)
     }
 
+    /// Subscribe before reading `current` to observe every subsequent rotation.
+    /// Notifications may coalesce; readers must always load the latest identity.
+    pub fn subscribe_rotations(&self) -> tokio::sync::watch::Receiver<()> {
+        self.rotation_notifications.subscribe()
+    }
+
     /// Replace the current identity only after every in-flight guarded
     /// publication or transaction has completed.
     pub async fn rotate(&self, identity: NodeIdentity) {
@@ -377,6 +385,7 @@ impl SharedNodeIdentity {
             .identity
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+        self.rotation_notifications.send_replace(());
     }
 
     /// Permanently revoke publication authority for this clustering
@@ -743,6 +752,37 @@ mod tests {
         let id = "x".repeat(64 * 1024);
         let json = serde_json::json!({ "entity_type": "RoomActor", "id": id }).to_string();
         assert!(serde_json::from_str::<Entity>(&json).is_err());
+    }
+
+    #[tokio::test]
+    async fn rotation_notifications_follow_publication_gate_and_coalesce() {
+        let initial = NodeIdentity::new("initial", "first");
+        let shared = SharedNodeIdentity::new(initial.clone());
+        let mut changes = shared.subscribe_rotations();
+        let guard = shared
+            .guard_if_current(&initial)
+            .await
+            .expect("current guard");
+        let next = NodeIdentity::new("next", "second");
+        let rotation = shared.rotate(next.clone());
+        tokio::pin!(rotation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut rotation)
+                .await
+                .is_err()
+        );
+        assert!(!changes.has_changed().expect("open watch"));
+        assert_eq!(shared.current(), initial);
+        drop(guard);
+        rotation.await;
+        let latest = NodeIdentity::new("latest", "third");
+        shared.rotate(latest.clone()).await;
+        changes
+            .changed()
+            .await
+            .expect("coalesced rotation notification");
+        assert_eq!(shared.current(), latest);
+        assert!(!changes.has_changed().expect("notification consumed"));
     }
 
     #[test]
