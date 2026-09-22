@@ -92,6 +92,31 @@ class MucCallPresenceTest {
     }
 
     @Test
+    fun `same resource fresh rejoin restores membership only after renewed active muji`() {
+        presence.applyMucCallPresence(mujiPresence("alice", active = true, hasVideo = true, mucJid = OWN_FULL))
+        assertEquals(mapOf(ROOM_JID to setOf("alice")), presence.participants.value)
+        assertEquals(mapOf(ROOM_JID to MucCallMedia(audio = true, video = true)), presence.media.value)
+
+        presence.applyMucCallPresence(mujiPresence("alice", presenceType = "unavailable", mucJid = OWN_FULL))
+        assertTrue(presence.participants.value.isEmpty())
+        assertTrue(presence.owners.value.isEmpty())
+        assertTrue(presence.media.value.isEmpty())
+
+        // XEP-0045 room membership alone does not resume the XEP-0272 conference.
+        presence.applyMucCallPresence(mujiPresence("alice", mucJid = OWN_FULL))
+        assertTrue(presence.participants.value.isEmpty())
+        assertTrue(presence.owners.value.isEmpty())
+        presence.applyMucCallPresence(mujiPresence("alice", preparing = true, mucJid = OWN_FULL))
+        assertTrue(presence.participants.value.isEmpty())
+
+        presence.applyMucCallPresence(mujiPresence("alice", active = true, hasVideo = true, mucJid = OWN_FULL))
+        presence.applyMucCallPresence(mujiPresence("alice", active = true, hasVideo = true, mucJid = OWN_FULL))
+        assertEquals(mapOf(ROOM_JID to setOf("alice")), presence.participants.value)
+        assertEquals(mapOf(ROOM_JID to mapOf<String, String?>("alice" to OWN_FULL)), presence.owners.value)
+        assertEquals(mapOf(ROOM_JID to MucCallMedia(audio = true, video = true)), presence.media.value)
+    }
+
+    @Test
     fun `preparing-only muji never counts as call membership`() {
         presence.applyMucCallPresence(mujiPresence("alice", preparing = true))
 

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   $mucCallParticipants,
+  $mucCallParticipantOwners,
+  $mucCallMedia,
   applyMucCallPresence,
   awaitNoOtherPreparing,
   awaitPreparingEcho,
@@ -36,6 +38,40 @@ describe("applyMucCallPresence", () => {
     });
     expect(mucCallParticipantCount("room@muc.test")).toBe(1);
     expect(mucCallParticipantCount("ROOM@MUC.TEST/resource")).toBe(1);
+  });
+
+  test("same-resource fresh rejoin restores call membership only after renewed Muji presence", () => {
+    const room = "room@muc.test";
+    const occupant = {
+      from: `${room}/alice`,
+      muc_jid: "alice@waddle.test/mobile",
+      presence_type: "available",
+    };
+    const activePresence = { ...occupant, muji: { ...activeMuji, audio: true, video: true } };
+    applyMucCallPresence(activePresence);
+    expect(mucCallParticipantCount(room)).toBe(1);
+    expect($mucCallMedia.get()[room]).toEqual({ audio: true, video: true });
+
+    applyMucCallPresence({ ...occupant, presence_type: "unavailable" });
+    expect(mucCallParticipantCount(room)).toBe(0);
+    expect($mucCallParticipantOwners.get()[room]).toBeUndefined();
+    expect($mucCallMedia.get()[room]).toBeUndefined();
+
+    // Joining the room alone does not resume the XEP-0272 conference.
+    applyMucCallPresence(occupant);
+    expect(mucCallParticipantCount(room)).toBe(0);
+    expect($mucCallParticipantOwners.get()[room]).toBeUndefined();
+    applyMucCallPresence({ ...occupant, muji: preparingMuji });
+    expect(mucCallParticipantCount(room)).toBe(0);
+
+    applyMucCallPresence(activePresence);
+    applyMucCallPresence(activePresence);
+    expect($mucCallParticipants.get()[room]).toEqual(["alice"]);
+    expect(mucCallParticipantCount(room)).toBe(1);
+    expect($mucCallParticipantOwners.get()[room]).toEqual([
+      { nick: "alice", realJid: occupant.muc_jid },
+    ]);
+    expect($mucCallMedia.get()[room]).toEqual({ audio: true, video: true });
   });
 
   test("multiple occupants accumulate per room", () => {
