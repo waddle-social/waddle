@@ -42,6 +42,9 @@ jobs:
           python-version: "3.11"
       - name: Check native telemetry contract
         run: bash scripts/check-native-remote-telemetry.sh --apple
+      - name: Test WaddleKit
+        working-directory: apps/apple/WaddleKit
+        run: swift test
       - name: Build XMPP client XCFramework
         run: bash scripts/build-xcframework.sh --debug
       - name: Build macOS app

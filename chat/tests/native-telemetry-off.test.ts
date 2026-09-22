@@ -180,10 +180,11 @@ tracing = "0.1"
 }
 
 function writeAppleFixture(root: string, overrides?: {
-  appModelSwift?: string;
+  appStateSwift?: string;
+  ffiPortSwift?: string;
   projectPbxproj?: string;
   projectYml?: string;
-  rustClientSwift?: string;
+  waddleKitPackage?: string;
   supportSwift?: string;
 }) {
   writeSharedClientFixture(root);
@@ -195,13 +196,18 @@ function writeAppleFixture(root: string, overrides?: {
   );
   writeFixtureFile(
     root,
-    "apps/apple/Waddle/App/AppModel.swift",
-    overrides?.appModelSwift ?? "import OSLog\n",
+    "apps/apple/Waddle/App/AppState.swift",
+    overrides?.appStateSwift ?? "import Observation\n",
   );
   writeFixtureFile(
     root,
-    "apps/apple/Waddle/RustClient/RustXmppClient.swift",
-    overrides?.rustClientSwift ?? "import OSLog\n",
+    "apps/apple/Waddle/Bridge/FFIXmppPort.swift",
+    overrides?.ffiPortSwift ?? "import OSLog\n",
+  );
+  writeFixtureFile(
+    root,
+    "apps/apple/WaddleKit/Package.swift",
+    overrides?.waddleKitPackage ?? "// swift-tools-version: 6.0\n",
   );
   if (overrides?.supportSwift !== undefined) {
     writeFixtureFile(root, "apps/apple/Waddle/Support/TelemetryBootstrap.swift", overrides.supportSwift);

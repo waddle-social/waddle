@@ -1,6 +1,9 @@
 name: Waddle
 options:
   createIntermediateGroups: true
+packages:
+  WaddleKit:
+    path: WaddleKit
 settings:
   base:
     SWIFT_VERSION: 5.0
@@ -24,6 +27,7 @@ targets:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
         link: true
+      - package: WaddleKit
     preBuildScripts:
       - name: Sync Waddle Brand Assets
         script: |
@@ -56,6 +60,7 @@ targets:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
         link: true
+      - package: WaddleKit
     preBuildScripts:
       - name: Sync Waddle Brand Assets
         script: |
