@@ -99,21 +99,45 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return identity.all.contains(thread)
     }
 
-    /// The id other clients know this message by, for reactions,
-    /// retractions, replies and pins: in a room strictly the room-assigned
-    /// XEP-0359 stanza id (`by` must be the room); in 1:1 strictly the
-    /// author-assigned id, because our server's archive id never reached
-    /// the peer.
+    /// The XEP-0359 stanza id the room assigned (`by` is the room). In a
+    /// room this is the only id other occupants cannot forge.
+    public var roomStanzaID: String? {
+        conversation.isRoom ? identity.stanzaID(assignedBy: conversation.jid) : nil
+    }
+
+    /// Ids another entity may use to point at this row. In a room only the
+    /// room-assigned stanza id: every other id is sender-controlled and
+    /// could collide with, and so hijack or block, another occupant's row.
+    public var targetableIDs: Set<String> {
+        if conversation.isRoom {
+            return roomStanzaID.map { [$0] } ?? []
+        }
+        return identity.all
+    }
+
+    /// The id for reactions (XEP-0444), replies (XEP-0461) and pins: in a
+    /// room strictly the room-assigned stanza id; in 1:1 the origin-id if
+    /// present, else `@id`. Our own server's archive id never reached the
+    /// peer, so it is never used in 1:1.
     public var actionTargetID: String? {
         if conversation.isRoom {
-            return identity.stanzaID(assignedBy: conversation.jid)
+            return roomStanzaID
         }
         return identity.originID ?? identity.messageID
     }
 
-    /// XEP-0308 targets the author-assigned id of the original send.
+    /// XEP-0424 retraction target: the room-assigned stanza id in a room,
+    /// the original `@id` in 1:1.
+    public var retractionTargetID: String? {
+        if conversation.isRoom {
+            return roomStanzaID
+        }
+        return identity.messageID ?? identity.originID
+    }
+
+    /// XEP-0308 targets the `@id` of the original message.
     public var correctionTargetID: String? {
-        identity.originID ?? identity.messageID
+        identity.messageID ?? identity.originID
     }
 
     /// The XEP-0201 thread a "reply in thread" joins: the row's own thread,

@@ -34,7 +34,7 @@ public final class ConversationTimeline {
 
     /// Number of thread replies under `item`.
     public func replyCount(for item: TimelineItem) -> Int {
-        var ids = item.identity.all
+        var ids = item.targetableIDs
         ids.insert(item.id)
         return ids.reduce(0) { $0 + (repliesByThread[$1]?.count ?? 0) }
     }
@@ -53,7 +53,7 @@ public final class ConversationTimeline {
         var replies: [String: [Int]] = [:]
         for (index, item) in items.enumerated() {
             byID[item.id] = index
-            for alias in item.identity.all where alias != item.id {
+            for alias in item.targetableIDs where alias != item.id {
                 aliasOwners[alias, default: []].append(index)
             }
             if let thread = item.message.thread, !item.isFeedVisible {

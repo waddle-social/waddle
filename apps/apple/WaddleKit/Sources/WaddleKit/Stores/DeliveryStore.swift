@@ -16,7 +16,9 @@ public enum DeliveryState: Hashable, Sendable {
 
 /// Tracks the lifecycle of own sends. Ack and failure events can beat the
 /// send's own continuation, so both are remembered (bounded) until the
-/// outcome arrives; failure wins over an ack.
+/// outcome arrives. A XEP-0198 ack is proof the server has the stanza, so
+/// it wins over a transport failure (the core may have re-sent it); only an
+/// error bounce from the recipient overrides an ack.
 @MainActor
 @Observable
 public final class DeliveryStore {
@@ -43,10 +45,10 @@ public final class DeliveryStore {
     public func outcome(_ outcome: SendOutcome, for clientID: String) {
         switch outcome {
         case .sent:
-            if earlyFailures.contains(clientID) {
-                states[clientID] = .failed
-            } else if earlyAcks.contains(clientID) {
+            if earlyAcks.contains(clientID) {
                 states[clientID] = .acknowledged
+            } else if earlyFailures.contains(clientID) {
+                states[clientID] = .failed
             } else {
                 states[clientID] = .sent
             }
@@ -58,20 +60,26 @@ public final class DeliveryStore {
     }
 
     public func acknowledged(_ clientID: String) {
-        guard let current = states[clientID] else {
+        guard states[clientID] != nil else {
             remember(clientID, in: &earlyAcks)
             return
         }
-        if current != .failed {
-            states[clientID] = .acknowledged
-        }
+        states[clientID] = .acknowledged
     }
 
     public func failed(_ clientID: String) {
-        guard states[clientID] != nil else {
+        guard let current = states[clientID] else {
             remember(clientID, in: &earlyFailures)
             return
         }
+        if current != .acknowledged {
+            states[clientID] = .failed
+        }
+    }
+
+    /// The recipient returned an error for the stanza.
+    public func bounced(_ clientID: String) {
+        guard states[clientID] != nil else { return }
         states[clientID] = .failed
     }
 

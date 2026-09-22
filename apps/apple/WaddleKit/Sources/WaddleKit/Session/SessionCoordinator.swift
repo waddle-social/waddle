@@ -51,6 +51,11 @@ public final class SessionCoordinator {
     @ObservationIgnored private var isStopped = false
     @ObservationIgnored var outboundQueue: [OutboundMessage] = []
     @ObservationIgnored var failedOutbound: [String: OutboundMessage] = [:]
+    @ObservationIgnored var sentOutbound: [String: OutboundMessage] = [:]
+    @ObservationIgnored var sentOrder: [String] = []
+    /// True once the ready pipeline rejoined rooms; sends drain only then.
+    @ObservationIgnored var isSendReady = false
+    @ObservationIgnored var isFlushing = false
     @ObservationIgnored var sentChatStates: [ConversationID: ChatState] = [:]
     @ObservationIgnored var typingPauseTasks: [ConversationID: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingDisplayed: Set<ConversationID> = []
@@ -187,6 +192,9 @@ public final class SessionCoordinator {
         readCursors.clear()
         outboundQueue.removeAll()
         failedOutbound.removeAll()
+        sentOutbound.removeAll()
+        sentOrder.removeAll()
+        isSendReady = false
         sentChatStates.removeAll()
         typingPauseTasks.values.forEach { $0.cancel() }
         typingPauseTasks.removeAll()
@@ -200,7 +208,6 @@ public final class SessionCoordinator {
         case .connected:
             connectWatchdog?.cancel()
             connectWatchdog = nil
-            reconnectAttempt = 0
             status.connection = .online
             // Runs beside the event loop: the pipeline awaits server
             // round-trips whose answers arrive as events.
@@ -209,6 +216,10 @@ public final class SessionCoordinator {
         case .disconnected:
             readyTask?.cancel()
             readyTask = nil
+            isSendReady = false
+            // Messages may have been missed while offline: loaded pages are
+            // no longer known to be current.
+            history.markAllStale()
             presence.clear()
             mdsPublishSupported = nil
             if !isStopped, status.connection != .authenticationFailed {
@@ -221,7 +232,7 @@ public final class SessionCoordinator {
         case let .deliveryAcked(stanzaID):
             deliveries.acknowledged(stanzaID)
         case let .deliveryFailed(stanzaID):
-            deliveries.failed(stanzaID)
+            sentMessageFailed(stanzaID, bounced: false)
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
@@ -247,10 +258,16 @@ public final class SessionCoordinator {
         guard !Task.isCancelled else { return }
         await loadNotifyModes()
         guard !Task.isCancelled else { return }
+        isSendReady = true
         await flushOutboundQueue()
         guard !Task.isCancelled else { return }
         await drainPendingDisplayed()
         await reloadActiveConversation()
+        // Only a session that got all the way through resets the backoff,
+        // so a stream that drops right after binding keeps backing off.
+        if !Task.isCancelled {
+            reconnectAttempt = 0
+        }
     }
 
     // MARK: - Message routing
@@ -263,8 +280,15 @@ public final class SessionCoordinator {
             cursors.forEach(applyDisplayedCursor)
             return
         }
-        // Error bounces are not conversation content.
-        guard message.type != .error,
+        // Error bounces are not conversation content; a bounce of one of
+        // our sends marks it failed.
+        if message.type == .error {
+            if let id = message.identity.messageID, deliveries.state(of: id) != nil {
+                sentMessageFailed(id, bounced: true)
+            }
+            return
+        }
+        guard
               let route = account.route(from: message.from, to: message.to, isGroupchat: message.isGroupchat)
         else { return }
         // MUC private messages (type chat from room/nick) are not 1:1
@@ -325,7 +349,7 @@ public final class SessionCoordinator {
             unread.liveMessage(in: conversation, isMine: false, mentionsMe: mentionsMe)
         }
         if conversation == unread.activeConversation {
-            Task { await self.markDisplayed(conversation) }
+            Task { await self.markDisplayedIfVisible(conversation) }
         }
         let mode = directory.notifyMode(for: conversation)
         let shouldAlert: Bool

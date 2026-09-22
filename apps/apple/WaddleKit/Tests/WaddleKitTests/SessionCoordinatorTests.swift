@@ -8,6 +8,7 @@ struct SessionCoordinatorTests {
     private func online(_ port: FakePort = FakePort()) -> (SessionCoordinator, FakePort) {
         let coordinator = SessionCoordinator(account: me, port: port)
         coordinator.status.connection = .online
+        coordinator.isSendReady = true
         coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
         return (coordinator, port)
     }
@@ -30,11 +31,13 @@ struct SessionCoordinatorTests {
     @Test func offlineSendQueuesAndFlushesOnReady() async {
         let (coordinator, port) = online()
         coordinator.status.connection = .offline(retryAt: nil)
+        coordinator.isSendReady = false
         let id = await coordinator.send(Draft(text: "later"), in: bobConversation)
         #expect(port.sent.isEmpty)
         #expect(coordinator.deliveries.state(of: id!) == .queued)
 
         coordinator.status.connection = .online
+        coordinator.isSendReady = true
         await coordinator.flushOutboundQueue()
         #expect(port.sent.map(\.clientID) == [id!])
         #expect(coordinator.deliveries.state(of: id!) == .sent)
@@ -131,8 +134,9 @@ struct SessionCoordinatorTests {
         #expect(port.displayed.map(\.id) == ["s1"])
     }
 
-    @Test func siblingCursorRecomputesUnread() {
+    @Test func siblingCursorRecomputesUnread() async {
         let (coordinator, _) = online()
+        await coordinator.loadLatest(roomConversation)
         coordinator.route(roomMessage("1", from: "bob", stanzaID: "s1"))
         coordinator.route(roomMessage("2", from: "bob", stanzaID: "s2"))
         coordinator.route(roomMessage("3", from: "bob", stanzaID: "s3"))
@@ -171,7 +175,7 @@ struct SessionCoordinatorTests {
         await coordinator.send(Draft(text: "tpyo"), in: bobConversation)
         let item = coordinator.timelines.timeline(for: bobConversation).items[0]
         #expect(await coordinator.edit(item, to: "typo"))
-        #expect(port.corrections.last?.target == item.id)
+        #expect(port.corrections.last?.target == item.correctionTargetID)
         #expect(coordinator.timelines.timeline(for: bobConversation).items[0].body == "typo")
         #expect(await coordinator.retract(item))
         #expect(coordinator.timelines.timeline(for: bobConversation).items[0].tombstone == .retracted)

@@ -26,7 +26,11 @@ struct SplitShell: View {
             QuickSwitcher()
         }
         .onChange(of: navigation.selection) { _, _ in
-            navigation.inspector = nil
+            // A thread belongs to the conversation it was opened in; details
+            // and pins follow the new selection.
+            if case .thread = navigation.inspector {
+                navigation.inspector = nil
+            }
         }
     }
 

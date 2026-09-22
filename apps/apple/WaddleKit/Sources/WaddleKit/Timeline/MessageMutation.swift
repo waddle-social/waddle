@@ -8,8 +8,9 @@ public enum MessageMutation: Hashable, Sendable {
     /// XEP-0444: `emojis` is the sender's complete current set and replaces
     /// their previous one (empty clears).
     case reaction(targetID: String, from: JID, senderKey: String, isMine: Bool, emojis: [String])
-    /// XEP-0308: only the original author may correct.
-    case correction(targetID: String, from: JID, body: String)
+    /// XEP-0308: only the original author may correct. The correction
+    /// replaces the text and the payloads tied to its offsets.
+    case correction(targetID: String, from: JID, content: CorrectedContent)
     /// XEP-0424: only the original author may retract.
     case retraction(targetID: String, from: JID)
     /// XEP-0425: only the room itself may moderate.
@@ -61,13 +62,7 @@ public enum MessageMutation: Hashable, Sendable {
             return .retraction(targetID: retractsID, from: from)
         }
         if let replacesID = message.replacesID, let body = message.body {
-            // A correction of a reply re-sends the fallback quote; strip it
-            // like the insert path or the quote renders twice.
-            return .correction(
-                targetID: replacesID,
-                from: from,
-                body: ReplyFallback.strip(body, range: message.reply?.fallback)
-            )
+            return .correction(targetID: replacesID, from: from, content: CorrectedContent(wireBody: body, message: message))
         }
         if let reaction = message.reaction {
             return .reaction(
@@ -91,4 +86,50 @@ func isSameAuthor(_ mutationFrom: JID, _ originalFrom: JID?, isGroupchat: Bool) 
         return mutationFrom == originalFrom
     }
     return mutationFrom.bare == originalFrom.bare
+}
+
+/// What a XEP-0308 correction replaces. Markup and references carry
+/// offsets over the correction's own wire body, so they are replaced
+/// together with the text; keeping the original's would style the wrong
+/// characters. Attachments are kept unless the correction carries its own,
+/// because clients that re-send only the text are common.
+public struct CorrectedContent: Hashable, Sendable {
+    /// Display body: the reply fallback already removed.
+    public let body: String
+    public let markupSpans: [MarkupSpan]
+    public let references: [Reference]
+    /// The correction's reply fallback range, which the offsets above
+    /// include.
+    public let replyFallback: Range<Int>?
+    public let sharedFiles: [SharedFile]
+
+    public init(body: String, markupSpans: [MarkupSpan], references: [Reference], replyFallback: Range<Int>?, sharedFiles: [SharedFile]) {
+        self.body = body
+        self.markupSpans = markupSpans
+        self.references = references
+        self.replyFallback = replyFallback
+        self.sharedFiles = sharedFiles
+    }
+
+    /// From a received correction stanza.
+    init(wireBody: String, message: WireMessage) {
+        self.init(
+            body: ReplyFallback.strip(wireBody, range: message.reply?.fallback),
+            markupSpans: message.markupSpans,
+            references: message.references,
+            replyFallback: message.reply?.fallback,
+            sharedFiles: message.sharedFiles
+        )
+    }
+
+    /// From a correction this client sends.
+    init(body wireBody: String, options: OutboundOptions) {
+        self.init(
+            body: ReplyFallback.strip(wireBody, range: options.reply?.fallback),
+            markupSpans: options.markupSpans,
+            references: options.references,
+            replyFallback: options.reply?.fallback,
+            sharedFiles: options.sharedFiles
+        )
+    }
 }

@@ -71,7 +71,7 @@ public final class TimelineStore {
             apply(mutation, in: conversation, timestamp: message.timestamp)
             return .mutation
         }
-        guard let body = message.body, let id = primaryID(of: message) else {
+        guard let body = message.body, let id = primaryID(of: message, in: conversation) else {
             return .ignored
         }
         let item = TimelineItem(
@@ -133,8 +133,18 @@ public final class TimelineStore {
 
     // MARK: - Insert
 
-    private func primaryID(of message: WireMessage) -> String? {
-        if let primary = message.identity.primary {
+    /// A room row is keyed by the room-assigned stanza id; the core's
+    /// primary stanza id is merely the first `<stanza-id/>` in the stanza,
+    /// which an occupant can inject.
+    private func primaryID(of message: WireMessage, in conversation: ConversationID) -> String? {
+        if conversation.isRoom, let roomID = message.identity.stanzaID(assignedBy: conversation.jid) {
+            return roomID
+        }
+        let identity = message.identity
+        if conversation.isRoom, let authored = identity.originID ?? identity.messageID {
+            return authored
+        }
+        if let primary = identity.primary {
             return primary
         }
         if case let .archive(mamID) = message.source {
@@ -147,13 +157,13 @@ public final class TimelineStore {
         let conversation = item.conversation
         var list = entries[conversation] ?? []
         let isGroupchat = conversation.isRoom
-        let incomingUnique = item.identity.uniqueWireIDs
+        let incomingUnique = dedupeIDs(of: item)
         let incomingSender = senderKey(item.from, isGroupchat: isGroupchat)
 
         if let incomingSender,
            let index = list.firstIndex(where: { entry in
                senderKey(entry.item.from, isGroupchat: isGroupchat) == incomingSender
-                   && (entry.item.id == item.id || !entry.item.identity.uniqueWireIDs.isDisjoint(with: incomingUnique))
+                   && (entry.item.id == item.id || !dedupeIDs(of: entry.item).isDisjoint(with: incomingUnique))
            }) {
             let existing = list[index]
             recordWireDate(item.timestamp, in: conversation)
@@ -254,28 +264,57 @@ public final class TimelineStore {
         publish(conversation)
     }
 
-    /// The primary id always wins; an alias resolves only when exactly one
-    /// row claims it. Author-scoped mutations only consider the mutating
-    /// author's rows, so a colliding row from someone else neither receives
-    /// the mutation nor makes the real target ambiguous.
+    /// Room rows resolve only through the room-assigned stanza id, except
+    /// XEP-0308 corrections, which name the author's own `@id`. In 1:1 the
+    /// primary id wins and an alias resolves only when exactly one row
+    /// claims it. Author-scoped mutations only consider the author's rows,
+    /// so a colliding row from someone else neither receives the mutation
+    /// nor makes the real target ambiguous.
     private func resolveTarget(in list: [Entry], mutation: MessageMutation, isGroupchat: Bool) -> Int? {
-        func eligible(_ entry: Entry) -> Bool {
-            !mutation.isSenderScoped || isSameAuthor(mutation.from, entry.item.from, isGroupchat: isGroupchat)
+        if isGroupchat {
+            let matches = list.indices.filter { mutationTargets(list[$0].item, mutation) }
+            return matches.count == 1 ? matches[0] : nil
         }
-        let primary = list.indices.filter { list[$0].item.id == mutation.targetID && eligible(list[$0]) }
+        let primary = list.indices.filter { list[$0].item.id == mutation.targetID && isEligible(list[$0].item, for: mutation) }
         if primary.count == 1 { return primary[0] }
         if primary.count > 1 { return nil }
-        let aliases = list.indices.filter { list[$0].item.identity.all.contains(mutation.targetID) && eligible(list[$0]) }
+        let aliases = list.indices.filter { mutationTargets(list[$0].item, mutation) }
         return aliases.count == 1 ? aliases[0] : nil
+    }
+
+    private func isEligible(_ item: TimelineItem, for mutation: MessageMutation) -> Bool {
+        !mutation.isSenderScoped || isSameAuthor(mutation.from, item.from, isGroupchat: item.conversation.isRoom)
+    }
+
+    /// Whether `mutation` points at `item` under the id rules above.
+    private func mutationTargets(_ item: TimelineItem, _ mutation: MessageMutation) -> Bool {
+        guard isEligible(item, for: mutation) else { return false }
+        let target = mutation.targetID
+        if item.conversation.isRoom {
+            if case .correction = mutation {
+                return item.identity.messageID == target || item.identity.originID == target
+            }
+            return item.roomStanzaID == target
+        }
+        return item.id == target || item.identity.all.contains(target)
+    }
+
+    /// Ids that identify the same stanza from the same sender: XEP-0359
+    /// ids, with the room-assigned one standing in for the stanza id in
+    /// rooms (an injected foreign stanza id must not merge rows).
+    private func dedupeIDs(of item: TimelineItem) -> Set<String> {
+        guard item.conversation.isRoom else { return item.identity.uniqueWireIDs }
+        var ids = Set<String>()
+        if let roomID = item.roomStanzaID { ids.insert(roomID) }
+        if let originID = item.identity.originID { ids.insert(originID) }
+        return ids
     }
 
     private func drainParked(into entry: Entry, conversation: ConversationID) -> Entry {
         guard var queue = parked[conversation] else { return entry }
-        var ids = entry.item.identity.all
-        ids.insert(entry.item.id)
-        let matching = queue.filter { ids.contains($0.mutation.targetID) }
+        let matching = queue.filter { mutationTargets(entry.item, $0.mutation) }
         guard !matching.isEmpty else { return entry }
-        queue.removeAll { ids.contains($0.mutation.targetID) }
+        queue.removeAll { mutationTargets(entry.item, $0.mutation) }
         parked[conversation] = queue.isEmpty ? nil : queue
         return matching
             .sorted { $0.rank < $1.rank }
@@ -292,9 +331,19 @@ public final class TimelineStore {
         var item = entry.item
         let state = entry.mutations
         item.isLocalEcho = entry.isLocalEcho
-        if let body = state.correctedBody {
-            item.body = body
+        if let correction = state.correction {
+            item.body = correction.body
             item.isEdited = true
+            item.message.markupSpans = correction.markupSpans
+            item.message.references = correction.references
+            // Offsets now follow the correction's wire body, whose fallback
+            // (if any) replaces the original's.
+            item.message.reply = item.message.reply.map {
+                WireMessage.ReplyTarget(id: $0.id, author: $0.author, fallback: correction.replyFallback)
+            }
+            if !correction.sharedFiles.isEmpty {
+                item.message.sharedFiles = correction.sharedFiles
+            }
         }
         item.tombstone = state.tombstone
         item.reactions = aggregate(state.reactionsBySender, isGroupchat: item.conversation.isRoom)
@@ -379,7 +428,7 @@ private struct SenderReactions: Hashable {
 
 private struct MutationState: Hashable {
     var reactionsBySender: [String: SenderReactions] = [:]
-    var correctedBody: String?
+    var correction: CorrectedContent?
     var correctionRank: Rank?
     var tombstone: Tombstone?
 }
@@ -421,14 +470,14 @@ private struct Entry: Hashable {
                 displayName: isGroupchat ? (from.resource ?? from.bare.description) : (from.bare.localpart ?? from.bare.domain),
                 rank: ranked.rank
             )
-        case let .correction(_, from, body):
+        case let .correction(_, from, content):
             guard mutations.tombstone == nil,
                   isSameAuthor(from, item.from, isGroupchat: isGroupchat)
             else { return self }
             if let current = mutations.correctionRank, current > ranked.rank {
                 return self
             }
-            next.mutations.correctedBody = body
+            next.mutations.correction = content
             next.mutations.correctionRank = ranked.rank
         case let .retraction(_, from):
             guard mutations.tombstone == nil,

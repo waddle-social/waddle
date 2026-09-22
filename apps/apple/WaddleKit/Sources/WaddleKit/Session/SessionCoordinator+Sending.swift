@@ -3,7 +3,9 @@ import Foundation
 extension SessionCoordinator {
     /// Sends a draft. The row appears immediately as a local echo; its
     /// delivery state lives in `deliveries` under the returned client id.
-    /// Offline sends queue and go out on the next ready session.
+    /// Every send goes through one FIFO queue that only drains once the
+    /// session has rejoined its rooms, so offline and reconnect-window sends
+    /// keep their order and never reach a room we are not in yet.
     @discardableResult
     public func send(_ draft: Draft, in conversation: ConversationID) async -> String? {
         guard let composed = MessageComposer.compose(draft) else { return nil }
@@ -18,19 +20,16 @@ extension SessionCoordinator {
             directory.touchDirect(conversation.jid, at: Date(), preview: draft.text)
         }
         stopTyping(in: conversation)
-        await dispatch(message)
+        enqueue(message)
+        await flushOutboundQueue()
         return message.clientID
     }
 
-    /// Re-sends a failed or queued own message under its original id.
+    /// Re-sends a failed own message under its original id.
     public func retry(clientID: String) async {
-        if let queued = outboundQueue.first(where: { $0.clientID == clientID }) {
-            outboundQueue.removeAll { $0.clientID == clientID }
-            await dispatch(queued)
-        } else if let failed = failedOutbound[clientID] {
-            failedOutbound[clientID] = nil
-            await dispatch(failed)
-        }
+        guard let failed = failedOutbound.removeValue(forKey: clientID) else { return }
+        enqueue(failed)
+        await flushOutboundQueue()
     }
 
     /// Drops a failed or queued own message.
@@ -41,28 +40,26 @@ extension SessionCoordinator {
         timelines.removeLocalEcho(id: clientID, in: conversation)
     }
 
-    func dispatch(_ message: OutboundMessage) async {
-        deliveries.began(message.clientID)
-        guard connection == .online else {
-            enqueue(message)
-            return
-        }
-        let outcome = await port.send(message)
-        deliveries.outcome(outcome, for: message.clientID)
-        switch outcome {
-        case .sent:
-            break
-        case .notConnected, .transportError:
-            enqueue(message)
-        case .rejected:
-            failedOutbound[message.clientID] = message
-        }
-    }
-
+    /// Sends queued messages in order. A transient failure stops the drain
+    /// and keeps the message at the head for the next ready session.
     func flushOutboundQueue() async {
-        while connection == .online, !outboundQueue.isEmpty {
-            let next = outboundQueue.removeFirst()
-            await dispatch(next)
+        guard isSendReady, !isFlushing else { return }
+        isFlushing = true
+        defer { isFlushing = false }
+        while isSendReady, let next = outboundQueue.first {
+            deliveries.began(next.clientID)
+            let outcome = await port.send(next)
+            deliveries.outcome(outcome, for: next.clientID)
+            switch outcome {
+            case .sent:
+                outboundQueue.removeAll { $0.clientID == next.clientID }
+                rememberSent(next)
+            case .notConnected, .transportError:
+                return
+            case .rejected:
+                outboundQueue.removeAll { $0.clientID == next.clientID }
+                failedOutbound[next.clientID] = next
+            }
         }
     }
 
@@ -70,6 +67,29 @@ extension SessionCoordinator {
         deliveries.queued(message.clientID)
         if !outboundQueue.contains(where: { $0.clientID == message.clientID }) {
             outboundQueue.append(message)
+        }
+    }
+
+    /// Keeps written messages (bounded) so a later XEP-0198 failure or an
+    /// error bounce can still be retried.
+    private func rememberSent(_ message: OutboundMessage) {
+        sentOutbound[message.clientID] = message
+        sentOrder.append(message.clientID)
+        if sentOrder.count > 200 {
+            sentOutbound[sentOrder.removeFirst()] = nil
+        }
+    }
+
+    /// The written message failed after all (XEP-0198 or an error bounce):
+    /// make it retryable.
+    func sentMessageFailed(_ clientID: String, bounced: Bool) {
+        if let message = sentOutbound.removeValue(forKey: clientID) {
+            failedOutbound[clientID] = message
+        }
+        if bounced {
+            deliveries.bounced(clientID)
+        } else {
+            deliveries.failed(clientID)
         }
     }
 
@@ -117,6 +137,8 @@ extension SessionCoordinator {
             mine.append(emoji)
         }
         guard await port.sendReaction(to: target, emojis: mine, in: item.conversation) else { return false }
+        // A room reflects the reaction back; only 1:1 needs a local apply.
+        guard !item.conversation.isRoom else { return true }
         let senderKey = item.conversation.isRoom ? from.description : from.bare.description
         timelines.applyLocalMutation(
             .reaction(targetID: target, from: from, senderKey: senderKey, isMine: true, emojis: mine),
@@ -125,23 +147,49 @@ extension SessionCoordinator {
         return true
     }
 
-    /// XEP-0308 correction of one of our own messages.
+    /// XEP-0308 correction of one of our own messages. The correction
+    /// re-sends the whole message (reply, thread, attachments) with only
+    /// the text changed, as the XEP requires.
     public func edit(_ item: TimelineItem, to text: String) async -> Bool {
         guard item.isMine,
+              item.tombstone == nil,
               let target = item.correctionTargetID,
               let from = ownJID(in: item.conversation),
-              let composed = MessageComposer.compose(Draft(text: text, thread: item.message.thread))
+              let composed = MessageComposer.compose(correctionDraft(of: item, text: text))
         else { return false }
         let outcome = await port.sendCorrection(of: target, body: composed.body, in: item.conversation, options: composed.options)
         guard case .sent = outcome else { return false }
-        timelines.applyLocalMutation(.correction(targetID: target, from: from, body: composed.body), in: item.conversation)
+        // A room reflects the correction, and may reject it (for example
+        // after a reconnect changed our occupancy); apply only in 1:1.
+        guard !item.conversation.isRoom else { return true }
+        timelines.applyLocalMutation(
+            .correction(targetID: target, from: from, content: CorrectedContent(body: composed.body, options: composed.options)),
+            in: item.conversation
+        )
         return true
     }
 
-    /// XEP-0424 retraction of one of our own messages.
+    private func correctionDraft(of item: TimelineItem, text: String) -> Draft {
+        let timeline = timelines.timeline(for: item.conversation)
+        let reply = item.message.reply.flatMap { target -> ReplyContext? in
+            guard let author = target.author else { return nil }
+            let parent = timeline.item(withID: target.id)
+            return ReplyContext(
+                targetID: target.id,
+                author: author,
+                parentBody: parent?.body ?? "",
+                parentAuthorName: parent?.authorName ?? ""
+            )
+        }
+        return Draft(text: text, reply: reply, thread: item.message.thread, attachments: item.message.sharedFiles)
+    }
+
+    /// XEP-0424 retraction of one of our own messages. A room may reject
+    /// it, so rooms wait for the reflected retraction.
     public func retract(_ item: TimelineItem) async -> Bool {
-        guard item.isMine, let target = item.actionTargetID, let from = ownJID(in: item.conversation) else { return false }
+        guard item.isMine, let target = item.retractionTargetID, let from = ownJID(in: item.conversation) else { return false }
         guard await port.sendRetraction(of: target, in: item.conversation) else { return false }
+        guard !item.conversation.isRoom else { return true }
         timelines.applyLocalMutation(.retraction(targetID: target, from: from), in: item.conversation)
         return true
     }

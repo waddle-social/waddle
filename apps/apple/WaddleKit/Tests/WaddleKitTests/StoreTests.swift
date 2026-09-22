@@ -55,12 +55,16 @@ struct StoreTests {
         #expect(deliveries.state(of: "c1") == .acknowledged)
     }
 
-    @Test func deliveryFailureWinsOverAck() {
+    @Test func ackWinsOverTransportFailureButNotBounce() {
         let deliveries = DeliveryStore()
         deliveries.failed("c1")
         deliveries.acknowledged("c1")
         deliveries.began("c1")
         deliveries.outcome(.sent(stanzaID: "c1"), for: "c1")
+        #expect(deliveries.state(of: "c1") == .acknowledged)
+        deliveries.failed("c1")
+        #expect(deliveries.state(of: "c1") == .acknowledged)
+        deliveries.bounced("c1")
         #expect(deliveries.state(of: "c1") == .failed)
     }
 

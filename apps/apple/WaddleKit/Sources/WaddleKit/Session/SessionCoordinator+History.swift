@@ -16,8 +16,7 @@ extension SessionCoordinator {
         if !history.state(of: conversation).hasLoadedLatest {
             await loadLatest(conversation)
         }
-        guard isAppActive else { return }
-        await markDisplayed(conversation)
+        await markDisplayedIfVisible(conversation)
         if conversation.isRoom {
             await refreshPins(in: conversation.jid)
         }
@@ -39,7 +38,7 @@ extension SessionCoordinator {
         guard let visible = visibleConversation else { return }
         if active {
             unread.setActive(visible)
-            await markDisplayed(visible)
+            await markDisplayedIfVisible(visible)
         } else {
             unread.clearActive(ifMatches: visible)
         }
@@ -82,7 +81,7 @@ extension SessionCoordinator {
         history.markAllStale()
         if let active = unread.activeConversation {
             await loadLatest(active)
-            await markDisplayed(active)
+            await markDisplayedIfVisible(active)
         }
     }
 

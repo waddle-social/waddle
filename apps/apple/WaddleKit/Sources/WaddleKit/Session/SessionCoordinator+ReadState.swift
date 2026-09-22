@@ -38,11 +38,17 @@ extension SessionCoordinator {
             ? .room(cursor.conversation)
             : .direct(cursor.conversation)
         let items = timelines.timeline(for: conversation).items
-        guard let index = items.lastIndex(where: { $0.identity.all.contains(cursor.stanzaID) }) else { return }
+        // Match only on the id the cursor's authority assigned: the room's
+        // stanza id in a room, our own archive's id in 1:1.
+        guard let index = items.lastIndex(where: { $0.identity.stanzaID(assignedBy: cursor.stanzaIDBy) == cursor.stanzaID })
+        else { return }
         let current = readCursors.cursor(conversation)
-        let currentIndex = current.flatMap { id in items.lastIndex(where: { $0.identity.all.contains(id) || $0.id == id }) } ?? -1
+        let currentIndex = current.flatMap { id in items.lastIndex(where: { $0.id == id || $0.identity.all.contains(id) }) } ?? -1
         guard currentIndex < index else { return }
         guard readCursors.advance(conversation, from: current, to: cursor.stanzaID) else { return }
+        // Loaded rows only give the true count when they reach the present;
+        // after a gap the server inbox count stays authoritative.
+        guard history.state(of: conversation).hasLoadedLatest else { return }
         let remaining = items[(index + 1)...].filter { !$0.isMine && $0.tombstone == nil && $0.isFeedVisible }.count
         unread.set(remaining, for: conversation)
     }
@@ -74,6 +80,17 @@ extension SessionCoordinator {
         }
     }
 
+    /// Marks read only if the user is still looking at `conversation`:
+    /// callers that awaited in between (history loads, app activation) must
+    /// not mark a conversation the user already left.
+    func markDisplayedIfVisible(_ conversation: ConversationID) async {
+        guard isAppActive,
+              visibleConversation == conversation,
+              unread.activeConversation == conversation
+        else { return }
+        await markDisplayed(conversation)
+    }
+
     func drainPendingDisplayed() async {
         let pending = pendingDisplayed
         pendingDisplayed.removeAll()
@@ -97,11 +114,14 @@ extension SessionCoordinator {
                 markerRequested: false
             )
         }
-        guard let markerID = identity.originID ?? identity.messageID else { return nil }
-        let ownDomain = BareJID(localpart: nil, domain: account.jid.domain)
-        let ownID = identity.stanzaID(assignedBy: account.jid)
-            ?? ownDomain.flatMap { identity.stanzaID(assignedBy: $0) }
-        let cursor = ownID.map { DisplayedCursor(conversation: conversation.jid, stanzaID: $0, stanzaIDBy: account.jid) }
+        // XEP-0333: the marker copies the message's `@id`.
+        guard let markerID = identity.messageID ?? identity.originID else { return nil }
+        let authorities = [account.jid] + [BareJID(localpart: nil, domain: account.jid.domain)].compactMap { $0 }
+        let cursor = authorities.lazy.compactMap { authority in
+            identity.stanzaID(assignedBy: authority).map {
+                DisplayedCursor(conversation: conversation.jid, stanzaID: $0, stanzaIDBy: authority)
+            }
+        }.first
         return DisplayedTarget(
             markerID: markerID,
             cursor: cursor,
