@@ -61,7 +61,7 @@ private struct MessageRowContent: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .contextMenu {
-            MessageContextMenu(item: item, openThread: openThread)
+            MessageContextMenu(item: item, session: session, actions: actions, openThread: openThread)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(MessageAccessibilityText.label(

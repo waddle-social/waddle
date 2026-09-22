@@ -25,6 +25,7 @@ enum MentionHighlight {
             displayedBody: item.body,
             wireBody: item.message.body,
             fallback: item.message.reply?.fallback,
+            isEdited: item.isEdited,
             spans: item.message.markupSpans,
             references: item.message.references,
             mentionKind: { kind(of: $0, account: account, in: item.conversation) }

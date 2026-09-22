@@ -18,6 +18,8 @@ final class ComposerModel {
     /// The draft that was in progress when an edit started.
     @ObservationIgnored private var stashedText: String?
     @ObservationIgnored private var stashedMentions: [RecordedMention] = []
+    /// The editable text the edit started from, to skip no-op corrections.
+    @ObservationIgnored private var editBaseline = ""
     /// Bytes kept for retrying failed uploads.
     @ObservationIgnored private var payloads: [UUID: AttachmentPayload] = [:]
     @ObservationIgnored private var uploads: [UUID: Task<Void, Never>] = [:]
@@ -56,7 +58,8 @@ final class ComposerModel {
         editing = item
         reply = nil
         mentions = []
-        text = item.body
+        editBaseline = EditableMarkdown.text(for: item)
+        text = editBaseline
     }
 
     func cancelEdit() {
@@ -153,8 +156,9 @@ final class ComposerModel {
         if let editing {
             let newText = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !newText.isEmpty else { return nil }
+            let baseline = editBaseline.trimmingCharacters(in: .whitespacesAndNewlines)
             cancelEdit()
-            guard newText != editing.body.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            guard newText != baseline else { return nil }
             return .edit(editing, newText)
         }
         guard canSend else { return nil }

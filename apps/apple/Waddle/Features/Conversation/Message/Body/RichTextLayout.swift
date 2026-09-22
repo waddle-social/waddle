@@ -5,9 +5,15 @@ import WaddleKit
 struct RichTextInput {
     /// `TimelineItem.body`: fallback stripped, corrections applied.
     let displayedBody: String
-    /// `WireMessage.body`, which the span and reference offsets count over.
+    /// `WireMessage.body`, which the span and reference offsets count over
+    /// unless the row was corrected.
     let wireBody: String?
+    /// The reply fallback the offsets include (the correction's, once
+    /// corrected).
     let fallback: Range<Int>?
+    /// A XEP-0308 correction replaced body, spans and references; the
+    /// offsets then count over the correction's wire body.
+    let isEdited: Bool
     let spans: [MarkupSpan]
     let references: [Reference]
     /// Classifies a reference as a mention; nil for non-mentions.
@@ -51,11 +57,9 @@ enum RichTextLayout {
     }
 
     /// Spans and references rebased onto the displayed body. Offsets that
-    /// no longer apply (the row was corrected) are dropped.
+    /// cannot be rebased are dropped rather than styling the wrong text.
     private static func styledRanges(for input: RichTextInput) -> (inline: [RichStyledRange], blocks: [BlockRange]) {
-        guard let wireBody = input.wireBody,
-              let mapping = WireBodyMapping(wireBody: wireBody, fallback: input.fallback, displayedBody: input.displayedBody)
-        else { return ([], []) }
+        guard let mapping = mapping(for: input) else { return ([], []) }
         var inline: [RichStyledRange] = []
         var blocks: [BlockRange] = []
         for span in input.spans {
@@ -79,6 +83,14 @@ enum RichTextLayout {
             }
         }
         return (inline, blocks)
+    }
+
+    private static func mapping(for input: RichTextInput) -> WireBodyMapping? {
+        if input.isEdited {
+            return WireBodyMapping(correctedBody: input.displayedBody, fallback: input.fallback)
+        }
+        guard let wireBody = input.wireBody else { return nil }
+        return WireBodyMapping(wireBody: wireBody, fallback: input.fallback, displayedBody: input.displayedBody)
     }
 
     /// A XEP-0372 `data` reference to a web page renders as a link.

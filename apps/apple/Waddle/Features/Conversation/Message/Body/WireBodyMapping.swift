@@ -38,6 +38,20 @@ struct WireBodyMapping: Equatable {
         self.displayedLength = remainderCount - leading - trailing
     }
 
+    /// A XEP-0308 correction keeps only its display body and fallback
+    /// range (the original's wire body stays on the row). Its wire body
+    /// was the fallback followed by the body, which the composer trims, so
+    /// offsets past the fallback shift by the fallback length.
+    init(correctedBody: String, fallback: Range<Int>?) {
+        if let fallback, fallback.lowerBound >= 0, fallback.lowerBound < fallback.upperBound {
+            removed = fallback
+        } else {
+            removed = 0..<0
+        }
+        leadingTrim = 0
+        displayedLength = correctedBody.unicodeScalars.count
+    }
+
     /// The displayed range for a wire range. Ranges inside the fallback
     /// are dropped; ranges crossing its edge are clipped to what remains.
     func displayedRange(ofWire lower: Int, _ upper: Int) -> Range<Int>? {
