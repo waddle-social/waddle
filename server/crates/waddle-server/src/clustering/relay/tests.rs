@@ -12,6 +12,62 @@ use waddle_xmpp::ownership::{
     ResumeIdentityProof, StalePredicate,
 };
 
+#[tokio::test(start_paused = true)]
+async fn failed_registration_retries_each_second_then_restores_refresh_cadence() {
+    let mut refresh = tokio::time::interval(REREGISTER_INTERVAL);
+    refresh.tick().await;
+    // A rotation or peer-triggered attempt can fail anywhere in the normal
+    // refresh interval. Exercise the production completion path, including
+    // repeated failures from the timer's own retry branch.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    for _ in 0..3 {
+        assert!(matches!(
+            refresh_relay_registration(async { RelayRegisterAttempt::Failed }, &mut refresh).await,
+            RelayRegisterAttempt::Failed
+        ));
+        let before = tokio::time::Instant::now();
+        tokio::time::advance(RESPAWN_BACKOFF - Duration::from_millis(1)).await;
+        assert!(tokio::time::timeout(Duration::ZERO, refresh.tick())
+            .await
+            .is_err());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::timeout(Duration::ZERO, refresh.tick())
+            .await
+            .expect("retry due");
+        assert_eq!(before.elapsed(), RESPAWN_BACKOFF);
+    }
+    // A peer connection (or another rotation) can succeed before the retry
+    // fires. That success must cancel the pending one-second retry as well.
+    refresh_relay_registration(async { RelayRegisterAttempt::Failed }, &mut refresh).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert!(matches!(
+        refresh_relay_registration(async { RelayRegisterAttempt::Registered }, &mut refresh).await,
+        RelayRegisterAttempt::Registered
+    ));
+    tokio::time::advance(RESPAWN_BACKOFF).await;
+    assert!(tokio::time::timeout(Duration::ZERO, refresh.tick())
+        .await
+        .is_err());
+    tokio::time::advance(REREGISTER_INTERVAL - RESPAWN_BACKOFF).await;
+    tokio::time::timeout(Duration::ZERO, refresh.tick())
+        .await
+        .expect("normal refresh due");
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_registration_does_not_schedule_a_retry() {
+    let mut refresh = tokio::time::interval(REREGISTER_INTERVAL);
+    refresh.tick().await;
+    assert!(matches!(
+        refresh_relay_registration(async { RelayRegisterAttempt::Cancelled }, &mut refresh).await,
+        RelayRegisterAttempt::Cancelled
+    ));
+    tokio::time::advance(RESPAWN_BACKOFF).await;
+    assert!(tokio::time::timeout(Duration::ZERO, refresh.tick())
+        .await
+        .is_err());
+}
+
 #[tokio::test]
 async fn relay_replies_follow_repeated_identity_rotations_without_respawn() {
     let identity = SharedNodeIdentity::new(NodeIdentity::new("initial", "first"));
