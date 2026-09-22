@@ -234,3 +234,25 @@ struct ConnectionLifecycleTests {
         await coordinator.stop()
     }
 }
+
+@MainActor
+@Suite("App activity")
+struct AppActivityTests {
+    @Test func backgroundedConversationCountsUnreadAndSendsNoMarkers() async {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
+        await coordinator.open(roomConversation)
+        await coordinator.setAppActive(false)
+
+        coordinator.route(roomMessage("while away", from: "bob", stanzaID: "s1"))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(coordinator.unread.count(for: roomConversation) == 1)
+        #expect(port.displayed.isEmpty)
+
+        await coordinator.setAppActive(true)
+        #expect(coordinator.unread.count(for: roomConversation) == 0)
+        #expect(port.displayed.map(\.id) == ["s1"])
+    }
+}

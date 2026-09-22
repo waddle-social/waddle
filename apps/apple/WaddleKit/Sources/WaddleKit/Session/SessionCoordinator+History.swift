@@ -7,7 +7,8 @@ extension SessionCoordinator {
     /// Called when a conversation comes on screen: marks it active, loads
     /// the newest page once, and marks it read.
     public func open(_ conversation: ConversationID) async {
-        unread.setActive(conversation)
+        visibleConversation = conversation
+        unread.setActive(isAppActive ? conversation : nil)
         inbox.markRead(conversation.jid)
         if conversation.kind == .direct {
             _ = directConversation(with: conversation.jid)
@@ -15,6 +16,7 @@ extension SessionCoordinator {
         if !history.state(of: conversation).hasLoadedLatest {
             await loadLatest(conversation)
         }
+        guard isAppActive else { return }
         await markDisplayed(conversation)
         if conversation.isRoom {
             await refreshPins(in: conversation.jid)
@@ -23,7 +25,24 @@ extension SessionCoordinator {
 
     /// Called when a conversation leaves the screen.
     public func close(_ conversation: ConversationID) {
+        if visibleConversation == conversation {
+            visibleConversation = nil
+        }
         unread.clearActive(ifMatches: conversation)
+    }
+
+    /// The app moved to or from the foreground. A conversation on screen
+    /// in a background app is not being read: its messages count as unread
+    /// and get no read markers until the app is active again.
+    public func setAppActive(_ active: Bool) async {
+        isAppActive = active
+        guard let visible = visibleConversation else { return }
+        if active {
+            unread.setActive(visible)
+            await markDisplayed(visible)
+        } else {
+            unread.clearActive(ifMatches: visible)
+        }
     }
 
     /// Fetches the newest page and merges it.

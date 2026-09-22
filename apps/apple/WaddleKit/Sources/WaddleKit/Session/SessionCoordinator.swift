@@ -54,6 +54,8 @@ public final class SessionCoordinator {
     @ObservationIgnored var sentChatStates: [ConversationID: ChatState] = [:]
     @ObservationIgnored var typingPauseTasks: [ConversationID: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingDisplayed: Set<ConversationID> = []
+    @ObservationIgnored var visibleConversation: ConversationID?
+    @ObservationIgnored var isAppActive = true
     @ObservationIgnored var mdsPublishSupported: Bool?
 
     @ObservationIgnored private let connectBudget: TimeInterval
