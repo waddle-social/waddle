@@ -1,0 +1,97 @@
+import Foundation
+import WaddleKit
+
+/// The `@word` being typed at the end of the draft.
+struct MentionQuery: Hashable {
+    /// Scalar offset of the `@`.
+    let start: Int
+    /// What follows the `@`.
+    let text: String
+}
+
+/// A mention the user picked, re-located in the final text on send.
+struct RecordedMention: Hashable {
+    /// `@nick`, as inserted.
+    let token: String
+    let target: MentionTarget
+}
+
+/// Mention token handling over the raw draft, in Unicode scalar offsets
+/// (the unit XEP-0372 references count in).
+enum MentionTokens {
+    /// The trailing `@word` when the draft ends inside one. The composer
+    /// has no caret position on every OS it supports, so completion works
+    /// on the word being typed at the end.
+    static func trailingQuery(in text: String) -> MentionQuery? {
+        let scalars = Array(text.unicodeScalars)
+        let tokenStart = (scalars.lastIndex(where: isSpace) ?? -1) + 1
+        guard tokenStart < scalars.count, scalars[tokenStart] == "@" else { return nil }
+        let query = scalars[(tokenStart + 1)...]
+        guard query.count <= 64, !query.contains("@") else { return nil }
+        return MentionQuery(start: tokenStart, text: RichTextSegmenter.string(query))
+    }
+
+    /// Replaces the query with `@name ` and returns the new text.
+    static func completing(_ text: String, query: MentionQuery, with name: String) -> String {
+        let scalars = Array(text.unicodeScalars)
+        let prefix = RichTextSegmenter.string(scalars[..<min(query.start, scalars.count)])
+        return prefix + "@" + name + " "
+    }
+
+    /// Finds every recorded token still present as a whole word and returns
+    /// one mention per occurrence. Longer tokens claim first so `@ann`
+    /// never matches inside `@anna`. Deleted or edited tokens drop out.
+    static func locate(_ recorded: [RecordedMention], in text: String) -> [MentionDraft] {
+        let scalars = Array(text.unicodeScalars)
+        var claimed: [Range<Int>] = []
+        var mentions: [MentionDraft] = []
+        let ordered = Array(Set(recorded)).sorted {
+            ($0.token.unicodeScalars.count, $0.token) > ($1.token.unicodeScalars.count, $1.token)
+        }
+        for mention in ordered {
+            let token = Array(mention.token.unicodeScalars)
+            guard token.count > 1 else { continue }
+            for range in occurrences(of: token, in: scalars) where !claimed.contains(where: { $0.overlaps(range) }) {
+                claimed.append(range)
+                mentions.append(MentionDraft(target: mention.target, range: range))
+            }
+        }
+        return mentions.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    /// Recorded mentions whose token still appears in `text`.
+    static func pruned(_ recorded: [RecordedMention], in text: String) -> [RecordedMention] {
+        let located = Set(locate(recorded, in: text).map(\.target))
+        return recorded.filter { located.contains($0.target) }
+    }
+
+    private static func occurrences(of token: [Unicode.Scalar], in scalars: [Unicode.Scalar]) -> [Range<Int>] {
+        guard token.count <= scalars.count else { return [] }
+        var ranges: [Range<Int>] = []
+        var index = 0
+        while index + token.count <= scalars.count {
+            let end = index + token.count
+            if scalars[index..<end].elementsEqual(token),
+               index == 0 || opensWord(scalars[index - 1]),
+               end == scalars.count || closesWord(scalars[end]) {
+                ranges.append(index..<end)
+                index = end
+            } else {
+                index += 1
+            }
+        }
+        return ranges
+    }
+
+    private static func isSpace(_ scalar: Unicode.Scalar) -> Bool {
+        CharacterSet.whitespacesAndNewlines.contains(scalar)
+    }
+
+    private static func opensWord(_ scalar: Unicode.Scalar) -> Bool {
+        isSpace(scalar) || "([{\"'".unicodeScalars.contains(scalar)
+    }
+
+    private static func closesWord(_ scalar: Unicode.Scalar) -> Bool {
+        isSpace(scalar) || ",.:;!?)]}\"'".unicodeScalars.contains(scalar)
+    }
+}
