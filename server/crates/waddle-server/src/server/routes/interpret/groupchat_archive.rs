@@ -974,7 +974,7 @@ async fn push_projected_inbox(
                 let intent = IngressEffectIntent::RouteDirect {
                     recipient: owner.clone(),
                     fanout: resources.clone(),
-                    route_identity: capture.next_route_identity(),
+                    route_identity: capture.next_inbox_push_identity(),
                 };
                 capture.record_intent(intent.clone());
                 Box::new(intent)

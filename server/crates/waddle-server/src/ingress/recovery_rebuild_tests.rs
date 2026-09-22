@@ -155,6 +155,14 @@ fn deferred_type(kind: MessageType) {
 #[test]
 fn groupchat_route_direct_is_unrecoverable() {
     deferred_type(MessageType::Groupchat);
+    let mut message = envelope("legacy inbox push").message().clone();
+    message.type_ = MessageType::Groupchat;
+    let routes = [route_intent(&["juliet@example.com/phone"])];
+    let result = run(&MessageEnvelope::new(message), &routes, &routes);
+    assert!(
+        result.discarded_receipts.is_empty(),
+        "unclassified capture must not expire"
+    );
 }
 #[test]
 fn headline_route_is_deferred() {
@@ -600,4 +608,24 @@ fn blocked_recipient_discards_a_pre_restored_muc_decline_route() {
     );
     assert!(result.unsupported_receipts.is_empty());
     assert!(result.unrecoverable.is_empty());
+}
+
+#[test]
+fn inbox_refresh_discard_does_not_settle_a_message_route_to_the_same_resource() {
+    let envelope = envelope("canonical message");
+    let route = route_intent(&["juliet@example.com/phone"]);
+    let mut push = route.clone();
+    if let IngressEffectIntent::RouteDirect { route_identity, .. } = &mut push {
+        *route_identity = EffectMessageIdentity::InboxPush(0);
+    }
+    let recorded = vec![route.clone(), push.clone()];
+    let result = run(&envelope, &recorded, &recorded);
+    assert_eq!(
+        result.discarded_receipts,
+        vec![crate::ingress::durable::receipt_key(&push).expect("push key")]
+    );
+    assert!(!result
+        .discarded_receipts
+        .contains(&crate::ingress::durable::receipt_key(&route).expect("route key")));
+    assert_detached(&result);
 }

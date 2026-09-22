@@ -57,7 +57,7 @@ pub(super) struct RebuiltRecovery {
     pub unrecoverable: Vec<IngressEffectKind>,
     /// Receipts of unreceipted intents no rebuilt effect or delegation can settle.
     pub unsupported_receipts: Vec<decision::EffectReceiptKey>,
-    /// Direct routes durably resolved by current recipient blocking policy.
+    /// Direct routes resolved by recipient blocking or expired best-effort inbox refreshes.
     pub discarded_receipts: Vec<decision::EffectReceiptKey>,
 }
 
@@ -258,6 +258,14 @@ fn restore_direct_routes(
         else {
             continue;
         };
+        if matches!(route_identity, EffectMessageIdentity::InboxPush(_)) {
+            // This is only a live refresh of an already committed inbox row.
+            // Never replay a stale projection after a crash; clients query the
+            // authoritative inbox on reconnect. Message and notification
+            // delivery have independent obligations.
+            discarded.push(super::durable::receipt_key(intent)?);
+            continue;
+        }
         if input.blocked_recipients.contains(recipient) {
             // Specialized restorers may already have reconstructed this route.
             plan.plan.retain(|planned| {
@@ -343,7 +351,8 @@ pub(super) fn rebuildable_direct_route(
     let pin_owned = recorded
         .iter()
         .any(|i| matches!(i, IngressEffectIntent::DmPinMutation { .. }));
-    !fanout.is_empty()
+    !matches!(route_identity, EffectMessageIdentity::InboxPush(_))
+        && !fanout.is_empty()
         && !(pin_owned && matches!(route_identity, EffectMessageIdentity::StanzaId(_)))
         && direct_provenance(envelope, recorded, recipient)
 }

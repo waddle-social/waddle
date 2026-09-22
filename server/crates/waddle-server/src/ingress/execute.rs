@@ -789,13 +789,24 @@ fn proven_receipts(
     }
     if let ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { receipt, .. }) = effect {
         let (
-            Some(IngressEffectIntent::RouteDirect { fanout, .. }),
+            Some(IngressEffectIntent::RouteDirect {
+                fanout,
+                route_identity,
+                ..
+            }),
             EffectOutcome::InboxPush(resources),
         ) = (receipt.as_deref(), outcome)
         else {
             return Vec::new();
         };
-        return if fanout.iter().all(|resource| resources.contains(resource)) {
+        // A committed inbox projection is queryable after reconnect. Its live
+        // refresh ends after the attempt, including disconnected resources;
+        // ordinary direct-message routes still require delivery evidence.
+        return if matches!(
+            route_identity,
+            waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(_)
+        ) || fanout.iter().all(|resource| resources.contains(resource))
+        {
             candidates.to_vec()
         } else {
             Vec::new()

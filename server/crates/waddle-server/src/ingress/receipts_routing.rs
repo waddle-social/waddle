@@ -195,7 +195,8 @@ fn cover_recipients(
                             | ExternalDeliveryEffect::RelayFullJid { route_identity, .. }
                             | ExternalDeliveryEffect::QueueDetached { route_identity, .. },
                         ) => match identity {
-                            EffectMessageIdentity::CaptureOrdinal(_) => {
+                            EffectMessageIdentity::CaptureOrdinal(_)
+                            | EffectMessageIdentity::InboxPush(_) => {
                                 route_identity.as_ref() == Some(identity)
                             }
                             _ => message_identity(message, identity),
@@ -293,7 +294,7 @@ pub(crate) fn message_identity(message: &Message, identity: &EffectMessageIdenti
         }
         // Capture ordinals have no wire identity. A typed association from the
         // plan interpreter is required before these can become receipts.
-        EffectMessageIdentity::CaptureOrdinal(_) => false,
+        EffectMessageIdentity::CaptureOrdinal(_) | EffectMessageIdentity::InboxPush(_) => false,
     }
 }
 

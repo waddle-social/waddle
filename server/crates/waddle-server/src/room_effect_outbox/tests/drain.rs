@@ -2003,17 +2003,14 @@ async fn local_enqueue_timeout_still_attempts_the_rest_of_the_roster_before_rele
 async fn due_drain_aborts_remaining_roster_after_lease_loss() {
     let state = create_test_websocket_state().await;
     let room: BareJid = "lease-loss@muc.example.com".parse().expect("room");
-    let blocked_recipient = full_jid("blocked-head@example.test/device");
+    let first_recipient = full_jid("first@example.test/device");
     let tail_recipient = full_jid("tail@example.test/device");
     let lifecycle = create_owned_room_and_lifecycle_for(state.as_ref(), &room).await;
     let reservation = enqueue_effects(
         state.as_ref(),
         lifecycle,
         initial_revision(),
-        &config_effects_for(
-            &room,
-            vec![blocked_recipient.clone(), tail_recipient.clone()],
-        ),
+        &config_effects_for(&room, vec![first_recipient.clone(), tail_recipient.clone()]),
         0,
     )
     .await;
@@ -2030,54 +2027,75 @@ async fn due_drain_aborts_remaining_roster_after_lease_loss() {
         ordinal: reservation.ordinals[0],
     };
 
-    let (blocked_tx, _blocked_rx) = mpsc::channel::<OutboundStanza>(1);
-    register_test_connection(state.as_ref(), &blocked_recipient, blocked_tx.clone()).await;
-    blocked_tx
-        .send(OutboundStanza::new(Stanza::Presence(
-            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None),
-        )))
-        .await
-        .expect("prefill blocked recipient channel");
+    let (first_tx, mut first_rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &first_recipient, first_tx).await;
     let (tail_tx, mut tail_rx) = mpsc::channel::<OutboundStanza>(4);
     register_test_connection(state.as_ref(), &tail_recipient, tail_tx).await;
 
-    let state_for_release = Arc::clone(&state);
-    let key_for_release = key.clone();
-    let release = tokio::spawn(async move {
-        loop {
-            let row = state_for_release
-                .deps
-                .protocol
-                .room_effect_outbox
-                .find(&key_for_release)
-                .await
-                .expect("find claimed row")
-                .expect("claimed row exists");
-            if let Some(token) = row.lease_token.clone() {
-                state_for_release
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .release_unattempted(&key_for_release, &token, crate::time::now_ms(), 0)
-                    .await
-                    .expect("release stolen lease");
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    });
+    // Fanout is concurrent: a blocked first recipient does not stop the tail
+    // from being admitted before a polling task steals the lease. Revoke it
+    // deterministically during the first recipient's renewal, after the
+    // pre-render renewal, so the next recipient's checkpoint must reject it.
+    let store = state.deps.protocol.room_effect_outbox.as_ref();
+    let connection = store.database().guard().await.expect("connection");
+    connection
+        .execute(
+            "CREATE TABLE test_lease_renewals (count INTEGER NOT NULL)",
+            (),
+        )
+        .await
+        .expect("create renewal counter");
+    connection
+        .execute("INSERT INTO test_lease_renewals VALUES (0)", ())
+        .await
+        .expect("initialize renewal counter");
+    connection
+        .execute(
+            "CREATE TRIGGER revoke_second_renewal
+             AFTER UPDATE OF leased_at_ms ON clustering_muc_room_effects
+             WHEN OLD.lease_token IS NOT NULL AND NEW.lease_token = OLD.lease_token
+             BEGIN
+               UPDATE test_lease_renewals SET count = count + 1;
+               UPDATE clustering_muc_room_effects
+               SET available_at_ms = NEW.leased_at_ms, lease_token = NULL, leased_at_ms = NULL
+               WHERE lifecycle_id = NEW.lifecycle_id AND revision = NEW.revision
+                 AND ordinal = NEW.ordinal AND (SELECT count FROM test_lease_renewals) = 2;
+             END",
+            (),
+        )
+        .await
+        .expect("inject lease loss at recipient checkpoint");
+    drop(connection);
 
-    let state_for_drain = Arc::clone(&state);
-    let drain =
-        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 0, 8).await });
-    release.await.expect("release task");
+    let summary = drain_due_effects(state.as_ref(), 0, 8)
+        .await
+        .expect("drain result");
     assert!(
-        tokio::time::timeout(Duration::from_secs(6), tail_rx.recv())
-            .await
-            .is_err(),
-        "no later recipient should receive a frame after the lease is lost mid-roster"
+        first_rx.try_recv().is_err(),
+        "fanout must not start after lease loss"
     );
-    let summary = drain.await.expect("drain join").expect("drain result");
+    assert!(
+        tail_rx.try_recv().is_err(),
+        "no later recipient may receive a frame"
+    );
+    let connection = store.database().guard().await.expect("counter connection");
+    let mut rows = connection
+        .query("SELECT count FROM test_lease_renewals", ())
+        .await
+        .expect("read renewal count");
+    let renewals: i64 = rows
+        .next()
+        .await
+        .expect("counter row")
+        .expect("counter exists")
+        .get(0)
+        .expect("renewal count");
+    assert_eq!(
+        renewals, 2,
+        "lease loss occurred inside the roster checkpoint loop"
+    );
+    drop(rows);
+    drop(connection);
     assert_eq!(summary.drained, 0);
     assert_eq!(summary.requeued, 0);
     assert_eq!(summary.stale, 1, "the stolen lease is reported as stale");
