@@ -130,7 +130,10 @@ async fn slow_force_detach_does_not_delay_a_concurrent_relay_ping() {
     let resume_bridge = ResumeStealBridge::new();
     resume_bridge.wire(Arc::clone(&registry));
     let actor_ref: kameo::actor::ActorRef<RelayActor> = RelayActor::spawn(RelayActor::new(
-        NodeId::new("node-under-test".to_string()),
+        waddle_xmpp::ownership::SharedNodeIdentity::new(waddle_xmpp::ownership::NodeIdentity::new(
+            "node-under-test".to_string(),
+            "incarnation".to_string(),
+        )),
         false,
         resume_bridge,
         RoomLocalClaims::new(),

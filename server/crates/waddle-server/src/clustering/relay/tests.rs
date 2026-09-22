@@ -12,6 +12,60 @@ use waddle_xmpp::ownership::{
     ResumeIdentityProof, StalePredicate,
 };
 
+#[tokio::test]
+async fn relay_replies_follow_repeated_identity_rotations_without_respawn() {
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("initial", "first"));
+    let mut rotations = identity.subscribe_rotations();
+    let actor = RelayActor::spawn(RelayActor::new(
+        identity.clone(),
+        false,
+        ResumeStealBridge::new(),
+        RoomLocalClaims::new(),
+        OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &crate::config::ClusteringMessagingConfig::default(),
+        ),
+    ));
+    assert_eq!(
+        actor
+            .ask(RelayPing)
+            .await
+            .expect("initial pong")
+            .node_id
+            .as_str(),
+        "initial"
+    );
+    for node in ["recovered-once", "recovered-twice"] {
+        identity.rotate(NodeIdentity::new(node, node)).await;
+        tokio::time::timeout(Duration::from_secs(1), rotations.changed())
+            .await
+            .expect("rotation notification")
+            .expect("source remains live");
+        assert_eq!(
+            actor
+                .ask(RelayPing)
+                .await
+                .expect("rotated pong")
+                .node_id
+                .as_str(),
+            node
+        );
+        let stanza = RemoteStanza(waddle_xmpp::Stanza::Message(
+            xmpp_parsers::message::Message::new(None::<jid::Jid>),
+        ));
+        assert_eq!(
+            actor
+                .ask(RelayEchoStanza { stanza })
+                .await
+                .expect("rotated echo")
+                .node_id
+                .as_str(),
+            node
+        );
+    }
+    actor.stop_gracefully().await.expect("stop actor");
+}
+
 #[test]
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
@@ -404,7 +458,10 @@ fn spawn_test_relay_actor() -> kameo::actor::ActorRef<RelayActor> {
     let resume_bridge = ResumeStealBridge::new();
     resume_bridge.wire(Arc::new(waddle_xmpp::registry::ConnectionRegistry::new()));
     RelayActor::spawn(RelayActor::new(
-        NodeId::new("span-test-node".to_string()),
+        waddle_xmpp::ownership::SharedNodeIdentity::new(waddle_xmpp::ownership::NodeIdentity::new(
+            "span-test-node".to_string(),
+            "incarnation".to_string(),
+        )),
         false,
         resume_bridge,
         RoomLocalClaims::new(),

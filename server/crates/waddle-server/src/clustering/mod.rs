@@ -1062,10 +1062,8 @@ pub async fn start_if_enabled(
         // genuine registration failure, exactly like the keypair-slot
         // acquire above), then hand the loop off to the background task.
         let node_lease = claims::PostgresClaimStore::new(db.clone());
-        let node_identity = waddle_xmpp::ownership::NodeIdentity::new(
-            handle.node_id.as_str().to_string(),
-            uuid::Uuid::new_v4().to_string(),
-        );
+        let live_identity = handle.node_identity.clone();
+        let node_identity = live_identity.current();
         // FIX 6: read through the typed `ClusteringConfig::pod_template_hash`
         // (parsed once in `config.rs`'s `from_vars` pipeline, like every
         // sibling var) rather than a raw `std::env::var` at this call site.
@@ -1092,7 +1090,6 @@ pub async fn start_if_enabled(
             waddle_xmpp::ownership::observed_claim_store(claims::PostgresClaimStore::new(
                 db.clone(),
             ));
-        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(node_identity.clone());
         // ADR-0017 Phase 3 Slice 5 (carried debt (b)): construct the real
         // `LocallyClaimedEntities` empty now, hand the same `Arc` to both
         // `run_node_lease` (below) and the returned handles — the SM

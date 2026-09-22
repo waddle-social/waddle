@@ -94,11 +94,13 @@ pub enum SwarmError {
 }
 
 /// Identity of a running swarm: the libp2p `PeerId` plus the per-process
-/// `node_id` that names this node's keypair-slot lease and relay registration.
+/// `node_id` that names its keypair-slot lease and initial relay registration.
 #[derive(Debug, Clone)]
 pub struct SwarmHandle {
     pub local_peer_id: PeerId,
     pub node_id: NodeId,
+    /// Ownership identity shared by the relay and the node-lease recovery loop.
+    pub node_identity: waddle_xmpp::ownership::SharedNodeIdentity,
     /// Readable snapshot of the swarm's current connected-peer count (Phase
     /// 2 Slice 1's gauge, reused here per ADR-0017 Phase 3 Slice 2's
     /// isolation rule — see `self_fence::ConnectedPeerCount`'s doc comment
@@ -146,8 +148,8 @@ pub async fn spawn(
         .collect::<Result<Vec<Multiaddr>, SwarmError>>()?;
 
     // One per-process node id: freshly generated every start, never reused
-    // across restarts. Names this node's keypair-slot lease and its single
-    // kademlia relay registration.
+    // across restarts. Names the keypair-slot lease; the ownership identity
+    // and relay registration initially share it but rotate after self-fencing.
     let node_id = NodeId::generate();
 
     let (keypair, pending_lease) = node_keypair(config, db, &node_id).await?;
@@ -312,8 +314,13 @@ async fn bring_up(
              relay or stall its mailbox — test harnesses only, never production"
         );
     }
+    let node_identity =
+        waddle_xmpp::ownership::SharedNodeIdentity::new(waddle_xmpp::ownership::NodeIdentity::new(
+            node_id.as_str().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ));
     let relay_registration = relay::spawn_supervised(
-        node_id.clone(),
+        node_identity.clone(),
         config.fault_injection,
         stop_token.clone(),
         resume_bridge,
@@ -338,6 +345,7 @@ async fn bring_up(
     let handle = SwarmHandle {
         local_peer_id,
         node_id,
+        node_identity,
         connected_peers,
     };
 

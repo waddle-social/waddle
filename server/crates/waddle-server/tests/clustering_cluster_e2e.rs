@@ -1321,6 +1321,11 @@ async fn cluster_exit_criteria_end_to_end() {
         .await
         .expect("relay respawned, re-registered under the same name, and re-resolved");
 
+    let mut cached_relay_a = RelayHandle::new(NodeId::new(node_a.clone()), stop.clone());
+    ping_until(&mut cached_relay_a, &node_a, Duration::from_secs(30))
+        .await
+        .expect("cache actor reference before identity rotation");
+
     // --- Exit criterion: revoked-peer-with-live-connection. Revoke A
     // cluster-wide (delete its allowlist row, using the peer id A published
     // in its node-id file): every node's refresh closes live connections to A
@@ -1344,6 +1349,17 @@ async fn cluster_exit_criteria_end_to_end() {
             "revoked peer A still reachable after the containment window"
         );
     }
+    // Expire A while disconnected so its real heartbeat loses the lease CAS.
+    // The test-process origin lease is not renewed, so isolation alone cannot
+    // reliably bypass the two-node lone-survivor carve-out. Recovery remains
+    // blocked on connectivity until re-enrollment below.
+    conn.execute(
+        "UPDATE clustering_nodes SET expired = TRUE WHERE node_id = ?",
+        waddle_server::db_params![node_a.clone()],
+    )
+    .await
+    .expect("expire A lease to trigger production self-fence");
+    wait_for_readiness(&server_a, false, Duration::from_secs(15)).await;
     // Re-enroll A: connectivity must recover via the periodic re-dial.
     conn.execute(
         "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
@@ -1351,9 +1367,35 @@ async fn cluster_exit_criteria_end_to_end() {
     )
     .await
     .expect("re-enroll A");
-    ping_until(&mut relay_a, &node_a, Duration::from_secs(30))
+    wait_for_readiness(&server_a, true, Duration::from_secs(30)).await;
+    let mut rows = conn.query(
+        "SELECT node_id FROM clustering_nodes WHERE peer_id = ? AND NOT expired AND NOT draining",
+        waddle_server::db_params![peer_a.clone()],
+    ).await.expect("read recovered node identity");
+    let recovered_a: String = rows
+        .next()
         .await
-        .expect("re-enrolled peer reachable again");
+        .expect("row")
+        .expect("live node")
+        .get(0)
+        .expect("node id");
+    assert_ne!(recovered_a, node_a, "self-fence must rotate node identity");
+    assert!(rows.next().await.expect("next row").is_none());
+    let mut recovered_relay = RelayHandle::new(NodeId::new(recovered_a.clone()), stop.clone());
+    // Darwin can retain the revoked TCP tuple in TIME_WAIT for about 60s.
+    // Successful discovery returns immediately; allow that transport recovery
+    // independently of the relay registration deadline on other platforms.
+    ping_until(&mut recovered_relay, &recovered_a, Duration::from_secs(90))
+        .await
+        .expect("fresh ownership identity must resolve to the recovered relay and pong");
+    // Existing in-flight refs still reach the same actor, which reports its current identity.
+    ping_until(&mut cached_relay_a, &recovered_a, Duration::from_secs(30))
+        .await
+        .expect("cached relay reference reports the rotated identity");
+    recovered_relay.crash().await.expect("crash rotated relay");
+    ping_until(&mut recovered_relay, &recovered_a, Duration::from_secs(30))
+        .await
+        .expect("supervisor respawns under the rotated name");
 
     // --- Exit criterion: re-discovery through a rolling restart of BOTH
     // bootstrap peers, sequential, at most one node down at any instant.

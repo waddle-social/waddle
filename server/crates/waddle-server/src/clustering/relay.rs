@@ -1,7 +1,8 @@
 //! Per-node relay actor for the clustering swarm (ADR-0017 elements 5/6).
 //!
 //! Each node registers exactly **one** name in kademlia: its relay actor,
-//! keyed by the node's per-instance `node_id`. Kademlia carries node
+//! keyed by the current ownership `node_id`, updated on self-fence recovery.
+//! Kademlia carries node
 //! discovery only — entity→node resolution is Phase 3's Postgres claims
 //! table, and per-entity DHT registration is ruled out by kameo 0.20's
 //! hardcoded `MemoryStore` limits.
@@ -49,7 +50,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use waddle_xmpp::ownership::{ClaimEpoch, Entity};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, SharedNodeIdentity};
 
 /// Bound on this node's own wait for a local force-detach to complete when
 /// answering a [`RelayResumeSteal`] ask (ADR-0017 Phase 3 Slice 6).
@@ -241,7 +242,7 @@ async fn register_relay_actor(
 #[derive(Actor, RemoteActor)]
 #[remote_actor(id = "waddle.clustering.relay-actor.v1")]
 pub struct RelayActor {
-    node_id: NodeId,
+    node_identity: SharedNodeIdentity,
     /// When false (production), the fault-injection messages are inert acks.
     fault_injection: bool,
     /// ADR-0017 Phase 3 Slice 6: this node's bridge to its own live
@@ -262,14 +263,14 @@ pub struct RelayActor {
 
 impl RelayActor {
     pub fn new(
-        node_id: NodeId,
+        node_identity: SharedNodeIdentity,
         fault_injection: bool,
         resume_bridge: Arc<ResumeStealBridge>,
         room_local_claims: Arc<RoomLocalClaims>,
         ordered_delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
     ) -> Self {
         Self {
-            node_id,
+            node_identity,
             fault_injection,
             resume_bridge,
             room_local_claims,
@@ -300,7 +301,7 @@ impl Message<RelayPing> for RelayActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> RelayPong {
         RelayPong {
-            node_id: self.node_id.clone(),
+            node_id: NodeId::new(self.node_identity.current().node_id),
         }
     }
 }
@@ -330,7 +331,7 @@ impl Message<RelayEchoStanza> for RelayActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> RelayEchoReply {
         RelayEchoReply {
-            node_id: self.node_id.clone(),
+            node_id: NodeId::new(self.node_identity.current().node_id),
             stanza: msg.stanza,
         }
     }
@@ -1263,9 +1264,12 @@ impl Message<RelaySleep> for RelayActor {
 /// under [`relay_name`], respawn it if it ever stops unexpectedly, and
 /// **re-register under the same name** on every respawn (kameo auto-registers
 /// removal on actor stop, so re-registration is mandatory, not optional).
+/// Identity rotation retires the previous name and registers the current name
+/// without replacing the actor or losing ordered receiver state. All retry and
+/// refresh paths then use that current name.
 /// Stops cleanly when `stop_token` fires.
 pub fn spawn_supervised(
-    node_id: NodeId,
+    node_identity: SharedNodeIdentity,
     fault_injection: bool,
     stop_token: CancellationToken,
     resume_bridge: Arc<ResumeStealBridge>,
@@ -1274,7 +1278,8 @@ pub fn spawn_supervised(
 ) -> RelayRegistrationTrigger {
     let (trigger_tx, mut trigger_rx) = mpsc::channel(1);
     tokio::spawn(async move {
-        let name = relay_name(&node_id);
+        let mut rotations = node_identity.subscribe_rotations();
+        let mut name = relay_name(&NodeId::new(node_identity.current().node_id));
         let mut respawns: u64 = 0;
         let mut trigger_closed = false;
         loop {
@@ -1282,7 +1287,7 @@ pub fn spawn_supervised(
                 break;
             }
             let actor_ref: ActorRef<RelayActor> = RelayActor::spawn(RelayActor::new(
-                node_id.clone(),
+                node_identity.clone(),
                 fault_injection,
                 Arc::clone(&resume_bridge),
                 Arc::clone(&room_local_claims),
@@ -1354,6 +1359,33 @@ pub fn spawn_supervised(
                             _ = tokio::time::sleep(RESPAWN_BACKOFF) => {}
                         }
                         break;
+                    }
+                    changed = rotations.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        let current_name = relay_name(&NodeId::new(node_identity.current().node_id));
+                        if current_name == name {
+                            continue;
+                        }
+                        // Stop publishing the superseded identity. Kameo removes
+                        // only this name's DHT records, preserving the live actor
+                        // and its ordered receiver state for in-flight requests.
+                        tokio::select! {
+                            biased;
+                            _ = stop_token.cancelled() => return,
+                            _ = kameo::remote::unregister(name.clone()) => {}
+                        }
+                        name = current_name;
+                        match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                            RelayRegisterAttempt::Registered => {}
+                            RelayRegisterAttempt::Cancelled => return,
+                            RelayRegisterAttempt::Failed => {
+                                // The periodic and peer-connect paths retry this
+                                // current name, never the superseded identity.
+                                tracing::warn!(%name, "clustering relay rotation registration failed; retrying on refresh");
+                            }
+                        }
                     }
                     _ = reregister.tick() => {
                         // Same-name refresh so a registration that predated
