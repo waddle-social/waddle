@@ -77,6 +77,7 @@ pub(in super::super) async fn deliver_reserved_full_jid_peer_live_only(
 
     match user_actor
         .ask(waddle_xmpp::registry::TrySendPeer {
+            ingress_append: None,
             jid: target.clone(),
             stanza: stanza.clone(),
         })

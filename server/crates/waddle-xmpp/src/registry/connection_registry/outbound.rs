@@ -103,9 +103,9 @@ pub struct OutboundStanza {
     /// Optional acknowledgement for a durable producer waiting until this
     /// frame reaches the connection's write/recovery-owning path.
     pub write_acceptance: Option<OutboundWriteAcceptance>,
-    /// The origin's ingress obligation for a frame relayed to this socket, unverified
-    /// (issue #1789). Read only by the detach drain, which keys the XEP-0198 replay
-    /// append with it; a live wire write ignores it.
+    /// The ingress obligation for a local or relayed frame, unverified (#1789, #1805).
+    /// The live handler retains it on the unacknowledged SM entry; detach authorizes
+    /// it before proving the XEP-0198 replay append. Live writes do not read canonical state.
     pub ingress_append: Option<crate::stream_management::SmRelayedAppendObligation>,
 }
 
@@ -128,7 +128,7 @@ impl OutboundStanza {
         }
     }
 
-    /// Attach the relaying origin's ingress obligation.
+    /// Attach the delivery origin's ingress obligation.
     pub fn with_ingress_append(
         mut self,
         obligation: crate::stream_management::SmRelayedAppendObligation,

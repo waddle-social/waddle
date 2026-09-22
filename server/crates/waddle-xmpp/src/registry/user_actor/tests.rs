@@ -544,6 +544,7 @@ async fn join_burst_does_not_drop_at_capacity_256() {
     for _ in 0..OCCUPANTS {
         let outcome: BroadcastOutcome = actor
             .ask(TrySendPeer {
+                ingress_append: None,
                 jid: jid.clone(),
                 stanza: any_stanza(),
             })
@@ -575,6 +576,7 @@ async fn join_burst_drops_at_default_capacity_64() {
     for _ in 0..OCCUPANTS {
         let outcome: BroadcastOutcome = actor
             .ask(TrySendPeer {
+                ingress_append: None,
                 jid: jid.clone(),
                 stanza: any_stanza(),
             })
@@ -678,6 +680,7 @@ async fn delivery_preserves_direct_vs_peer_kind() {
 
     let outcome: BroadcastOutcome = actor
         .ask(TrySendDirect {
+            ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
         })
@@ -691,6 +694,7 @@ async fn delivery_preserves_direct_vs_peer_kind() {
 
     let outcome: BroadcastOutcome = actor
         .ask(TrySendPeer {
+            ingress_append: None,
             jid,
             stanza: any_stanza(),
         })
@@ -712,6 +716,7 @@ async fn delivery_full_channel_drops_without_blocking() {
 
     let first: BroadcastOutcome = actor
         .ask(TrySendDirect {
+            ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
         })
@@ -721,6 +726,7 @@ async fn delivery_full_channel_drops_without_blocking() {
 
     let second: BroadcastOutcome = actor
         .ask(TrySendDirect {
+            ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
         })
@@ -730,6 +736,7 @@ async fn delivery_full_channel_drops_without_blocking() {
 
     let absent: BroadcastOutcome = actor
         .ask(TrySendDirect {
+            ingress_append: None,
             jid: full("alice", "ghost"),
             stanza: any_stanza(),
         })
@@ -753,6 +760,7 @@ async fn delivery_closed_channel_evicts_and_replacement_delivers() {
 
     let outcome: BroadcastOutcome = actor
         .ask(TrySendDirect {
+            ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
         })
@@ -772,6 +780,7 @@ async fn delivery_closed_channel_evicts_and_replacement_delivers() {
     register(&actor, jid.clone(), e_live).await;
     let outcome: BroadcastOutcome = actor
         .ask(TrySendDirect {
+            ingress_append: None,
             jid,
             stanza: any_stanza(),
         })
@@ -799,6 +808,7 @@ async fn register_over_live_entry_routes_to_new_receiver() {
 
     let outcome: BroadcastOutcome = actor
         .ask(TrySendDirect {
+            ingress_append: None,
             jid,
             stanza: any_stanza(),
         })

@@ -2072,3 +2072,135 @@ async fn relayed_ingress_backstop_timeout_is_metered_once() {
     );
     assert_eq!(metrics.counter_sum("ingress.decisions", &[]), Some(1));
 }
+
+/// Issue #1805: the owner mirror's UserActor queue must carry the same obligation
+/// the socket receiver reconstructs. Exercise both actor delivery kinds and the
+/// forwarder's existing typed conversion; the network forwarder itself requires
+/// the multi-process swarm harness and is not invoked here.
+#[tokio::test]
+async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope() {
+    use crate::ingress::identity::IngressAppendObligationRef;
+    use crate::ingress::EffectReceiptKey;
+    use crate::ingress_substrate::EffectReceiptKind;
+    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+    use waddle_xmpp::registry::{GetUser, RegisterUserResource, TrySendDirect, TrySendPeer};
+
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (mirror_tx, mut mirror_rx) = mpsc::channel(1);
+    services
+        .user_registry
+        .ask(RegisterUserResource {
+            jid: target.clone(),
+            entry: ConnectionEntry::new(mirror_tx),
+        })
+        .await
+        .expect("register owner mirror in UserActor");
+    let actor = services
+        .user_registry
+        .ask(GetUser {
+            bare_jid: target.to_bare(),
+        })
+        .await
+        .expect("lookup user")
+        .expect("registered actor");
+
+    let (socket_tx, mut socket_rx) = mpsc::channel(1);
+    let socket_entry = ConnectionEntry::new(socket_tx);
+    let owner = socket_entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), socket_entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            owner,
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration_id = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .expect("socket registration")
+        .registration_id;
+    let obligation = IngressAppendObligationRef {
+        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1805)),
+        sender_bare: sender_full().to_bare(),
+        receipt: EffectReceiptKey {
+            kind: EffectReceiptKind::from_storage(IngressEffectKind::RouteDirect.storage_tag()),
+            semantic_identity_hash: [5; 32],
+        },
+        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    }
+    .into_relayed_for(target.clone());
+    let mut message = Message::new(Some(target.clone().into()));
+    message.from = Some(sender_full().into());
+    let stanza = Stanza::Message(message);
+
+    for kind in [DeliveryKind::DirectFrame, DeliveryKind::PeerStanza] {
+        let outcome = match kind {
+            DeliveryKind::DirectFrame => actor
+                .ask(TrySendDirect {
+                    jid: target.clone(),
+                    stanza: stanza.clone(),
+                    ingress_append: Some(obligation.clone()),
+                })
+                .await
+                .expect("direct actor delivery"),
+            DeliveryKind::PeerStanza => actor
+                .ask(TrySendPeer {
+                    jid: target.clone(),
+                    stanza: stanza.clone(),
+                    ingress_append: Some(obligation.clone()),
+                })
+                .await
+                .expect("peer actor delivery"),
+        };
+        assert_eq!(outcome, BroadcastOutcome::Delivered);
+        let queued = mirror_rx
+            .try_recv()
+            .expect("mirror received actor delivery");
+        assert_eq!(queued.kind, kind);
+        assert_eq!(queued.ingress_append, Some(obligation.clone()));
+
+        // This is the conversion registration/socket_forwarder.rs uses after
+        // dequeuing the owner mirror, followed by the real socket receiver.
+        let frame = RemoteResourceOutboundFrame {
+            jid: target.clone(),
+            registration_id,
+            stanza: RemoteStanza(queued.stanza),
+            kind: queued.kind,
+            ingress_append: queued
+                .ingress_append
+                .map(IngressAppendObligationRef::from_relayed),
+        };
+        let reply = bridge
+            .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
+                frame,
+                trace: RelayTraceContext::default(),
+            })
+            .await;
+        assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
+        let delivered = socket_rx
+            .try_recv()
+            .expect("socket received forwarded frame");
+        assert_eq!(delivered.kind, kind);
+        assert_eq!(delivered.stanza.to_element(), stanza.to_element());
+        assert_eq!(delivered.ingress_append, Some(obligation.clone()));
+    }
+}

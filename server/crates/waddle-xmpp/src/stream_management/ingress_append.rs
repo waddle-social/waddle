@@ -37,10 +37,10 @@ pub struct SmIngressAppendKey {
     pub resource: FullJid,
 }
 
-/// An ingress obligation a peer node attached to a frame queued on this node's socket
-/// (issue #1789). It is a *claim*: nothing has checked it against canonical ingress
-/// state. It is authorized only if the frame is later drained into a replay queue,
-/// which is the one place it can be used — a frame written live never reads it.
+/// An ingress obligation attached to a local or relayed socket frame (#1789, #1805).
+/// The socket treats it as a claim and authorizes it against canonical ingress state
+/// at detach, including when a live write already recorded the unacknowledged entry.
+/// Queuing through a local UserActor does not bypass that authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmRelayedAppendObligation {
     pub key: SmIngressAppendKey,

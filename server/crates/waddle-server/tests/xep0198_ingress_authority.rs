@@ -494,3 +494,43 @@ async fn postgres_maintenance_recovery_appends_lost_detached_delivery_once() {
         maintenance_recovery_appends_lost_detached_delivery_once(fixture).await;
     }
 }
+
+#[path = "ingress_cases/user_actor_keyed_append.rs"]
+mod user_actor_keyed_append;
+
+#[tokio::test]
+async fn sqlite_xep0198_user_actor_direct_keyed_append() {
+    user_actor_keyed_append::local_queue_retains_append_identity(
+        IngressFixture::sqlite().await,
+        waddle_server::ingress::effects::delivery::PeerDeliveryKind::DirectFrame,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_xep0198_user_actor_direct_keyed_append() {
+    if let Some(fixture) = IngressFixture::postgres("ua_direct").await {
+        user_actor_keyed_append::local_queue_retains_append_identity(
+            fixture,
+            waddle_server::ingress::effects::delivery::PeerDeliveryKind::DirectFrame,
+        )
+        .await;
+    }
+}
+#[tokio::test]
+async fn sqlite_xep0198_user_actor_peer_keyed_append() {
+    user_actor_keyed_append::local_queue_retains_append_identity(
+        IngressFixture::sqlite().await,
+        waddle_server::ingress::effects::delivery::PeerDeliveryKind::PeerStanza,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_xep0198_user_actor_peer_keyed_append() {
+    if let Some(fixture) = IngressFixture::postgres("ua_peer").await {
+        user_actor_keyed_append::local_queue_retains_append_identity(
+            fixture,
+            waddle_server::ingress::effects::delivery::PeerDeliveryKind::PeerStanza,
+        )
+        .await;
+    }
+}

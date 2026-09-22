@@ -1961,6 +1961,7 @@ async fn test_reap_user_if_empty_removes_orphaned_empty_actor() {
         .expect("actor exists");
     let outcome = user_actor
         .ask(TrySendPeer {
+            ingress_append: None,
             jid: phone.clone(),
             stanza: sample_stanza(&phone),
         })

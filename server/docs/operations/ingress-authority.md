@@ -1719,7 +1719,17 @@ Failed authorization warns and increments
 unkeyed append; delivery never fails because the check failed.
 That fallback remains at-least-once.
 
-The registered-remote-socket drain is keyed (#1789). The owner-to-socket frame
+Registered-remote-socket and local UserActor drains are keyed (#1789, #1805).
+Local `TrySendPeer` and `TrySendDirect` preserve the typed ingress obligation
+through both queued drains and the live handler's unacknowledged SM entry.
+An owner mirror forwards that obligation using the existing frame envelope;
+no relay version or schema change is needed. Local delivery retains the same
+bounded canonical authorization at detach, including its unkeyed fallback.
+This closes the missing-identity duplicate window after local delivery,
+failed progress persistence, detach and recovery; it does not close #1760's
+custody gaps or make recipient archive/inbox effects idempotent (#1759).
+
+The owner-to-socket frame
 (`remote_resource_frame.v2`) carries the recorded obligation, and the socket node
 queues it **unverified** on the live outbound entry. Only if that socket detaches
 before writing the frame does the detach drain

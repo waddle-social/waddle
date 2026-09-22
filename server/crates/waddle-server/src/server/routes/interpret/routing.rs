@@ -591,12 +591,20 @@ async fn deliver_one_via_actor(
     // declaring the frame lost, so a recipient that is merely catching up
     // (e.g. draining a MAM page) doesn't silently miss a groupchat
     // reflection.
+    // Preserve the same recorded obligation on live queues and detached fallback.
+    // Owner mirrors forward this claim unchanged; detach retains canonical authorization.
+    let ingress_append = crate::ingress::identity::IngressAppendObligationRef::for_message(
+        ingress_append_context,
+        stanza,
+    )
+    .map(|obligation| obligation.into_relayed_for(target.clone()));
     let mut retry_delays = DROPPED_FULL_RETRY_DELAYS.iter();
     let outcome: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> = loop {
         let attempt: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> =
             match kind {
                 ActorSendKind::Direct => user_actor
                     .ask(waddle_xmpp::registry::TrySendDirect {
+                        ingress_append: ingress_append.clone(),
                         jid: target.clone(),
                         stanza: stanza.clone(),
                     })
@@ -606,6 +614,7 @@ async fn deliver_one_via_actor(
                     .map_err(|error| (classify_send_error(&error), error.to_string())),
                 ActorSendKind::Peer => user_actor
                     .ask(waddle_xmpp::registry::TrySendPeer {
+                        ingress_append: ingress_append.clone(),
                         jid: target.clone(),
                         stanza: stanza.clone(),
                     })
@@ -805,6 +814,7 @@ pub(super) async fn deliver_peer_to_live_only(
     };
     match user_actor
         .ask(waddle_xmpp::registry::TrySendPeer {
+            ingress_append: None,
             jid: target.clone(),
             stanza: stanza.clone(),
         })
