@@ -76,12 +76,20 @@ impl IngressEffectCapture {
         });
     }
 
+    pub fn next_inbox_push_identity(&self) -> EffectMessageIdentity {
+        EffectMessageIdentity::InboxPush(self.next_route_ordinal())
+    }
+
     pub fn next_route_identity(&self) -> EffectMessageIdentity {
+        EffectMessageIdentity::capture_ordinal(self.next_route_ordinal())
+    }
+
+    fn next_route_ordinal(&self) -> u64 {
         let mut state = self
             .inner
             .lock()
             .expect("capture mutex should not be poisoned");
-        let identity = EffectMessageIdentity::capture_ordinal(state.next_route_identity);
+        let identity = state.next_route_identity;
         state.next_route_identity = state
             .next_route_identity
             .checked_add(1)

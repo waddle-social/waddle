@@ -125,6 +125,9 @@ pub enum EffectMessageIdentity {
     StanzaId(StanzaId),
     OriginId(OriginId),
     CaptureOrdinal(u64),
+    /// Best-effort inbox refresh, backed by a separately committed projection.
+    /// Its captured audience is not a durable message-delivery obligation.
+    InboxPush(u64),
 }
 
 impl EffectMessageIdentity {
@@ -147,6 +150,7 @@ impl EffectMessageIdentity {
             }
             Self::OriginId(origin_id) => format!("origin:{}", origin_id.as_str()),
             Self::CaptureOrdinal(ordinal) => format!("capture:{ordinal:020}"),
+            Self::InboxPush(ordinal) => format!("inbox-push:{ordinal:020}"),
         }
     }
 }
@@ -2366,6 +2370,7 @@ enum StoredEffectMessageIdentity {
     StanzaId { stanza_id: StanzaId },
     OriginId { origin_id: String },
     CaptureOrdinal { ordinal: u64 },
+    InboxPush { ordinal: u64 },
 }
 
 impl From<EffectMessageIdentity> for StoredEffectMessageIdentity {
@@ -2376,6 +2381,7 @@ impl From<EffectMessageIdentity> for StoredEffectMessageIdentity {
                 origin_id: origin_id.id,
             },
             EffectMessageIdentity::CaptureOrdinal(ordinal) => Self::CaptureOrdinal { ordinal },
+            EffectMessageIdentity::InboxPush(ordinal) => Self::InboxPush { ordinal },
         }
     }
 }
@@ -2388,6 +2394,7 @@ impl StoredEffectMessageIdentity {
                 EffectMessageIdentity::OriginId(OriginId::new(origin_id))
             }
             Self::CaptureOrdinal { ordinal } => EffectMessageIdentity::CaptureOrdinal(ordinal),
+            Self::InboxPush { ordinal } => EffectMessageIdentity::InboxPush(ordinal),
         }
     }
 }
@@ -5356,6 +5363,22 @@ mod tests {
                 &vec![b'x'; MAX_EFFECT_INTENT_PAYLOAD_BYTES + 1],
             ),
             Err(EffectIntentCodecError::PayloadTooLarge)
+        );
+    }
+    #[test]
+    fn inbox_push_identity_roundtrips_and_cannot_alias_message_delivery() {
+        let make = |route_identity| IngressEffectIntent::RouteDirect {
+            recipient: "juliet@example.com".parse().expect("recipient"),
+            fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
+            route_identity,
+        };
+        let push = make(EffectMessageIdentity::InboxPush(7));
+        let route = make(EffectMessageIdentity::CaptureOrdinal(7));
+        assert_ne!(push.semantic_key(), route.semantic_key());
+        let encoded = push.encode_v1().expect("encode");
+        assert_eq!(
+            IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload()).expect("decode"),
+            push
         );
     }
 }

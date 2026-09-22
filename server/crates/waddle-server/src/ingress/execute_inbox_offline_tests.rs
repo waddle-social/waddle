@@ -24,7 +24,7 @@ async fn socket_state(
     .await
 }
 
-async fn inbox_push_receipt(fixture: IngressFixture) {
+async fn inbox_push_receipt(fixture: IngressFixture, disconnect: bool) {
     let state = socket_state(&fixture).await;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("member");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
@@ -58,6 +58,9 @@ async fn inbox_push_receipt(fixture: IngressFixture) {
             })
             .await
             .expect("member");
+        if disconnect && occupant == &resource {
+            continue;
+        }
         actor
             .ask(Join {
                 nick: nick.to_owned(),
@@ -108,7 +111,7 @@ async fn inbox_push_receipt(fixture: IngressFixture) {
             .filter(|intent| matches!(
                 intent,
                 IngressEffectIntent::RouteDirect {
-                    route_identity: waddle_xmpp::ingress::EffectMessageIdentity::CaptureOrdinal(_),
+                    route_identity: waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(_),
                     ..
                 }
             ))
@@ -133,6 +136,13 @@ async fn inbox_push_receipt(fixture: IngressFixture) {
         })
         .expect("planned push");
     assert_eq!(decision.external_receipts[push_index].len(), 1);
+    if disconnect {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister(&resource);
+    }
     deps.effects = &ImmediateSink;
     let mut report = execute_effects(
         &fixture.uow,
@@ -153,7 +163,10 @@ async fn inbox_push_receipt(fixture: IngressFixture) {
                 .any(|payload| payload.is("push", waddle_xmpp::xep::xep0430::NS_WADDLE_INBOX));
         }
     }
-    assert!(push_received, "online member receives XEP-0430 push");
+    assert_eq!(
+        push_received, !disconnect,
+        "only connected members receive inbox pushes"
+    );
     assert!(sender_rx.try_recv().is_ok(), "sender receives reflection");
     report
         .complete_frame_obligations(&fixture.uow, &fixture.db, Duration::from_secs(5))
@@ -331,12 +344,12 @@ async fn offline_receipts(
 
 #[tokio::test]
 async fn sqlite_groupchat_inbox_push_receipts_and_terminalizes() {
-    inbox_push_receipt(IngressFixture::sqlite().await).await;
+    inbox_push_receipt(IngressFixture::sqlite().await, false).await;
 }
 #[tokio::test]
 async fn postgres_groupchat_inbox_push_receipts_and_terminalizes() {
     if let Some(fixture) = IngressFixture::postgres("inbox_push_receipt").await {
-        inbox_push_receipt(fixture).await;
+        inbox_push_receipt(fixture, false).await;
     }
 }
 #[tokio::test]
@@ -401,4 +414,51 @@ async fn postgres_offline_delivery_quota_settles_without_pending_row_or_candidat
     if let Some(fixture) = IngressFixture::postgres("offline_quota_receipts").await {
         offline_receipts(fixture, false, true).await;
     }
+}
+
+#[tokio::test]
+async fn sqlite_groupchat_inbox_push_disconnected_recipient_terminalizes() {
+    inbox_push_receipt(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn postgres_groupchat_inbox_push_disconnected_recipient_terminalizes() {
+    if let Some(fixture) = IngressFixture::postgres("inbox_push_disconnect").await {
+        inbox_push_receipt(fixture, true).await;
+    }
+}
+
+#[test]
+fn ephemeral_inbox_push_settles_absent_partial_and_complete_audiences() {
+    let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first");
+    let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second");
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: first.to_bare(),
+        fanout: vec![first.clone(), second.clone()],
+        route_identity: waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(5),
+    };
+    let key = crate::ingress::durable::receipt_key(&intent).expect("key");
+    let effect = ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
+        owner: first.to_bare(),
+        projection: crate::ingress::effects::ProjectionRef(0),
+        receipt: Some(Box::new(intent)),
+    });
+    for delivered in [vec![], vec![first.clone()], vec![first, second]] {
+        assert_eq!(
+            proven_receipts(
+                &effect,
+                &EffectOutcome::InboxPush(delivered),
+                std::slice::from_ref(&key)
+            ),
+            vec![key.clone()]
+        );
+    }
+    assert!(
+        proven_receipts(
+            &effect,
+            &EffectOutcome::Unavailable,
+            std::slice::from_ref(&key)
+        )
+        .is_empty(),
+        "missing projection cannot settle"
+    );
 }

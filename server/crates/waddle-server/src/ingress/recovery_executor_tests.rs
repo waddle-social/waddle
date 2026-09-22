@@ -2114,7 +2114,7 @@ impl waddle_xmpp::xep::xep0191::BlockingStorage for CountingBlocking {
     }
 }
 
-async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
+async fn groupchat_inbox_push_expires_without_replaying_stale_projection(fixture: IngressFixture) {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let mut state = state_for(&fixture, persistent_sm(&fixture).await).await;
     let blocking = Arc::new(CountingBlocking(std::sync::atomic::AtomicUsize::new(0)));
@@ -2206,7 +2206,7 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
             .filter(|intent| matches!(
                 intent,
                 IngressEffectIntent::RouteDirect {
-                    route_identity: waddle_xmpp::ingress::EffectMessageIdentity::CaptureOrdinal(_),
+                    route_identity: waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(_),
                     ..
                 }
             ))
@@ -2231,6 +2231,34 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
         })
         .expect("planned push");
     assert_eq!(decision.external_receipts[push_index].len(), 1);
+    // The sender's activity marker is an independent, non-rebuildable effect.
+    // Commit it through the real executor, then crash before any delivery runs.
+    let activity_index = decision.external.iter().position(|effect| matches!(effect,
+        ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::NotificationActivity {
+            mutation: waddle_xmpp::ingress::NotificationActivityMutation::OutboundMessage { .. }, ..
+        }))).expect("sender activity");
+    let mut activity = decision.clone();
+    activity.external = vec![decision.external[activity_index].clone()];
+    activity.external_receipts = vec![decision.external_receipts[activity_index].clone()];
+    activity.external_dependencies = vec![decision.external_dependencies[activity_index].clone()];
+    activity.route_progress.clear();
+    activity.arm_owned_receipts.clear();
+    deps.effects = &ImmediateSink;
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &activity,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(report.receipt_failures.is_empty());
+    assert!(rx.try_recv().is_err(), "crash before recipient delivery");
+    assert!(
+        sender_rx.try_recv().is_err(),
+        "crash before sender reflection"
+    );
     let key = decision.message_key.expect("key");
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
     let cursor = MaintenanceCursor::default();
@@ -2252,7 +2280,6 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
             pass(&fixture, &env, &cursor).await,
             MaintenanceOutcome::Complete
         );
-        assert_pending(&fixture, key).await;
         if iteration == 0 {
             let Stanza::Message(copy) = rx.try_recv().expect("remaining MUC occupant copy").stanza
             else {
@@ -2282,13 +2309,14 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
             })
             .collect();
         assert!(
-            pending.iter().any(|intent| {
-                matches!(intent, IngressEffectIntent::RouteDirect { .. })
-                    && decision.external_receipts[push_index]
-                        .contains(&crate::ingress::receipt_key(intent).expect("inbox receipt"))
-            }),
-            "exact inbox route remains pending: {pending:?}"
+            !pending
+                .iter()
+                .any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { .. })),
+            "inbox refresh must expire: {pending:?}"
         );
+        if iteration == 1 {
+            assert!(pending.is_empty(), "all obligations settle: {pending:?}");
+        }
         assert!(
             !pending.iter().any(|intent| matches!(
                 intent,
@@ -2312,7 +2340,13 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
                 &[("kind", "route_direct")]
             )
             .unwrap_or(0)
-            > before
+            == before
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
     );
     fixture.close().await;
 }
@@ -2384,13 +2418,14 @@ async fn postgres_live_duplicate_and_recovery_serialize_detached_appends() {
 }
 
 #[tokio::test]
-async fn sqlite_groupchat_inbox_push_route_is_left_pending() {
-    groupchat_inbox_push_route_is_left_pending(IngressFixture::sqlite().await).await;
+async fn sqlite_groupchat_inbox_push_expires_without_replaying_stale_projection() {
+    groupchat_inbox_push_expires_without_replaying_stale_projection(IngressFixture::sqlite().await)
+        .await;
 }
 #[tokio::test]
-async fn postgres_groupchat_inbox_push_route_is_left_pending() {
-    if let Some(fixture) = IngressFixture::postgres("groupchat_inbox_push_route_is_left_").await {
-        groupchat_inbox_push_route_is_left_pending(fixture).await;
+async fn postgres_groupchat_inbox_push_expires_without_replaying_stale_projection() {
+    if let Some(fixture) = IngressFixture::postgres("groupchat_inbox_push_expires").await {
+        groupchat_inbox_push_expires_without_replaying_stale_projection(fixture).await;
     }
 }
 
