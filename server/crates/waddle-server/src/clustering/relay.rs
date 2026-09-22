@@ -230,6 +230,21 @@ async fn register_relay_actor(
     }
 }
 
+/// All live-actor registration paths share the same completion policy: failed
+/// publication retries promptly without replacing the actor or its ordered state.
+async fn refresh_relay_registration(
+    attempt: impl std::future::Future<Output = RelayRegisterAttempt>,
+    reregister: &mut tokio::time::Interval,
+) -> RelayRegisterAttempt {
+    let outcome = attempt.await;
+    match outcome {
+        RelayRegisterAttempt::Registered => reregister.reset_after(REREGISTER_INTERVAL),
+        RelayRegisterAttempt::Failed => reregister.reset_after(RESPAWN_BACKOFF),
+        RelayRegisterAttempt::Cancelled => {}
+    }
+    outcome
+}
+
 /// The per-node relay actor. Phase 2 carries only the liveness/codec-proof
 /// message set plus harness fault-injection; the ordered per-peer relay
 /// channel semantics (sequencing, gap detection, sticky failover) land with
@@ -1377,13 +1392,16 @@ pub fn spawn_supervised(
                             _ = kameo::remote::unregister(name.clone()) => {}
                         }
                         name = current_name;
-                        match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                        match refresh_relay_registration(
+                            register_relay_actor(&actor_ref, &name, &stop_token),
+                            &mut reregister,
+                        ).await {
                             RelayRegisterAttempt::Registered => {}
                             RelayRegisterAttempt::Cancelled => return,
                             RelayRegisterAttempt::Failed => {
-                                // The periodic and peer-connect paths retry this
-                                // current name, never the superseded identity.
-                                tracing::warn!(%name, "clustering relay rotation registration failed; retrying on refresh");
+                                // Retry the current name after the short backoff,
+                                // preserving the live actor and ordered state.
+                                tracing::warn!(%name, "clustering relay rotation registration failed; retrying after backoff");
                             }
                         }
                     }
@@ -1403,7 +1421,10 @@ pub fn spawn_supervised(
                         // next iteration's `stop_token.cancelled()` arm fires
                         // immediately.
                         if !stop_token.is_cancelled() {
-                            match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                            match refresh_relay_registration(
+                                register_relay_actor(&actor_ref, &name, &stop_token),
+                                &mut reregister,
+                            ).await {
                                 RelayRegisterAttempt::Registered => {}
                                 RelayRegisterAttempt::Cancelled => return,
                                 RelayRegisterAttempt::Failed => {
@@ -1419,7 +1440,10 @@ pub fn spawn_supervised(
                     trigger = trigger_rx.recv(), if !trigger_closed => {
                         match trigger {
                             Some(()) => {
-                                match register_relay_actor(&actor_ref, &name, &stop_token).await {
+                                match refresh_relay_registration(
+                                    register_relay_actor(&actor_ref, &name, &stop_token),
+                                    &mut reregister,
+                                ).await {
                                     RelayRegisterAttempt::Registered => {
                                         tracing::debug!(%name, "clustering relay re-registered after peer connection");
                                     }
