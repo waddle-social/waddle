@@ -1,5 +1,6 @@
 mod owner;
 mod owner_retire;
+mod owner_sweep;
 mod owner_update;
 mod side_effects;
 pub(crate) use side_effects::RemoteCarbonFanout;

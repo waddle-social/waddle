@@ -168,6 +168,10 @@ impl OrderedRelayDeliveryBridge {
         envelope: RemoteStanzaEnvelope,
     ) -> Result<OrderedRelayReply, RelayAskError> {
         #[cfg(test)]
+        if let Ok(receiver) = super::muc::cleanup::TEST_CLEANUP_RELAY.try_with(Arc::clone) {
+            return Ok(receiver.deliver(envelope).await);
+        }
+        #[cfg(test)]
         if let Ok(receiver) =
             crate::ingress::execute::relay_detached_tests::CROSS_NODE_RECEIVER.try_with(Arc::clone)
         {

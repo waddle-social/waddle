@@ -123,6 +123,57 @@ async fn assert_no_frame_matching<F: Fn(&str) -> bool>(
     }
 }
 
+/// Drain bind-time departure traffic through a known replacement presence.
+/// A same-full-JID rejoin can suppress its join broadcast if it replaces the
+/// old occupancy before cleanup runs, so an explicit status update supplies
+/// a barrier in either ordering. Never discard a leave after availability.
+async fn observe_replacement_presence(
+    replacement: &mut WsXmppClient,
+    observer: &mut WsXmppClient,
+    occupant: &str,
+) {
+    let marker = format!("replacement-ready-{}", uuid::Uuid::new_v4());
+    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    presence.to = Some(occupant.parse().expect("replacement occupant JID"));
+    presence
+        .statuses
+        .insert(xmpp_parsers::message::Lang::new(), marker.clone());
+    replacement
+        .send(&element_to_xml(presence.into()))
+        .await
+        .expect("replacement sends presence barrier");
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut replacement_available = false;
+        loop {
+            let frame = observer.recv().await.expect("replacement presence traffic");
+            let element: Element = frame.parse().expect("typed replacement presence traffic");
+            if !element.is("presence", waddle_xmpp::ns::JABBER_CLIENT)
+                || element.attr("from") != Some(occupant)
+            {
+                continue;
+            }
+            if element.attr("type") == Some("unavailable") {
+                assert!(
+                    !replacement_available,
+                    "old cleanup must not leave after replacement availability: {frame}"
+                );
+                assert_leave_presence(&frame, occupant);
+            } else if element.attr("type").is_none() {
+                replacement_available = true;
+                if element
+                    .get_child("status", waddle_xmpp::ns::JABBER_CLIENT)
+                    .is_some_and(|status| status.text() == marker)
+                {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+    .expect("observer receives the replacement's reflected presence barrier");
+}
+
 /// Assert the XEP-0045 §7.14 room-broadcast leave shape: `<presence
 /// type='unavailable' from='room@service/nick'>` with `<x
 /// xmlns='http://jabber.org/protocol/muc#user'>` carrying `<item
@@ -584,6 +635,11 @@ async fn xep_0045_same_full_jid_replacement_leave_keeps_the_wire_shape_unchanged
 
     let mut alice_replacement = connect(&server, ALICE, &alice_pass, "replace-alice-old").await;
     join_room(&mut alice_replacement, &room, ALICE).await;
+    // Bob's own join already drained Alice's original roster presence.
+    // A fresh bind may now have left the old generation before this rejoin;
+    // distinguish that legitimate departure from any stale leave afterward.
+    observe_replacement_presence(&mut alice_replacement, &mut bob, &format!("{room}/{ALICE}"))
+        .await;
 
     alice_old
         .send(&unavailable_presence_xml(&format!("{room}/{ALICE}")))

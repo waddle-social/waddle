@@ -10,13 +10,43 @@ use std::collections::HashSet;
 use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, InProcessClaimStore, NodeIdentity};
 use xmpp_parsers::message::{Lang, Message};
 
+#[derive(Clone)]
+enum SocketLeaseRead {
+    Present(NodeIdentity),
+    Gone,
+    Failed,
+    Stalled,
+}
+
 struct StaticNodeLease {
+    socket_read: Option<Arc<std::sync::Mutex<SocketLeaseRead>>>,
     origin: NodeIdentity,
     peer_id: String,
 }
 
 #[async_trait::async_trait]
 impl NodeLeaseStore for StaticNodeLease {
+    async fn unexpired_node_identity(
+        &self,
+        node: &NodeId,
+    ) -> Result<Option<NodeIdentity>, ClaimError> {
+        let result = self.socket_read.as_ref().map(|state| {
+            state
+                .lock()
+                .expect("socket lease fixture lock must not be poisoned")
+                .clone()
+        });
+        match result {
+            Some(SocketLeaseRead::Present(identity)) => Ok(Some(identity)),
+            Some(SocketLeaseRead::Gone) => Ok(None),
+            Some(SocketLeaseRead::Failed) => {
+                Err(ClaimError::Backend("injected read failure".into()))
+            }
+            Some(SocketLeaseRead::Stalled) => std::future::pending().await,
+            None => Ok(Some(NodeIdentity::new(node.as_str(), "fixture-epoch"))),
+        }
+    }
+
     async fn list_orphaned_room_actor_claims_page(
         &self,
         _after: Option<crate::clustering::claims::RoomOrphanScanCursor>,
@@ -336,6 +366,7 @@ async fn services_with_claims_and_blocking(
             peer_id: origin_peer_id.parse().expect("valid test peer id"),
         }),
         node_lease: Arc::new(StaticNodeLease {
+            socket_read: None,
             origin: origin_owner,
             peer_id: origin_peer_id,
         }),
@@ -352,5 +383,6 @@ pub(crate) mod delivery;
 mod ingress_append;
 pub(crate) mod muc_refresh;
 mod nack_channels;
+mod owner_sweep;
 mod presence;
 mod reassert;

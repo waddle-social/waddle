@@ -7,7 +7,7 @@
 //! spawn time, then wire the narrow services it needs once
 //! `create_websocket_state` has built the live registries.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -168,7 +168,8 @@ pub struct OrderedRelayDeliveryBridge {
     pending_remote_socket_unregistrations:
         Mutex<HashMap<PendingRemoteSocketUnregisterKey, PendingRemoteSocketUnregister>>,
     remote_socket_generations: Mutex<HashMap<jid::FullJid, RemoteResourceSocketGeneration>>,
-    remote_owner_resources: Mutex<HashMap<jid::FullJid, RemoteOwnerRegistration>>,
+    remote_owner_resources: Mutex<RemoteOwnerResources>,
+    remote_owner_sweep_lock: Mutex<()>,
     pending_remote_owner_retirements: Mutex<HashMap<jid::FullJid, RemoteOwnerRegistration>>,
     remote_owner_registration_locks: Mutex<HashMap<jid::FullJid, Arc<Mutex<()>>>>,
     /// (Full JID, socket-owner identity) → dirty flag for resyncs in
@@ -198,7 +199,8 @@ impl OrderedRelayDeliveryBridge {
             remote_socket_resources: Mutex::new(HashMap::new()),
             pending_remote_socket_unregistrations: Mutex::new(HashMap::new()),
             remote_socket_generations: Mutex::new(HashMap::new()),
-            remote_owner_resources: Mutex::new(HashMap::new()),
+            remote_owner_resources: Mutex::new(RemoteOwnerResources::default()),
+            remote_owner_sweep_lock: Mutex::new(()),
             pending_remote_owner_retirements: Mutex::new(HashMap::new()),
             remote_owner_registration_locks: Mutex::new(HashMap::new()),
             remote_state_resyncs_in_flight: Mutex::new(std::collections::HashMap::new()),
@@ -296,6 +298,8 @@ impl OrderedRelayDeliveryBridge {
         self.remote_owner_resources.lock().await.insert(
             jid,
             RemoteOwnerRegistration {
+                socket_identity: NodeIdentity::new(socket_node.as_str(), "fixture-epoch"),
+                unregister_pending: false,
                 registration_id: RemoteResourceRegistrationId::fresh(),
                 socket_node,
                 socket_generation: RemoteResourceSocketGeneration::next(None),

@@ -1,5 +1,5 @@
-//! XEP-0045 §7.14: retained remote departures converge after a live foreign
-//! UserActor claim is released. Uses the parent suite's native cluster harness.
+//! XEP-0045 §7.14: remote departures follow transferred UserActor authority
+//! without waiting for its release. Uses the parent suite's native cluster harness.
 
 use super::*;
 use waddle_xmpp::ownership::{ClaimStore, ExactReleaseOutcome};
@@ -13,7 +13,7 @@ fn is_departure(frame: &str, occupant: &jid::FullJid) -> bool {
 }
 
 #[tokio::test]
-async fn foreign_user_claim_defers_remote_departure_until_reconciliation_after_release() {
+async fn transferred_user_claim_routes_remote_departure_without_waiting_for_release() {
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping XEP-0045 remote cleanup retry: WADDLE_TEST_POSTGRES_URL not set");
         return;
@@ -103,17 +103,14 @@ async fn foreign_user_claim_defers_remote_departure_until_reconciliation_after_r
     // than preserving an intentionally resumable occupancy.
     departing.close().await.expect("departing client closes");
 
-    // Cover at least one production 30-second reconciliation scan while
-    // the foreign claim stays live. A departure here would be premature.
-    match observer
-        .recv_matching_within(Duration::from_secs(35), |frame| {
+    // The new claim holder authorizes this exact generation's departure even
+    // though the disconnecting socket no longer owns the UserActor claim.
+    let departure = observer
+        .recv_matching_within(Duration::from_secs(120), |frame| {
             is_departure(frame, &occupant)
         })
         .await
-    {
-        Err(error) if error.starts_with("Timeout waiting") => {}
-        result => panic!("departure must remain deferred while A holds the user claim: {result:?}"),
-    }
+        .expect("remote unavailable follows transferred live user authority");
     let held = claims
         .current_claim(&entity)
         .await
@@ -121,7 +118,10 @@ async fn foreign_user_claim_defers_remote_departure_until_reconciliation_after_r
         .expect("foreign claim remains held");
     assert_eq!(held.owner, room_claim.owner);
     assert_eq!(held.claim_epoch, held_epoch);
-    assert!(held.owner_lease_fresh, "deferral must involve a live owner");
+    assert!(
+        held.owner_lease_fresh,
+        "cleanup must converge while the foreign owner remains live"
+    );
     assert_eq!(
         claims
             .release_exact(&entity, &held.owner, held.claim_epoch)
@@ -130,14 +130,6 @@ async fn foreign_user_claim_defers_remote_departure_until_reconciliation_after_r
         ExactReleaseOutcome::Released
     );
 
-    // Nothing reconnects or sends another presence. Only retained membership
-    // reconciliation on B can now originate this generation's remote leave.
-    let departure = observer
-        .recv_matching_within(Duration::from_secs(120), |frame| {
-            is_departure(frame, &occupant)
-        })
-        .await
-        .expect("reconciliation delivers remote unavailable after foreign claim release");
     let presence: minidom::Element = departure.parse().expect("typed unavailable presence");
     let item = presence
         .get_child("x", xmpp_parsers::ns::MUC_USER)

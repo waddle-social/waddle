@@ -1441,6 +1441,18 @@ pub trait NodeLeaseStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<NodeIdentity>, ClaimError>;
 
+    /// Read the committed live incarnation of a socket-hosting node.
+    /// Stale heartbeats and draining nodes remain live until expiry commits.
+    /// An unavailable backend must return an error, never evidence of death.
+    async fn unexpired_node_identity(
+        &self,
+        _node: &super::NodeId,
+    ) -> Result<Option<NodeIdentity>, ClaimError> {
+        Err(ClaimError::Backend(
+            "exact node identity lookup is unavailable".to_owned(),
+        ))
+    }
+
     /// The demotion-reconciliation query (element 4/Slice 2): read every
     /// entity currently on file as owned by `(me.node_id, me.node_epoch)`
     /// via the `clustering_claims_node_id_node_epoch` index, and return
@@ -2064,6 +2076,30 @@ impl NodeLeaseStore for PostgresClaimStore {
             out.push(NodeIdentity::new(node_id, node_epoch));
         }
         Ok(out)
+    }
+
+    async fn unexpired_node_identity(
+        &self,
+        node: &super::NodeId,
+    ) -> Result<Option<NodeIdentity>, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut rows = conn
+            .query(
+                "SELECT node_id, node_epoch FROM clustering_nodes WHERE node_id = ? AND NOT expired",
+                crate::db_params![node.as_str()],
+            )
+            .await
+            .map_err(db_err)?;
+        rows.next()
+            .await
+            .map_err(db_err)?
+            .map(|row| {
+                Ok(NodeIdentity::new(
+                    row.get::<String>(0).map_err(db_err)?,
+                    row.get::<String>(1).map_err(db_err)?,
+                ))
+            })
+            .transpose()
     }
 
     async fn reconcile(
@@ -4171,6 +4207,64 @@ mod tests {
             0,
             "a heartbeat-stale row must stop counting as live even though \
              `expired` was never explicitly committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn unexpired_node_identity_uses_committed_expiry_and_current_epoch() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let original = node_identity();
+        let node = crate::clustering::NodeId::new(original.node_id.clone());
+        assert_eq!(
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up an unregistered node"),
+            None
+        );
+        store
+            .register(&original, None)
+            .await
+            .expect("register the original node incarnation");
+        store
+            .mark_draining(&original)
+            .await
+            .expect("mark the original node draining");
+        backdate_heartbeat(&store.db, &original).await;
+        assert_eq!(
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up the draining node before committed expiry"),
+            Some(original.clone()),
+            "draining and stale heartbeat do not prove committed death"
+        );
+        assert!(store
+            .expire(&original, NODE_LEASE_TTL)
+            .await
+            .expect("commit expiry of the stale node lease"));
+        assert_eq!(
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up the node after committed expiry"),
+            None
+        );
+        let replacement = NodeIdentity::new(original.node_id, uuid::Uuid::new_v4().to_string());
+        store
+            .register(&replacement, None)
+            .await
+            .expect("register the replacement node incarnation");
+        assert_eq!(
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up the replacement node incarnation"),
+            Some(replacement),
+            "a reused node id must expose its new incarnation"
         );
     }
 

@@ -399,10 +399,81 @@ pub struct RemoteResourceOriginSnapshot {
 
 #[derive(Debug, Clone)]
 pub(super) struct RemoteOwnerRegistration {
+    /// Exact committed node incarnation observed when this mirror was admitted.
+    pub(super) socket_identity: NodeIdentity,
+    /// An owner-gated unregister must converge even if its relay handler exits.
+    pub(super) unregister_pending: bool,
     pub(super) registration_id: RemoteResourceRegistrationId,
     pub(super) socket_node: NodeId,
     pub(super) socket_generation: RemoteResourceSocketGeneration,
     pub(super) owner: Arc<AtomicBool>,
+}
+
+/// Each live mirror has exactly one sweep slot. Freezing a finite round keeps
+/// new registrations from indefinitely postponing retries of earlier mirrors.
+#[derive(Default)]
+pub(super) struct RemoteOwnerResources {
+    registrations: BTreeMap<jid::FullJid, RemoteOwnerRegistration>,
+    current_round: BTreeSet<jid::FullJid>,
+    next_round: BTreeSet<jid::FullJid>,
+}
+
+// Expose map reads only: all key mutations must also maintain the sweep rounds.
+impl std::ops::Deref for RemoteOwnerResources {
+    type Target = BTreeMap<jid::FullJid, RemoteOwnerRegistration>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.registrations
+    }
+}
+
+impl RemoteOwnerResources {
+    pub(super) fn insert(
+        &mut self,
+        jid: jid::FullJid,
+        registration: RemoteOwnerRegistration,
+    ) -> Option<RemoteOwnerRegistration> {
+        if !self.current_round.contains(&jid) {
+            self.next_round.insert(jid.clone());
+        }
+        self.registrations.insert(jid, registration)
+    }
+
+    pub(super) fn remove(&mut self, jid: &jid::FullJid) -> Option<RemoteOwnerRegistration> {
+        self.current_round.remove(jid);
+        self.next_round.remove(jid);
+        self.registrations.remove(jid)
+    }
+
+    pub(super) fn get_mut(&mut self, jid: &jid::FullJid) -> Option<&mut RemoteOwnerRegistration> {
+        self.registrations.get_mut(jid)
+    }
+
+    pub(super) fn sweep_page(
+        &mut self,
+        limit: usize,
+    ) -> Vec<(jid::FullJid, RemoteOwnerRegistration)> {
+        if self.current_round.is_empty() {
+            std::mem::swap(&mut self.current_round, &mut self.next_round);
+        }
+        self.current_round
+            .iter()
+            .take(limit)
+            .filter_map(|jid| {
+                self.registrations
+                    .get(jid)
+                    .map(|registration| (jid.clone(), registration.clone()))
+            })
+            .collect()
+    }
+
+    pub(super) fn mark_sweep_attempt(&mut self, jid: &jid::FullJid) {
+        // Rotate only the attempted entry, before awaiting reconciliation:
+        // cancellation retries it next round without skipping a page suffix.
+        if self.current_round.remove(jid) {
+            self.next_round.insert(jid.clone());
+        }
+    }
 }
 
 pub(super) struct RelayOriginSigner {
