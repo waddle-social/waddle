@@ -6,7 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -48,6 +48,8 @@ import social.waddle.client.ffi.WaddleMujiPresence
 @RunWith(AndroidJUnit4::class)
 class CallFlowTest {
 
+    // Queue recomposition: background fake-client events must not resume
+    // lifecycle effects inline on the connection worker thread.
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
 
