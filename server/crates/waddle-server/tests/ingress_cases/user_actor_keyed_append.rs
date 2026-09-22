@@ -16,7 +16,7 @@ use waddle_server::ingress::{
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, IngressEffectIntent},
     registry::{ConnectionRegistry, DeliveryKind, RegisterUserResource, UserRegistryActor},
-    stream_management::{SmKeyedAppendOutcome, SmSessionRegistry, StreamManagementState},
+    stream_management::{SmKeyedAppendOutcome, StreamManagementState},
     Stanza,
 };
 
