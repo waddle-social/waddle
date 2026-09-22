@@ -38,6 +38,7 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use super::UserActor;
 use crate::registry::connection_registry::{BroadcastOutcome, ConnectionEntry, OutboundStanza};
+use crate::stream_management::SmRelayedAppendObligation;
 use crate::Stanza;
 
 impl UserActor {
@@ -121,6 +122,8 @@ impl kameo::message::Message<SelectRoutableResources> for UserActor {
 pub struct TrySendDirect {
     pub jid: FullJid,
     pub stanza: Stanza,
+    /// Recorded ingress identity preserved until the socket owns its replay entry.
+    pub ingress_append: Option<SmRelayedAppendObligation>,
 }
 
 impl kameo::message::Message<TrySendDirect> for UserActor {
@@ -131,7 +134,9 @@ impl kameo::message::Message<TrySendDirect> for UserActor {
         msg: TrySendDirect,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.try_deliver(&msg.jid, OutboundStanza::new(msg.stanza))
+        let mut outbound = OutboundStanza::new(msg.stanza);
+        outbound.ingress_append = msg.ingress_append;
+        self.try_deliver(&msg.jid, outbound)
     }
 }
 
@@ -143,6 +148,8 @@ impl kameo::message::Message<TrySendDirect> for UserActor {
 pub struct TrySendPeer {
     pub jid: FullJid,
     pub stanza: Stanza,
+    /// Recorded ingress identity preserved until the socket owns its replay entry.
+    pub ingress_append: Option<SmRelayedAppendObligation>,
 }
 
 impl kameo::message::Message<TrySendPeer> for UserActor {
@@ -153,7 +160,9 @@ impl kameo::message::Message<TrySendPeer> for UserActor {
         msg: TrySendPeer,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.try_deliver(&msg.jid, OutboundStanza::peer_stanza(msg.stanza))
+        let mut outbound = OutboundStanza::peer_stanza(msg.stanza);
+        outbound.ingress_append = msg.ingress_append;
+        self.try_deliver(&msg.jid, outbound)
     }
 }
 

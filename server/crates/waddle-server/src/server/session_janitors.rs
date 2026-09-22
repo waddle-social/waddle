@@ -9130,6 +9130,7 @@ mod user_reaper_tests {
             .expect("actor exists");
         actor
             .ask(TrySendPeer {
+                ingress_append: None,
                 jid: jid.clone(),
                 stanza: sample_stanza(&jid),
             })
@@ -9211,6 +9212,7 @@ mod user_reaper_tests {
             .expect("actor exists");
         actor
             .ask(TrySendPeer {
+                ingress_append: None,
                 jid: jid.clone(),
                 stanza: sample_stanza(&jid),
             })

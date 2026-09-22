@@ -31,8 +31,8 @@ and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger
 locally and on authorized cross-node receiver appends (#1778), including direct
 routes and recorded MUC occupant copies, and on the registered-remote-socket
-detach drain (#1789). The authorization-failure fallback remains unkeyed and
-at-least-once;
+and local UserActor detach drains (#1789, #1805). The authorization-failure
+fallback remains unkeyed and at-least-once;
 #1760 custody failures still let proofs outlive payloads and suppress recovery
 (§3.3a). Live sends remain at-least-once, and maintenance never relays
 remote-hosted resources; (iii) live full-JID delivery keeps the
@@ -337,6 +337,14 @@ The remaining limits are explicit:
   the frame so a duplicate never occupies a sequence the client cannot
   acknowledge. First-drain entries are proven in the session snapshot's
   transaction; later ones commit with their proof individually.
+- **UserActor delivery (#1805):** local `TrySendPeer` and `TrySendDirect`
+  carry the same typed obligation onto the outbound entry. This covers both
+  same-node sockets and owner mirrors, whose forwarder preserves the obligation
+  on the existing `remote_resource_frame.v2` envelope. Local delivery retains
+  the bounded canonical-sender check at detach; the actor mailbox does not
+  confer a separate authorization bypass. A lost progress receipt followed by
+  detach and recovery therefore reuses the recorded queue allocation, subject
+  to the authorization and custody limits below.
 - **Still at-least-once:** a drained entry that loses the ledger race between
   the drain's read and the session store keeps its queue entry and only its proof
   is withheld; entries past a drain's 2 s authorization budget, or after one
