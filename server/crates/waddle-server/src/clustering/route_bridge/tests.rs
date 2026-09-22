@@ -16,6 +16,13 @@ enum SocketLeaseRead {
     Gone,
     Failed,
     Stalled,
+    DelayedLive {
+        delay: Duration,
+    },
+    Counted {
+        identity: Option<NodeIdentity>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    },
 }
 
 struct StaticNodeLease {
@@ -43,6 +50,14 @@ impl NodeLeaseStore for StaticNodeLease {
                 Err(ClaimError::Backend("injected read failure".into()))
             }
             Some(SocketLeaseRead::Stalled) => std::future::pending().await,
+            Some(SocketLeaseRead::DelayedLive { delay }) => {
+                tokio::time::sleep(delay).await;
+                Ok(Some(NodeIdentity::new(node.as_str(), "old-epoch")))
+            }
+            Some(SocketLeaseRead::Counted { identity, reads }) => {
+                reads.fetch_add(1, Ordering::SeqCst);
+                Ok(identity)
+            }
             None => Ok(Some(NodeIdentity::new(node.as_str(), "fixture-epoch"))),
         }
     }

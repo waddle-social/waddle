@@ -81,6 +81,7 @@ pub mod call;
 pub mod messages;
 pub mod push_pipeline;
 pub mod reliability;
+pub mod remote_owner;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
 #[cfg(test)]

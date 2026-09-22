@@ -1784,7 +1784,7 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
             .ask(waddle_xmpp::registry::RetryUserRegistryConvergence)
             .await
             .expect("retry convergence"),
-        (0, 0)
+        waddle_xmpp::registry::UserRegistryConvergenceReport::default()
     );
 
     let (fresh_tx, _fresh_rx) = mpsc::channel(1);
@@ -1954,6 +1954,11 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
         .lock()
         .await
         .contains_key(&target));
+    assert_eq!(
+        bridge.sweep_remote_owner_resources().await,
+        waddle_xmpp::telemetry::attributes::SweepOutcome::Deferred,
+        "a busy actor leaves owed work without marking the sweep failed"
+    );
     release_tx.send(()).expect("release mailbox gate");
     tokio::task::yield_now().await;
     assert_eq!(
@@ -1962,9 +1967,12 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
             .ask(waddle_xmpp::registry::RetryUserRegistryConvergence)
             .await
             .expect("converge actor unregister"),
-        (0, 0)
+        waddle_xmpp::registry::UserRegistryConvergenceReport::default()
     );
-    assert!(bridge.sweep_remote_owner_resources().await);
+    assert_eq!(
+        bridge.sweep_remote_owner_resources().await,
+        waddle_xmpp::telemetry::attributes::SweepOutcome::Completed
+    );
     assert!(!services.connection_registry.is_connected(&target));
     assert!(!bridge
         .remote_owner_resources

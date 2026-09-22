@@ -161,6 +161,8 @@ pub enum Janitor {
     RoomDormancy,
     /// Empty user-actor reaping.
     UserActorReaper,
+    /// Remote user-resource mirrors after committed socket-node expiry.
+    RemoteOwnerMirror,
     /// Remote MUC membership reconciliation (clustering).
     RemoteMucMembership,
     /// Retained local MUC departure reconciliation.
@@ -184,6 +186,7 @@ impl MetricAttribute for Janitor {
             Self::AuthState => "auth_state",
             Self::RoomDormancy => "room_dormancy",
             Self::UserActorReaper => "user_actor_reaper",
+            Self::RemoteOwnerMirror => "remote_owner_mirror",
             Self::RemoteMucMembership => "remote_muc_membership",
             Self::LocalMucDeparture => "local_muc_departure",
         }
@@ -196,6 +199,8 @@ impl MetricAttribute for Janitor {
 pub enum SweepOutcome {
     /// The sweep ran to completion, including zero-work sweeps.
     Completed,
+    /// Bounded work or expected contention remains for a later tick.
+    Deferred,
     /// The sweep aborted on an error.
     Failed,
 }
@@ -208,6 +213,33 @@ impl MetricAttribute for SweepOutcome {
     fn value(&self) -> &'static str {
         match self {
             Self::Completed => "completed",
+            Self::Deferred => "deferred",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// `outcome` — one remote-owner mirror reconciliation attempt. No node or JID labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteOwnerMirrorOutcome {
+    Live,
+    Retired,
+    Superseded,
+    Deferred,
+    Failed,
+}
+
+impl sealed::Sealed for RemoteOwnerMirrorOutcome {}
+impl MetricAttribute for RemoteOwnerMirrorOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Retired => "retired",
+            Self::Superseded => "superseded",
+            Self::Deferred => "deferred",
             Self::Failed => "failed",
         }
     }

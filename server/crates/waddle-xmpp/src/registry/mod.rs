@@ -40,5 +40,5 @@ pub use user_registry::{
     RecordPendingUserUnregister, RegisterUserResource, RegisterUserResourceIfOwnerOrAbsent,
     RemoveUser, RetryUserRegistryConvergence, UnregisterAndReleaseIfEmpty,
     UnregisterAndReleaseOutcome, UnregisterUserResource, UserCount, UserRegistryActor,
-    UserRegistryError, WireUserClusteringClaims,
+    UserRegistryConvergenceReport, UserRegistryError, WireUserClusteringClaims,
 };
