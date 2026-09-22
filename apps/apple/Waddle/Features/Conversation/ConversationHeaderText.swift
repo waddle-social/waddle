@@ -21,6 +21,27 @@ struct ConversationHeaderText: Hashable {
 
     var searchPrompt: String { "Search \(title)" }
 
+    @MainActor
+    static func make(for conversation: ConversationID, session: SessionCoordinator) -> ConversationHeaderText {
+        let isGroupDM = session.directory.channel(for: conversation.jid)?.isGroupDM == true
+        return ConversationHeaderText(
+            name: session.directory.title(for: conversation),
+            isChannel: conversation.isRoom && !isGroupDM
+        )
+    }
+
+    @MainActor
+    static func subtitle(for conversation: ConversationID, session: SessionCoordinator) -> String? {
+        if conversation.isRoom {
+            return roomSubtitle(
+                occupantCount: session.presence.occupants[conversation.jid]?.count,
+                summary: session.directory.channel(for: conversation.jid)?.summary
+            )
+        }
+        let contact = session.presence.contacts[conversation.jid]
+        return directSubtitle(availability: contact?.availability ?? .offline, status: contact?.status)
+    }
+
     /// Member count while joined, else the channel summary.
     static func roomSubtitle(occupantCount: Int?, summary: String?) -> String? {
         if let occupantCount, occupantCount > 0 {

@@ -110,11 +110,12 @@ final class ComposerModel {
         guard let payload = payloads[id] else { return }
         uploads[id]?.cancel()
         setPhase(.uploading(fraction: 0), for: id)
+        let report: @Sendable (Double) -> Void = { [weak self] fraction in
+            Task { @MainActor [self] in self?.setProgress(fraction, for: id) }
+        }
         uploads[id] = Task { [weak self] in
             do {
-                let file = try await uploader.upload(payload) { fraction in
-                    Task { @MainActor [weak self] in self?.setProgress(fraction, for: id) }
-                }
+                let file = try await uploader.upload(payload, progress: report)
                 guard !Task.isCancelled else { return }
                 self?.finishUpload(id, phase: .uploaded(file))
             } catch {
@@ -146,14 +147,17 @@ final class ComposerModel {
 
     // MARK: - Sending
 
-    /// Sends the draft, or the correction in edit mode. The composer clears
-    /// before the network round trip so a second Return cannot resend.
-    func submit(to session: SessionCoordinator, in conversation: ConversationID, thread: String?) async {
+    /// Takes what the composer holds as a send or an edit and clears it at
+    /// once, so a second Return before the round trip cannot resend.
+    func takeSubmission(thread: String?) -> ComposerSubmission? {
         if let editing {
-            await submitEdit(of: editing, session: session)
-            return
+            let newText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newText.isEmpty else { return nil }
+            cancelEdit()
+            guard newText != editing.body.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            return .edit(editing, newText)
         }
-        guard canSend else { return }
+        guard canSend else { return nil }
         let draft = Draft(
             text: text,
             mentions: MentionTokens.locate(mentions, in: text),
@@ -162,16 +166,18 @@ final class ComposerModel {
             attachments: attachments.compactMap(\.sharedFile)
         )
         clearDraft()
-        await session.send(draft, in: conversation)
+        return .send(draft)
     }
 
-    private func submitEdit(of item: TimelineItem, session: SessionCoordinator) async {
-        let newText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !newText.isEmpty else { return }
-        cancelEdit()
-        guard newText != item.body.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-        if await !session.edit(item, to: newText) {
-            errorMessage = "Couldn't edit the message. Try again."
+    func perform(_ submission: ComposerSubmission, session: SessionCoordinator, in conversation: ConversationID) async {
+        switch submission {
+        case let .send(draft):
+            await session.send(draft, in: conversation)
+        case let .edit(item, newText):
+            let succeeded = await session.edit(item, to: newText)
+            if !succeeded {
+                errorMessage = "Couldn't edit the message. Try again."
+            }
         }
     }
 
@@ -183,6 +189,13 @@ final class ComposerModel {
         payloads = [:]
         uploads = [:]
     }
+}
+
+/// What one press of Send does.
+enum ComposerSubmission {
+    case send(Draft)
+    /// XEP-0308 correction of `item` to the new text.
+    case edit(TimelineItem, String)
 }
 
 /// Composer drafts per account, conversation and thread, kept in memory
