@@ -20,8 +20,10 @@
 //! discovers node relays only; entity ownership remains in Postgres claims.
 
 pub(crate) mod frame_receipts;
+mod muc_cleanup;
 use frame_receipts::PendingReplyReceipts;
 pub use frame_receipts::RelayReplyReceiptToken;
+pub use muc_cleanup::{RelayMucCleanup, RelayMucCleanupOutcome};
 
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
@@ -106,6 +108,7 @@ enum RelayDispatchKind {
     RemoteResourceUpdate,
     RemoteUserSideEffect,
     RemoteResourceRoute,
+    MucCleanup,
     RemoteResourceFrame,
     RemoteResourceWriteAccepted,
     RemoteResourceForceDetach,
@@ -124,6 +127,7 @@ impl RelayDispatchKind {
             Self::RemoteResourceUpdate => "remote_resource_update",
             Self::RemoteUserSideEffect => "remote_user_side_effect",
             Self::RemoteResourceRoute => "remote_resource_route",
+            Self::MucCleanup => "muc_cleanup",
             Self::RemoteResourceFrame => "remote_resource_frame",
             Self::RemoteResourceWriteAccepted => "remote_resource_write_accepted",
             Self::RemoteResourceForceDetach => "remote_resource_force_detach",

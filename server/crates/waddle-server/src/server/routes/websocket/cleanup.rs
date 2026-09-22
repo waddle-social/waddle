@@ -26,6 +26,11 @@ use waddle_xmpp::xep::xep0421::OccupantIdentity;
 /// brief windows rather than immediately handing it to the janitor.
 const FORCE_DETACH_BUSY_UNREGISTER_ATTEMPTS: usize = 3;
 
+#[cfg(test)]
+tokio::task_local! {
+    static POST_DETACH_STORE_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
+
 fn force_detach_busy_unregister_backoff(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_millis(50 * (attempt as u64 + 1))
 }
@@ -789,11 +794,12 @@ async fn cleanup_connection_shutdown_inner(
     force_detach_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
 ) -> ConnectionShutdownOutcome {
     let force_detach = force_detach_origin.is_some();
-    // A superseded ordinary connection must not touch the replacement's
-    // registry or MUC state. Terminal SM recovery is different: it only
-    // promotes this task's already accepted delivery and leaves those shared
-    // resources alone.
+    // Registry ownership protects the replacement's route, not the departing
+    // occupancy. Every terminal path still owes its generation-scoped sweep.
     if superseded && !conn.sm_recovery_required {
+        if let Some(jid) = conn.phase.cleanup_jid() {
+            cleanup_terminal_muc_presence(state, jid, conn).await;
+        }
         forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
         return ConnectionShutdownOutcome::NotPersisted;
     }
@@ -857,6 +863,7 @@ async fn cleanup_connection_shutdown_inner(
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
+            cleanup_terminal_muc_presence(state, &jid, conn).await;
             forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
@@ -880,6 +887,7 @@ async fn cleanup_connection_shutdown_inner(
             // release_claim` drains to idle first and then terminalizes the
             // exact claim itself.
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
+            cleanup_terminal_muc_presence(state, &jid, conn).await;
             forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
@@ -1033,6 +1041,11 @@ async fn cleanup_connection_shutdown_inner(
                     displaced,
                     unproven,
                 }) => {
+                    #[cfg(test)]
+                    if let Ok((reached, release)) = POST_DETACH_STORE_GATE.try_with(Clone::clone) {
+                        reached.notify_one();
+                        release.notified().await;
+                    }
                     if !unproven.is_empty() {
                         // Either a racing keyed writer won between the drain's
                         // ledger read and this store, or the store was skipped for
@@ -1124,7 +1137,10 @@ async fn cleanup_connection_shutdown_inner(
                                     )
                                     .await;
                                 }
+                                cleanup_terminal_muc_presence(state, &jid, conn).await;
                             }
+                            // An in-flight resume can already own this exact
+                            // generation. Only a displaced snapshot is terminal.
                             Ok(None) => {}
                             Err(error) => {
                                 warn!(
@@ -1490,7 +1506,8 @@ async fn cleanup_connection_shutdown_inner(
         .await;
         unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
     } else {
-        debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
+        cleanup_terminal_muc_presence(state, &jid, conn).await;
+        debug!(jid = %jid, "Skipped registry cleanup for non-owned registry entry");
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
@@ -1624,6 +1641,18 @@ struct TerminalRowRecovery {
     redrive_aborted: bool,
 }
 
+/// A terminal session owes this sweep even after losing its registry token.
+/// The room actor compares the exact generation before changing occupancy.
+async fn cleanup_terminal_muc_presence(state: &WebSocketState, jid: &FullJid, conn: &WsConnState) {
+    cleanup_muc_presence(
+        state,
+        jid,
+        LeaveSessionSelector::Generation(conn.occupancy_session),
+        MucRemovalCause::Voluntary,
+    )
+    .await;
+}
+
 async fn promote_terminal_recovery(
     state: &WebSocketState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
@@ -1632,6 +1661,7 @@ async fn promote_terminal_recovery(
 ) -> ConnectionShutdownOutcome {
     let detached_snapshot = terminal_recovery_snapshot(jid, conn);
     let Some(mut detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
+        cleanup_terminal_muc_presence(state, jid, conn).await;
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     };
@@ -2833,7 +2863,16 @@ async fn cleanup_muc_presence_with_origin(
                     acknowledge,
                 );
             }
-            Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {
+            Ok(disposition @ (LeaveDisposition::NotOccupant | LeaveDisposition::Superseded)) => {
+                match disposition {
+                    LeaveDisposition::NotOccupant => {
+                        waddle_xmpp::telemetry::reliability::increment_muc_cleanup_not_occupant()
+                    }
+                    LeaveDisposition::Superseded => {
+                        waddle_xmpp::telemetry::reliability::increment_muc_cleanup_superseded()
+                    }
+                    _ => unreachable!(),
+                }
                 state
                     .deps
                     .protocol
@@ -2951,28 +2990,15 @@ async fn cleanup_remote_muc_presence(
         }
         return false;
     };
-    let acquired_user_actor_origin = cleanup_origin.is_none();
     let origin = match cleanup_origin.cloned() {
-        Some(origin) => origin,
-        None => {
-            let Some(origin) = acquire_remote_muc_cleanup_origin(state, jid).await else {
-                for membership in &mut memberships {
-                    retain_failed_remote_muc_cleanup(state, membership);
-                }
-                return false;
-            };
-            origin
-        }
+        Some(origin) => Some(origin),
+        None => acquire_remote_muc_cleanup_origin(state, jid).await,
     };
+    let acquired_user_actor_origin = cleanup_origin.is_none() && origin.is_some();
     for mut membership in memberships {
         let room_jid = membership.room().clone();
         let nick = membership.nick().to_string();
-        let Some(to) = room_jid
-            .clone()
-            .with_resource_str(&nick)
-            .ok()
-            .map(jid::Jid::from)
-        else {
+        let Ok(occupant) = room_jid.clone().with_resource_str(&nick) else {
             completed = false;
             retain_failed_remote_muc_cleanup(state, &mut membership);
             continue;
@@ -3009,18 +3035,32 @@ async fn cleanup_remote_muc_presence(
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(jid.clone()));
-        presence.to = Some(to);
+        presence.to = Some(occupant.clone().into());
         let stanza = Stanza::Presence(presence);
-        let decision = bridge
-            .try_proxy_muc_remote_decision(
-                &room_jid,
-                &stanza,
-                crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
-                remote_membership_leave_origin(&membership),
-                &origin,
-                None,
-            )
-            .await;
+        let mut decision = match origin.as_ref() {
+            Some(origin) => bridge
+                .try_proxy_muc_remote_decision(
+                    &room_jid,
+                    &stanza,
+                    crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                    remote_membership_leave_origin(&membership),
+                    origin,
+                    None,
+                )
+                .await,
+            None => crate::clustering::route_bridge::MucProxyRouteDecision::OriginUnavailable,
+        };
+        // A janitor has no live registration. A live sibling can keep the
+        // UserActor claim foreign indefinitely, so forward the exact recorded
+        // generation through that owner instead of waiting for its release.
+        if matches!(
+            remote_muc_cleanup_disposition(&decision),
+            RemoteMucCleanupDisposition::RetryableFailure
+        ) {
+            decision = bridge
+                .cleanup_muc_via_user_owner(jid, &occupant, occupant_session)
+                .await;
+        }
         match remote_muc_cleanup_disposition(&decision) {
             RemoteMucCleanupDisposition::Converged => {
                 debug!(
@@ -4687,6 +4727,293 @@ mod local_departure_cleanup_tests {
         jid: &FullJid,
     ) -> MucCleanupOutcome {
         super::cleanup_muc_presence_for_jid(state, jid, LeaveSessionSelector::Any).await
+    }
+
+    /// Registry ownership cannot decide which occupancy a terminal stream owes.
+    #[tokio::test]
+    async fn terminal_non_owned_cleanup_sweeps_only_its_occupancy_generation() {
+        for (superseded, resumable, recovery, stale_owner, live_fence) in [
+            (true, false, false, false, false),
+            (false, false, false, false, false),
+            (false, false, false, true, false),
+            (false, true, false, false, true),
+            (false, true, false, true, true),
+            (false, true, false, false, false),
+            (true, true, true, false, false),
+        ] {
+            let state = create_test_websocket_state().await;
+            let jid = full_jid("alice@example.com/web");
+            let mut conn = WsConnState::new();
+            conn.phase = ConnectionPhase::ready(jid.clone(), resumable);
+            if resumable {
+                conn.sm_state
+                    .enable("failed-resumed-stream".to_owned(), true, Some(300));
+            }
+            if recovery {
+                conn.begin_terminal_sm_recovery();
+            }
+            // A failed post-resume remote registration leaves this unset;
+            // an ownership race retains a token that no longer owns the slot.
+            if stale_owner {
+                conn.registry_owner = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            }
+            if live_fence {
+                drop(
+                    state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .ensure_session_claim("failed-resumed-stream")
+                        .await
+                        .unwrap(),
+                );
+            }
+            let old_room = room_jid("terminal-old");
+            let replacement_room = room_jid("terminal-replacement");
+            let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+            let mut actors = Vec::new();
+            for (room, generation) in [
+                (old_room, conn.occupancy_session),
+                (replacement_room, replacement),
+            ] {
+                let actor = state
+                    .deps
+                    .protocol
+                    .room_registry
+                    .ask(CreateRoom {
+                        room_jid: room,
+                        waddle_id: "w".to_owned(),
+                        channel_id: "c".to_owned(),
+                        config: RoomConfig::default(),
+                    })
+                    .await
+                    .expect("create room");
+                join_member_with_generation(&actor, &jid, "alice", generation).await;
+                actors.push(actor);
+            }
+            let (_tx, mut rx) = mpsc::channel(1);
+            let _ = cleanup_connection_shutdown(&state, &mut rx, &mut conn, superseded).await;
+            assert_eq!(
+                actors[0].ask(GetSnapshot).await.unwrap().room.session_generation(&jid),
+                None,
+                "old room must be swept: superseded={superseded}, resumable={resumable}, recovery={recovery}"
+            );
+            assert_eq!(
+                actors[1]
+                    .ask(GetSnapshot)
+                    .await
+                    .unwrap()
+                    .room
+                    .session_generation(&jid),
+                Some(replacement),
+                "same-FullJID replacement must survive terminal cleanup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn healthy_resumable_detach_preserves_occupancy() {
+        let state = create_test_websocket_state().await;
+        let jid = full_jid("alice@example.com/web");
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        conn.authenticated_session =
+            Some(super::super::tests::create_test_session(&state, "alice").await);
+        let (tx, mut rx) = mpsc::channel(1);
+        conn.registry_owner = Some(
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .register(jid.clone(), tx),
+        );
+        conn.sm_state
+            .enable("healthy-muc-detach".to_owned(), true, Some(300));
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+                "healthy-muc-detach",
+            ))
+            .await
+            .unwrap();
+        drop(
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .ensure_session_claim("healthy-muc-detach")
+                .await
+                .unwrap(),
+        );
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid("healthy-detach"),
+                waddle_id: "w".to_owned(),
+                channel_id: "c".to_owned(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .unwrap();
+        join_member_with_generation(&actor, &jid, "alice", conn.occupancy_session).await;
+        assert_eq!(
+            cleanup_connection_shutdown(&state, &mut rx, &mut conn, false).await,
+            ConnectionShutdownOutcome::Detached
+        );
+        assert_eq!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .unwrap()
+                .room
+                .session_generation(&jid),
+            Some(conn.occupancy_session)
+        );
+    }
+
+    #[tokio::test]
+    async fn ownership_lost_after_detach_store_sweeps_only_displaced_sessions() {
+        for resumed in [false, true] {
+            let state = create_test_websocket_state().await;
+            let jid = full_jid("alice@example.com/web");
+            let mut conn = WsConnState::new();
+            conn.phase = ConnectionPhase::ready(jid.clone(), false);
+            conn.authenticated_session =
+                Some(super::super::tests::create_test_session(&state, "alice").await);
+            let (tx, mut rx) = mpsc::channel(1);
+            conn.registry_owner = Some(
+                state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .register(jid.clone(), tx),
+            );
+            conn.sm_state
+                .enable("detach-ownership-race".to_owned(), true, Some(300));
+            state
+                .deps
+                .protocol
+                .ingress
+                .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+                    "detach-ownership-race",
+                ))
+                .await
+                .unwrap();
+            drop(
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .ensure_session_claim("detach-ownership-race")
+                    .await
+                    .unwrap(),
+            );
+            let actor = state
+                .deps
+                .protocol
+                .room_registry
+                .ask(CreateRoom {
+                    room_jid: room_jid("detach-race"),
+                    waddle_id: "w".to_owned(),
+                    channel_id: "c".to_owned(),
+                    config: RoomConfig::default(),
+                })
+                .await
+                .unwrap();
+            let generation = conn.occupancy_session;
+            join_member_with_generation(&actor, &jid, "alice", generation).await;
+            let reached = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let task_state = state.clone();
+            let gate = (reached.clone(), release.clone());
+            let task = tokio::spawn(POST_DETACH_STORE_GATE.scope(gate, async move {
+                cleanup_connection_shutdown(&task_state, &mut rx, &mut conn, false).await
+            }));
+            tokio::time::timeout(Duration::from_secs(5), reached.notified())
+                .await
+                .expect("detach reached stored snapshot");
+            // Hold the actual resume claim, so displacement must return None.
+            let claimed = if resumed {
+                Some(
+                    state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .claim_session("detach-ownership-race")
+                        .await
+                        .unwrap()
+                        .expect("resuming snapshot"),
+                )
+            } else {
+                None
+            };
+            let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+            let replacement_owner = state
+                .deps
+                .protocol
+                .connection_registry
+                .register(jid.clone(), replacement_tx);
+            release.notify_one();
+            assert_eq!(task.await.unwrap(), ConnectionShutdownOutcome::NotPersisted);
+            assert!(state
+                .deps
+                .protocol
+                .connection_registry
+                .entry_if_owner(&jid, &replacement_owner)
+                .is_some());
+            assert_eq!(
+                actor
+                    .ask(GetSnapshot)
+                    .await
+                    .unwrap()
+                    .room
+                    .session_generation(&jid),
+                resumed.then_some(generation)
+            );
+            drop(claimed);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_sweep_meters_superseded_and_absent_occupancies() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let jid = full_jid("alice@example.com/web");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid("cleanup-metrics"),
+                waddle_id: "w".to_owned(),
+                channel_id: "c".to_owned(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .unwrap();
+        join_member(&actor, &jid, "alice").await;
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        let (_tx, mut rx) = mpsc::channel(1);
+        let _ = cleanup_connection_shutdown(&state, &mut rx, &mut conn, true).await;
+        assert!(
+            metrics
+                .counter_sum("muc.cleanup.superseded", &[])
+                .unwrap_or_default()
+                >= 1
+        );
+        conn.phase = ConnectionPhase::ready(full_jid("absent@example.com/web"), false);
+        let _ = cleanup_connection_shutdown(&state, &mut rx, &mut conn, true).await;
+        assert!(
+            metrics
+                .counter_sum("muc.cleanup.not_occupant", &[])
+                .unwrap_or_default()
+                >= 1
+        );
     }
 
     /// #1814 (Greptile on #1803): a sweep whose per-ROOM leave could not

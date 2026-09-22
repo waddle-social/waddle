@@ -399,6 +399,10 @@ pub struct RemoteResourceOriginSnapshot {
 
 #[derive(Debug, Clone)]
 pub(super) struct RemoteOwnerRegistration {
+    /// Exact committed node incarnation observed when this mirror was admitted.
+    pub(super) socket_identity: NodeIdentity,
+    /// An owner-gated unregister must converge even if its relay handler exits.
+    pub(super) unregister_pending: bool,
     pub(super) registration_id: RemoteResourceRegistrationId,
     pub(super) socket_node: NodeId,
     pub(super) socket_generation: RemoteResourceSocketGeneration,

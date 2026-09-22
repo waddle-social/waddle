@@ -8406,6 +8406,18 @@ pub(crate) async fn sweep_empty_user_actors_once(
     let mut counts = UserReaperSweepCounts::default();
     let user_registry = &websocket_state.deps.protocol.user_registry;
     record_user_registry_convergence_status(user_registry, &mut counts).await;
+    #[cfg(feature = "clustering")]
+    if let Some(bridge) = websocket_state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    {
+        if !bridge.sweep_remote_owner_resources().await {
+            counts.failed = true;
+        }
+    }
     let users = match user_registry
         .ask(ListUsers)
         .mailbox_timeout(REAPER_ASK_TIMEOUT)

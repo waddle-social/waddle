@@ -256,6 +256,19 @@ impl OrderedRelayDeliveryBridge {
             }
         }
 
+        let socket_identity = match services
+            .node_lease
+            .unexpired_node_identity(&msg.socket_node)
+            .await
+        {
+            Ok(Some(identity)) => identity,
+            Ok(None) | Err(_) => {
+                return RelayRemoteResourceRegistrationReply {
+                    status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                }
+            }
+        };
+
         let (tx, rx) = mpsc::channel(REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE);
         let entry = ConnectionEntry::remote_hosted(tx);
         apply_remote_resource_state(&entry, &msg.state);
@@ -274,6 +287,8 @@ impl OrderedRelayDeliveryBridge {
         {
             Ok(true) => {
                 let registration = RemoteOwnerRegistration {
+                    socket_identity,
+                    unregister_pending: false,
                     registration_id: msg.registration_id,
                     socket_node: msg.socket_node.clone(),
                     socket_generation: msg.socket_generation,
@@ -378,6 +393,10 @@ impl OrderedRelayDeliveryBridge {
                 status: RelayRemoteResourceUnregisterStatus::NotRegistered,
             };
         };
+        // Inventory intent before the actor ask: a cancelled relay handler can
+        // still leave an accepted unregister queued behind a busy actor.
+        self.mark_remote_owner_unregister_pending(&msg.jid, &registration)
+            .await;
         let actor_outcome =
             unregister_remote_owner_actor_entry(&services, &msg.jid, &registration.owner).await;
         match actor_outcome {
@@ -392,9 +411,8 @@ impl OrderedRelayDeliveryBridge {
                 // entry and forwarder registration NOW would bounce those
                 // stanzas at the socket as unavailable — outside the
                 // detached XEP-0198 replay snapshot. Keep both until the
-                // recorded owner-gated obligation completes; its janitor
-                // convergence performs the full owner-side cleanup
-                // (connection registry, forwarder, and owner tracking).
+                // recorded owner-gated obligation completes. The bridge sweep
+                // then finishes connection-registry and forwarder cleanup.
                 return RelayRemoteResourceUnregisterReply {
                     status: RelayRemoteResourceUnregisterStatus::RecordedRetry,
                 };
@@ -625,6 +643,8 @@ mod tests {
             .expect("register current owner mirror");
 
         let registration = RemoteOwnerRegistration {
+            socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            unregister_pending: false,
             registration_id: RemoteResourceRegistrationId::fresh(),
             socket_node,
             socket_generation,

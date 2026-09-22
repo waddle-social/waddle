@@ -52,6 +52,9 @@
 #[path = "xep0045_remote_cleanup_retry/mod.rs"]
 mod xep0045_remote_cleanup_retry;
 
+#[path = "xep0045_xep0198_remote_cleanup/mod.rs"]
+mod xep0045_xep0198_remote_cleanup;
+
 #[path = "xep0045_partial_fanout/mod.rs"]
 mod xep0045_partial_fanout;
 

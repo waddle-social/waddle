@@ -146,6 +146,14 @@ pub fn record_sm_request_latency_ms(latency_ms: f64) {
 }
 
 reliability_counters! {
+    increment increment_muc_cleanup_superseded,
+        "muc.cleanup.superseded",
+        "{departure}",
+        "Generation-scoped MUC cleanup attempts superseded by another occupant generation.";
+    increment increment_muc_cleanup_not_occupant,
+        "muc.cleanup.not_occupant",
+        "{departure}",
+        "Generation-scoped MUC cleanup attempts whose resource is no longer an occupant.";
     add add_sm_promotion_storage_failed,
         "xmpp.sm.promotion_storage_failed",
         "{stanza}",
@@ -641,6 +649,16 @@ mod tests {
             guard.counter_sum("xmpp.sm.promotion_storage_failed", &[]),
             Some(3)
         );
+    }
+
+    #[tokio::test]
+    async fn muc_cleanup_terminal_dispositions_are_distinct() {
+        let guard = setup().await;
+        increment_muc_cleanup_superseded();
+        increment_muc_cleanup_not_occupant();
+        increment_muc_cleanup_not_occupant();
+        assert_eq!(guard.counter_sum("muc.cleanup.superseded", &[]), Some(1));
+        assert_eq!(guard.counter_sum("muc.cleanup.not_occupant", &[]), Some(2));
     }
 
     #[tokio::test]

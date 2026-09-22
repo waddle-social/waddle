@@ -2098,6 +2098,7 @@ pub async fn handle_muc_leave(
     {
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => outcome,
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant) => {
+            waddle_xmpp::telemetry::reliability::increment_muc_cleanup_not_occupant();
             state
                 .deps
                 .protocol
@@ -2122,6 +2123,7 @@ pub async fn handle_muc_leave(
             )];
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded) => {
+            waddle_xmpp::telemetry::reliability::increment_muc_cleanup_superseded();
             state
                 .deps
                 .protocol

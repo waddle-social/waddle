@@ -788,6 +788,8 @@ async fn unreachable_write_accepted_ask_is_retryable_and_keeps_the_owner_mirror(
     let entry = ConnectionEntry::new(tx);
     let owner = entry.carbons_handle();
     let stale = RemoteOwnerRegistration {
+        socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+        unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("origin-node".to_owned()),
         socket_generation: RemoteResourceSocketGeneration::next(None),
@@ -827,6 +829,8 @@ async fn drained_remote_direct_frame_retry_releases_room_effect_as_infrastructur
     bridge.remote_owner_resources.lock().await.insert(
         target.clone(),
         RemoteOwnerRegistration {
+            socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            unregister_pending: false,
             registration_id: RemoteResourceRegistrationId::fresh(),
             socket_node: NodeId::new("unreachable-remote-socket".to_owned()),
             socket_generation: RemoteResourceSocketGeneration::next(None),
@@ -1156,6 +1160,8 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
     bridge.remote_owner_resources.lock().await.insert(
         target.clone(),
         RemoteOwnerRegistration {
+            socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            unregister_pending: false,
             registration_id,
             socket_node: NodeId::new("missing-socket-node".to_string()),
             socket_generation: RemoteResourceSocketGeneration::next(None),
@@ -1228,6 +1234,8 @@ async fn remote_full_jid_route_queues_detached_delivery() {
     bridge.remote_owner_resources.lock().await.insert(
         source.clone(),
         RemoteOwnerRegistration {
+            socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            unregister_pending: false,
             registration_id,
             socket_node: NodeId::new("source-socket-node".to_string()),
             socket_generation,
@@ -1343,6 +1351,8 @@ pub(crate) async fn remote_carbon_owner_reply(
     bridge.remote_owner_resources.lock().await.insert(
         source.clone(),
         RemoteOwnerRegistration {
+            socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            unregister_pending: false,
             registration_id,
             socket_node: NodeId::new("carbon-socket-node".to_string()),
             socket_generation,
@@ -1462,6 +1472,8 @@ async fn stale_force_detach_error_cleans_old_socket_mirror() {
 
     let old_generation = RemoteResourceSocketGeneration::next(None);
     let registration = RemoteOwnerRegistration {
+        socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+        unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("missing-old-socket-node".to_string()),
         socket_generation: old_generation,
@@ -1583,6 +1595,8 @@ async fn stale_force_detach_busy_actor_retries_and_cleans_without_janitor_work()
 
     let old_generation = RemoteResourceSocketGeneration::next(None);
     let registration = RemoteOwnerRegistration {
+        socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+        unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("busy-old-socket-node".to_string()),
         socket_generation: old_generation,
@@ -1720,6 +1734,8 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
 
     let old_generation = RemoteResourceSocketGeneration::next(None);
     let registration = RemoteOwnerRegistration {
+        socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+        unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("stuck-old-socket-node".to_string()),
         socket_generation: old_generation,
@@ -1896,6 +1912,8 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
     );
 
     let registration = RemoteOwnerRegistration {
+        socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+        unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("busy-socket-node".to_string()),
         socket_generation: RemoteResourceSocketGeneration::next(None),
@@ -1930,7 +1948,29 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
         "owner reply must only report RecordedRetry once the janitor obligation exists"
     );
 
+    assert!(services.connection_registry.is_connected(&target));
+    assert!(bridge
+        .remote_owner_resources
+        .lock()
+        .await
+        .contains_key(&target));
     release_tx.send(()).expect("release mailbox gate");
+    tokio::task::yield_now().await;
+    assert_eq!(
+        services
+            .user_registry
+            .ask(waddle_xmpp::registry::RetryUserRegistryConvergence)
+            .await
+            .expect("converge actor unregister"),
+        (0, 0)
+    );
+    assert!(bridge.sweep_remote_owner_resources().await);
+    assert!(!services.connection_registry.is_connected(&target));
+    assert!(!bridge
+        .remote_owner_resources
+        .lock()
+        .await
+        .contains_key(&target));
 }
 
 #[tokio::test]
