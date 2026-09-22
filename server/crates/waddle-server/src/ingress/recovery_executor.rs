@@ -71,6 +71,19 @@ pub(super) async fn recover_row(
     if departed.classification == AttemptClassification::Inconclusive {
         classification = AttemptClassification::Inconclusive;
     }
+    // A copy this attempt could neither deliver nor settle keeps the row
+    // RETRYABLE: the settlement's evidence is time-varying, so "nothing can
+    // progress until the evidence changes" — which is all the unsupported cache
+    // means — is simply false for it (#1803).
+    let still_owed = departed.still_owed;
+    // The MUC route receipts this row is still waiting for, kept so the
+    // post-execution check below can tell whether a rebuilt copy landed.
+    let owed_muc_receipts: Vec<EffectReceiptKey> = frozen
+        .route_progress
+        .iter()
+        .filter(|progress| progress.room().is_some())
+        .map(|progress| progress.receipt.clone())
+        .collect();
     let pending = pending_kinds(&frozen.unreceipted);
     let blocked_recipients = blocked_recipients(deps, &frozen).await?;
     let host_owned_resources = frozen
@@ -92,7 +105,8 @@ pub(super) async fn recover_row(
         blocked_recipients: &blocked_recipients,
     })?;
     record_discarded_receipts(uow, key, &rebuilt.discarded_receipts).await?;
-    let mut unsupported = rebuilt.decision.external.is_empty()
+    let mut unsupported = !still_owed
+        && rebuilt.decision.external.is_empty()
         && rebuilt.delegated.is_empty()
         && !rebuilt.unsupported_receipts.is_empty();
     let mut unrecoverable = rebuilt.unrecoverable;
@@ -149,11 +163,28 @@ pub(super) async fn recover_row(
     if !settled_here.is_empty() {
         settled_here.extend(&rebuilt.unsupported_receipts);
         let missing = missing_receipts(uow, key, &rebuilt.decision.receipts_pending).await?;
-        unsupported = !missing.is_empty()
+        // `still_owed` was decided BEFORE the rebuilt effects ran. A copy one
+        // of them delivered since is no longer owed, so the receipts as they
+        // stand NOW decide, not the pre-execution answer: otherwise a row whose
+        // last copy just landed is retried once more, re-invoking any
+        // warning-only observer it also carries. `missing` already IS that
+        // reading — every frozen MUC route's receipt is one of the
+        // `receipts_pending` it was read from — so this costs no second
+        // transaction inside the row deadline.
+        let owed_now = still_owed
+            && owed_muc_receipts
+                .iter()
+                .any(|receipt| missing.contains(receipt));
+        unsupported = !owed_now
+            && !missing.is_empty()
             && missing
                 .iter()
                 .all(|receipt| settled_here.contains(&receipt));
     }
+    // Only a cached row is classified for the caller; a retryable one keeps
+    // whatever the settlement and the effect arms decided, so a stable fact
+    // ("a peer holds that socket", "the occupant is still seated") accumulates
+    // the ordinary stall streak and a failed read does not.
     if unsupported {
         classification = AttemptClassification::Inconclusive;
     }

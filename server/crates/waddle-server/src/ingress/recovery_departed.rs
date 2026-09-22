@@ -179,11 +179,48 @@ pub(super) struct DepartedSettlement {
     /// completed their frozen fanout.
     pub(super) settled: Vec<IngressEffectIntent>,
     pub(super) classification: AttemptClassification,
+    /// Whether some frozen MUC route still owes a copy to an occupant this
+    /// attempt neither completed nor settled.
+    ///
+    /// The proof a settlement rests on is TIME-VARYING — a terminated pod's
+    /// node row stays unexpired for minutes after a rolling deploy, a peer that
+    /// holds the socket today may not tomorrow, a room becomes hosted or
+    /// unhosted — so an attempt that could not settle such a copy has proven
+    /// nothing durable about the row. `recover_row` must therefore never report
+    /// it `unsupported`, which would cache it until its receipt or progress
+    /// counts changed: the very counts only a later settlement can change
+    /// (#1803).
+    pub(super) still_owed: bool,
 }
 
 /// Record delivery progress for every frozen occupant this node can prove is
-/// no longer in the room, settling each obligation whose fanout that completes.
+/// no longer in the room, settling each obligation whose fanout that completes,
+/// and report whether any copy is still owed afterwards.
 pub(super) async fn settle_departed_occupants(
+    uow: &IngressUnitOfWork,
+    deps: &Deps<'_>,
+    key: MessageKey,
+    route_progress: &[RouteProgress],
+) -> Result<DepartedSettlement, IngressUowError> {
+    let mut settlement = settle_proven_departures(uow, deps, key, route_progress).await?;
+    settlement.still_owed = still_owed(deps, route_progress, &settlement.occupants);
+    Ok(settlement)
+}
+
+/// Whether any frozen MUC route still owes a copy once `settled` is discounted.
+///
+/// Reads only the frozen fanout and this attempt's own settlements: no probe is
+/// repeated, so the answer costs nothing beyond the route progress already in
+/// hand.
+fn still_owed(deps: &Deps<'_>, route_progress: &[RouteProgress], settled: &[FullJid]) -> bool {
+    route_progress
+        .iter()
+        .filter(|progress| progress.room().is_some())
+        .flat_map(|progress| owed_occupants(deps, progress))
+        .any(|occupant| !settled.contains(&occupant))
+}
+
+async fn settle_proven_departures(
     uow: &IngressUnitOfWork,
     deps: &Deps<'_>,
     key: MessageKey,
@@ -193,6 +230,7 @@ pub(super) async fn settle_departed_occupants(
         occupants: Vec::new(),
         settled: Vec::new(),
         classification: AttemptClassification::Evaluable,
+        still_owed: false,
     };
     let Some(registry) = deps.room_registry else {
         return Ok(settlement);

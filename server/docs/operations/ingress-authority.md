@@ -1011,11 +1011,50 @@ Two properties bound the settlement, because it permanently drops a copy:
   occupant discussion history on join rather than the traffic that predates
   it, and the message remains in the room's XEP-0313 archive regardless.
 
+  **A row with an owed groupchat copy is never cached as unsupported
+  (#1803).** Every answer the settlement rests on is TIME-VARYING: a peer that
+  holds the socket today releases it tomorrow, a peer that cannot answer now
+  answers on the next pass, a room becomes hosted or unhosted. The unsupported
+  cache asserts the opposite — "nothing on this row can progress until its
+  receipt or progress counts change" — and it is released only by exactly those
+  counts, which only a later settlement can change. A recovery attempt
+  therefore reports a row unsupported only once every unreceipted `route_muc`
+  route on it has no owed occupant left after the settlement pass (owed =
+  frozen in the fanout, not completed, not host-owned, and not settled by this
+  attempt). A row that still owes a copy falls through to the ordinary stall
+  accounting instead, which already bounds its cost: three evaluable samples at
+  least `recovery_stall_sample_interval` apart, then a
+  `recovery_stall_cooldown` parking, then a retry. Its attempts keep whatever
+  classification the settlement decided — Evaluable for a stable fact ("a peer
+  holds that socket", "the occupant is still seated"), Inconclusive for a read
+  that failed — so a stable fact accumulates the streak and is parked, while a
+  transient failure is retried. Rows with no `route_muc` route, or none with an
+  owed occupant, are cached exactly as before. One consequence to expect: a
+  retried row re-runs every rebuildable arm on it, so a row that carries both
+  an owed groupchat copy and a warning-only `room_observer` obligation
+  re-invokes that keyless, at-least-once plugin observer on each attempt (a
+  handful per parking cycle; every pass while a read keeps failing) — the same
+  behaviour newer-shaped rows already had, now also true for legacy ones. For
+  `ingress.maintenance.unrecoverable_obligations{reason="unsupported"}`, a
+  per-evaluation counter: such a row ticks it once per attempt. For EVALUABLE
+  attempts (a stable fact keeps the copy owed) that is a handful of times while
+  the streak builds, then once per 15-minute parking cycle. For INCONCLUSIVE
+  attempts (a peer or claim read keeps failing) the streak is reset on purpose
+  and the row is never parked, so it ticks once per maintenance pass (~30 s)
+  for as long as the read fails — expected for the 1–3 minutes after a rolling
+  deploy; sustained ticking points at a peer that cannot be asked (#1813).
+
   **Rollout note:** because a peer that predates
   `waddle.clustering.relay.resource_presence.v1` answers `UnknownMessage`,
   which fails closed, departed-copy settlement is also suspended for the
   duration of a rolling update. Legacy `route_muc` rows only start draining
-  once BOTH replicas run the new image.
+  once BOTH replicas run the new image. The same holds for the first one to
+  three minutes AFTER a rolling deploy: the terminated pods' `clustering_nodes`
+  rows are still unexpired, so those pods are still asked, their asks fail, and
+  the every-peer proof is `Unproven`. Settlement stays suspended until the
+  stale-node watchdog expires those rows. Rows attempted inside that window are
+  retried once it has, rather than parked for the life of the process — which
+  is exactly what the rule above buys.
 
 ### Ghost-occupant eviction (#1803)
 
