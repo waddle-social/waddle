@@ -13,8 +13,9 @@ enum AttachmentLoader {
         }.value
     }
 
-    /// Photos arrive as raw library bytes; HEIC and JPEG are re-encoded as
-    /// JPEG without location metadata.
+    /// Photos arrive as raw library bytes. HEIC and JPEG are re-encoded as
+    /// JPEG without location metadata, and any other image that carries a
+    /// location is too, so no picked photo leaks where it was taken.
     static func payload(fromPhoto data: Data, mediaType: String?, fileExtension: String?) async -> AttachmentPayload {
         await Task.detached(priority: .userInitiated) {
             Self.photoPayload(data, mediaType: mediaType, fileExtension: fileExtension)
@@ -47,7 +48,9 @@ enum AttachmentLoader {
     private static func photoPayload(_ data: Data, mediaType: String?, fileExtension: String?) -> AttachmentPayload {
         let type = mediaType?.lowercased() ?? "application/octet-stream"
         let stamp = Int(Date().timeIntervalSince1970)
-        if ["image/heic", "image/heif", "image/jpeg"].contains(type), let jpeg = AttachmentImageInfo.sanitizedJPEG(from: data) {
+        let mustReencode = ["image/heic", "image/heif", "image/jpeg"].contains(type)
+            || (type.hasPrefix("image/") && AttachmentImageInfo.hasLocation(data))
+        if mustReencode, let jpeg = AttachmentImageInfo.sanitizedJPEG(from: data) {
             let size = AttachmentImageInfo.pixelSize(of: jpeg)
             return AttachmentPayload(data: jpeg, filename: "Photo-\(stamp).jpg", mediaType: "image/jpeg", width: size?.width, height: size?.height)
         }

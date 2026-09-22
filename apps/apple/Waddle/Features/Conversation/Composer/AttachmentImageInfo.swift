@@ -45,6 +45,19 @@ enum AttachmentImageInfo {
         #endif
     }
 
+    /// Whether the image carries GPS metadata (EXIF, XMP-derived or PNG
+    /// eXIf chunks all surface here through ImageIO).
+    static func hasLocation(_ data: Data) -> Bool {
+        #if canImport(ImageIO)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else { return false }
+        return properties[kCGImagePropertyGPSDictionary] != nil
+        #else
+        return false
+        #endif
+    }
+
     /// A small JPEG for the composer chip.
     static func thumbnail(from data: Data, maxPixelSize: Int = 160) -> Data? {
         #if canImport(ImageIO)

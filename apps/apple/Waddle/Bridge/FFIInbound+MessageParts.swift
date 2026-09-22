@@ -33,7 +33,7 @@ extension FFIInbound {
         case .code: return .code
         case .codeBlock: return .codeBlock
         case .blockquote: return .blockquote
-        case .link: return url(span.uri).map(MarkupSpan.Kind.link)
+        case .link: return webURL(span.uri).map(MarkupSpan.Kind.link)
         }
     }
 
@@ -58,7 +58,7 @@ extension FFIInbound {
     /// is XEP-0448 ciphertext without a usable envelope: rendering
     /// ciphertext as the file would be wrong.
     static func sharedFile(_ file: WaddleSharedFile) -> SharedFile? {
-        guard let location = url(file.url) else { return nil }
+        guard let location = webURL(file.url) else { return nil }
         var encrypted: EncryptedFileSource?
         if let envelope = file.encrypted {
             guard let source = encryptedSource(envelope) else { return nil }
@@ -80,7 +80,7 @@ extension FFIInbound {
     /// XEP-0448 envelope; nil when none of its sources parse. The first
     /// digest per algorithm wins.
     static func encryptedSource(_ envelope: WaddleEncryptedFile) -> EncryptedFileSource? {
-        let sources = envelope.sources.compactMap(url)
+        let sources = envelope.sources.compactMap(webURL)
         guard !sources.isEmpty else { return nil }
         let hashes = Dictionary(envelope.hashes.map { ($0.algo, $0.valueB64) }, uniquingKeysWith: { first, _ in first })
         return EncryptedFileSource(
@@ -95,12 +95,12 @@ extension FFIInbound {
     /// `urn:waddle:link-preview:0` card, keyed on the normalized URL when
     /// the server supplied one.
     static func linkPreview(_ preview: WaddleLinkPreview) -> LinkPreview? {
-        guard let location = url(preview.normalizedUrl) ?? url(preview.originalUrl) else { return nil }
+        guard let location = webURL(preview.normalizedUrl) ?? webURL(preview.originalUrl) else { return nil }
         return LinkPreview(
             url: location,
             title: preview.title,
             summary: preview.description,
-            imageURL: url(preview.image?.url),
+            imageURL: webURL(preview.image?.url),
             imageAlt: preview.image?.alt
         )
     }

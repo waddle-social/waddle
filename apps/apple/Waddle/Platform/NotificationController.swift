@@ -28,10 +28,12 @@ final class NotificationController: NSObject {
     override init() {
         super.init()
         center.delegate = self
+        // Foreground: the app must be running with a live session to send;
+        // a background wake could be suspended with the reply still queued.
         let reply = UNTextInputNotificationAction(
             identifier: Identifier.reply,
             title: "Reply",
-            options: [],
+            options: [.foreground],
             textInputButtonTitle: "Send",
             textInputPlaceholder: "Message"
         )
@@ -59,7 +61,7 @@ final class NotificationController: NSObject {
         } else {
             content.title = alert.senderName
         }
-        content.body = showsPreviews ? alert.body : (alert.mentionsMe ? "Mentioned you" : "New message")
+        content.body = showsPreviews ? alert.body : Self.hiddenPreview(mentionsMe: alert.mentionsMe)
         content.sound = .default
         content.threadIdentifier = alert.conversation.description
         content.categoryIdentifier = Identifier.category
@@ -91,6 +93,10 @@ final class NotificationController: NSObject {
 
     func setBadge(_ count: Int) {
         center.setBadgeCount(count)
+    }
+
+    private static func hiddenPreview(mentionsMe: Bool) -> String {
+        mentionsMe ? "Mentioned you" : "New message"
     }
 
     nonisolated private static func conversation(from userInfo: [AnyHashable: Any]) -> ConversationID? {

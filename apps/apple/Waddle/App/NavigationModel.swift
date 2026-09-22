@@ -35,6 +35,12 @@ enum InspectorRoute: Hashable {
     case pins
 }
 
+/// A request to scroll a conversation to one message.
+struct FocusRequest: Equatable {
+    let conversation: ConversationID
+    let messageID: String
+}
+
 /// Navigation for both shells. The split shell (iPad, Mac) reads
 /// `selection` and `inspector`; the phone shell reads the tab and its paths.
 /// `open(_:)` drives both so notifications and deep links work everywhere.
@@ -53,6 +59,9 @@ final class NavigationModel {
     /// Quick switcher (⌘K) visibility.
     var isQuickSwitcherPresented = false
 
+    /// Consumed by the conversation screen showing `conversation`.
+    var focusRequest: FocusRequest?
+
     func open(_ conversation: ConversationID) {
         selection = conversation
         inspector = nil
@@ -64,6 +73,14 @@ final class NavigationModel {
             tab = .directMessages
             directPath = [.conversation(conversation)]
         }
+    }
+
+    /// Scrolls the conversation already on screen to `messageID`. Used from
+    /// search and pins, which are only reachable from that conversation, so
+    /// tabs and stacks stay put; on iPad/Mac the selection follows.
+    func focus(_ messageID: String, in conversation: ConversationID) {
+        selection = conversation
+        focusRequest = FocusRequest(conversation: conversation, messageID: messageID)
     }
 
     func openThread(_ rootID: String, in conversation: ConversationID, usesInspector: Bool) {

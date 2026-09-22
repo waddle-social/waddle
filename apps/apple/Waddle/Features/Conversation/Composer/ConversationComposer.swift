@@ -44,7 +44,9 @@ struct ConversationComposer: View {
             isPresented: $showsPhotoPicker,
             selection: $photoSelection,
             maxSelectionCount: 6,
-            matching: .any(of: [.images, .videos])
+            // Images only: picked assets load into memory, and video
+            // location metadata is not stripped. Videos go through Files.
+            matching: .images
         )
         .fileImporter(isPresented: $showsFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {

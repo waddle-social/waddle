@@ -92,9 +92,7 @@ struct SearchSheet: View {
     }
 
     private func select(_ item: TimelineItem) {
-        if navigation.selection != conversation {
-            navigation.open(conversation)
-        }
+        navigation.focus(item.id, in: conversation)
         dismiss()
     }
 }

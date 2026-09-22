@@ -21,6 +21,19 @@ enum FFIInbound {
         return url
     }
 
+    /// Sender-controlled URLs the app will fetch or open (files, previews,
+    /// links): http(s) with a host only. Anything else (`file:`, `smb:`,
+    /// other apps' schemes) could open a local app or mount a share behind
+    /// a harmless-looking file card, so it is dropped here.
+    static func webURL(_ raw: String?) -> URL? {
+        guard let url = url(raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              url.host?.isEmpty == false
+        else { return nil }
+        return url
+    }
+
     static func date(_ raw: String?) -> Date? {
         raw.flatMap(FFIRFC3339.date(from:))
     }

@@ -26,6 +26,8 @@ final class AppState {
     let preferences = Preferences()
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var isBootstrapping = false
+    @ObservationIgnored private var pendingNotificationActions: [NotificationAction] = []
     @ObservationIgnored private var client: AuthClient
 
     init() {
@@ -36,11 +38,31 @@ final class AppState {
             self?.session?.navigation.open(conversation)
         }
         notifications.onReply = { [weak self] conversation, text in
-            guard let session = self?.session?.coordinator else { return }
-            await session.send(Draft(text: text), in: conversation)
+            await self?.perform(.reply(conversation, text))
         }
         notifications.onMarkRead = { [weak self] conversation in
-            await self?.session?.coordinator.markDisplayed(conversation)
+            await self?.perform(.markRead(conversation))
+        }
+    }
+
+    /// A notification action. One that arrives before the session exists
+    /// (the app was launched by the action) waits for it instead of being
+    /// dropped.
+    enum NotificationAction {
+        case reply(ConversationID, String)
+        case markRead(ConversationID)
+    }
+
+    func perform(_ action: NotificationAction) async {
+        guard let coordinator = session?.coordinator else {
+            pendingNotificationActions.append(action)
+            return
+        }
+        switch action {
+        case let .reply(conversation, text):
+            await coordinator.send(Draft(text: text), in: conversation)
+        case let .markRead(conversation):
+            await coordinator.markDisplayed(conversation)
         }
     }
 
@@ -48,9 +70,19 @@ final class AppState {
 
     /// Restores a stored session or shows sign-in.
     func bootstrap() async {
+        // RootView's .task runs again whenever a window is recreated (a Mac
+        // app outlives its windows); only the first launch restores.
+        guard phase == .launching, !isBootstrapping else { return }
+        isBootstrapping = true
+        defer { isBootstrapping = false }
         await loadProviders()
-        guard let stored = CredentialStore.sessionID(for: server) else {
-            phase = .signedOut
+        await restoreStoredSession()
+    }
+
+    /// Resumes the session whose credential is in the Keychain.
+    private func restoreStoredSession() async {
+        guard session == nil, let stored = CredentialStore.sessionID(for: server) else {
+            if session == nil { phase = .signedOut }
             return
         }
         do {
@@ -61,8 +93,8 @@ final class AppState {
                 phase = .signedOut
             }
         } catch {
-            // Offline at launch: stay signed out rather than guessing; the
-            // user can retry, and the credential is kept.
+            // Offline at launch: show sign-in with the error but keep the
+            // credential; Retry restores it once the server is reachable.
             errorMessage = error.localizedDescription
             phase = .signedOut
         }
@@ -107,6 +139,9 @@ final class AppState {
 
     func retryProviders() async {
         await loadProviders()
+        if case .signedOut = phase {
+            await restoreStoredSession()
+        }
     }
 
     // MARK: - Sign in
@@ -184,6 +219,13 @@ final class AppState {
         phase = .signedIn
         active.coordinator.start()
         notifications.requestAuthorizationIfNeeded()
+        let pending = pendingNotificationActions
+        pendingNotificationActions.removeAll()
+        Task {
+            for action in pending {
+                await perform(action)
+            }
+        }
     }
 
     private func isOnScreen(_ conversation: ConversationID) -> Bool {
@@ -192,9 +234,12 @@ final class AppState {
 
     func signOut() async {
         let sessionID = session?.auth.sessionID
-        if let coordinator = session?.coordinator, let registration = AppDelegate.storedRegistration {
-            _ = await coordinator.disablePush(registration)
-            AppDelegate.forgetRegistration()
+        if let coordinator = session?.coordinator {
+            let owner = PushRegistrationStore.Owner(server: server, account: coordinator.account.jid)
+            if let registration = PushRegistrationStore.registration(for: owner),
+               await coordinator.disablePush(registration) {
+                PushRegistrationStore.forget(owner)
+            }
         }
         await endSession()
         if let sessionID {

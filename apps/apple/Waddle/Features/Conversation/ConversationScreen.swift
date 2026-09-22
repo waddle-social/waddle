@@ -87,6 +87,13 @@ private struct ConversationContent: View {
             .task(id: conversation) {
                 await open()
             }
+            .onChange(of: navigation.focusRequest, initial: true) { _, request in
+                guard let request, request.conversation == conversation else { return }
+                navigation.focusRequest = nil
+                // Rows are keyed by their primary id; resolve any alias.
+                let timeline = session.timelines.timeline(for: conversation)
+                actions.scrollRequest = timeline.item(withID: request.messageID)?.id ?? request.messageID
+            }
             .onDisappear {
                 session.close(conversation)
                 session.stopTyping(in: conversation, notify: true)

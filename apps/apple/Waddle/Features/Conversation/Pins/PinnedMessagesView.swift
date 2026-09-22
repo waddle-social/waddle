@@ -41,7 +41,7 @@ struct PinnedMessagesView: View {
         } else {
             List(pins, id: \.targetStanzaID) { pin in
                 Button {
-                    open()
+                    open(pin)
                 } label: {
                     PinnedMessageRow(pin: pin, room: conversation.jid)
                 }
@@ -66,10 +66,8 @@ struct PinnedMessagesView: View {
         }
     }
 
-    private func open() {
-        if navigation.selection != conversation {
-            navigation.open(conversation)
-        }
+    private func open(_ pin: PinEntry) {
+        navigation.focus(pin.targetStanzaID, in: conversation)
         onOpen?()
     }
 }

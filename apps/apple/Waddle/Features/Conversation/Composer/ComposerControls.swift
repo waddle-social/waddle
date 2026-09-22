@@ -36,7 +36,12 @@ struct ComposerTextField: View {
 
     #if os(macOS)
     private func handleReturn(_ press: KeyPress) -> KeyPress.Result {
-        if press.modifiers.contains(.shift) || press.modifiers.contains(.option) {
+        // Option-Return is the text system's own newline, inserted at the
+        // caret; let it through.
+        if press.modifiers.contains(.option) {
+            return .ignored
+        }
+        if press.modifiers.contains(.shift) {
             text += "\n"
             return .handled
         }
