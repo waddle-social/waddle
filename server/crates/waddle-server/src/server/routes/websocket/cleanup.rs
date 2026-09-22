@@ -4765,7 +4765,7 @@ mod local_departure_cleanup_tests {
                         .sm_session_registry
                         .ensure_session_claim("failed-resumed-stream")
                         .await
-                        .unwrap(),
+                        .expect("establish the live stream management fence"),
                 );
             }
             let old_room = room_jid("terminal-old");
@@ -4794,7 +4794,7 @@ mod local_departure_cleanup_tests {
             let (_tx, mut rx) = mpsc::channel(1);
             let _ = cleanup_connection_shutdown(&state, &mut rx, &mut conn, superseded).await;
             assert_eq!(
-                actors[0].ask(GetSnapshot).await.unwrap().room.session_generation(&jid),
+                actors[0].ask(GetSnapshot).await.expect("read the old room after terminal cleanup").room.session_generation(&jid),
                 None,
                 "old room must be swept: superseded={superseded}, resumable={resumable}, recovery={recovery}"
             );
@@ -4802,7 +4802,7 @@ mod local_departure_cleanup_tests {
                 actors[1]
                     .ask(GetSnapshot)
                     .await
-                    .unwrap()
+                    .expect("read the replacement room after terminal cleanup")
                     .room
                     .session_generation(&jid),
                 Some(replacement),
@@ -4837,7 +4837,7 @@ mod local_departure_cleanup_tests {
                 "healthy-muc-detach",
             ))
             .await
-            .unwrap();
+            .expect("enroll the healthy detachable stream");
         drop(
             state
                 .deps
@@ -4845,7 +4845,7 @@ mod local_departure_cleanup_tests {
                 .sm_session_registry
                 .ensure_session_claim("healthy-muc-detach")
                 .await
-                .unwrap(),
+                .expect("establish the healthy stream session claim"),
         );
         let actor = state
             .deps
@@ -4858,7 +4858,7 @@ mod local_departure_cleanup_tests {
                 config: RoomConfig::default(),
             })
             .await
-            .unwrap();
+            .expect("create the healthy detach test room");
         join_member_with_generation(&actor, &jid, "alice", conn.occupancy_session).await;
         assert_eq!(
             cleanup_connection_shutdown(&state, &mut rx, &mut conn, false).await,
@@ -4868,7 +4868,7 @@ mod local_departure_cleanup_tests {
             actor
                 .ask(GetSnapshot)
                 .await
-                .unwrap()
+                .expect("read occupancy after resumable detach")
                 .room
                 .session_generation(&jid),
             Some(conn.occupancy_session)
@@ -4902,7 +4902,7 @@ mod local_departure_cleanup_tests {
                     "detach-ownership-race",
                 ))
                 .await
-                .unwrap();
+                .expect("enroll the stream for the detach ownership race");
             drop(
                 state
                     .deps
@@ -4910,7 +4910,7 @@ mod local_departure_cleanup_tests {
                     .sm_session_registry
                     .ensure_session_claim("detach-ownership-race")
                     .await
-                    .unwrap(),
+                    .expect("establish the detach race session claim"),
             );
             let actor = state
                 .deps
@@ -4923,7 +4923,7 @@ mod local_departure_cleanup_tests {
                     config: RoomConfig::default(),
                 })
                 .await
-                .unwrap();
+                .expect("create the detach ownership race room");
             let generation = conn.occupancy_session;
             join_member_with_generation(&actor, &jid, "alice", generation).await;
             let reached = Arc::new(tokio::sync::Notify::new());
@@ -4945,7 +4945,7 @@ mod local_departure_cleanup_tests {
                         .sm_session_registry
                         .claim_session("detach-ownership-race")
                         .await
-                        .unwrap()
+                        .expect("claim the stored session for resumption")
                         .expect("resuming snapshot"),
                 )
             } else {
@@ -4958,7 +4958,11 @@ mod local_departure_cleanup_tests {
                 .connection_registry
                 .register(jid.clone(), replacement_tx);
             release.notify_one();
-            assert_eq!(task.await.unwrap(), ConnectionShutdownOutcome::NotPersisted);
+            assert_eq!(
+                task.await
+                    .expect("shutdown task completes after ownership displacement"),
+                ConnectionShutdownOutcome::NotPersisted
+            );
             assert!(state
                 .deps
                 .protocol
@@ -4969,7 +4973,7 @@ mod local_departure_cleanup_tests {
                 actor
                     .ask(GetSnapshot)
                     .await
-                    .unwrap()
+                    .expect("read occupancy after detach ownership displacement")
                     .room
                     .session_generation(&jid),
                 resumed.then_some(generation)
@@ -4994,7 +4998,7 @@ mod local_departure_cleanup_tests {
                 config: RoomConfig::default(),
             })
             .await
-            .unwrap();
+            .expect("create the cleanup metrics test room");
         join_member(&actor, &jid, "alice").await;
         let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::ready(jid.clone(), false);

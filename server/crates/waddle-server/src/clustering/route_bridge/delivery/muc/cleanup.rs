@@ -177,13 +177,17 @@ mod tests {
             test_peer_id(),
         )
         .await;
-        let sender: jid::FullJid = "alice@example.com/departed".parse().unwrap();
-        let room: jid::BareJid = "cleanup@muc.example.com".parse().unwrap();
+        let sender: jid::FullJid = "alice@example.com/departed"
+            .parse()
+            .expect("valid departed sender JID");
+        let room: jid::BareJid = "cleanup@muc.example.com"
+            .parse()
+            .expect("valid cleanup room JID");
         let epoch = services
             .claim_store
             .acquire(&user_entity(&sender.to_bare()), &receiver_identity())
             .await
-            .unwrap();
+            .expect("acquire the sender user claim");
         services
             .claim_store
             .acquire(
@@ -191,7 +195,7 @@ mod tests {
                 &crate::clustering::route_bridge::tests::origin_identity(),
             )
             .await
-            .unwrap();
+            .expect("acquire the remote room claim");
         let bridge = OrderedRelayDeliveryBridge::new(
             CancellationToken::new(),
             &ClusteringMessagingConfig::default(),
@@ -200,7 +204,9 @@ mod tests {
         bridge.wire(Arc::new(services));
         let request = RelayMucCleanup {
             sender,
-            occupant: room.with_resource_str("alice").unwrap(),
+            occupant: room
+                .with_resource_str("alice")
+                .expect("valid cleanup occupant JID"),
             generation: OccupancySessionGeneration::mint(),
             user_claim_epoch: epoch,
             trace: RelayTraceContext::default(),
@@ -232,19 +238,25 @@ mod tests {
         )
         .await;
         services.web_socket_state = Arc::downgrade(&state);
-        let sender: jid::FullJid = "alice@example.com/departed".parse().unwrap();
-        let sibling: jid::FullJid = "alice@example.com/live".parse().unwrap();
-        let room: jid::BareJid = "cleanup@muc.example.com".parse().unwrap();
+        let sender: jid::FullJid = "alice@example.com/departed"
+            .parse()
+            .expect("valid departed sender JID");
+        let sibling: jid::FullJid = "alice@example.com/live"
+            .parse()
+            .expect("valid live sibling JID");
+        let room: jid::BareJid = "cleanup@muc.example.com"
+            .parse()
+            .expect("valid cleanup room JID");
         let epoch = services
             .claim_store
             .acquire(&user_entity(&sender.to_bare()), &receiver_identity())
             .await
-            .unwrap();
+            .expect("acquire the sender user claim");
         services
             .claim_store
             .acquire(&room_entity(&room), &receiver_identity())
             .await
-            .unwrap();
+            .expect("acquire the local room claim");
         let actor = state
             .deps
             .protocol
@@ -256,7 +268,7 @@ mod tests {
                 config: RoomConfig::default(),
             })
             .await
-            .unwrap();
+            .expect("create the cleanup test room");
         let generation = OccupancySessionGeneration::mint();
         let sibling_generation = OccupancySessionGeneration::mint();
         for (jid, generation) in [(&sender, generation), (&sibling, sibling_generation)] {
@@ -266,11 +278,15 @@ mod tests {
                     nick: "alice".to_owned(),
                     affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                     local_domain: "example.com".to_owned(),
-                    admission_revision: actor.ask(GetSnapshot).await.unwrap().admission_revision,
+                    admission_revision: actor
+                        .ask(GetSnapshot)
+                        .await
+                        .expect("read the room admission revision")
+                        .admission_revision,
                     session: generation,
                 })
                 .await
-                .unwrap();
+                .expect("join the test occupant with its generation");
         }
         let bridge = OrderedRelayDeliveryBridge::new(
             CancellationToken::new(),
@@ -279,7 +295,9 @@ mod tests {
         bridge.wire(Arc::new(services));
         let request = RelayMucCleanup {
             sender: sender.clone(),
-            occupant: room.with_resource_str("alice").unwrap(),
+            occupant: room
+                .with_resource_str("alice")
+                .expect("valid cleanup occupant JID"),
             generation,
             user_claim_epoch: epoch,
             trace: RelayTraceContext::default(),
@@ -294,7 +312,7 @@ mod tests {
             actor
                 .ask(GetSnapshot)
                 .await
-                .unwrap()
+                .expect("read occupancy after rejecting the stale claim")
                 .room
                 .session_generation(&sender),
             Some(generation)
@@ -310,7 +328,7 @@ mod tests {
             actor
                 .ask(GetSnapshot)
                 .await
-                .unwrap()
+                .expect("read occupancy after ignoring the wrong generation")
                 .room
                 .session_generation(&sender),
             Some(generation)
@@ -320,7 +338,10 @@ mod tests {
             bridge.cleanup_muc_on_user_owner(request.clone()).await,
             RelayMucCleanupOutcome::Converged
         );
-        let snapshot = actor.ask(GetSnapshot).await.unwrap();
+        let snapshot = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("read occupancy after generation-scoped cleanup");
         assert_eq!(snapshot.room.session_generation(&sender), None);
         assert_eq!(
             snapshot.room.session_generation(&sibling),

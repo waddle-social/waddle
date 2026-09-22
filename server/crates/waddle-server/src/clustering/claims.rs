@@ -4218,21 +4218,51 @@ mod tests {
         };
         let original = node_identity();
         let node = crate::clustering::NodeId::new(original.node_id.clone());
-        assert_eq!(store.unexpired_node_identity(&node).await.unwrap(), None);
-        store.register(&original, None).await.unwrap();
-        store.mark_draining(&original).await.unwrap();
+        assert_eq!(
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up an unregistered node"),
+            None
+        );
+        store
+            .register(&original, None)
+            .await
+            .expect("register the original node incarnation");
+        store
+            .mark_draining(&original)
+            .await
+            .expect("mark the original node draining");
         backdate_heartbeat(&store.db, &original).await;
         assert_eq!(
-            store.unexpired_node_identity(&node).await.unwrap(),
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up the draining node before committed expiry"),
             Some(original.clone()),
             "draining and stale heartbeat do not prove committed death"
         );
-        assert!(store.expire(&original, NODE_LEASE_TTL).await.unwrap());
-        assert_eq!(store.unexpired_node_identity(&node).await.unwrap(), None);
-        let replacement = NodeIdentity::new(original.node_id, uuid::Uuid::new_v4().to_string());
-        store.register(&replacement, None).await.unwrap();
+        assert!(store
+            .expire(&original, NODE_LEASE_TTL)
+            .await
+            .expect("commit expiry of the stale node lease"));
         assert_eq!(
-            store.unexpired_node_identity(&node).await.unwrap(),
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up the node after committed expiry"),
+            None
+        );
+        let replacement = NodeIdentity::new(original.node_id, uuid::Uuid::new_v4().to_string());
+        store
+            .register(&replacement, None)
+            .await
+            .expect("register the replacement node incarnation");
+        assert_eq!(
+            store
+                .unexpired_node_identity(&node)
+                .await
+                .expect("look up the replacement node incarnation"),
             Some(replacement),
             "a reused node id must expose its new incarnation"
         );

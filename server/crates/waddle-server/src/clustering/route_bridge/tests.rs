@@ -30,10 +30,12 @@ impl NodeLeaseStore for StaticNodeLease {
         &self,
         node: &NodeId,
     ) -> Result<Option<NodeIdentity>, ClaimError> {
-        let result = self
-            .socket_read
-            .as_ref()
-            .map(|state| state.lock().unwrap().clone());
+        let result = self.socket_read.as_ref().map(|state| {
+            state
+                .lock()
+                .expect("socket lease fixture lock must not be poisoned")
+                .clone()
+        });
         match result {
             Some(SocketLeaseRead::Present(identity)) => Ok(Some(identity)),
             Some(SocketLeaseRead::Gone) => Ok(None),

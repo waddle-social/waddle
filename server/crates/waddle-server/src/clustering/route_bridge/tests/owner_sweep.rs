@@ -73,7 +73,7 @@ async fn assert_mirror_exists(
 #[tokio::test]
 async fn owner_sweep_retires_committed_expired_or_missing_socket_without_delivery() {
     let (bridge, services, lease) = setup().await;
-    *lease.lock().unwrap() = SocketLeaseRead::Gone;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert!(bridge.sweep_remote_owner_resources().await);
     assert_mirror_exists(&bridge, &services, false).await;
     assert!(
@@ -90,7 +90,7 @@ async fn owner_sweep_retires_committed_expired_or_missing_socket_without_deliver
 #[tokio::test]
 async fn owner_sweep_retires_superseded_socket_epoch() {
     let (bridge, services, lease) = setup().await;
-    *lease.lock().unwrap() =
+    *lease.lock().expect("socket lease fixture lock") =
         SocketLeaseRead::Present(NodeIdentity::new("socket-node", "new-epoch"));
     assert!(bridge.sweep_remote_owner_resources().await);
     assert_mirror_exists(&bridge, &services, false).await;
@@ -102,7 +102,7 @@ async fn owner_sweep_preserves_unreachable_unexpired_socket_and_failed_reads() {
     // No socket relay is running. Only the committed node row governs expiry.
     assert!(bridge.sweep_remote_owner_resources().await);
     assert_mirror_exists(&bridge, &services, true).await;
-    *lease.lock().unwrap() = SocketLeaseRead::Failed;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Failed;
     assert!(!bridge.sweep_remote_owner_resources().await);
     assert_mirror_exists(&bridge, &services, true).await;
 }
@@ -110,12 +110,12 @@ async fn owner_sweep_preserves_unreachable_unexpired_socket_and_failed_reads() {
 #[tokio::test(start_paused = true)]
 async fn owner_sweep_bounds_stalled_lease_reads_and_retries_next_pass() {
     let (bridge, services, lease) = setup().await;
-    *lease.lock().unwrap() = SocketLeaseRead::Stalled;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Stalled;
     let started = tokio::time::Instant::now();
     assert!(!bridge.sweep_remote_owner_resources().await);
     assert!(started.elapsed() <= Duration::from_secs(5));
     assert_mirror_exists(&bridge, &services, true).await;
-    *lease.lock().unwrap() = SocketLeaseRead::Gone;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert!(bridge.sweep_remote_owner_resources().await);
     assert_mirror_exists(&bridge, &services, false).await;
 }
@@ -139,7 +139,7 @@ async fn owner_sweep_old_registration_cannot_remove_successor_mirror() {
         })
         .await
         .expect("successor actor resource");
-    *lease.lock().unwrap() = SocketLeaseRead::Gone;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert!(bridge.sweep_remote_owner_resources().await);
     assert!(services
         .connection_registry
@@ -166,7 +166,7 @@ async fn owner_sweep_pages_past_live_mirrors_to_expired_tail() {
     for index in 0..64 {
         let jid = format!("a{index:03}@example.test/resource")
             .parse()
-            .unwrap();
+            .expect("valid synthetic mirror JID");
         bridge
             .remote_owner_resources
             .lock()
@@ -175,8 +175,84 @@ async fn owner_sweep_pages_past_live_mirrors_to_expired_tail() {
     }
     assert!(bridge.sweep_remote_owner_resources().await);
     assert_mirror_exists(&bridge, &services, true).await;
-    *lease.lock().unwrap() = SocketLeaseRead::Gone;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert!(bridge.sweep_remote_owner_resources().await);
     assert_mirror_exists(&bridge, &services, false).await;
     assert_eq!(bridge.remote_owner_resources.lock().await.len(), 64);
+}
+
+#[tokio::test]
+async fn owner_sweep_revisits_failed_mirror_despite_continuous_later_arrivals() {
+    let (bridge, services, lease) = setup().await;
+    let original = bridge.remote_owner_resources.lock().await[&target_full()].clone();
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Failed;
+    assert!(!bridge.sweep_remote_owner_resources().await);
+    assert_mirror_exists(&bridge, &services, true).await;
+
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
+    for pass in 0..3 {
+        // Keep the lexical suffix full on every pass, including after the
+        // previous suffix was removed. A cursor that waits to reach an empty
+        // suffix before wrapping never revisits the retained failed mirror.
+        for index in 0..64 {
+            let jid = format!("z{pass:03}-{index:03}@example.test/resource")
+                .parse()
+                .expect("valid later-arriving mirror JID");
+            bridge
+                .remote_owner_resources
+                .lock()
+                .await
+                .insert(jid, original.clone());
+        }
+        assert!(bridge.sweep_remote_owner_resources().await);
+    }
+    assert_mirror_exists(&bridge, &services, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn owner_sweep_budget_preserves_unattempted_candidates_for_later_passes() {
+    let (bridge, services, lease) = setup().await;
+    {
+        let mut registrations = bridge.remote_owner_resources.lock().await;
+        let original = registrations[&target_full()].clone();
+        // A full page fits in the item limit, but only six stalled lease reads
+        // fit the time budget. The last candidate must keep its place until
+        // reached instead of being rotated with the unattempted page suffix.
+        for index in 0..63 {
+            let jid = format!("a{index:03}@example.test/resource")
+                .parse()
+                .expect("valid stalled mirror JID");
+            registrations.insert(jid, original.clone());
+        }
+        registrations
+            .get_mut(&target_full())
+            .expect("target mirror remains registered")
+            .unregister_pending = true;
+    }
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Stalled;
+    for _ in 0..11 {
+        let started = tokio::time::Instant::now();
+        assert!(!bridge.sweep_remote_owner_resources().await);
+        assert!(started.elapsed() <= Duration::from_secs(30));
+    }
+    assert_mirror_exists(&bridge, &services, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn owner_sweep_cancellation_keeps_attempted_mirror_available_for_retry() {
+    let (bridge, services, lease) = setup().await;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Stalled;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            bridge.sweep_remote_owner_resources()
+        )
+        .await
+        .is_err(),
+        "cancel the sweep while its lease lookup is in flight"
+    );
+    assert_mirror_exists(&bridge, &services, true).await;
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
+    assert!(bridge.sweep_remote_owner_resources().await);
+    assert_mirror_exists(&bridge, &services, false).await;
 }

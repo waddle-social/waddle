@@ -4,7 +4,6 @@ use super::owner::{
     remote_owner_registration_matches, unregister_remote_owner_actor_entry,
     RemoteOwnerActorUnregisterOutcome,
 };
-use std::ops::Bound::{Excluded, Unbounded};
 
 const REMOTE_OWNER_SWEEP_LIMIT: usize = 64;
 const REMOTE_OWNER_SWEEP_BUDGET: Duration = Duration::from_secs(30);
@@ -25,34 +24,21 @@ impl OrderedRelayDeliveryBridge {
 
     /// Retire a bounded, fair page of mirrors. Raw heartbeat age, draining,
     /// transport failures, and failed lease reads never prove a socket gone.
-    /// The cursor advances even on timeout so one blocked account cannot starve
-    /// the rest. Cancellation leaves the exact registration available to retry.
+    /// Each finite round excludes new arrivals. Attempts rotate even on timeout
+    /// so one blocked account cannot starve the rest. Cancellation preserves the
+    /// exact registration for retry without skipping unattempted candidates.
     pub(crate) async fn sweep_remote_owner_resources(&self) -> bool {
         let Some(services) = self.services.get() else {
             return true;
         };
-        let Ok(mut cursor) = self.remote_owner_sweep_cursor.try_lock() else {
+        let Ok(_sweep_guard) = self.remote_owner_sweep_lock.try_lock() else {
             return false;
         };
         let candidates = {
-            let Ok(registrations) = self.remote_owner_resources.try_lock() else {
+            let Ok(mut registrations) = self.remote_owner_resources.try_lock() else {
                 return false;
             };
-            let page = registrations
-                .range((cursor.clone().map_or(Unbounded, Excluded), Unbounded))
-                .take(REMOTE_OWNER_SWEEP_LIMIT)
-                .map(|(jid, registration)| (jid.clone(), registration.clone()))
-                .collect::<Vec<_>>();
-            if page.is_empty() {
-                *cursor = None;
-                registrations
-                    .iter()
-                    .take(REMOTE_OWNER_SWEEP_LIMIT)
-                    .map(|(jid, registration)| (jid.clone(), registration.clone()))
-                    .collect::<Vec<_>>()
-            } else {
-                page
-            }
+            registrations.sweep_page(REMOTE_OWNER_SWEEP_LIMIT)
         };
         let deadline = tokio::time::Instant::now() + REMOTE_OWNER_SWEEP_BUDGET;
         let mut complete = true;
@@ -61,7 +47,12 @@ impl OrderedRelayDeliveryBridge {
             if now >= deadline {
                 return false;
             }
-            *cursor = Some(jid.clone());
+            {
+                let Ok(mut registrations) = self.remote_owner_resources.try_lock() else {
+                    return false;
+                };
+                registrations.mark_sweep_attempt(&jid);
+            }
             let timeout = REMOTE_OWNER_SWEEP_ENTRY_TIMEOUT.min(deadline - now);
             if !matches!(
                 tokio::time::timeout(
