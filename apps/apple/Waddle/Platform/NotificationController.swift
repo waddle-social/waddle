@@ -93,7 +93,7 @@ final class NotificationController: NSObject {
         center.setBadgeCount(count)
     }
 
-    private static func conversation(from userInfo: [AnyHashable: Any]) -> ConversationID? {
+    nonisolated private static func conversation(from userInfo: [AnyHashable: Any]) -> ConversationID? {
         guard let raw = userInfo[Identifier.conversationKey] as? String,
               let jid = BareJID(parsing: raw)
         else { return nil }
@@ -113,11 +113,11 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        let userInfo = response.notification.request.content.userInfo
+        // Parse before hopping: the userInfo dictionary is not Sendable.
+        guard let conversation = Self.conversation(from: response.notification.request.content.userInfo) else { return }
         let action = response.actionIdentifier
         let text = (response as? UNTextInputNotificationResponse)?.userText
         await MainActor.run {
-            guard let conversation = Self.conversation(from: userInfo) else { return }
             switch action {
             case Identifier.reply:
                 guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
