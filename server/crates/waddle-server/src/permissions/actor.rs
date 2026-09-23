@@ -167,6 +167,57 @@ impl PermissionActor {
         }
     }
 
+    async fn swap_exclusive_relation(
+        &self,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => backend.swap_exclusive_relation(msg).await,
+            PermissionActorBackend::Local { tuple_store, .. } => {
+                // One actor turn: no other permission mutation interleaves
+                // between this read and the writes below.
+                let held: Vec<String> = tuple_store
+                    .list_relations(&msg.subject, &msg.object)
+                    .await?
+                    .into_iter()
+                    .filter(|held| msg.family.iter().any(|member| member.name == *held))
+                    .collect();
+                let expected: Vec<&str> = msg
+                    .expected
+                    .iter()
+                    .map(|relation| relation.name.as_str())
+                    .collect();
+                if held.iter().map(String::as_str).collect::<Vec<_>>() != expected {
+                    return Ok(ExclusiveRelationSwap::Mismatch);
+                }
+                if msg.expected.as_ref().map(|relation| &relation.name)
+                    == msg.replacement.as_ref().map(|relation| &relation.name)
+                {
+                    return Ok(ExclusiveRelationSwap::Swapped);
+                }
+                if let Some(expected) = &msg.expected {
+                    tuple_store
+                        .delete(&Tuple::new(
+                            msg.object.clone(),
+                            Relation::new(expected.name.clone()),
+                            msg.subject.clone(),
+                        ))
+                        .await?;
+                }
+                if let Some(replacement) = &msg.replacement {
+                    tuple_store
+                        .write(Tuple::new(
+                            msg.object.clone(),
+                            Relation::new(replacement.name.clone()),
+                            msg.subject.clone(),
+                        ))
+                        .await?;
+                }
+                Ok(ExclusiveRelationSwap::Swapped)
+            }
+        }
+    }
+
     async fn list_relations(
         &self,
         subject: &Subject,
@@ -317,6 +368,43 @@ impl kameo::message::Message<DeleteTuple> for PermissionActor {
         self.delete_tuple(&msg.tuple).await?;
         self.clear_cache().await;
         Ok(())
+    }
+}
+
+/// Outcome of [`SwapExclusiveRelation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveRelationSwap {
+    /// The family held exactly `expected` and now holds `replacement`.
+    Swapped,
+    /// The family no longer held exactly `expected`; nothing was written.
+    Mismatch,
+}
+
+/// Atomically replace the relation a subject holds on an object within a
+/// mutually exclusive relation family (for example the channel affiliation
+/// family `owner`/`admin`/`member`/`outcast`), only while the family still
+/// holds exactly `expected`. `None` means the subject holds no relation of
+/// the family. SpiceDB evaluates the preconditions and the writes in one
+/// request; the local backend performs both inside a single actor turn.
+pub struct SwapExclusiveRelation {
+    pub object: Object,
+    pub subject: Subject,
+    pub family: Vec<Relation>,
+    pub expected: Option<Relation>,
+    pub replacement: Option<Relation>,
+}
+
+impl kameo::message::Message<SwapExclusiveRelation> for PermissionActor {
+    type Reply = Result<ExclusiveRelationSwap, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: SwapExclusiveRelation,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let outcome = self.swap_exclusive_relation(msg).await?;
+        self.clear_cache().await;
+        Ok(outcome)
     }
 }
 

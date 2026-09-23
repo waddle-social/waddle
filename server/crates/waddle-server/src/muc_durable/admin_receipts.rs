@@ -4,7 +4,7 @@ use jid::BareJid;
 use waddle_xmpp::muc::{AdminMutationId, RoomCommittedCoordinates, RoomLifecycleId, RoomRevision};
 use waddle_xmpp::XmppError;
 
-use crate::db::{Database, DatabaseError, Transaction};
+use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
 pub(super) async fn ensure_schema(tx: &mut Transaction<'_>) -> Result<(), DatabaseError> {
     tx.execute(
@@ -16,18 +16,53 @@ pub(super) async fn ensure_schema(tx: &mut Transaction<'_>) -> Result<(), Databa
         (),
     )
     .await?;
-    tx.execute(
-        "CREATE INDEX IF NOT EXISTS clustering_muc_admin_receipts_lifecycle_idx \
-         ON clustering_muc_admin_receipts (lifecycle_id)",
-        (),
-    )
-    .await?;
-    tx.execute(
-        "CREATE INDEX IF NOT EXISTS clustering_muc_admin_receipts_created_at_idx \
-         ON clustering_muc_admin_receipts (created_at_ms)",
-        (),
-    )
-    .await?;
+    for (index, column) in [
+        (
+            "clustering_muc_admin_receipts_lifecycle_idx",
+            "lifecycle_id",
+        ),
+        (
+            "clustering_muc_admin_receipts_created_at_idx",
+            "created_at_ms",
+        ),
+    ] {
+        ensure_index(tx, index, column).await?;
+    }
+    Ok(())
+}
+
+/// PostgreSQL index creation is catalog-guarded rather than `IF NOT EXISTS`:
+/// non-concurrent `CREATE INDEX` takes SHARE on the table before evaluating
+/// `IF NOT EXISTS` and keeps it to the end of the bootstrap transaction, which
+/// would block every receipt insert/delete on active pods during a rolling
+/// restart (see the affiliation index comment in `muc_durable.rs`). The
+/// `pg_index` probe takes no relation lock and is bound to this table's own
+/// regclass. SQLite has no such lock and keeps the plain form.
+async fn ensure_index(
+    tx: &mut Transaction<'_>,
+    index: &str,
+    column: &str,
+) -> Result<(), DatabaseError> {
+    let sql = match tx.driver() {
+        DatabaseDriver::Postgres => format!(
+            "DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_index i
+                    JOIN pg_class c ON c.oid = i.indexrelid
+                    WHERE i.indrelid = 'clustering_muc_admin_receipts'::regclass
+                      AND c.relname = '{index}'
+                ) THEN
+                    CREATE INDEX {index} ON clustering_muc_admin_receipts ({column});
+                END IF;
+            END $$"
+        ),
+        DatabaseDriver::Sqlite => format!(
+            "CREATE INDEX IF NOT EXISTS {index} ON clustering_muc_admin_receipts ({column})"
+        ),
+    };
+    tx.execute(&sql, ()).await?;
     Ok(())
 }
 

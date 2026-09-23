@@ -184,3 +184,87 @@ async fn from_server_config_requires_spicedb_config() {
 
     assert!(matches!(result, Err(PermissionError::SpiceDbConfigMissing)));
 }
+
+fn affiliation_family() -> Vec<Relation> {
+    ["owner", "admin", "member", "outcast"]
+        .into_iter()
+        .map(Relation::new)
+        .collect()
+}
+
+async fn held_relations(
+    actor: &ActorRef<PermissionActor>,
+    object: &Object,
+    subject: &Subject,
+) -> Vec<String> {
+    actor
+        .ask(ListRelations {
+            subject: subject.clone(),
+            object: object.clone(),
+        })
+        .await
+        .expect("list relations")
+        .into_iter()
+        .map(|relation| relation.name)
+        .collect()
+}
+
+#[tokio::test]
+async fn swap_exclusive_relation_writes_only_while_the_family_holds_expected() {
+    let actor = spawn_test_actor().await;
+    let object = Object::new(ObjectType::Channel, "swap-channel");
+    let subject = Subject::user("alice@example.com");
+    let swap = |expected: Option<&str>, replacement: Option<&str>| SwapExclusiveRelation {
+        object: object.clone(),
+        subject: subject.clone(),
+        family: affiliation_family(),
+        expected: expected.map(Relation::new),
+        replacement: replacement.map(Relation::new),
+    };
+
+    assert_eq!(
+        actor.ask(swap(None, Some("member"))).await.expect("swap"),
+        ExclusiveRelationSwap::Swapped
+    );
+    assert_eq!(
+        held_relations(&actor, &object, &subject).await,
+        vec!["member"]
+    );
+
+    assert_eq!(
+        actor
+            .ask(swap(Some("outcast"), Some("admin")))
+            .await
+            .expect("swap"),
+        ExclusiveRelationSwap::Mismatch,
+        "a family that does not hold `expected` is left alone"
+    );
+    assert_eq!(
+        held_relations(&actor, &object, &subject).await,
+        vec!["member"]
+    );
+
+    assert_eq!(
+        actor.ask(swap(None, Some("admin"))).await.expect("swap"),
+        ExclusiveRelationSwap::Mismatch,
+        "`expected: None` requires the family to be empty"
+    );
+
+    assert_eq!(
+        actor
+            .ask(swap(Some("member"), Some("admin")))
+            .await
+            .expect("swap"),
+        ExclusiveRelationSwap::Swapped
+    );
+    assert_eq!(
+        held_relations(&actor, &object, &subject).await,
+        vec!["admin"]
+    );
+
+    assert_eq!(
+        actor.ask(swap(Some("admin"), None)).await.expect("swap"),
+        ExclusiveRelationSwap::Swapped
+    );
+    assert!(held_relations(&actor, &object, &subject).await.is_empty());
+}

@@ -2,6 +2,7 @@ use super::*;
 use crate::admin::channels::{
     acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
 };
+use crate::permissions::{ExclusiveRelationSwap, SwapExclusiveRelation};
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
 
 /// Upper bound on the mutating room-actor asks below. The room actor
@@ -80,7 +81,7 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
     let object = Object::new(ObjectType::Channel, channel_id);
     let subject = Subject::user(jid.to_string());
 
-    for relation in ["owner", "admin", "member", "outcast"] {
+    for relation in CHANNEL_AFFILIATION_RELATIONS {
         let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
         match state
             .deps
@@ -112,8 +113,15 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
     }
 }
 
-fn affiliation_of(list: &[(BareJid, Affiliation)], jid: &BareJid) -> Option<Affiliation> {
+/// The mutually exclusive channel relations one managed affiliation occupies.
+const CHANNEL_AFFILIATION_RELATIONS: [&str; 4] = ["owner", "admin", "member", "outcast"];
+
+/// The affiliation an admin batch leaves on `jid` once every item has been
+/// persisted in order: the last write wins, so `[Outcast, Member]` on one JID
+/// leaves `Member`.
+fn final_affiliation_of(list: &[(BareJid, Affiliation)], jid: &BareJid) -> Option<Affiliation> {
     list.iter()
+        .rev()
         .find(|(candidate, _)| candidate == jid)
         .map(|(_, affiliation)| *affiliation)
 }
@@ -124,9 +132,10 @@ fn affiliation_of(list: &[(BareJid, Affiliation)], jid: &BareJid) -> Option<Affi
 ///
 /// A missing commit proves only that THIS attempt did not land. The room lock
 /// is process-local, so a later owner may already have committed a newer
-/// affiliation for the same JID. Each tuple is restored compare-and-set: only
-/// while it still holds the value this attempt wrote. A tuple that moved on
-/// keeps the later owner's value.
+/// affiliation for the same JID. Each tuple is therefore restored with an
+/// atomic compare-and-set in the authorization store: the pre-ask value is
+/// written only while the family still holds the value this batch finally
+/// wrote. A tuple that moved on keeps the later owner's value.
 async fn rollback_admin_affiliations(
     state: &WebSocketState,
     managed_channel_id: Option<&str>,
@@ -136,44 +145,49 @@ async fn rollback_admin_affiliations(
     let Some(channel_id) = managed_channel_id else {
         return;
     };
-    let target_jids: Vec<BareJid> = durable_previous_affiliations
-        .iter()
-        .map(|(jid, _)| jid.clone())
-        .collect();
-    let current = match explicit_channel_affiliations_for_jids(
-        &state.deps.app_state,
-        channel_id,
-        target_jids,
-    )
-    .await
-    {
-        Ok(current) => current,
-        Err(error) => {
-            warn!(
-                channel = channel_id,
-                error = %error,
-                "Could not read current managed-channel affiliations; retaining optimistic tuples for later reconciliation"
-            );
-            return;
-        }
-    };
+    let object = Object::new(ObjectType::Channel, channel_id);
     for (previous_jid, previous_affiliation) in durable_previous_affiliations {
-        let optimistic = affiliation_of(optimistic_affiliations, previous_jid);
-        if optimistic.is_some() && affiliation_of(&current, previous_jid) != optimistic {
-            warn!(
-                channel = channel_id,
-                target = %previous_jid,
-                "Managed-channel affiliation changed after this attempt wrote it; keeping the later value instead of rolling back"
-            );
+        let Some(optimistic) = final_affiliation_of(optimistic_affiliations, previous_jid) else {
+            let _ = persist_managed_channel_affiliation(
+                state,
+                channel_id,
+                previous_jid,
+                *previous_affiliation,
+            )
+            .await;
+            continue;
+        };
+        if optimistic == *previous_affiliation {
             continue;
         }
-        let _ = persist_managed_channel_affiliation(
-            state,
-            channel_id,
-            previous_jid,
-            *previous_affiliation,
-        )
-        .await;
+        let swap = SwapExclusiveRelation {
+            object: object.clone(),
+            subject: Subject::user(previous_jid.to_string()),
+            family: CHANNEL_AFFILIATION_RELATIONS
+                .iter()
+                .map(|relation| Relation::new(*relation))
+                .collect(),
+            expected: channel_affiliation_relation(optimistic).map(Relation::new),
+            replacement: channel_affiliation_relation(*previous_affiliation).map(Relation::new),
+        };
+        match state.deps.app_state.permission_actor.ask(swap).await {
+            Ok(ExclusiveRelationSwap::Swapped) => {}
+            Ok(ExclusiveRelationSwap::Mismatch) => {
+                warn!(
+                    channel = channel_id,
+                    target = %previous_jid,
+                    "Managed-channel affiliation changed after this attempt wrote it; keeping the later value instead of rolling back"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    channel = channel_id,
+                    target = %previous_jid,
+                    error = %error,
+                    "Could not roll back managed-channel affiliation; retaining the optimistic tuple for later reconciliation"
+                );
+            }
+        }
     }
 }
 
@@ -3201,6 +3215,41 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Affiliation::Member, Affiliation::Admin],
             "only the tuple still holding this attempt's value is restored"
+        );
+    }
+
+    /// A batch may touch one JID several times; persistence applies them in
+    /// order, so the rollback must compare against the final value.
+    #[tokio::test]
+    async fn rollback_compares_against_the_batch_final_affiliation_per_jid() {
+        let state = create_test_websocket_state().await;
+        let channel_id = "cas-final-value-channel";
+        let target: BareJid = "target@example.com".parse().expect("target");
+        // Pre-ask: no explicit affiliation. The batch wrote Outcast, then Admin.
+        let previous = vec![(target.clone(), Affiliation::None)];
+        let optimistic = vec![
+            (target.clone(), Affiliation::Outcast),
+            (target.clone(), Affiliation::Admin),
+        ];
+        for (jid, affiliation) in &optimistic {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("optimistic tuple");
+        }
+
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &optimistic).await;
+
+        let current =
+            explicit_channel_affiliations_for_jids(&state.deps.app_state, channel_id, [target])
+                .await
+                .expect("current tuples");
+        assert_eq!(
+            current
+                .iter()
+                .map(|(_, affiliation)| *affiliation)
+                .collect::<Vec<_>>(),
+            vec![Affiliation::None],
+            "the batch's own final write must be recognised and rolled back"
         );
     }
 }
