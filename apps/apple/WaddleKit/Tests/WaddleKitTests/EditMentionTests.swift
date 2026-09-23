@@ -7,6 +7,19 @@ import Testing
 @MainActor
 @Suite("Editing keeps mentions")
 struct EditMentionTests {
+    @Test func ownNickRangesRejectLongerNickPrefixes() {
+        #expect(MentionTokens.ownNickRanges("alice", in: "@alice-smith @alice+dev @alice#dev @alice.bob @alice*dev @alice~dev @alice.(dev @alice*(dev").isEmpty)
+    }
+
+    @Test func ownNickRangesKeepSentencePunctuationAsABoundary() {
+        #expect(MentionTokens.ownNickRanges("alice", in: "@alice.") == [0..<6])
+    }
+
+    @Test func ownNickRangesKeepAPlainMentionBeforeFollowingText() {
+        #expect(MentionTokens.ownNickRanges("alice", in: "@alice hello") == [0..<6])
+        #expect(MentionTokens.ownNickRanges("alice", in: "@alice, thanks") == [0..<6])
+    }
+
     private let carol = bare("carol@waddle.test")
 
     /// Sends `draft` to bob, after `earlier` arrived, and returns our row.

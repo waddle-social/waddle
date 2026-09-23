@@ -15,6 +15,15 @@ struct ReviewRegressionTests {
         return (coordinator, port)
     }
 
+    @Test func fakePortProbeUsesScriptedResult() async {
+        let port = FakePort()
+        #expect(await port.probeConnection())
+
+        port.probeConnectionResult = false
+        #expect(await !port.probeConnection())
+        #expect(port.probeConnectionCount == 2)
+    }
+
     /// An occupant injecting a foreign stanza-id equal to another row's
     /// room id must not make that row unmoderatable.
     @Test func injectedForeignStanzaIDDoesNotBlockModeration() {
@@ -62,30 +71,37 @@ struct ReviewRegressionTests {
     }
 
     @Test func queueKeepsOrderAcrossTransientFailure() async {
-        let (coordinator, port) = online()
-        coordinator.isSendReady = false
-        let first = await coordinator.send(Draft(text: "1"), in: bobConversation)!
-        let second = await coordinator.send(Draft(text: "2"), in: bobConversation)!
+        let port = FakePort()
         var failOnce = true
         port.sendOutcome = { message in
-            if failOnce { failOnce = false; return .notConnected }
+            if failOnce {
+                failOnce = false
+                return .notConnected
+            }
             return .sent(stanzaID: message.clientID)
         }
-        coordinator.isSendReady = true
-        await coordinator.flushOutboundQueue()
+        let coordinator = SessionCoordinator(
+            account: me,
+            port: port,
+            reconnectPolicy: ReconnectPolicy(base: 0.01, cap: 0.01)
+        )
+        let first = await coordinator.send(Draft(text: "1"), in: bobConversation)!
+        let second = await coordinator.send(Draft(text: "2"), in: bobConversation)!
+
+        coordinator.start()
+        port.emit(.connected)
+        await eventually { port.disconnectCount == 1 }
         #expect(coordinator.outboundQueue.map(\.clientID) == [first, second])
-        // The simulated online fixture does not consume FakePort.events, so
-        // model the next ready stream after the transient failure explicitly.
-        coordinator.isConnectResetting = false
-        coordinator.status.connection = .online
-        coordinator.isSendReady = true
-        await coordinator.flushOutboundQueue()
+        await eventually { port.connectCount >= 2 }
+        port.emit(.connected)
+        await eventually { coordinator.isSendReady && coordinator.outboundQueue.isEmpty }
         #expect(port.sent.map(\.clientID) == [first, first, second])
         // A send while not ready never overtakes the queue.
         coordinator.isSendReady = false
         let third = await coordinator.send(Draft(text: "3"), in: bobConversation)!
         #expect(port.sent.last?.clientID == second)
         #expect(coordinator.outboundQueue.map(\.clientID) == [third])
+        await coordinator.stop()
     }
 
     @Test func deliveryFailureAfterWriteIsRetryable() async {

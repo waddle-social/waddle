@@ -102,34 +102,13 @@ enum RichTextLayout {
             return nil
         }
         let codeRanges = inline.filter { $0.style == .code }.map(\.range) + codeBlockRanges
-        for range in ownNickRanges(in: visibleScalars, nick: input.ownNick) {
+        for range in MentionTokens.ownNickRanges(input.ownNick, in: visibleText) {
             guard !codeRanges.contains(where: { $0.overlaps(range) }),
                   !links.contains(where: { $0.overlaps(range) }),
                   !referencedMentions.contains(where: { $0.overlaps(range) }) else { continue }
             inline.append(RichStyledRange(style: .mention(.me), range: range))
         }
         return (inline, blocks)
-    }
-
-    private static func ownNickRanges(in scalars: [Unicode.Scalar], nick: String) -> [Range<Int>] {
-        let token = Array(("@" + nick).unicodeScalars)
-        guard token.count > 1, token.count <= scalars.count else { return [] }
-        func isWord(_ scalar: Unicode.Scalar) -> Bool {
-            CharacterSet.alphanumerics.contains(scalar)
-                || scalar == "_"
-                || scalar.properties.generalCategory == .nonspacingMark
-                || scalar.properties.generalCategory == .spacingMark
-                || scalar.properties.generalCategory == .enclosingMark
-        }
-        var matches: [Range<Int>] = []
-        for start in 0...(scalars.count - token.count) {
-            let end = start + token.count
-            guard Array(scalars[start..<end]).elementsEqual(token),
-                  start == 0 || !isWord(scalars[start - 1]),
-                  end == scalars.count || !isWord(scalars[end]) else { continue }
-            matches.append(start..<end)
-        }
-        return matches
     }
 
     private static func mapping(for input: RichTextInput) -> WireBodyMapping? {

@@ -53,11 +53,6 @@ public protocol ConnectionPort: AnyObject, Sendable {
     func sendPresence(_ availability: Availability, status: String?) async
 }
 
-public extension ConnectionPort {
-    /// Ports without an explicit health probe keep their existing behavior.
-    func probeConnection() async -> Bool { true }
-}
-
 /// Conversation messaging verbs.
 public protocol MessagingPort: AnyObject, Sendable {
     func send(_ message: OutboundMessage) async -> SendOutcome
