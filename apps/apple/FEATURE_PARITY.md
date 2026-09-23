@@ -71,7 +71,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
 | File upload + attachments | 0363, 0447 | ✅ | ✅ | Photos re-encoded as JPEG without location data |
-| Encrypted attachments | 0448 | ❌ | ❌ | Shown as a locked card; no decryption yet |
+| Encrypted attachments | 0448 | ❌ | 🟡 | Received files are downloaded, verified (XEP-0300 sha-256/sha-512, GCM tag) and decrypted in memory (AES-128/256-GCM with or without tag, AES-256-CBC), then shown like plain attachments. Sending encrypted files is not implemented |
 | Link previews | urn:waddle:link-preview:0 | ❌ | ✅ | Renders server-attached cards |
 | Stickers | 0449 | 🟡 | 🟡 | Render only |
 | GIF picker | — | ❌ | ❌ | Removed the fake picker; not rebuilt. Baseline: shipped six hardcoded GIF URLs |

@@ -1,10 +1,9 @@
 import Foundation
 import WaddleKit
 
-/// How a XEP-0447 shared file renders in a row.
+/// How a XEP-0447 shared file renders in a row, from its plaintext
+/// metadata (for XEP-0448 files, once decrypted).
 enum MessageAttachmentKind: Hashable {
-    /// XEP-0448: the URL points at ciphertext; never fetched as media.
-    case encrypted
     case image
     case video
     case audio
@@ -13,10 +12,6 @@ enum MessageAttachmentKind: Hashable {
     case other
 
     init(_ file: SharedFile) {
-        if file.encrypted != nil {
-            self = .encrypted
-            return
-        }
         let type = file.mediaType?.lowercased() ?? ""
         let fileExtension = (file.name.map(Self.fileExtension(of:)) ?? file.url.pathExtension).lowercased()
         if type.hasPrefix("image/") {
@@ -42,7 +37,6 @@ enum MessageAttachmentKind: Hashable {
 
     var symbolName: String {
         switch self {
-        case .encrypted: return "lock.doc"
         case .image: return "photo"
         case .video: return "film"
         case .audio: return "waveform"
@@ -55,7 +49,6 @@ enum MessageAttachmentKind: Hashable {
     /// Short description for VoiceOver and previews.
     var noun: String {
         switch self {
-        case .encrypted: return "Encrypted attachment"
         case .image: return "Image"
         case .video: return "Video"
         case .audio: return "Audio"

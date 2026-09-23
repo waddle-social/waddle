@@ -1,8 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// XEP-0447 files of a row: inline images, stickers, file cards, and
-/// locked cards for XEP-0448 encrypted files.
+/// XEP-0447 files of a row: inline images, stickers and file cards, with
+/// XEP-0448 encrypted files decrypted first.
 struct MessageAttachmentsView: View {
     let files: [SharedFile]
     let isSticker: Bool
@@ -18,9 +18,16 @@ struct MessageAttachmentsView: View {
     @ViewBuilder
     private func attachment(_ file: SharedFile) -> some View {
         let kind = MessageAttachmentKind(file)
+        if let source = file.encrypted {
+            EncryptedAttachmentView(file: file, source: source, kind: kind, isSticker: isSticker)
+        } else {
+            plainAttachment(file, kind: kind)
+        }
+    }
+
+    @ViewBuilder
+    private func plainAttachment(_ file: SharedFile, kind: MessageAttachmentKind) -> some View {
         switch kind {
-        case .encrypted:
-            MessageEncryptedFileCard(file: file)
         case .image where isSticker:
             MessageStickerView(file: file)
         case .image:
@@ -36,7 +43,7 @@ struct MessageImageAttachment: View {
     @Environment(\.openURL) private var openURL
     let file: SharedFile
 
-    private static let maxHeight: CGFloat = 320
+    static let maxHeight: CGFloat = 320
 
     var body: some View {
         Button {
@@ -142,24 +149,13 @@ struct MessageFileCard: View {
     }
 
     private var detail: String {
+        Self.detail(for: file, kind: kind)
+    }
+
+    /// "PDF · 1.2 MB", or the kind alone when the size is unknown.
+    static func detail(for file: SharedFile, kind: MessageAttachmentKind) -> String {
         guard let size = file.size else { return kind.noun }
         return "\(kind.noun) · \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))"
-    }
-}
-
-/// XEP-0448 file: decryption is not supported yet, so the ciphertext is
-/// never fetched or shown.
-struct MessageEncryptedFileCard: View {
-    let file: SharedFile
-
-    var body: some View {
-        MessageFileCardLabel(
-            symbol: MessageAttachmentKind.encrypted.symbolName,
-            title: "Encrypted attachment",
-            detail: "Opening encrypted files isn't supported yet",
-            trailingSymbol: "lock.fill"
-        )
-        .accessibilityElement(children: .combine)
     }
 }
 
