@@ -59,7 +59,10 @@ extension SessionCoordinator {
     private func outboxSnapshot() -> [PersistedOutbound] {
         let unconfirmed = sentOrder.compactMap { sentOutbound[$0] }.filter(isAwaitingConfirmation)
         let pending = (unconfirmed + outboundQueue).map { persisted($0, state: .pending) }
+        // A failed send the core replayed on a fresh stream can still be
+        // acknowledged or reflected; only a send that stays failed is saved.
         let failed = failedOutbound.values
+            .filter { deliveries.state(of: $0.clientID) == .failed }
             .map { persisted($0, state: .failed) }
             .sorted { $0.createdAt < $1.createdAt }
         var seen = Set<String>()

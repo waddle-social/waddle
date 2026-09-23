@@ -92,6 +92,21 @@ public final class HistoryStore {
         waiters.values.forEach { $0.resume() }
     }
 
+    /// The timeline dropped archived rows: page older from the oldest one
+    /// still loaded, or reload the newest page when none is left.
+    func rewind(_ conversation: ConversationID, toOlderCursor cursor: String?) {
+        guard var state = states[conversation] else { return }
+        if let cursor {
+            state.olderCursor = cursor
+            state.hasMoreOlder = true
+        } else {
+            let isLoading = state.isLoading
+            state = HistoryState()
+            state.isLoading = isLoading
+        }
+        states[conversation] = state
+    }
+
     /// Forces a newest-page refetch on next open, keeping paging cursors.
     func markAllStale() {
         for key in Array(states.keys) {

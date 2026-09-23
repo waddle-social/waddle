@@ -19,10 +19,12 @@ extension SessionCoordinator {
     /// older pages. Shares the paging state with scroll-triggered loads, so
     /// it never runs a second request beside one already in flight; it
     /// waits for that one instead, and only its own requests count against
-    /// `pageBudget`.
-    public func reveal(messageID: String, in conversation: ConversationID, pageBudget: Int = 10) async -> RevealOutcome {
+    /// `pageBudget`. The default pages at most three fifths of the
+    /// timeline's live-trim capacity, so a revealed row survives the live
+    /// messages that follow instead of being trimmed from under the reader.
+    public func reveal(messageID: String, in conversation: ConversationID, pageBudget: Int? = nil) async -> RevealOutcome {
         let generation = history.generation
-        var pagesLeft = pageBudget
+        var pagesLeft = pageBudget ?? defaultRevealPageBudget
         while true {
             if let item = timelines.timeline(for: conversation).item(withID: messageID) {
                 return .found(itemID: item.id)
@@ -52,5 +54,9 @@ extension SessionCoordinator {
             await loadLatest(conversation)
         }
         return !history.state(of: conversation).failed
+    }
+
+    var defaultRevealPageBudget: Int {
+        max(1, timelines.capacity * 3 / 5 / Self.historyPageSize)
     }
 }

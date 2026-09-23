@@ -314,3 +314,28 @@ struct OutboxRestoreTests {
         #expect(port.sent.map(\.clientID) == ["old"])
     }
 }
+
+/// Regressions from the state review.
+@MainActor
+@Suite("Outbox after a replayed failure")
+struct OutboxReplayTests {
+    /// XEP-0198 resume `<failed/>`: the core reports the send failed, replays
+    /// it on the fresh stream, and it is acknowledged there.
+    @Test func failedThenAckedIsNotRestoredAsFailed() async throws {
+        let store = InMemoryOutboxStore()
+        let first = SessionCoordinator(account: me, port: FakePort(), outboxStore: store)
+        first.start()
+        first.status.connection = .online
+        first.isSendReady = true
+        let id = try #require(await first.send(Draft(text: "hello"), in: bobConversation))
+        first.handle(.deliveryFailed(stanzaID: id))
+        first.handle(.deliveryAcked(stanzaID: id))
+        #expect(store.entries.isEmpty)
+
+        let second = SessionCoordinator(account: me, port: FakePort(), outboxStore: store)
+        second.start()
+        #expect(second.deliveries.state(of: id) != .failed)
+        await first.stop()
+        await second.stop()
+    }
+}

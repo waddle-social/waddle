@@ -87,7 +87,8 @@ public final class SessionCoordinator {
         port: any XmppPort,
         reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
         connectBudget: TimeInterval = 15,
-        outboxStore: any OutboxStore = InMemoryOutboxStore()
+        outboxStore: any OutboxStore = InMemoryOutboxStore(),
+        timelineCapacity: Int = 500
     ) {
         self.account = account
         self.port = port
@@ -96,7 +97,7 @@ public final class SessionCoordinator {
         self.connectBudget = connectBudget
         let directory = DirectoryStore()
         self.directory = directory
-        self.timelines = TimelineStore()
+        self.timelines = TimelineStore(maxItemsPerConversation: timelineCapacity)
         self.presence = PresenceStore(isRoom: { directory.isRoom($0) })
         self.typing = TypingStore()
         self.unread = UnreadStore()
@@ -107,6 +108,10 @@ public final class SessionCoordinator {
         self.inbox = InboxStore()
         self.readCursors = ReadCursorStore()
         timelines.account = account
+        let history = self.history
+        timelines.onArchiveTrimmed = { conversation, cursor in
+            history.rewind(conversation, toOlderCursor: cursor)
+        }
     }
 
     // MARK: - Lifecycle

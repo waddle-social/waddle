@@ -117,3 +117,61 @@ struct RevealTests {
         #expect(cursors(port) == [nil, "s8"])
     }
 }
+
+/// A live insert over the cap trims the oldest rows; archived ones must
+/// stay reachable by paging, and a revealed row must survive it.
+@MainActor
+@Suite("Reveal and the live-trim cap")
+struct RevealTrimTests {
+    private func page(_ ids: ClosedRange<Int>) -> ArchivePage {
+        let messages = ids.map {
+            roomMessage("m\($0)", from: "bob", stanzaID: "s\($0)", at: date(TimeInterval($0)), source: .archive(mamID: "s\($0)"))
+        }
+        return ArchivePage(messages: messages, first: "s\(ids.lowerBound)", isComplete: false)
+    }
+
+    @Test func defaultBudgetStaysWellInsideTheCapacity() {
+        let coordinator = SessionCoordinator(account: me, port: FakePort())
+        #expect(coordinator.defaultRevealPageBudget == 6)
+        #expect(coordinator.defaultRevealPageBudget * SessionCoordinator.historyPageSize <= coordinator.timelines.capacity * 3 / 5)
+    }
+
+    @Test func revealedRowSurvivesTheNextLiveMessage() async {
+        let port = FakePort()
+        // Room for two pages: the default budget is one.
+        let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 100)
+        coordinator.status.connection = .online
+        port.historyPages = [page(951...1000), page(901...950)]
+        #expect(await coordinator.reveal(messageID: "s951", in: roomConversation) == .found(itemID: "s951"))
+        coordinator.route(roomMessage("live", from: "bob", stanzaID: "live-1"))
+        #expect(coordinator.timelines.timeline(for: roomConversation).item(withID: "s951") != nil)
+        #expect(port.historyRequests.count == 1)
+    }
+
+    @Test func trimmedArchiveRowsArePagedAgain() async {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 100)
+        coordinator.status.connection = .online
+        port.historyPages = [page(951...1000), page(901...950)]
+        await coordinator.loadLatest(roomConversation)
+        await coordinator.loadOlder(roomConversation)
+        #expect(coordinator.history.state(of: roomConversation).olderCursor == "s901")
+
+        coordinator.route(roomMessage("live", from: "bob", stanzaID: "live-1"))
+        #expect(coordinator.timelines.timeline(for: roomConversation).item(withID: "s901") == nil)
+        // The next older page starts where the loaded rows now end.
+        #expect(coordinator.history.state(of: roomConversation).olderCursor == "s902")
+        #expect(coordinator.history.state(of: roomConversation).hasMoreOlder)
+    }
+
+    @Test func trimmingEveryArchivedRowReloadsTheNewestPage() {
+        let history = HistoryStore()
+        _ = history.begin(roomConversation)
+        history.finish(roomConversation, page: page(1...2), wasLatest: true)
+        history.rewind(roomConversation, toOlderCursor: nil)
+        let state = history.state(of: roomConversation)
+        #expect(!state.hasLoadedLatest)
+        #expect(state.olderCursor == nil)
+        #expect(state.hasMoreOlder)
+    }
+}
