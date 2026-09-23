@@ -5,7 +5,11 @@ extension SessionCoordinator {
     /// DM, and room the user opened or created this session. A failed
     /// discovery keeps the last known directory.
     func refreshDirectory() async {
-        if case let .success(topology) = await port.discoverTopology() {
+        let result = await port.discoverTopology()
+        // A superseded ready pipeline (the stream dropped and reconnected
+        // meanwhile) must not overwrite the directory with its answer.
+        guard !Task.isCancelled else { return }
+        if case let .success(topology) = result {
             directory.apply(topology)
         }
         let listed = (directory.channels + directory.groupDMs)

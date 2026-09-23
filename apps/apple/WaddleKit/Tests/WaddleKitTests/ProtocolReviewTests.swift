@@ -82,6 +82,17 @@ struct ProtocolReviewTests {
         await coordinator.stop()
     }
 
+    /// A ready pipeline superseded by a reconnect must not apply its
+    /// (possibly empty) discovery result over the directory.
+    @Test func cancelledDiscoveryKeepsTheDirectory() async {
+        let (coordinator, port) = online(channels: [Channel(roomJID: room, name: "general")])
+        port.topology = .empty
+        let superseded = Task { await coordinator.refreshDirectory() }
+        superseded.cancel()
+        await superseded.value
+        #expect(coordinator.directory.channels.map(\.roomJID) == [room])
+    }
+
     // MARK: - Failed archive queries
 
     @Test func failedFirstLoadIsRetryableNotTheBeginning() async {
