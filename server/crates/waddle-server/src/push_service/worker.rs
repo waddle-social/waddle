@@ -1347,6 +1347,7 @@ mod tests {
 
     use crate::push_service::test_support::{notification_item, owner, store};
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
+    use waddle_xmpp::inbox::storage::InboxStorage;
 
     #[tokio::test]
     async fn apns_badge_uses_live_account_unread_total() {
