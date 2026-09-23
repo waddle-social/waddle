@@ -46,7 +46,7 @@ public final class SessionCoordinator {
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var typingSweepTask: Task<Void, Never>?
-    @ObservationIgnored private var readyTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var readyTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored private(set) var isStopped = false
     @ObservationIgnored var outboundQueue: [OutboundMessage] = []
@@ -108,9 +108,8 @@ public final class SessionCoordinator {
         self.inbox = InboxStore()
         self.readCursors = ReadCursorStore()
         timelines.account = account
-        let history = self.history
-        timelines.onArchiveTrimmed = { conversation, cursor in
-            history.rewind(conversation, toOlderCursor: cursor)
+        timelines.onArchiveTrimmed = { [weak self] conversation, cursor in
+            self?.archiveTrimmed(conversation, cursor: cursor)
         }
     }
 

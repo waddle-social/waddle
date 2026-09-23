@@ -338,4 +338,20 @@ struct OutboxReplayTests {
         await first.stop()
         await second.stop()
     }
+
+    /// A failed room send that the room reflects was delivered: its local
+    /// echo is replaced, and it is not saved as failed.
+    @Test func failedThenReflectedIsNotSavedAsFailed() async throws {
+        let store = InMemoryOutboxStore()
+        let coordinator = SessionCoordinator(account: me, port: FakePort(), outboxStore: store)
+        coordinator.start()
+        coordinator.status.connection = .online
+        coordinator.isSendReady = true
+        let id = try #require(await coordinator.send(Draft(text: "hello"), in: roomConversation))
+        coordinator.handle(.deliveryFailed(stanzaID: id))
+        #expect(store.entries.map(\.state) == [.failed])
+        coordinator.route(roomMessage("hello", from: me.nick, stanzaID: "s-own", originID: id))
+        #expect(store.entries.isEmpty)
+        await coordinator.stop()
+    }
 }

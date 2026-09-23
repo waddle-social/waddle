@@ -9,6 +9,9 @@ public struct HistoryState: Hashable, Sendable {
     /// RSM `<first/>` of the oldest page loaded; the next `before` cursor.
     public var olderCursor: String?
     public var failed = false
+    /// A trim moved `olderCursor` back while a page was loading; that page
+    /// must not move it past the rows the rewind refetches.
+    var rewoundDuringLoad = false
 
     public init() {}
 }
@@ -41,7 +44,10 @@ public final class HistoryStore {
     func finish(_ conversation: ConversationID, page: ArchivePage, wasLatest: Bool) {
         var state = self.state(of: conversation)
         state.isLoading = false
-        if wasLatest {
+        if state.rewoundDuringLoad {
+            state.rewoundDuringLoad = false
+            state.hasLoadedLatest = state.hasLoadedLatest || wasLatest
+        } else if wasLatest {
             state.hasLoadedLatest = true
             // A refresh of the newest page only moves the older cursor on
             // the first load; later refreshes keep the deeper paging state.
@@ -61,6 +67,7 @@ public final class HistoryStore {
     func fail(_ conversation: ConversationID) {
         var state = self.state(of: conversation)
         state.isLoading = false
+        state.rewoundDuringLoad = false
         state.failed = true
         states[conversation] = state
         resumeIdleWaiters(conversation)
@@ -92,13 +99,15 @@ public final class HistoryStore {
         waiters.values.forEach { $0.resume() }
     }
 
-    /// The timeline dropped archived rows: page older from the oldest one
-    /// still loaded, or reload the newest page when none is left.
+    /// The timeline dropped archived rows: page older from the oldest row
+    /// still loaded, or reload the newest page when no loaded row has an
+    /// archive id. A page already in flight keeps the rewound cursor.
     func rewind(_ conversation: ConversationID, toOlderCursor cursor: String?) {
         guard var state = states[conversation] else { return }
         if let cursor {
             state.olderCursor = cursor
             state.hasMoreOlder = true
+            state.rewoundDuringLoad = state.isLoading
         } else {
             let isLoading = state.isLoading
             state = HistoryState()

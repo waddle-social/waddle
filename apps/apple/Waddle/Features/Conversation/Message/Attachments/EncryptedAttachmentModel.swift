@@ -37,14 +37,23 @@ final class EncryptedAttachmentModel {
     init(file: SharedFile, source: EncryptedFileSource) {
         self.file = file
         self.source = source
-        phase = file.isImage ? .loading : .idle
+        phase = EncryptedAttachmentModel.loadsAutomatically(file) ? .loading : .idle
+    }
+
+    /// Images decrypt as the row appears unless they declare a size over
+    /// the automatic cap; those, like any other file, wait for a tap.
+    private static func loadsAutomatically(_ file: SharedFile) -> Bool {
+        file.isImage && (file.size ?? 0) <= automaticDownloadLimit
     }
 
     func loadImage() async {
-        guard file.isImage, case .loading = phase else { return }
+        guard Self.loadsAutomatically(file), case .loading = phase else { return }
         do {
             let data = try await Self.fetchAndDecrypt(file: file, source: source, limit: Self.automaticDownloadLimit)
             phase = .decrypted(DecryptedAttachment(data: data, image: Image(data: data)))
+        } catch EncryptedFileDownloadError.tooLarge {
+            // Bigger than it declared: offer it as a file to open instead.
+            phase = .idle
         } catch {
             // A cancelled load (the row scrolled away) stays `.loading` so
             // the next appearance starts over.
@@ -75,7 +84,7 @@ final class EncryptedAttachmentModel {
 
     func retry() async {
         guard case .failed = phase else { return }
-        if file.isImage {
+        if Self.loadsAutomatically(file) {
             phase = .loading
             await loadImage()
         } else {

@@ -174,4 +174,72 @@ struct RevealTrimTests {
         #expect(state.olderCursor == nil)
         #expect(state.hasMoreOlder)
     }
+
+    private func settle(until condition: () -> Bool) async {
+        for _ in 0..<1_000 where !condition() {
+            await Task.yield()
+        }
+    }
+
+    /// A trim while an older page is in flight: that page must not move the
+    /// cursor past the rows the rewind refetches.
+    @Test func rewindDuringAnInFlightPageIsKept() async {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 100)
+        coordinator.status.connection = .online
+        port.historyPages = [page(951...1000), page(901...950), page(851...900)]
+        await coordinator.loadLatest(roomConversation)
+        await coordinator.loadOlder(roomConversation)
+        port.holdsHistory = true
+        let older = Task { await coordinator.loadOlder(roomConversation) }
+        await settle { !port.heldHistory.isEmpty }
+
+        coordinator.route(roomMessage("live", from: "bob", stanzaID: "live-1"))
+        port.holdsHistory = false
+        port.releaseHistory()
+        await older.value
+
+        #expect(coordinator.history.state(of: roomConversation).olderCursor == "s902")
+        await coordinator.loadOlder(roomConversation)
+        #expect(port.historyRequests.last?.1 == "s902")
+    }
+
+    /// A live row carries the room's XEP-0359 stanza-id, which is its
+    /// archive id: paging continues from it once no archived row is left.
+    @Test func liveRowsKeepPagingWhenNoArchivedRowIsLeft() async {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 3)
+        coordinator.status.connection = .online
+        port.historyPages = [page(9...10)]
+        await coordinator.loadLatest(roomConversation)
+        for index in 1...3 {
+            coordinator.route(roomMessage("live", from: "bob", stanzaID: "live-\(index)"))
+        }
+        let state = coordinator.history.state(of: roomConversation)
+        #expect(state.hasLoadedLatest)
+        #expect(state.olderCursor == "live-1")
+    }
+
+    /// With no archive id left at all, the conversation on screen reloads
+    /// its newest page instead of losing paging.
+    @Test func noPagingIDLeftReloadsTheVisibleConversation() async {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 2)
+        coordinator.status.connection = .online
+        port.historyPages = [page(9...10), page(20...21)]
+        await coordinator.open(roomConversation)
+        for index in 1...2 {
+            coordinator.route(WireMessage(
+                source: .live,
+                type: .groupchat,
+                from: room.with(resource: "bob"),
+                to: JID(bare: me.jid, resource: "phone"),
+                identity: MessageIdentity(messageID: "o\(index)", originID: "o\(index)", stanzaID: nil, stanzaIDs: []),
+                timestamp: nil,
+                body: "unarchived"
+            ))
+        }
+        await settle { port.historyRequests.count == 2 }
+        #expect(port.historyRequests.map(\.1) == [nil, nil])
+    }
 }
