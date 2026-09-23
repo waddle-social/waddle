@@ -5195,6 +5195,7 @@ async fn run_kick(
     }];
     let applied = match actor
         .ask(ApplyAdminItems {
+            attempt: waddle_xmpp::muc::AdminMutationId::generate(),
             sender_jid: caller_full.clone(),
             // Community-owner admin V2 callers are not necessarily
             // joined to the room; declare them as `Affiliation::Owner`
