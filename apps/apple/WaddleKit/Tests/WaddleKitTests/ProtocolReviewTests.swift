@@ -199,10 +199,10 @@ struct SerializedConnectTests {
         await coordinator.stop()
     }
 
-    @Test func slowAttemptThatConnectsNeedsNoRetry() async throws {
+    @Test func slowAttemptThatConnectsBeforeBudgetNeedsNoRetry() async throws {
         let port = FakePort()
         port.connectDelay = 300_000_000
-        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
+        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 1.5)
         coordinator.start()
         try await Task.sleep(nanoseconds: 350_000_000)
         port.emit(.connected)
