@@ -34,9 +34,18 @@ enum ServerSettings {
         return components.url
     }
 
+    /// `localhost`, `::1`, or a literal IPv4 address in 127.0.0.0/8. A DNS
+    /// name that merely starts with "127." is not loopback.
     private static func isLoopback(_ host: String) -> Bool {
         let bare = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        return bare == "localhost" || bare == "::1" || bare.hasPrefix("127.")
+        if bare == "localhost" || bare == "::1" {
+            return true
+        }
+        let octets = bare.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4,
+              octets.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) && UInt8($0) != nil })
+        else { return false }
+        return octets.first == "127"
     }
 
     /// A random resource per install. Full JIDs are visible to contacts and
