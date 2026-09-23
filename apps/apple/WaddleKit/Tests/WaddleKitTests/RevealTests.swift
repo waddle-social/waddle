@@ -1,0 +1,119 @@
+import Foundation
+import Testing
+@testable import WaddleKit
+
+/// Jumping to a search hit or pin pages XEP-0313 history (RSM `before`)
+/// until the message is loaded.
+@MainActor
+@Suite("Reveal message")
+struct RevealTests {
+    private func online() -> (SessionCoordinator, FakePort) {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        return (coordinator, port)
+    }
+
+    /// An archive page, oldest message first; its RSM `<first/>` is the
+    /// oldest id.
+    private func page(_ ids: [Int], complete: Bool = false) -> ArchivePage {
+        let messages = ids.map {
+            roomMessage("m\($0)", from: "bob", stanzaID: "s\($0)", at: date(TimeInterval($0)), source: .archive(mamID: "s\($0)"))
+        }
+        return ArchivePage(messages: messages, first: ids.first.map { "s\($0)" }, isComplete: complete)
+    }
+
+    private func cursors(_ port: FakePort) -> [String?] {
+        port.historyRequests.map(\.1)
+    }
+
+    /// Lets queued main-actor work run until `condition` holds.
+    private func settle(until condition: () -> Bool) async {
+        for _ in 0..<1_000 where !condition() {
+            await Task.yield()
+        }
+    }
+
+    @Test func alreadyLoadedNeedsNoRequest() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9])]
+        await coordinator.loadLatest(roomConversation)
+        #expect(await coordinator.reveal(messageID: "s8", in: roomConversation) == .found(itemID: "s8"))
+        #expect(port.historyRequests.count == 1)
+    }
+
+    @Test func loadsLatestThenPagesBackUntilFound() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9]), page([6, 7]), page([4, 5])]
+        #expect(await coordinator.reveal(messageID: "s7", in: roomConversation) == .found(itemID: "s7"))
+        #expect(cursors(port) == [nil, "s8"])
+    }
+
+    @Test func archiveStartReachedIsNotFound() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9]), page([6, 7], complete: true)]
+        #expect(await coordinator.reveal(messageID: "gone", in: roomConversation) == .notFound)
+        #expect(cursors(port) == [nil, "s8"])
+    }
+
+    @Test func spentBudgetGivesUp() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9]), page([6, 7]), page([4, 5]), page([2, 3])]
+        #expect(await coordinator.reveal(messageID: "s2", in: roomConversation, pageBudget: 3) == .gaveUp)
+        #expect(cursors(port) == [nil, "s8", "s6"])
+    }
+
+    @Test func failedPageFails() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9]), page([6, 7])]
+        await coordinator.loadLatest(roomConversation)
+        port.failingHistoryRequests = 1
+        #expect(await coordinator.reveal(messageID: "s6", in: roomConversation) == .failed)
+        #expect(cursors(port) == [nil, "s8"])
+    }
+
+    @Test func cancellationStopsPaging() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9]), page([6, 7]), page([4, 5])]
+        port.holdsHistory = true
+        let reveal = Task { await coordinator.reveal(messageID: "s4", in: roomConversation) }
+        await settle { !port.heldHistory.isEmpty }
+        reveal.cancel()
+        port.releaseHistory()
+        #expect(await reveal.value == .gaveUp)
+        #expect(cursors(port) == [nil])
+    }
+
+    @Test func waitsForScrollLoadInsteadOfDuplicatingIt() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9]), page([6, 7]), page([4, 5])]
+        await coordinator.loadLatest(roomConversation)
+        port.holdsHistory = true
+        let scroll = Task { await coordinator.loadOlder(roomConversation) }
+        await settle { !port.heldHistory.isEmpty }
+        let reveal = Task { await coordinator.reveal(messageID: "s4", in: roomConversation) }
+        await settle { false }
+        #expect(cursors(port) == [nil, "s8"])
+
+        port.holdsHistory = false
+        port.releaseHistory()
+        await scroll.value
+        #expect(await reveal.value == .found(itemID: "s4"))
+        #expect(cursors(port) == [nil, "s8", "s6"])
+    }
+
+    @Test func historyResetStopsPaging() async {
+        let (coordinator, port) = online()
+        port.historyPages = [page([8, 9]), page([6, 7]), page([4, 5])]
+        await coordinator.loadLatest(roomConversation)
+        port.holdsHistory = true
+        let reveal = Task { await coordinator.reveal(messageID: "s4", in: roomConversation) }
+        await settle { !port.heldHistory.isEmpty }
+        coordinator.timelines.clear()
+        coordinator.history.clear()
+        port.holdsHistory = false
+        port.releaseHistory()
+        #expect(await reveal.value == .failed)
+        #expect(cursors(port) == [nil, "s8"])
+    }
+}

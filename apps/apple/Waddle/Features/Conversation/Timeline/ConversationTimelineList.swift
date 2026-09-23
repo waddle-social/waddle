@@ -65,7 +65,7 @@ struct ConversationTimelineList: View {
                 guard let anchor else { return }
                 proxy.scrollTo(anchor, anchor: .top)
             }
-            .onChange(of: actions.scrollRequest) { _, target in
+            .onChange(of: actions.scrollRequest, initial: true) { _, target in
                 guard let target else { return }
                 actions.scrollRequest = nil
                 withAnimation(reduceMotion ? nil : .easeInOut) {

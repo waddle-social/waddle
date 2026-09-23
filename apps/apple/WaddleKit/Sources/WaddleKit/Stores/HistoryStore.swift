@@ -17,6 +17,10 @@ public struct HistoryState: Hashable, Sendable {
 @Observable
 public final class HistoryStore {
     public private(set) var states: [ConversationID: HistoryState] = [:]
+    /// Bumped by `clear()`, so a long-running pager can tell its paging
+    /// state was thrown away underneath it.
+    @ObservationIgnored private(set) var generation = 0
+    @ObservationIgnored private var idleWaiters: [ConversationID: [UUID: CheckedContinuation<Void, Never>]] = [:]
 
     public init() {}
 
@@ -51,6 +55,7 @@ public final class HistoryStore {
             state.hasMoreOlder = !page.isComplete && advanced
         }
         states[conversation] = state
+        resumeIdleWaiters(conversation)
     }
 
     func fail(_ conversation: ConversationID) {
@@ -58,6 +63,33 @@ public final class HistoryStore {
         state.isLoading = false
         state.failed = true
         states[conversation] = state
+        resumeIdleWaiters(conversation)
+    }
+
+    /// Returns once no load of `conversation` is running, or at once when
+    /// the calling task is cancelled.
+    func waitUntilIdle(_ conversation: ConversationID) async {
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                guard state(of: conversation).isLoading, !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                idleWaiters[conversation, default: [:]][id] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor in self.resumeIdleWaiter(id, of: conversation) }
+        }
+    }
+
+    private func resumeIdleWaiter(_ id: UUID, of conversation: ConversationID) {
+        idleWaiters[conversation]?.removeValue(forKey: id)?.resume()
+    }
+
+    private func resumeIdleWaiters(_ conversation: ConversationID) {
+        let waiters = idleWaiters.removeValue(forKey: conversation) ?? [:]
+        waiters.values.forEach { $0.resume() }
     }
 
     /// Forces a newest-page refetch on next open, keeping paging cursors.
@@ -69,6 +101,10 @@ public final class HistoryStore {
 
     public func clear() {
         states.removeAll()
+        generation += 1
+        for conversation in Array(idleWaiters.keys) {
+            resumeIdleWaiters(conversation)
+        }
     }
 }
 

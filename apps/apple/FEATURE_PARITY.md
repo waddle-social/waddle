@@ -28,8 +28,8 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | 1:1 direct messages | — | 🟡 | ✅ | XEP-0359 dedupe across live, carbon and archive copies. Baseline: appended live and archived copies without dedupe |
 | Group DMs | 0045 | ❌ | 🟡 | Create, list and chat; rename, invite and leave not surfaced yet |
 | History (MAM) | 0313 | 🟡 | ✅ | RSM paging for rooms and DMs; refetch of the newest page after reconnect. Baseline: rooms paged; DMs fetched one page only |
-| Message search | 0313 | ❌ | 🟡 | Per-conversation archive search; results do not jump to the message yet |
-| Corrections | 0308 | 🟡 | ✅ | Full-stanza re-send per XEP-0308; received corrections replace markup and references. Baseline: rendered, never sent |
+| Message search | 0313 | ❌ | ✅ | Per-conversation archive search; a result jumps to the message, paging older history in when it is not loaded |
+| Corrections | 0308 | 🟡 | ✅ | Full-stanza re-send per XEP-0308, keeping the original's mentions and markup; received corrections replace markup and references. Baseline: rendered, never sent |
 | Retraction | 0424 | ❌ | ✅ | Room retractions wait for the reflection. Baseline: `retractMessage` was an empty stub |
 | Reactions | 0444 | 🟡 | ✅ | XEP-0444 replace-set semantics, room-assigned ids only in rooms. Baseline: rendered, never sent |
 | Replies | 0461, 0428 | ✅ | ✅ | Reply ids follow XEP-0461 (room-assigned ids in rooms) |
