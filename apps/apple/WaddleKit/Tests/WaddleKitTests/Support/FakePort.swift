@@ -10,7 +10,7 @@ final class FakePort: XmppPort {
     var sent: [OutboundMessage] = []
     var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
     var reactions: [(target: String, emojis: [String])] = []
-    var corrections: [(target: String, body: String)] = []
+    var corrections: [(target: String, body: String, options: OutboundOptions)] = []
     var retractions: [String] = []
     var displayed: [(id: String, conversation: ConversationID)] = []
     var publishedCursors: [DisplayedCursor] = []
@@ -54,7 +54,7 @@ final class FakePort: XmppPort {
     }
 
     func sendCorrection(of targetID: String, body: String, in conversation: ConversationID, options: OutboundOptions) async -> SendOutcome {
-        corrections.append((targetID, body))
+        corrections.append((targetID, body, options))
         return .sent(stanzaID: "correction")
     }
 
@@ -78,8 +78,21 @@ final class FakePort: XmppPort {
     func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool { true }
     func fetchPins(in room: BareJID) async throws -> [PinEntry] { [] }
 
+    /// While set, history fetches suspend until `releaseHistory()`.
+    var holdsHistory = false
+    private(set) var heldHistory: [CheckedContinuation<Void, Never>] = []
+
+    func releaseHistory() {
+        let held = heldHistory
+        heldHistory = []
+        held.forEach { $0.resume() }
+    }
+
     func fetchHistory(of conversation: ConversationID, before cursor: String?, max: Int) async throws -> ArchivePage {
         historyRequests.append((conversation, cursor))
+        if holdsHistory {
+            await withCheckedContinuation { heldHistory.append($0) }
+        }
         if failingHistoryRequests > 0 {
             failingHistoryRequests -= 1
             throw PortError.failed

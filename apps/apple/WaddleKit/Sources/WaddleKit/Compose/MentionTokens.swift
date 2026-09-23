@@ -1,47 +1,51 @@
 import Foundation
-import WaddleKit
 
 /// The `@word` being typed at the end of the draft.
-struct MentionQuery: Hashable {
+public struct MentionQuery: Hashable, Sendable {
     /// Scalar offset of the `@`.
-    let start: Int
+    public let start: Int
     /// What follows the `@`.
-    let text: String
+    public let text: String
 }
 
 /// A mention the user picked, re-located in the final text on send.
-struct RecordedMention: Hashable {
+public struct RecordedMention: Hashable, Sendable {
     /// `@nick`, as inserted.
-    let token: String
-    let target: MentionTarget
+    public let token: String
+    public let target: MentionTarget
+
+    public init(token: String, target: MentionTarget) {
+        self.token = token
+        self.target = target
+    }
 }
 
 /// Mention token handling over the raw draft, in Unicode scalar offsets
 /// (the unit XEP-0372 references count in).
-enum MentionTokens {
+public enum MentionTokens {
     /// The trailing `@word` when the draft ends inside one. The composer
     /// has no caret position on every OS it supports, so completion works
     /// on the word being typed at the end.
-    static func trailingQuery(in text: String) -> MentionQuery? {
+    public static func trailingQuery(in text: String) -> MentionQuery? {
         let scalars = Array(text.unicodeScalars)
         let tokenStart = (scalars.lastIndex(where: isSpace) ?? -1) + 1
         guard tokenStart < scalars.count, scalars[tokenStart] == "@" else { return nil }
         let query = scalars[(tokenStart + 1)...]
         guard query.count <= 64, !query.contains("@") else { return nil }
-        return MentionQuery(start: tokenStart, text: RichTextSegmenter.string(query))
+        return MentionQuery(start: tokenStart, text: string(query))
     }
 
     /// Replaces the query with `@name ` and returns the new text.
-    static func completing(_ text: String, query: MentionQuery, with name: String) -> String {
+    public static func completing(_ text: String, query: MentionQuery, with name: String) -> String {
         let scalars = Array(text.unicodeScalars)
-        let prefix = RichTextSegmenter.string(scalars[..<min(query.start, scalars.count)])
+        let prefix = string(scalars[..<min(query.start, scalars.count)])
         return prefix + "@" + name + " "
     }
 
     /// Finds every recorded token still present as a whole word and returns
     /// one mention per occurrence. Longer tokens claim first so `@ann`
     /// never matches inside `@anna`. Deleted or edited tokens drop out.
-    static func locate(_ recorded: [RecordedMention], in text: String) -> [MentionDraft] {
+    public static func locate(_ recorded: [RecordedMention], in text: String) -> [MentionDraft] {
         let scalars = Array(text.unicodeScalars)
         var claimed: [Range<Int>] = []
         var mentions: [MentionDraft] = []
@@ -57,12 +61,6 @@ enum MentionTokens {
             }
         }
         return mentions.sorted { $0.range.lowerBound < $1.range.lowerBound }
-    }
-
-    /// Recorded mentions whose token still appears in `text`.
-    static func pruned(_ recorded: [RecordedMention], in text: String) -> [RecordedMention] {
-        let located = Set(locate(recorded, in: text).map(\.target))
-        return recorded.filter { located.contains($0.target) }
     }
 
     private static func occurrences(of token: [Unicode.Scalar], in scalars: [Unicode.Scalar]) -> [Range<Int>] {
@@ -83,15 +81,23 @@ enum MentionTokens {
         return ranges
     }
 
+    private static func string(_ scalars: ArraySlice<Unicode.Scalar>) -> String {
+        var view = String.UnicodeScalarView()
+        view.append(contentsOf: scalars)
+        return String(view)
+    }
+
     private static func isSpace(_ scalar: Unicode.Scalar) -> Bool {
         CharacterSet.whitespacesAndNewlines.contains(scalar)
     }
 
+    /// Bold, italic and strike markers count as word edges, so a mention
+    /// wrapped in markdown (as editing a styled message produces) is found.
     private static func opensWord(_ scalar: Unicode.Scalar) -> Bool {
-        isSpace(scalar) || "([{\"'".unicodeScalars.contains(scalar)
+        isSpace(scalar) || "([{\"'*~".unicodeScalars.contains(scalar)
     }
 
     private static func closesWord(_ scalar: Unicode.Scalar) -> Bool {
-        isSpace(scalar) || ",.:;!?)]}\"'".unicodeScalars.contains(scalar)
+        isSpace(scalar) || ",.:;!?)]}\"'*~".unicodeScalars.contains(scalar)
     }
 }

@@ -55,11 +55,12 @@ final class ComposerModel {
             stashedText = text
             stashedMentions = mentions
         }
+        let editable = EditableMessage(item: item)
         editing = item
         reply = nil
-        mentions = []
-        editBaseline = EditableMarkdown.text(for: item)
-        text = editBaseline
+        mentions = editable.recordedMentions
+        editBaseline = editable.text
+        text = editable.text
     }
 
     func cancelEdit() {
@@ -157,9 +158,10 @@ final class ComposerModel {
             let newText = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !newText.isEmpty else { return nil }
             let baseline = editBaseline.trimmingCharacters(in: .whitespacesAndNewlines)
+            let draft = Draft(text: text, mentions: MentionTokens.locate(mentions, in: text))
             cancelEdit()
             guard newText != baseline else { return nil }
-            return .edit(editing, newText)
+            return .edit(editing, draft)
         }
         guard canSend else { return nil }
         let draft = Draft(
@@ -177,8 +179,8 @@ final class ComposerModel {
         switch submission {
         case let .send(draft):
             await session.send(draft, in: conversation)
-        case let .edit(item, newText):
-            let succeeded = await session.edit(item, to: newText)
+        case let .edit(item, draft):
+            let succeeded = await session.edit(item, draft: draft)
             if !succeeded {
                 errorMessage = "Couldn't edit the message. Try again."
             }
@@ -198,8 +200,8 @@ final class ComposerModel {
 /// What one press of Send does.
 enum ComposerSubmission {
     case send(Draft)
-    /// XEP-0308 correction of `item` to the new text.
-    case edit(TimelineItem, String)
+    /// XEP-0308 correction of `item` to the draft's text and mentions.
+    case edit(TimelineItem, Draft)
 }
 
 /// Composer drafts per account, conversation and thread, kept in memory

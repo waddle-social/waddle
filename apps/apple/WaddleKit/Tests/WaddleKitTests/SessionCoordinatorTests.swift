@@ -174,7 +174,7 @@ struct SessionCoordinatorTests {
         let (coordinator, port) = online()
         await coordinator.send(Draft(text: "tpyo"), in: bobConversation)
         let item = coordinator.timelines.timeline(for: bobConversation).items[0]
-        #expect(await coordinator.edit(item, to: "typo"))
+        #expect(await coordinator.edit(item, draft: Draft(text: "typo")))
         #expect(port.corrections.last?.target == item.correctionTargetID)
         #expect(coordinator.timelines.timeline(for: bobConversation).items[0].body == "typo")
         #expect(await coordinator.retract(item))

@@ -152,7 +152,7 @@ struct ReviewRegressionTests {
         let reply = ReplyContext(targetID: "p1", author: jid("bob@waddle.test"), parentBody: "q", parentAuthorName: "bob")
         await coordinator.send(Draft(text: "caption", reply: reply, attachments: [file]), in: bobConversation)
         let item = coordinator.timelines.timeline(for: bobConversation).items[0]
-        #expect(await coordinator.edit(item, to: "better caption"))
+        #expect(await coordinator.edit(item, draft: Draft(text: "better caption")))
         #expect(port.corrections.last?.body.hasSuffix("better caption") == true)
         let row = coordinator.timelines.timeline(for: bobConversation).items[0]
         #expect(row.body == "better caption")
