@@ -612,6 +612,9 @@ impl kameo::message::Message<GetAdminContext> for RoomActor {
 }
 
 pub struct ApplyAdminItems {
+    /// Minted by the caller so recovery can identify this ask even if the
+    /// predecessor disappears before returning its snapshot.
+    pub attempt: super::super::durable::AdminMutationId,
     pub sender_jid: FullJid,
     pub sender_affiliation: Affiliation,
     pub sender_role: Role,
@@ -923,6 +926,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             durable_updates.extend(applied_durable_updates);
         }
 
+        let admin_mutation_id = (!durable_delta.is_empty()).then_some(msg.attempt);
         let outbox_reservation = if durable_delta.is_empty() {
             self.gate_pre_mutation_ownership()
                 .await
@@ -938,7 +942,8 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                         durable_updates,
                         removed_by_moderation.clone(),
                         &voice_changes,
-                    ),
+                    )
+                    .with_admin_mutation_id(admin_mutation_id.expect("non-empty durable delta")),
                 )
                 .await;
             let (_, reservation) = match commit {
@@ -962,6 +967,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 })
                                 .collect();
                             super::PendingAdminProjection {
+                                attempt: admin_mutation_id.expect("non-empty durable delta"),
                                 previous_coordinates: coordinates,
                                 expected_affiliations: touched_jids
                                     .iter()
@@ -990,6 +996,15 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             self.advance_member_admission_revision(&jid);
         }
         self.room = staged_room;
+        if let Some(attempt) = admin_mutation_id {
+            self.admin_mutation_resolution = self.durable_coordinates.map(|coordinates| {
+                super::AdminMutationResolution::Committed {
+                    attempt,
+                    coordinates,
+                }
+            });
+            self.delete_admin_receipt_after_projection(attempt);
+        }
         if needs_rehydration {
             // R1: converge the durable-recipient mirror to the durable
             // channel∪space truth after any removal to `None` — a

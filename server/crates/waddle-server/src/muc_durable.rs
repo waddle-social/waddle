@@ -70,6 +70,8 @@ use crate::clustering::relay::RelayHandle;
 use crate::clustering::NodeId;
 use crate::db::{Database, DatabaseError, Transaction};
 
+mod admin_receipts;
+
 /// Dedicated transaction-scoped Postgres advisory lock for MUC store schema
 /// bootstrap. It is distinct from the clustering claims lock
 /// (`6_841_445_497_037_937_991`), migration-ledger lock
@@ -538,6 +540,7 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
+        admin_receipts::ensure_schema(&mut tx).await?;
         // Upgrade the closed state vocabulary only when this deployment
         // predates the durable preparing phase. The catalog probe avoids an
         // ACCESS EXCLUSIVE lock on every steady-state startup.
@@ -1133,9 +1136,13 @@ impl PostgresMucRoomStore {
         room_jid: &BareJid,
         fence: &RoomClaimFenceContext,
         intent: &RoomDurableMutation,
-        coordinates: RoomCommittedCoordinates,
-        reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+        outcome: RoomCommitOutcome,
+        admin_mutation_id: Option<waddle_xmpp::muc::AdminMutationId>,
     ) -> Result<RoomCommitOutcome, RoomCommitError> {
+        let RoomCommitOutcome {
+            coordinates,
+            reservation,
+        } = outcome;
         match tx.commit().await {
             Ok(()) => Ok(RoomCommitOutcome {
                 coordinates,
@@ -1146,10 +1153,24 @@ impl PostgresMucRoomStore {
                     return Err(Self::commit_error(error));
                 }
                 let commit_error = Self::commit_error(error);
-                match self
-                    .reconcile_ambiguous_commit(room_jid, fence, intent, coordinates)
-                    .await
-                {
+                let reconciliation = if let Some(attempt) = admin_mutation_id {
+                    admin_receipts::load(&self.db, room_jid, attempt)
+                        .await
+                        .map(|receipt| match receipt {
+                            Some(receipt) if receipt == coordinates => {
+                                CommitReconciliation::Committed
+                            }
+                            // A disconnected COMMIT may still be finishing.
+                            // Only the later fenced successor can treat a
+                            // missing receipt as proof to skip the projection.
+                            Some(_) | None => CommitReconciliation::Unknown,
+                        })
+                        .map_err(|_| commit_database_error())
+                } else {
+                    self.reconcile_ambiguous_commit(room_jid, fence, intent, coordinates)
+                        .await
+                };
+                match reconciliation {
                     Ok(CommitReconciliation::Committed) => {
                         tracing::warn!(
                             room = %room_jid,
@@ -1585,11 +1606,14 @@ impl PostgresMucRoomStore {
                         room_jid,
                         fence,
                         intent,
-                        RoomCommittedCoordinates {
-                            lifecycle,
-                            revision,
+                        RoomCommitOutcome {
+                            coordinates: RoomCommittedCoordinates {
+                                lifecycle,
+                                revision,
+                            },
+                            reservation,
                         },
-                        reservation,
+                        effects.admin_mutation_id(),
                     )
                     .await;
             }
@@ -1684,11 +1708,14 @@ impl PostgresMucRoomStore {
                     room_jid,
                     fence,
                     intent,
-                    RoomCommittedCoordinates {
-                        lifecycle,
-                        revision,
+                    RoomCommitOutcome {
+                        coordinates: RoomCommittedCoordinates {
+                            lifecycle,
+                            revision,
+                        },
+                        reservation: None,
                     },
-                    None,
+                    effects.admin_mutation_id(),
                 )
                 .await
             } else {
@@ -1727,11 +1754,14 @@ impl PostgresMucRoomStore {
                     room_jid,
                     fence,
                     intent,
-                    RoomCommittedCoordinates {
-                        lifecycle,
-                        revision,
+                    RoomCommitOutcome {
+                        coordinates: RoomCommittedCoordinates {
+                            lifecycle,
+                            revision,
+                        },
+                        reservation: None,
                     },
-                    None,
+                    effects.admin_mutation_id(),
                 )
                 .await;
         }
@@ -1755,11 +1785,14 @@ impl PostgresMucRoomStore {
                     room_jid,
                     fence,
                     intent,
-                    RoomCommittedCoordinates {
-                        lifecycle,
-                        revision,
+                    RoomCommitOutcome {
+                        coordinates: RoomCommittedCoordinates {
+                            lifecycle,
+                            revision,
+                        },
+                        reservation: None,
                     },
-                    None,
+                    effects.admin_mutation_id(),
                 )
                 .await;
         }
@@ -1782,11 +1815,14 @@ impl PostgresMucRoomStore {
                     room_jid,
                     fence,
                     intent,
-                    RoomCommittedCoordinates {
-                        lifecycle,
-                        revision,
+                    RoomCommitOutcome {
+                        coordinates: RoomCommittedCoordinates {
+                            lifecycle,
+                            revision,
+                        },
+                        reservation: None,
                     },
-                    None,
+                    effects.admin_mutation_id(),
                 )
                 .await;
         }
@@ -1812,11 +1848,14 @@ impl PostgresMucRoomStore {
                     room_jid,
                     fence,
                     intent,
-                    RoomCommittedCoordinates {
-                        lifecycle,
-                        revision,
+                    RoomCommitOutcome {
+                        coordinates: RoomCommittedCoordinates {
+                            lifecycle,
+                            revision,
+                        },
+                        reservation: None,
                     },
-                    None,
+                    effects.admin_mutation_id(),
                 )
                 .await;
         }
@@ -1903,6 +1942,9 @@ impl PostgresMucRoomStore {
             }
             RoomDurableMutation::Destroy { .. }
             | RoomDurableMutation::DestroyAndReleaseClaim { .. } => {
+                admin_receipts::delete_lifecycle_in_tx(&mut tx, lifecycle)
+                    .await
+                    .map_err(Self::commit_error)?;
                 tx.execute(
                     "DELETE FROM clustering_muc_room_affiliations WHERE room_jid = ?",
                     crate::db_params![room_jid.to_string()],
@@ -1988,6 +2030,19 @@ impl PostgresMucRoomStore {
         )
         .await
         .map_err(Self::commit_error)?;
+        if let Some(attempt) = effects.admin_mutation_id() {
+            admin_receipts::insert_in_tx(
+                &mut tx,
+                room_jid,
+                attempt,
+                RoomCommittedCoordinates {
+                    lifecycle,
+                    revision: next_revision,
+                },
+            )
+            .await
+            .map_err(Self::commit_error)?;
+        }
         let reservation = self
             .enqueue_room_effects_in_tx(
                 &mut tx,
@@ -2006,11 +2061,14 @@ impl PostgresMucRoomStore {
             room_jid,
             fence,
             intent,
-            RoomCommittedCoordinates {
-                lifecycle,
-                revision: next_revision,
+            RoomCommitOutcome {
+                coordinates: RoomCommittedCoordinates {
+                    lifecycle,
+                    revision: next_revision,
+                },
+                reservation,
             },
-            reservation,
+            effects.admin_mutation_id(),
         )
         .await
     }
@@ -2191,6 +2249,22 @@ impl PostgresMucRoomStore {
 }
 
 impl MucDurableStore for PostgresMucRoomStore {
+    fn load_admin_mutation_receipt<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        attempt: waddle_xmpp::muc::AdminMutationId,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<RoomCommittedCoordinates>> {
+        Box::pin(admin_receipts::load(&self.db, room_jid, attempt))
+    }
+
+    fn delete_admin_mutation_receipt<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        attempt: waddle_xmpp::muc::AdminMutationId,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        Box::pin(admin_receipts::delete(&self.db, room_jid, attempt))
+    }
+
     fn commit_room_mutation<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3106,6 +3180,9 @@ mod tests {
         .await
         .expect("open test postgres");
         let conn = db.guard().await.expect("guard");
+        conn.execute("DROP TABLE IF EXISTS clustering_muc_admin_receipts", ())
+            .await
+            .expect("drop admin receipts");
         conn.execute("DROP TABLE IF EXISTS clustering_muc_room_lifecycles", ())
             .await
             .expect("drop room lifecycles");
@@ -7483,5 +7560,224 @@ mod tests {
         remove_room_claim_fence_if(&cache, &jid, &fence_a);
 
         assert_eq!(cache.get(&jid).as_deref(), Some(&fence_b));
+    }
+    #[tokio::test]
+    async fn admin_commit_receipt_survives_foreign_mutations_and_effect_drain() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(ProjectionTestRoom {
+            store,
+            db,
+            room_jid,
+            fence,
+            ..
+        }) = projection_test_room("admin-receipt-handoff").await
+        else {
+            return;
+        };
+        let attempt = waddle_xmpp::muc::AdminMutationId::generate();
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice");
+        let committed = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::AffiliationBatch(vec![
+                    waddle_xmpp::muc::durable::AffiliationEntry {
+                        jid: alice.to_bare(),
+                        affiliation: Some(Affiliation::Outcast),
+                    },
+                ]),
+                RoomMutationEffects::admin(room_jid.clone(), vec![], vec![], vec![alice], vec![])
+                    .with_admin_mutation_id(attempt),
+            )
+            .await
+            .expect("commit admin batch and its proof");
+        assert_eq!(
+            store
+                .load_admin_mutation_receipt(&room_jid, attempt)
+                .await
+                .expect("receipt"),
+            Some(committed.coordinates)
+        );
+        assert!(
+            committed.reservation.is_some(),
+            "admin effects must be staged"
+        );
+        let drained = db
+            .guard()
+            .await
+            .expect("guard")
+            .execute(
+                "DELETE FROM clustering_muc_room_effects WHERE lifecycle_id = ?",
+                crate::db_params![committed.coordinates.lifecycle.to_string()],
+            )
+            .await
+            .expect("simulate completed effect delivery");
+        assert!(drained > 0);
+
+        let claims = PostgresClaimStore::new(db.clone());
+        claims
+            .release_exact(&fence.entity, &fence.owner, fence.epoch)
+            .await
+            .expect("release original owner");
+        let foreign = node_identity();
+        let epoch = claims
+            .ensure_claimed(&fence.entity, &foreign)
+            .await
+            .expect("foreign claim");
+        let foreign_fence =
+            RoomClaimFenceContext::new(fence.entity.clone(), foreign.clone(), epoch);
+        let foreign_store = PostgresMucRoomStore::open(
+            db.clone(),
+            CancellationToken::new(),
+            SharedNodeIdentity::new(foreign),
+        )
+        .await
+        .expect("foreign store");
+        foreign_store.record_claim_fence(&room_jid, foreign_fence.clone());
+        let foreign_attempt = waddle_xmpp::muc::AdminMutationId::generate();
+        let later = foreign_store
+            .commit_room_mutation(
+                &room_jid,
+                &foreign_fence,
+                RoomDurableMutation::AffiliationBatch(vec![
+                    waddle_xmpp::muc::durable::AffiliationEntry {
+                        jid: "bob@example.com".parse().expect("bob"),
+                        affiliation: Some(Affiliation::Outcast),
+                    },
+                ]),
+                RoomMutationEffects::admin(room_jid.clone(), vec![], vec![], vec![], vec![])
+                    .with_admin_mutation_id(foreign_attempt),
+            )
+            .await
+            .expect("independent foreign admin commit");
+        assert!(later.coordinates.revision > committed.coordinates.revision);
+        assert_eq!(
+            foreign_store
+                .load_admin_mutation_receipt(&room_jid, attempt)
+                .await
+                .expect("original proof"),
+            Some(committed.coordinates)
+        );
+        assert_eq!(
+            foreign_store
+                .load_admin_mutation_receipt(
+                    &room_jid,
+                    waddle_xmpp::muc::AdminMutationId::generate()
+                )
+                .await
+                .expect("uncommitted attempt"),
+            None
+        );
+
+        foreign_store
+            .commit_room_mutation(
+                &room_jid,
+                &foreign_fence,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: None,
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("destroy lifecycle");
+        for receipt in [attempt, foreign_attempt] {
+            assert_eq!(
+                foreign_store
+                    .load_admin_mutation_receipt(&room_jid, receipt)
+                    .await
+                    .expect("destroyed receipt"),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_receipt_insert_failure_rolls_back_affiliations_and_effects() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(ProjectionTestRoom {
+            store,
+            db,
+            room_jid,
+            fence,
+            ..
+        }) = projection_test_room("admin-receipt-rollback").await
+        else {
+            return;
+        };
+        let attempt = waddle_xmpp::muc::AdminMutationId::generate();
+        let alice: BareJid = "alice@example.com".parse().expect("alice");
+        let committed = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::AffiliationBatch(vec![
+                    waddle_xmpp::muc::durable::AffiliationEntry {
+                        jid: alice,
+                        affiliation: Some(Affiliation::Member),
+                    },
+                ]),
+                RoomMutationEffects::none().with_admin_mutation_id(attempt),
+            )
+            .await
+            .expect("initial batch");
+        let bob: jid::FullJid = "bob@example.com/web".parse().expect("bob");
+        // Deliberately violate the receipt's unique key to inject a storage
+        // failure after affiliation changes, and require the whole transaction
+        // (including the staged admin effects) to roll back.
+        assert!(store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::AffiliationBatch(vec![
+                    waddle_xmpp::muc::durable::AffiliationEntry {
+                        jid: bob.to_bare(),
+                        affiliation: Some(Affiliation::Outcast),
+                    }
+                ]),
+                RoomMutationEffects::admin(
+                    room_jid.clone(),
+                    vec![],
+                    vec![],
+                    vec![bob.clone()],
+                    vec![]
+                )
+                .with_admin_mutation_id(attempt)
+            )
+            .await
+            .is_err());
+        let stored = store
+            .load_room_state_fenced(&room_jid, &fence)
+            .await
+            .expect("state")
+            .expect("room");
+        assert_eq!(stored.coordinates, Some(committed.coordinates));
+        assert!(!stored
+            .affiliations
+            .iter()
+            .any(|entry| entry.jid == bob.to_bare()));
+        assert_eq!(
+            store
+                .load_admin_mutation_receipt(&room_jid, attempt)
+                .await
+                .expect("original receipt"),
+            Some(committed.coordinates)
+        );
+        let connection = db.guard().await.expect("guard");
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM clustering_muc_room_effects WHERE lifecycle_id = ?",
+                crate::db_params![committed.coordinates.lifecycle.to_string()],
+            )
+            .await
+            .expect("effects");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("row read")
+                .expect("count row")
+                .get::<i64>(0)
+                .expect("count"),
+            0
+        );
     }
 }

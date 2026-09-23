@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use crate::muc::MucConfigStatusCode;
 use crate::types::{Affiliation, Role, Voice};
 
-use super::{RoomEffectOrdinal, RoomLifecycleId, RoomRevision};
+use super::{AdminMutationId, RoomEffectOrdinal, RoomLifecycleId, RoomRevision};
 
 /// A validated room nickname carried by a durable effect. Deserialization
 /// re-validates (`try_from`), so a malformed stored nickname is rejected at
@@ -227,6 +227,7 @@ pub struct RoomMutationEffects {
     staging: RoomEffectStagingClass,
     effects: Vec<RoomEffect>,
     superseding_reservation: Option<RoomEffectReservation>,
+    admin_mutation_id: Option<AdminMutationId>,
 }
 
 impl RoomMutationEffects {
@@ -236,6 +237,7 @@ impl RoomMutationEffects {
             staging: RoomEffectStagingClass::StagedConfig,
             effects: Vec::new(),
             superseding_reservation: None,
+            admin_mutation_id: None,
         }
     }
     pub fn none_superseding(reservation: RoomEffectReservation) -> Self {
@@ -266,6 +268,7 @@ impl RoomMutationEffects {
                 voice_changes,
             }],
             superseding_reservation: None,
+            admin_mutation_id: None,
         }
     }
     pub fn admin(
@@ -289,6 +292,7 @@ impl RoomMutationEffects {
                 },
             ],
             superseding_reservation: None,
+            admin_mutation_id: None,
         }
     }
     pub fn members_only_enforcement(
@@ -319,6 +323,7 @@ impl RoomMutationEffects {
                 },
             ],
             superseding_reservation: None,
+            admin_mutation_id: None,
         }
     }
     pub fn with_superseding_reservation(mut self, reservation: RoomEffectReservation) -> Self {
@@ -342,6 +347,7 @@ impl RoomMutationEffects {
                 recipients,
             }],
             superseding_reservation: None,
+            admin_mutation_id: None,
         }
     }
     pub fn room_jid(&self) -> Option<&BareJid> {
@@ -352,6 +358,15 @@ impl RoomMutationEffects {
     }
     pub fn effects(&self) -> &[RoomEffect] {
         &self.effects
+    }
+    /// Request a durable receipt for this exact admin batch in the same
+    /// transaction as its affiliations and effects.
+    pub fn with_admin_mutation_id(mut self, attempt: AdminMutationId) -> Self {
+        self.admin_mutation_id = Some(attempt);
+        self
+    }
+    pub fn admin_mutation_id(&self) -> Option<AdminMutationId> {
+        self.admin_mutation_id
     }
     pub fn superseding_reservation(&self) -> Option<&RoomEffectReservation> {
         self.superseding_reservation.as_ref()

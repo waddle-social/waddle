@@ -369,6 +369,51 @@ async fn recover_committed_admin_effects_after_ambiguity(
     Ok((applied, suppress_direct_admin_effects))
 }
 
+async fn recover_exact_admin_result(
+    state: &WebSocketState,
+    before: &waddle_xmpp::muc::MucRoom,
+    items: &[AdminItem],
+    sender_jid: &FullJid,
+    mutation_attempt: waddle_xmpp::muc::AdminMutationId,
+    resolution: Option<waddle_xmpp::muc::room_actor::AdminMutationResolution>,
+) -> (AdminReconciliationOutcome, bool) {
+    use waddle_xmpp::muc::room_actor::AdminMutationResolution;
+    let coordinates = match resolution {
+        Some(AdminMutationResolution::Committed {
+            attempt,
+            coordinates,
+        }) if attempt == mutation_attempt => coordinates,
+        Some(AdminMutationResolution::NotCommitted { attempt }) if attempt == mutation_attempt => {
+            return (AdminReconciliationOutcome::NotCommitted, false);
+        }
+        _ => return (AdminReconciliationOutcome::Inconclusive, false),
+    };
+    match state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .reservation_for_revision(coordinates.lifecycle, coordinates.revision)
+        .await
+    {
+        Ok(reservation) => {
+            let mut applied = recover_committed_admin_effects(
+                before,
+                items,
+                sender_jid,
+                &state.deps.occupant_id_secret,
+            );
+            applied.outbox_reservation = reservation;
+            // Only this exact durable batch's rows own delivery, even if
+            // drained already or followed by another affiliation mutation.
+            (AdminReconciliationOutcome::Committed(applied), true)
+        }
+        Err(error) => {
+            warn!(room = %before.room_jid, %error, "Could not recover exact committed admin outbox reservation");
+            (AdminReconciliationOutcome::Inconclusive, false)
+        }
+    }
+}
+
 async fn reconcile_ambiguous_admin_result(
     state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -376,7 +421,7 @@ async fn reconcile_ambiguous_admin_result(
     pre_apply_snapshot: Option<&waddle_xmpp::muc::room_actor::RoomSnapshot>,
     items: &[AdminItem],
     sender_jid: &FullJid,
-    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    mutation_attempt: waddle_xmpp::muc::AdminMutationId,
 ) -> (
     Option<waddle_xmpp::muc::room_actor::AdminItemsApplied>,
     bool,
@@ -388,13 +433,35 @@ async fn reconcile_ambiguous_admin_result(
         .await
     {
         Ok(snapshot) => match pre_apply_snapshot {
+            Some(before)
+                if !is_role_change_query(items)
+                    && (before.durable_coordinates.is_some()
+                        || snapshot.durable_coordinates.is_some()) =>
+            {
+                match recover_exact_admin_result(
+                    state,
+                    &before.room,
+                    items,
+                    sender_jid,
+                    mutation_attempt,
+                    snapshot.admin_mutation_resolution,
+                )
+                .await
+                {
+                    (AdminReconciliationOutcome::Committed(applied), suppress) => {
+                        (Some(applied), false, suppress)
+                    }
+                    (AdminReconciliationOutcome::NotCommitted, _) => (None, true, false),
+                    (AdminReconciliationOutcome::Inconclusive, _) => (None, false, false),
+                }
+            }
             Some(snapshot_before_apply) => match reconcile_admin_result_from_rooms(
                 &snapshot_before_apply.room,
                 Some(&snapshot.room),
                 None,
                 items,
                 sender_jid,
-                occupant_id_secret,
+                &state.deps.occupant_id_secret,
             ) {
                 AdminReconciliationOutcome::Committed(_) => {
                     match recover_committed_admin_effects_after_ambiguity(
@@ -402,7 +469,7 @@ async fn reconcile_ambiguous_admin_result(
                         &snapshot_before_apply.room,
                         items,
                         sender_jid,
-                        occupant_id_secret,
+                        &state.deps.occupant_id_secret,
                         snapshot_before_apply.durable_coordinates,
                         snapshot.durable_coordinates,
                     )
@@ -442,6 +509,7 @@ async fn recover_admin_result_after_actor_failure(
     room_jid: &BareJid,
     pre_apply_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
     stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    mutation_attempt: waddle_xmpp::muc::AdminMutationId,
     items: &[AdminItem],
     sender_jid: &FullJid,
 ) -> (AdminReconciliationOutcome, bool) {
@@ -468,50 +536,8 @@ async fn recover_admin_result_after_actor_failure(
                 .await
             {
                 Ok(snapshot) => {
-                    let outcome = reconcile_admin_result_from_rooms(
-                        &pre_apply_snapshot.room,
-                        None,
-                        Some(&snapshot.room),
-                        items,
-                        sender_jid,
-                        &state.deps.occupant_id_secret,
-                    );
-                    if matches!(outcome, AdminReconciliationOutcome::Committed(_)) {
-                        match recover_committed_admin_effects_after_ambiguity(
-                            state,
-                            &pre_apply_snapshot.room,
-                            items,
-                            sender_jid,
-                            &state.deps.occupant_id_secret,
-                            pre_apply_snapshot.durable_coordinates,
-                            snapshot.durable_coordinates,
-                        )
-                        .await
-                        {
-                            Ok((applied, suppress_direct_admin_effects)) => {
-                                return (
-                                    AdminReconciliationOutcome::Committed(applied),
-                                    suppress_direct_admin_effects,
-                                );
-                            }
-                            Err(error) => {
-                                // A commit was proven but its outbox rows could
-                                // not be looked up. Returning Committed here
-                                // would re-enter the direct-send path while the
-                                // durable rows may still drain — a duplicate
-                                // delivery. Stay inconclusive: no success reply
-                                // and no direct replay; the janitor finishes the
-                                // broadcast.
-                                warn!(
-                                    room = %room_jid,
-                                    error = %error,
-                                    "Could not recover committed MUC admin outbox reservation after actor demotion; staying inconclusive"
-                                );
-                                return (AdminReconciliationOutcome::Inconclusive, false);
-                            }
-                        }
-                    }
-                    return (outcome, false);
+                    return recover_exact_admin_result(state, &pre_apply_snapshot.room, items, sender_jid,
+                        mutation_attempt, snapshot.admin_mutation_resolution).await;
                 }
                 Err(error) => {
                     warn!(
@@ -528,6 +554,13 @@ async fn recover_admin_result_after_actor_failure(
                 ),
             ) => {}
             Err(error) => {
+                if matches!(error, waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Timeout) {
+                    let _ = state.deps.protocol.room_registry.ask(
+                        waddle_xmpp::muc::room_registry_actor::RetireUnresponsiveRoomIfExactActor {
+                            room_jid: room_jid.clone(), actor_ref: stale_actor.clone(),
+                        },
+                    ).mailbox_timeout(ADMIN_ROOM_ASK_TIMEOUT).reply_timeout(ADMIN_ROOM_ASK_TIMEOUT).await;
+                }
                 warn!(
                     room = %room_jid,
                     error = ?error,
@@ -1224,8 +1257,10 @@ pub(super) async fn handle_muc_admin_iq(
         }
     }
     let mut suppress_direct_admin_effects = false;
+    let mutation_attempt = waddle_xmpp::muc::AdminMutationId::generate();
     let applied = match room_actor
         .ask(ApplyAdminItems {
+            attempt: mutation_attempt,
             sender_jid: sender_jid.clone(),
             sender_affiliation: context.affiliation,
             sender_role: context.role,
@@ -1318,20 +1353,8 @@ pub(super) async fn handle_muc_admin_iq(
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CommitOutcomeUnknown,
         )) => {
-            let (recovered_applied, _, recovered_suppress_direct_admin_effects) =
-                reconcile_ambiguous_admin_result(
-                    state,
-                    &room_actor,
-                    &room_jid,
-                    pre_apply_snapshot.as_ref(),
-                    &query.items,
-                    sender_jid,
-                    &state.deps.occupant_id_secret,
-                )
-                .await;
-            suppress_direct_admin_effects = recovered_suppress_direct_admin_effects;
-            // Even an already-proven commit needs an authoritative successor;
-            // a standalone demotion would discard unrelated live occupants.
+            // Restore the exact attempt's verdict before deciding whether to
+            // acknowledge the batch or roll back optimistic affiliations.
             let (reconciliation, restored_suppress_direct_admin_effects) =
                 if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
                     recover_admin_result_after_actor_failure(
@@ -1339,6 +1362,7 @@ pub(super) async fn handle_muc_admin_iq(
                         &room_jid,
                         snapshot_before_apply,
                         &room_actor,
+                        mutation_attempt,
                         &query.items,
                         sender_jid,
                     )
@@ -1346,9 +1370,6 @@ pub(super) async fn handle_muc_admin_iq(
                 } else {
                     (AdminReconciliationOutcome::Inconclusive, false)
                 };
-            let reconciliation = recovered_applied
-                .map(AdminReconciliationOutcome::Committed)
-                .unwrap_or(reconciliation);
             suppress_direct_admin_effects |= restored_suppress_direct_admin_effects;
             match reconciliation {
                 AdminReconciliationOutcome::Committed(applied) => {
@@ -1531,7 +1552,7 @@ pub(super) async fn handle_muc_admin_iq(
                     pre_apply_snapshot.as_ref(),
                     &query.items,
                     sender_jid,
-                    &state.deps.occupant_id_secret,
+                    mutation_attempt,
                 )
                 .await;
             if let Some(applied) = recovered_applied {
@@ -1740,7 +1761,7 @@ mod tests {
         });
     }
 
-    async fn enqueue_recovered_admin_reservation(
+    pub(super) async fn enqueue_recovered_admin_reservation(
         state: &WebSocketState,
         room_jid: &BareJid,
         coordinates: RoomCommittedCoordinates,

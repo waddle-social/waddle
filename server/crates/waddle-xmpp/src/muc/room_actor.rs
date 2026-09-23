@@ -252,12 +252,28 @@ pub struct RoomSnapshot {
     pub departures: DepartureLedger,
     /// Ephemeral admin changes awaiting proof of an ambiguous durable commit.
     pub pending_admin_projection: Option<PendingAdminProjection>,
+    /// Exact ask outcome retained after its receipt is cleaned up.
+    pub admin_mutation_resolution: Option<AdminMutationResolution>,
+}
+
+/// Exact durable evidence for one caller-minted admin attempt. Final room
+/// affiliations can belong to a later owner and are not commit evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminMutationResolution {
+    Committed {
+        attempt: super::durable::AdminMutationId,
+        coordinates: super::durable::RoomCommittedCoordinates,
+    },
+    NotCommitted {
+        attempt: super::durable::AdminMutationId,
+    },
 }
 
 /// The exact live-roster delta of an admin batch whose COMMIT reply was lost.
 /// Final affiliations alone cannot recover intermediate bans in a batch.
 #[derive(Debug, Clone)]
 pub struct PendingAdminProjection {
+    attempt: super::durable::AdminMutationId,
     previous_coordinates: super::durable::RoomCommittedCoordinates,
     expected_affiliations: Vec<(BareJid, Affiliation)>,
     removed_sessions: Vec<FullJid>,
@@ -266,18 +282,17 @@ pub struct PendingAdminProjection {
 }
 
 impl PendingAdminProjection {
-    fn matches_committed_room(
+    fn matches_receipt(
         &self,
-        room: &MucRoom,
+        receipt: super::durable::RoomCommittedCoordinates,
         coordinates: Option<super::durable::RoomCommittedCoordinates>,
     ) -> bool {
         coordinates.is_some_and(|coordinates| {
             coordinates.lifecycle == self.previous_coordinates.lifecycle
-                && coordinates.revision > self.previous_coordinates.revision
-        }) && self
-            .expected_affiliations
-            .iter()
-            .all(|(jid, affiliation)| room.get_affiliation(jid) == *affiliation)
+                && receipt.lifecycle == coordinates.lifecycle
+                && receipt.revision > self.previous_coordinates.revision
+                && receipt.revision <= coordinates.revision
+        })
     }
 
     fn apply_to_roster(&self, room: &mut MucRoom) {
@@ -290,7 +305,11 @@ impl PendingAdminProjection {
             for session in sessions {
                 if self.removed_sessions.contains(&session) {
                     room.remove_occupant_session(&nick, &session);
-                } else if self.moderated == room.config.moderated {
+                } else if self.moderated == room.config.moderated
+                    && self.expected_affiliations.iter().any(|(jid, affiliation)| {
+                        *jid == session.to_bare() && room.get_affiliation(jid) == *affiliation
+                    })
+                {
                     if let Some((_, role)) = self
                         .changed_roles
                         .iter()
@@ -346,22 +365,59 @@ pub struct RestoreLiveRoster {
     pub pending_admin_projection: Option<PendingAdminProjection>,
 }
 
+#[derive(Debug, Clone, Copy, Error)]
+pub enum LiveRosterRestoreError {
+    #[error("the exact admin commit receipt could not be checked")]
+    AdminReceiptUnavailable,
+}
+
 impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), LiveRosterRestoreError>;
 
     async fn handle(
         &mut self,
         msg: RestoreLiveRoster,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let restoring_admin = msg.pending_admin_projection.is_some();
+        let (pending_admin_projection, admin_mutation_resolution) = match msg
+            .pending_admin_projection
+        {
+            Some(projection) => {
+                let store = self
+                    .durable_store
+                    .as_ref()
+                    .ok_or(LiveRosterRestoreError::AdminReceiptUnavailable)?;
+                let receipt = store
+                    .load_admin_mutation_receipt(&self.room.room_jid, projection.attempt)
+                    .await
+                    .map_err(|_| LiveRosterRestoreError::AdminReceiptUnavailable)?;
+                match receipt {
+                    Some(coordinates)
+                        if projection.matches_receipt(coordinates, self.durable_coordinates) =>
+                    {
+                        let resolution = AdminMutationResolution::Committed {
+                            attempt: projection.attempt,
+                            coordinates,
+                        };
+                        (Some(projection), Some(resolution))
+                    }
+                    None => (
+                        None,
+                        Some(AdminMutationResolution::NotCommitted {
+                            attempt: projection.attempt,
+                        }),
+                    ),
+                    Some(_) => (None, None),
+                }
+            }
+            None => (None, None),
+        };
         let occupant_count_before = self.room.occupant_count();
         let config = self.room.config.clone();
         let subject = self.room.subject.clone();
         let affiliations = self.room.affiliation_list.clone();
         let mut restored = msg.room;
-        let pending_admin_projection = msg.pending_admin_projection.filter(|projection| {
-            projection.matches_committed_room(&self.room, self.durable_coordinates)
-        });
         let moderation_changed = restored.config.moderated != config.moderated;
         // The transplant restores THIS room's live roster; its identity is
         // never the restored value's (durable commits key their claim fence
@@ -376,6 +432,14 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             .map(|(nick, occupant)| (nick.clone(), occupant.real_jid.to_bare()))
             .collect::<Vec<_>>();
         for (nick, jid) in restored_occupants {
+            // A different owner may have committed an independent ban while
+            // our batch rolled back. Its durable authorization still applies;
+            // only the original batch's intermediate removals require its ID.
+            // Config-only recovery retains its separate status-322 work.
+            if restoring_admin && !restored.can_user_join(&jid) {
+                restored.remove_occupant(&nick);
+                continue;
+            }
             let affiliation = restored.get_affiliation(&jid);
             let role = restored.derive_role_from_affiliation(affiliation);
             if let Some(occupant) = restored.occupants.get_mut(&nick) {
@@ -390,6 +454,7 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             // Only finish the exact in-memory delta before publication; a
             // config transition still retains its separately owed removals.
             projection.apply_to_roster(&mut restored);
+            self.admin_receipt_after_publication = Some(projection.attempt);
         }
         self.room = restored;
         // The predecessor's `Drop` releases its occupants from the pod-wide
@@ -399,6 +464,26 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         );
         self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
         self.absorb_departure_ledger(msg.departures);
+        self.admin_mutation_resolution = admin_mutation_resolution;
+        Ok(())
+    }
+}
+
+/// Publication is the first point at which a failed preparation can no
+/// longer retry this handoff from its original, unprojected roster.
+pub struct AcknowledgeAdminProjection;
+
+impl kameo::message::Message<AcknowledgeAdminProjection> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: AcknowledgeAdminProjection,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if let Some(attempt) = self.admin_receipt_after_publication.take() {
+            self.delete_admin_receipt_after_projection(attempt);
+        }
     }
 }
 
@@ -701,6 +786,8 @@ pub struct RoomActor {
     /// The newest durable revision consumed by an ephemeral projection.
     projected_revision: Option<super::durable::RoomRevision>,
     pending_admin_projection: Option<PendingAdminProjection>,
+    admin_mutation_resolution: Option<AdminMutationResolution>,
+    admin_receipt_after_publication: Option<super::durable::AdminMutationId>,
     /// Completed departures retained for attempt replay (see
     /// [`occupancy_handlers::LeaveAttemptId`]).
     departure_receipts: std::collections::VecDeque<DepartureReceipt>,
@@ -932,6 +1019,8 @@ impl RoomActor {
             occupancy_revision: 0,
             projected_revision: None,
             pending_admin_projection: None,
+            admin_mutation_resolution: None,
+            admin_receipt_after_publication: None,
             departure_receipts: std::collections::VecDeque::new(),
             latest_generations: std::collections::HashMap::new(),
             superseded_departure_attempts: std::collections::HashMap::new(),
@@ -945,6 +1034,25 @@ impl RoomActor {
             #[cfg(test)]
             test_projection_apply_hook: None,
         }
+    }
+
+    fn delete_admin_receipt_after_projection(&self, attempt: super::durable::AdminMutationId) {
+        let Some(store) = self.durable_store.clone() else {
+            return;
+        };
+        let room_jid = self.room.room_jid.clone();
+        tokio::spawn(async move {
+            if !matches!(
+                tokio::time::timeout(
+                    JOIN_OWNERSHIP_CHECK_TIMEOUT,
+                    store.delete_admin_mutation_receipt(&room_jid, attempt),
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!(room = %room_jid, "could not clean up projected admin commit receipt");
+            }
+        });
     }
 
     /// Install one authoritative durable snapshot and advance the room-wide
@@ -2528,6 +2636,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 occupancy_revision: self.occupancy_revision,
                 departures: self.departure_ledger(),
                 pending_admin_projection: self.pending_admin_projection.clone(),
+                admin_mutation_resolution: self.admin_mutation_resolution,
             },
             notification,
             reservation,
@@ -3127,6 +3236,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             occupancy_revision: self.occupancy_revision,
             departures: self.departure_ledger(),
             pending_admin_projection: self.pending_admin_projection.clone(),
+            admin_mutation_resolution: self.admin_mutation_resolution,
         })
     }
 }

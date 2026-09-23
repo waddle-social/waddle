@@ -86,6 +86,21 @@ pub struct RoomCommitOutcome {
     pub reservation: Option<RoomEffectReservation>,
 }
 
+/// Identifies one admin batch, including its intermediate live-roster effects.
+/// Mint once before committing and never reuse for another batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdminMutationId(uuid::Uuid);
+
+impl AdminMutationId {
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    pub const fn as_uuid(self) -> uuid::Uuid {
+        self.0
+    }
+}
+
 /// One durable affiliation delta carried by [`RoomDurableMutation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AffiliationEntry {
@@ -361,6 +376,34 @@ pub trait MucDurableStore: Send + Sync {
         intent: RoomDurableMutation,
         effects: RoomMutationEffects,
     ) -> RoomCommitFuture<'a>;
+
+    /// Read the exact admin attempt's receipt, retained independently of
+    /// later mutations and drained effect rows. Missing means this attempt
+    /// has no remaining proof; implementations must never infer it from the
+    /// current affiliation snapshot. Unsupported stores fail closed.
+    fn load_admin_mutation_receipt<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        attempt: AdminMutationId,
+    ) -> MucDurableFuture<'a, Option<RoomCommittedCoordinates>> {
+        let _ = (room_jid, attempt);
+        Box::pin(async {
+            Err(XmppError::internal(
+                "admin mutation receipts are unavailable",
+            ))
+        })
+    }
+
+    /// Delete only after the in-memory mutation applied, or the recovered
+    /// successor was published. Failed preparations must retain their proof.
+    fn delete_admin_mutation_receipt<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        attempt: AdminMutationId,
+    ) -> MucDurableFuture<'a, ()> {
+        let _ = (room_jid, attempt);
+        Box::pin(async { Ok(()) })
+    }
 
     /// Commit with publication authority that is already held by the caller.
     /// Implementations that share that authority gate must reuse it rather

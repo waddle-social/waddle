@@ -6,6 +6,7 @@ use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
+mod admin_recovery;
 mod mediated_invites;
 
 fn test_secret() -> OccupantIdSecret {
@@ -102,179 +103,6 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
         .expect("restored visitor");
     assert_eq!(visitor.affiliation, crate::Affiliation::None);
     assert_eq!(visitor.role, Role::Visitor);
-}
-
-#[tokio::test]
-async fn restoring_live_roster_removes_committed_affiliation_revocations() {
-    for (members_only, affiliation) in [
-        (false, Affiliation::Outcast),
-        (true, Affiliation::None),
-        // A batch can ban and then reinstate membership: its final
-        // affiliation does not describe the intermediate removal.
-        (false, Affiliation::Member),
-    ] {
-        let mut stale_room = test_room();
-        stale_room.config.members_only = members_only;
-        let occupant = test_full_jid("member");
-        stale_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
-        stale_room.add_occupant(crate::muc::Occupant {
-            real_jid: occupant.clone(),
-            nick: "member".to_string(),
-            role: Role::Participant,
-            affiliation: Affiliation::Member,
-            is_remote: false,
-            home_server: None,
-        });
-        let mut authoritative_room = test_room();
-        authoritative_room.config.members_only = members_only;
-        authoritative_room.set_affiliation(occupant.to_bare(), affiliation);
-        let previous_coordinates = super::super::RoomCommittedCoordinates {
-            lifecycle: super::super::RoomLifecycleId::generate(),
-            revision: super::super::RoomRevision::initial(),
-        };
-        let mut actor = RoomActor::new(authoritative_room, test_secret());
-        actor.durable_coordinates = Some(super::super::RoomCommittedCoordinates {
-            revision: super::super::RoomRevision::from_stored(2).expect("revision"),
-            ..previous_coordinates
-        });
-        let actor = RoomActor::spawn(actor);
-
-        actor
-            .ask(RestoreLiveRoster {
-                room: stale_room,
-                occupancy_revision: 7,
-                departures: Default::default(),
-                pending_admin_projection: Some(PendingAdminProjection {
-                    previous_coordinates,
-                    expected_affiliations: vec![(occupant.to_bare(), affiliation)],
-                    removed_sessions: vec![occupant.clone()],
-                    changed_roles: Vec::new(),
-                    moderated: false,
-                }),
-            })
-            .await
-            .expect("restore after committed affiliation change");
-
-        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
-        assert_eq!(
-            snapshot.room.get_affiliation(&occupant.to_bare()),
-            affiliation
-        );
-        assert!(snapshot.room.get_occupant("member").is_none());
-        assert!(snapshot.room.get_occupant_sessions("member").is_empty());
-        assert_eq!(snapshot.occupancy_revision, 7);
-    }
-}
-
-#[tokio::test]
-async fn restoring_live_roster_requires_proof_before_applying_admin_projection() {
-    for (revision, same_lifecycle, affiliation) in [
-        (1, true, Affiliation::Outcast),
-        (2, false, Affiliation::Outcast),
-        (2, true, Affiliation::Member),
-    ] {
-        let occupant = test_full_jid("member");
-        let mut stale_room = test_room();
-        stale_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
-        stale_room.add_occupant(crate::muc::Occupant {
-            real_jid: occupant.clone(),
-            nick: "member".to_string(),
-            role: Role::Participant,
-            affiliation: Affiliation::Member,
-            is_remote: false,
-            home_server: None,
-        });
-        let previous_coordinates = super::super::RoomCommittedCoordinates {
-            lifecycle: super::super::RoomLifecycleId::generate(),
-            revision: super::super::RoomRevision::initial(),
-        };
-        let mut authoritative_room = test_room();
-        authoritative_room.set_affiliation(occupant.to_bare(), affiliation);
-        let mut actor = RoomActor::new(authoritative_room, test_secret());
-        actor.durable_coordinates = Some(super::super::RoomCommittedCoordinates {
-            lifecycle: if same_lifecycle {
-                previous_coordinates.lifecycle
-            } else {
-                super::super::RoomLifecycleId::generate()
-            },
-            revision: super::super::RoomRevision::from_stored(revision).expect("revision"),
-        });
-        let actor = RoomActor::spawn(actor);
-
-        actor
-            .ask(RestoreLiveRoster {
-                room: stale_room,
-                occupancy_revision: 0,
-                departures: Default::default(),
-                pending_admin_projection: Some(PendingAdminProjection {
-                    previous_coordinates,
-                    expected_affiliations: vec![(occupant.to_bare(), Affiliation::Outcast)],
-                    removed_sessions: vec![occupant],
-                    changed_roles: Vec::new(),
-                    moderated: false,
-                }),
-            })
-            .await
-            .expect("restore unproven admin result");
-
-        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
-        assert!(snapshot.room.get_occupant("member").is_some());
-    }
-}
-
-#[tokio::test]
-async fn restoring_live_roster_applies_committed_admin_role_delta() {
-    let occupant = test_full_jid("member");
-    let mut stale_room = test_room();
-    stale_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
-    stale_room.add_occupant(crate::muc::Occupant {
-        real_jid: occupant.clone(),
-        nick: "member".to_string(),
-        role: Role::Moderator,
-        affiliation: Affiliation::Member,
-        is_remote: false,
-        home_server: None,
-    });
-    let previous_coordinates = super::super::RoomCommittedCoordinates {
-        lifecycle: super::super::RoomLifecycleId::generate(),
-        revision: super::super::RoomRevision::initial(),
-    };
-    let mut authoritative_room = test_room();
-    authoritative_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
-    let mut actor = RoomActor::new(authoritative_room, test_secret());
-    actor.durable_coordinates = Some(super::super::RoomCommittedCoordinates {
-        revision: super::super::RoomRevision::from_stored(2).expect("revision"),
-        ..previous_coordinates
-    });
-    let actor = RoomActor::spawn(actor);
-
-    actor
-        .ask(RestoreLiveRoster {
-            room: stale_room,
-            occupancy_revision: 0,
-            departures: Default::default(),
-            pending_admin_projection: Some(PendingAdminProjection {
-                previous_coordinates,
-                expected_affiliations: vec![(occupant.to_bare(), Affiliation::Member)],
-                removed_sessions: Vec::new(),
-                // An intermediate affiliation change can reset an explicit
-                // role even when the batch restores the original affiliation.
-                changed_roles: vec![(occupant, Role::Participant)],
-                moderated: false,
-            }),
-        })
-        .await
-        .expect("restore committed role delta");
-
-    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
-    assert_eq!(
-        snapshot
-            .room
-            .get_occupant("member")
-            .expect("member retained")
-            .role,
-        Role::Participant
-    );
 }
 
 #[tokio::test]
@@ -974,6 +802,7 @@ async fn test_apply_admin_items_rejects_moderator_role_change_on_admin() {
     let sender_jid = test_full_jid("mod");
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid,
             sender_affiliation: Affiliation::None,
             sender_role: Role::Moderator,
@@ -1026,6 +855,7 @@ async fn test_apply_admin_items_rejects_admin_role_change_on_admin() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("bob"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -1081,6 +911,7 @@ async fn test_apply_admin_items_rejects_moderator_grant_from_role_only_moderator
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("bob"),
             sender_affiliation: Affiliation::None,
             sender_role: Role::Moderator,
@@ -1132,6 +963,7 @@ async fn test_apply_admin_items_cannot_remove_last_owner() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -1182,6 +1014,7 @@ async fn admin_cannot_ban_or_deaffiliate_owner() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("admin"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -1232,6 +1065,7 @@ async fn admin_cannot_modify_admin_affiliations() {
 
     let demote_result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("admin"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -1253,6 +1087,7 @@ async fn admin_cannot_modify_admin_affiliations() {
 
     let promote_result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("admin"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -1320,6 +1155,7 @@ async fn affiliation_batch_validation_happens_before_members_only_ejection() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("admin"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -1458,6 +1294,7 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
 
     let updates = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -2707,6 +2544,7 @@ async fn space_entitled_member_survives_admin_item_revocation() {
 
     actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -2791,6 +2629,7 @@ async fn apply_admin_items_removal_prunes_hydrated_durable_recipient() {
 
     actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -3915,6 +3754,7 @@ async fn kick_reports_every_removed_session_for_sfu_eviction() {
 
     let applied = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("mod"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -3974,6 +3814,7 @@ async fn ban_reports_every_removed_session_for_sfu_eviction() {
 
     let applied = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("mod"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -4020,6 +3861,7 @@ async fn non_removing_admin_changes_report_no_moderation_removals() {
     // mark the session for SFU eviction.
     let applied = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("mod"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -4072,6 +3914,7 @@ async fn admin_set_error_after_ban_item_must_not_partially_apply() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -4148,6 +3991,7 @@ async fn admin_set_with_owner_grant_before_demotion_applies_fully() {
 
     let applied = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -5133,6 +4977,7 @@ async fn old_receipt_is_not_replayed_after_the_rejoined_session_was_kicked() {
         .expect("alice rejoins");
     actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: owner,
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -8140,6 +7985,7 @@ async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
     // presence, or SFU effects race the terminal commit.
     let role_only = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: alice.clone(),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -8895,6 +8741,7 @@ async fn apply_admin_items_surfaces_ambiguous_commit_outcome_without_compensatio
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -8949,6 +8796,7 @@ async fn role_only_admin_items_stay_direct_without_an_outbox_reservation() {
 
     let applied = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -10207,6 +10055,7 @@ async fn xep0045_owner_cannot_revoke_voice_from_admin() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -10231,6 +10080,7 @@ async fn xep0045_owner_cannot_revoke_voice_from_owner() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -10256,6 +10106,7 @@ async fn xep0045_owner_cannot_revoke_moderator_from_admin() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -10282,6 +10133,7 @@ async fn xep0045_owner_can_kick_admin() {
 
     let applied = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -10313,6 +10165,7 @@ async fn xep0045_admin_cannot_kick_owner() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("admin"),
             sender_affiliation: Affiliation::Admin,
             sender_role: Role::Moderator,
@@ -10338,6 +10191,7 @@ async fn xep0045_member_moderator_cannot_revoke_voice_from_equal_affiliation() {
 
     let result = actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("mod"),
             sender_affiliation: Affiliation::Member,
             sender_role: Role::Moderator,
@@ -10364,6 +10218,7 @@ async fn xep0045_owner_can_revoke_voice_from_member() {
 
     actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: test_full_jid("owner"),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,

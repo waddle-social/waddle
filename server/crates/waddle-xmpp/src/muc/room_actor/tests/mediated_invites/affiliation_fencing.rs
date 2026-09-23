@@ -316,6 +316,7 @@ async fn successor_owner_promotion_survives_original_owner_demotion_and_stale_ro
 
     actor
         .ask(ApplyAdminItems {
+            attempt: crate::muc::AdminMutationId::generate(),
             sender_jid: inviter.clone(),
             sender_affiliation: Affiliation::Owner,
             sender_role: Role::Moderator,
@@ -403,6 +404,7 @@ async fn prepared_rollback_blocks_guarded_and_batched_affiliation_paths() {
     assert!(matches!(
         actor
             .ask(ApplyAdminItems {
+                attempt: crate::muc::AdminMutationId::generate(),
                 sender_jid: inviter,
                 sender_affiliation: Affiliation::Admin,
                 sender_role: Role::Moderator,
@@ -472,6 +474,7 @@ async fn a_batch_targeting_a_reserved_invitee_is_rejected_before_any_item_applie
     assert!(matches!(
         actor
             .ask(ApplyAdminItems {
+                attempt: crate::muc::AdminMutationId::generate(),
                 sender_jid: inviter,
                 sender_affiliation: Affiliation::Admin,
                 sender_role: Role::Moderator,

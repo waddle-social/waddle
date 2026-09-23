@@ -275,7 +275,7 @@ pub(super) async fn persist_room_subject_event(
     }
 }
 
-async fn reconcile_ambiguous_subject_commit(
+pub(super) async fn reconcile_ambiguous_subject_commit(
     room_registry: &ActorRef<RoomRegistryActor>,
     room: &BareJid,
     stale_actor: &ActorRef<RoomActor>,
@@ -300,6 +300,21 @@ async fn reconcile_ambiguous_subject_commit(
         Ok(Some(actor)) => actor,
         Ok(None) => return false,
         Err(error) => {
+            if matches!(
+                error,
+                waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Timeout
+            ) {
+                let _ = room_registry
+                    .ask(
+                        waddle_xmpp::muc::room_registry_actor::RetireUnresponsiveRoomIfExactActor {
+                            room_jid: room.clone(),
+                            actor_ref: stale_actor.clone(),
+                        },
+                    )
+                    .mailbox_timeout(std::time::Duration::from_secs(5))
+                    .reply_timeout(std::time::Duration::from_secs(5))
+                    .await;
+            }
             warn!(room = %room, %error, "ambiguous subject reconciliation could not restore the room");
             return false;
         }

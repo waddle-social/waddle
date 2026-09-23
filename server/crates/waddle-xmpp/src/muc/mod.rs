@@ -32,8 +32,8 @@ pub use admin::{
     KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
 };
 pub use durable::{
-    AdminPresenceKind, AffiliationEntry as DurableAffiliationEntry, DestroyAttemptId,
-    DestroyPassword, DestroyReason, DestroyRecipient, DurableRoomState,
+    AdminMutationId, AdminPresenceKind, AffiliationEntry as DurableAffiliationEntry,
+    DestroyAttemptId, DestroyPassword, DestroyReason, DestroyRecipient, DurableRoomState,
     EphemeralProjectionAuthorization, MucDurableFuture, MucDurableStore, MucOccupantNick,
     OccupantPresenceUpdate, OccupantVoiceChange, RoomClaimFenceContext, RoomCommitDatabaseError,
     RoomCommitError, RoomCommitFuture, RoomCommitOutcome, RoomCommittedCoordinates,

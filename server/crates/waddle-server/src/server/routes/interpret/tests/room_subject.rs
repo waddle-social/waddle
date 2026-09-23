@@ -21,6 +21,8 @@ pub(super) struct SubjectMutationStore {
     durable_parent_rows: std::sync::atomic::AtomicUsize,
     stored_state: std::sync::Mutex<Option<waddle_xmpp::muc::DurableRoomState>>,
     fanout_owned: std::sync::atomic::AtomicBool,
+    block_next_load: std::sync::atomic::AtomicBool,
+    load_started: tokio::sync::Notify,
     fanout_check_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
@@ -32,6 +34,8 @@ impl SubjectMutationStore {
             durable_parent_rows: std::sync::atomic::AtomicUsize::new(1),
             stored_state: std::sync::Mutex::new(None),
             fanout_owned: std::sync::atomic::AtomicBool::new(true),
+            block_next_load: std::sync::atomic::AtomicBool::new(false),
+            load_started: tokio::sync::Notify::new(),
             fanout_check_barrier: std::sync::Mutex::new(None),
         }
     }
@@ -141,6 +145,13 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
     ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>> {
         let stored_state = self.stored_state.lock().expect("stored state lock").clone();
         Box::pin(async move {
+            if self
+                .block_next_load
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.load_started.notify_one();
+                std::future::pending::<()>().await;
+            }
             if self.exact_fence_matches(room_jid, fence).await? {
                 Ok(stored_state)
             } else {
@@ -1207,3 +1218,66 @@ async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast
 #[cfg(feature = "clustering")]
 #[path = "room_relay_plan_tests.rs"]
 mod room_relay_plan_tests;
+
+#[tokio::test]
+async fn xep0045_subject_recovery_timeout_retires_unresponsive_exact_actor() {
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, RestoreDurableRoomState, SetSubject, SetSubjectError,
+    };
+    let (registry, actor, room, _claims, fence, store) = spawn_subject_mutation_test_room().await;
+    let previous = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot before ambiguous commit");
+    let intended = waddle_xmpp::muc::SubjectState {
+        texts: waddle_xmpp::muc::RoomSubjectTexts::from_message_subjects(
+            &std::collections::BTreeMap::from([(
+                xmpp_parsers::message::Lang::default(),
+                "timed out recovery".to_owned(),
+            )]),
+        ),
+        setter: "alice@example.com".parse().expect("setter"),
+        setter_nick: "alice".to_owned(),
+        set_at: chrono::Utc::now(),
+    };
+    store.set_mode(SubjectMutationStoreMode::CommitOutcomeUnknown);
+    assert!(matches!(
+        actor
+            .ask(SetSubject {
+                texts: intended.texts.clone(),
+                setter: intended.setter.clone(),
+                setter_nick: intended.setter_nick.clone(),
+                set_at: intended.set_at
+            })
+            .await,
+        Err(kameo::error::SendError::HandlerError(
+            SetSubjectError::CommitOutcomeUnknown
+        ))
+    ));
+    store
+        .block_next_load
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    actor
+        .tell(RestoreDurableRoomState {
+            store: store.clone(),
+            claim_fence: fence,
+        })
+        .await
+        .expect("queue stalled actor operation");
+    store.load_started.notified().await;
+    assert!(
+        !super::super::room_subject::reconcile_ambiguous_subject_commit(
+            &registry,
+            &room,
+            &actor,
+            Some(&previous),
+            intended
+        )
+        .await
+    );
+    assert!(
+        matches!(registry.ask(GetRoom { room_jid: room.clone() }).await,
+        Err(kameo::error::SendError::HandlerError(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::RoomActorStateLost(jid))) if jid == room)
+    );
+    registry.kill();
+}

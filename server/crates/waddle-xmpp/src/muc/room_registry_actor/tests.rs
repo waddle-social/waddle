@@ -845,6 +845,63 @@ async fn stale_exact_owner_demotion_preserves_a_fresh_same_jid_room() {
 }
 
 #[tokio::test]
+async fn unresponsive_exact_actor_retirement_preserves_successor_and_reports_state_loss() {
+    let registry = spawn_registry().await;
+    let room_jid = test_room_jid("unresponsive-exact-retirement");
+    let current = registry
+        .ask(GetOrCreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w".to_owned(),
+            channel_id: "c".to_owned(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room")
+        .actor_ref;
+    let stale = RoomActor::spawn(RoomActor::new(
+        MucRoom::new(
+            room_jid.clone(),
+            "w".to_owned(),
+            "c".to_owned(),
+            RoomConfig::default(),
+        ),
+        OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+    ));
+    assert!(!registry
+        .ask(RetireUnresponsiveRoomIfExactActor {
+            room_jid: room_jid.clone(),
+            actor_ref: stale.clone(),
+        })
+        .await
+        .expect("stale retirement"));
+    assert_eq!(
+        registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone()
+            })
+            .await
+            .expect("lookup")
+            .expect("current actor")
+            .id(),
+        current.id()
+    );
+    assert!(current.is_alive());
+    assert!(registry
+        .ask(RetireUnresponsiveRoomIfExactActor {
+            room_jid: room_jid.clone(),
+            actor_ref: current.clone(),
+        })
+        .await
+        .expect("retire exact actor"));
+    assert!(
+        matches!(registry.ask(GetRoom { room_jid: room_jid.clone() }).await,
+        Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(jid))) if jid == room_jid)
+    );
+    stale.kill();
+    registry.kill();
+}
+
+#[tokio::test]
 async fn exact_actor_demotion_cannot_evict_a_different_same_jid_actor() {
     let registry = spawn_registry().await;
     let room_jid = test_room_jid("exact-actor-demotion");
@@ -6902,6 +6959,7 @@ mod ownership_claims_tests {
         SharedNodeIdentity,
         BareJid,
         NodeIdentity,
+        ActorRef<RoomActor>,
     ) {
         let registry = spawn_registry().await;
         let owner = this_identity();
@@ -6917,10 +6975,11 @@ mod ownership_claims_tests {
             .await
             .expect("wire");
         let room_jid = test_room_jid(name);
-        registry
+        let actor = registry
             .ask(get_or_create(room_jid.clone()))
             .await
-            .expect("create room before saturation");
+            .expect("create room before saturation")
+            .actor_ref;
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let release_jid = test_room_jid(&format!("{name}-release-{index}"));
             assert!(registry
@@ -6949,12 +7008,48 @@ mod ownership_claims_tests {
             MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES + 1,
             "identity rotation turns the live old-identity room into one additional retained responsibility"
         );
-        (registry, claim_store, identity, room_jid, owner)
+        (registry, claim_store, identity, room_jid, owner, actor)
+    }
+
+    #[tokio::test]
+    async fn saturated_unresponsive_retirement_retains_exact_release_and_poison() {
+        let (registry, claim_store, _identity, room_jid, _owner, actor) =
+            saturated_registry_with_deposed_room("saturated-unresponsive").await;
+        assert!(registry
+            .ask(RetireUnresponsiveRoomIfExactActor {
+                room_jid: room_jid.clone(),
+                actor_ref: actor,
+            })
+            .await
+            .expect("retire under saturation"));
+        assert!(
+            matches!(registry.ask(GetRoom { room_jid: room_jid.clone() }).await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(jid))) if jid == room_jid)
+        );
+        assert!(registry
+            .ask(IsPendingRoomReleaseOnly {
+                room_jid: room_jid.clone()
+            })
+            .await
+            .expect("pending exact fence"));
+        assert_eq!(
+            registry
+                .ask(PendingRoomOwnershipResponsibilityCountForTest)
+                .await
+                .expect("responsibility count"),
+            MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES + 1
+        );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, room_jid.to_string()))
+            .await
+            .expect("claim")
+            .is_some());
+        registry.kill();
     }
 
     #[tokio::test]
     async fn saturated_demotion_retains_failed_exact_release() {
-        let (registry, claim_store, _identity, room_jid, owner) =
+        let (registry, claim_store, _identity, room_jid, owner, _actor) =
             saturated_registry_with_deposed_room("saturated-demotion").await;
 
         assert!(registry
@@ -6988,7 +7083,7 @@ mod ownership_claims_tests {
 
     #[tokio::test]
     async fn saturated_deposed_eviction_retains_failed_exact_release() {
-        let (registry, claim_store, _identity, room_jid, _owner) =
+        let (registry, claim_store, _identity, room_jid, _owner, _actor) =
             saturated_registry_with_deposed_room("saturated-deposed-eviction").await;
 
         assert_eq!(

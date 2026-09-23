@@ -1684,6 +1684,14 @@ impl RoomRegistryActor {
         if !self.publish_room(room_jid.clone(), actor_ref.clone(), claim_fence) {
             return Err(RoomPublicationError::ReconciliationPending);
         }
+        // Never consume exact admin evidence before publication: a failed
+        // preparation retries its original roster from the stashed spec.
+        let published_actor = actor_ref.clone();
+        tokio::spawn(async move {
+            let _ = published_actor
+                .tell(super::room_actor::AcknowledgeAdminProjection)
+                .await;
+        });
         Ok(actor_guard.disarm())
     }
 
@@ -6774,6 +6782,49 @@ pub struct DemoteRoomIfOwner {
 pub struct DemoteRoomIfExactActor {
     pub room_jid: BareJid,
     pub actor_ref: ActorRef<RoomActor>,
+}
+
+/// Retire an unresponsive actor after a known ambiguous commit sealed it.
+/// Unlike ordinary demotion, lost live state remains explicit: lookups fail
+/// with `RoomActorStateLost` rather than reporting that the room is absent.
+/// Callers must already know the exact actor's mutation outcome was ambiguous;
+/// a timeout alone does not prove a healthy actor should be retired.
+pub struct RetireUnresponsiveRoomIfExactActor {
+    pub room_jid: BareJid,
+    pub actor_ref: ActorRef<RoomActor>,
+}
+
+impl kameo::message::Message<RetireUnresponsiveRoomIfExactActor> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: RetireUnresponsiveRoomIfExactActor,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self
+            .rooms
+            .get(&msg.room_jid)
+            .is_some_and(|entry| entry.actor_ref.id() == msg.actor_ref.id())
+        {
+            return false;
+        }
+        let entry = self
+            .rooms
+            .remove(&msg.room_jid)
+            .expect("exact actor checked in the same registry turn");
+        entry.actor_ref.kill();
+        self.poisoned_rooms.insert(msg.room_jid.clone());
+        self.publish_room_count();
+        // Transfer existing responsibility before I/O, even when admitting
+        // a new release would exceed the ordinary pending-release bound.
+        self.transfer_exact_responsibility_to_pending_release(
+            msg.room_jid.clone(),
+            entry.claim_fence.clone(),
+        );
+        self.start_detached_room_release(msg.room_jid, entry.claim_fence, ctx.actor_ref().clone());
+        true
+    }
 }
 
 impl kameo::message::Message<DemoteRoomIfExactActor> for RoomRegistryActor {
