@@ -290,6 +290,22 @@ impl StreamManagementState {
         self.unacked_queue.ingress_appends()
     }
 
+    /// Re-enter the typed domain before retaining an ingress frame independently
+    /// of the bounded wire replay queue. Ingress append obligations carry messages.
+    pub fn ingress_replay_payload(
+        &self,
+        sequence: u32,
+    ) -> Option<(crate::Stanza, chrono::DateTime<chrono::Utc>)> {
+        let entry = self
+            .unacked_queue
+            .get_all_unacked()
+            .into_iter()
+            .find(|entry| entry.sequence == sequence)?;
+        let element = entry.stanza_xml.parse::<minidom::Element>().ok()?;
+        let message = xmpp_parsers::message::Message::try_from(element).ok()?;
+        Some((crate::Stanza::Message(message), entry.original_receipt_at))
+    }
+
     /// Attach receipt obligations to the most recently recorded replay entry.
     pub fn attach_ingress_receipts(&mut self, receipts: Vec<super::SmIngressFrameReceipt>) {
         self.unacked_queue.attach_ingress_receipts(receipts);

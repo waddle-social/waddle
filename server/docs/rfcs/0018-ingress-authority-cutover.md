@@ -33,8 +33,8 @@ locally and on authorized cross-node receiver appends (#1778), including direct
 routes and recorded MUC occupant copies, and on the registered-remote-socket
 and local UserActor detach drains (#1789, #1805). The authorization-failure
 fallback remains unkeyed and at-least-once;
-#1760 custody failures still let proofs outlive payloads and suppress recovery
-(§3.3a). Live sends remain at-least-once, and maintenance never relays
+#1760 now retains immutable proof and replay payload as one durable custody
+unit, with atomic pending-delivery handoff and independent recovery (§3.3a). Live sends remain at-least-once, and maintenance never relays
 remote-hosted resources; (iii) live full-JID delivery keeps the
 destination connection's own recipient archive/inbox pipeline (#1658, now tracked as #1759);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
@@ -302,69 +302,72 @@ settles the aggregate route only when all recorded resources are covered.
 The progress and aggregate receipt commit atomically. No registry or socket
 operation runs while this transaction is open.
 
-**ONE DURABLE QUEUE ALLOCATION PER (recorded obligation, resource), WITH NO
-RETRY-INDUCED DUPLICATE** is guaranteed by a stream-independent ledger keyed by
-`(message_key, receipt_kind, semantic_identity_hash, resource)`. Its database
-constraint is the gate, and the ledger entry is written in the same transaction
-as the SM snapshot. Concurrent replay and retries after an append but before
-resource-progress settlement therefore cannot allocate another durable queue
-entry for the same recorded obligation and resource.
+**ONE DURABLE CUSTODY ALLOCATION PER (recorded obligation, resource)** is
+provided by `sm_ingress_appends`, keyed by
+`(message_key, receipt_kind, semantic_identity_hash, resource)`. Each row owns
+both the immutable allocation and its typed replay payload with the original
+receipt timestamp. The row commits with the SM snapshot. The bounded SM queue
+is a replay cache: eviction, resume deletion, quarantine, displacement and
+retirement cannot delete the custody payload or invalidate its proof (#1760).
+Drained-frame tickets retain their payload before the bounded queue can evict it.
+
+Retries consult custody before live actor dispatch as well as detached append.
+A concurrent SM mutation after that lookup cannot invalidate the evidence:
+resource progress settles acceptance by this durable custody unit, independently
+of which stream currently publishes the resource. The former gap/acknowledgement
+liveness reconstruction and allocation replacement machinery are removed.
+
+A validated, authenticated client acknowledgement records the exact wrapping
+sequence window durably before releasing the connection's replay entries.
+Failure preserves that window and terminates the transport so resumption can
+retry it. Normal durable promotion discharges the matching allocations; a live
+channel enqueue alone does not discharge custody. A separate bounded janitor
+traverses pending custody, defers live or resumable streams and protected claims,
+acquires the exact stream's recovery claim, and promotes the retained payload
+using XEP-0198 unavailable-resource policy. Recoverable messages enter durable
+pending delivery before its normal live flush. Both normal keyed promotion and
+orphan recovery lock the exact custody row, insert pending delivery and mark
+custody promoted in one transaction. A concurrent tombstone either prevents the
+transfer or observes the committed pending row in its subsequent scrub. The janitor also runs after
+canonical ingress settlement; pending custody is excluded from both canonical
+retention deletion and orphan GC. Positive acknowledgement, durable promotion
+or tombstone disposition permits ordinary retention GC.
+
+Tombstone scrubbing covers custody independently of session presence. Exact
+queue deletion during a scrub also retires the corresponding custody atomically,
+including appends that raced the initial custody scan. The replay timestamp is
+retained for XEP-0203 and the existing time-scoped retraction checks.
 
 The remaining limits are explicit:
 
-- XEP-0198 itself still permits client-observed duplicates after an uncertain
-  acknowledgement: an unacknowledged stanza may already have been received,
-  so retransmission can duplicate it (see
-  [`xeps/xep-0198.xml`](../../../xeps/xep-0198.xml), §4 Acks, duplicate warning
-  near line 367).
-- When no unexpired session exists, the append does not happen at all and the
-  obligation stays unresolved for its recorded route to retry or degrade.
-- The `RegistryFrame` live-transport branch is not durable queue delivery and
-  is out of scope.
-- The obligation identity now crosses nodes in `deliver_ordered.v11` and
-  `remote_resource_route.v7` (#1778). The typed `IngressAppendObligationRef`
-  carries `message_key`, `sender_bare`, the effect receipt key and `received_at`;
-  it is covered by the ordered envelope signature and payload fingerprint.
-  Both direct routes and recorded MUC groupchat occupant copies carry it.
-  Before using it, the receiver checks that `sender_bare` matches the validated
-  sender claim and stanza `from`, and that the canonical ingress row for
-  `message_key` exists and names that sender. Authorized detached appends on
-  the receiving node use the same `sm_ingress_appends` ledger as local appends.
-- **Registered remote sockets (#1789):** the owner-to-socket frame
-  (`remote_resource_frame.v2`) carries the obligation, queued unverified on the
-  socket node's live outbound entry. It is authorized lazily, only when a detach
-  drain is about to append it, and the drain reads the ledger *before* counting
-  the frame so a duplicate never occupies a sequence the client cannot
-  acknowledge. First-drain entries are proven in the session snapshot's
-  transaction; later ones commit with their proof individually.
-- **UserActor delivery (#1805):** local `TrySendPeer` and `TrySendDirect`
-  carry the same typed obligation onto the outbound entry. This covers both
-  same-node sockets and owner mirrors, whose forwarder preserves the obligation
-  on the existing `remote_resource_frame.v2` envelope. Local delivery retains
-  the bounded canonical-sender check at detach; the actor mailbox does not
-  confer a separate authorization bypass. A lost progress receipt followed by
-  detach and recovery therefore reuses the recorded queue allocation, subject
-  to the authorization and custody limits below.
-- **Still at-least-once:** a drained entry that loses the ledger race between
-  the drain's read and the session store keeps its queue entry and only its proof
-  is withheld; entries past a drain's 2 s authorization budget, or after one
-  indeterminate canonical read, drain unkeyed.
-- **Live writes (#1789):** the handler records a frame into the SM queue before the
-  transport write, so the obligation moves onto that recovery-owned entry and the
-  detach proves it with the session snapshot, whether the write failed or went
-  unacknowledged. After the client acknowledges the entry there is nothing left to
-  key; a later re-execution is the lost-receipt duplicate of #1760 direction 2.
-- **Still at-least-once:** failed receiver-side authorization degrades to an
-  unkeyed append, with a warning and counter. Delivery never fails because
-  this check failed; availability does not depend on authorization succeeding.
-- Proof and resource progress commit in two transactions: the ledger row
-  with the SM snapshot, the progress row afterwards under the canonical lock.
-  A retry between them reads `AlreadyAppended`. The #1760 custody limitation
-  is unchanged: quarantine deletes a session's queue but retires only
-  gap-covered proofs, so a retained entry's proof can outlive its payload and
-  turn later recovery into a false `AlreadyAppended`. Cross-node keying extends
-  these proof-suppresses-recovery failure modes to remote deliveries; it does
-  not provide lifecycle-safe exactly-once delivery.
+- XEP-0198 permits client-observed duplicates after an uncertain acknowledgement.
+  Custody is a server-side durable acceptance guarantee, not exactly-once client
+  observation. The custody-to-pending handoff is atomic, while later pending
+  delivery still follows XEP-0198 acknowledgement and retransmission semantics.
+- Without an unexpired session, a new detached append does not occur and the
+  recorded obligation remains unresolved. Existing custody remains recoverable
+  even when no detached session exists.
+- The `RegistryFrame` live-transport branch remains outside durable queue
+  allocation. Live frames acknowledged before detach cannot gain an append
+  receipt retroactively; a lost progress receipt can still cause a live retry.
+- Obligation identity crosses nodes in `deliver_ordered.v11`,
+  `remote_resource_route.v7` and `remote_resource_frame.v2`. The typed reference
+  carries the canonical message key, sender, receipt key and original receipt
+  time, covered by the ordered envelope's signature and fingerprint. Receiver
+  checks still bind it to the authenticated sender and canonical ingress row.
+  Authorized remote detached appends use the same custody ledger as local ones.
+- Local `UserActor` and remote socket queues retain this obligation through live
+  writes and detach. Detach authorizes it before counting duplicate frames.
+  A drained frame losing a concurrent ledger race retains its already-counted
+  replay entry but receives no second proof; this remains at-least-once.
+- Failed or timed-out receiver authorization still degrades to an unkeyed append
+  with a warning and counter. The two-second drain authorization budget and
+  indeterminate canonical reads retain this existing availability tradeoff.
+- Migration 1019 is a clean ledger cutover: old rows cannot be backfilled with
+  payloads that resume or quarantine may already have removed. It discards old
+  append proofs while leaving existing SM queues intact. Pre-cutover unresolved
+  attempts can repeat; no compatibility guarantee is made for that development
+  state, and no payload is fabricated to preserve old evidence.
 
 ### 3.3b Per-plugin observer obligations (#1740)
 

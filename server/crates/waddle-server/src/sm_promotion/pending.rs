@@ -21,13 +21,20 @@ pub(super) struct DeliveryHandles<'a> {
     pub user_registry: &'a ActorRef<UserRegistryActor>,
 }
 
+/// Select the durable authority that must commit with a pending insertion.
+#[derive(Clone, Copy)]
+pub(super) enum PromotionOrigin<'a> {
+    Stream(&'a str),
+    IngressCustody(&'a waddle_xmpp::stream_management::persistence::PersistedIngressAppend),
+}
+
 pub(super) async fn promote_as_transient(
     message: xmpp_parsers::message::Message,
     recipient_bare: BareJid,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
     delivery: DeliveryHandles<'_>,
-    origin_stream_id: &str,
+    origin: PromotionOrigin<'_>,
 ) -> PromotedOutcome {
     let payload = PendingPayload::Transient(Box::new(message.clone()));
     insert_pending(
@@ -37,7 +44,7 @@ pub(super) async fn promote_as_transient(
         original_receipt_fallback,
         &message,
         delivery,
-        origin_stream_id,
+        origin,
     )
     .await
 }
@@ -62,7 +69,7 @@ pub(super) async fn insert_pending(
     original_receipt_at: DateTime<Utc>,
     original_message: &xmpp_parsers::message::Message,
     delivery: DeliveryHandles<'_>,
-    origin_stream_id: &str,
+    origin: PromotionOrigin<'_>,
 ) -> PromotedOutcome {
     let row = PendingRow {
         id: PendingRowId::fresh(),
@@ -72,7 +79,23 @@ pub(super) async fn insert_pending(
         flushed_in_session: None,
         outbound_sequence: None,
     };
-    match pending_storage.insert_fenced(row, origin_stream_id).await {
+    let result = match origin {
+        PromotionOrigin::Stream(stream) => pending_storage.insert_fenced(row, stream).await,
+        PromotionOrigin::IngressCustody(append) => {
+            use waddle_xmpp::pending_delivery::storage::CustodyInsertOutcome;
+            match pending_storage.insert_ingress_custody(row, append).await {
+                Ok(CustodyInsertOutcome::Inserted) => Ok(InsertOutcome::Inserted),
+                Ok(CustodyInsertOutcome::AlreadyCompleted) => {
+                    return PromotedOutcome::NotPromotable
+                }
+                // A quota error sent to an in-memory socket is not a durable
+                // replacement for the retained original payload.
+                Ok(CustodyInsertOutcome::QuotaExceeded) => return PromotedOutcome::StorageFailure,
+                Err(error) => Err(error),
+            }
+        }
+    };
+    match result {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
         Ok(InsertOutcome::QuotaExceeded) => {
             // XEP-0160 §3 step 3 + RFC 6120 §8.3 — bounce
@@ -81,8 +104,13 @@ pub(super) async fn insert_pending(
             // intake-time quota overflow so the wire shape is
             // identical.
             waddle_xmpp::telemetry::reliability::increment_pending_delivery_quota_exceeded();
-            send_quota_bounce(original_message, &recipient, delivery).await;
-            PromotedOutcome::Bounced
+            if send_quota_bounce(original_message, &recipient, delivery).await {
+                PromotedOutcome::Bounced
+            } else {
+                // The error never reached an accepted sink. Keep custody so
+                // a later pass can queue the message when quota is available.
+                PromotedOutcome::StorageFailure
+            }
         }
         Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { entity }) => {
             // FIX 3: this node's claim on the origin SM session was lost
@@ -120,7 +148,7 @@ async fn send_quota_bounce(
     original_message: &xmpp_parsers::message::Message,
     recipient: &BareJid,
     delivery: DeliveryHandles<'_>,
-) {
+) -> bool {
     let error = xmpp_parsers::stanza_error::StanzaError::new(
         xmpp_parsers::stanza_error::ErrorType::Cancel,
         xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
@@ -134,7 +162,7 @@ async fn send_quota_bounce(
             recipient = %recipient,
             "Q6 promotion: bounce target JID missing; dropping bounce"
         );
-        return;
+        return false;
     };
     let stanza = Stanza::Message(bounce);
     let mut delivered = false;
@@ -170,4 +198,5 @@ async fn send_quota_bounce(
              conformance gap until s2s lands"
         );
     }
+    delivered
 }

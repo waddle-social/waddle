@@ -93,6 +93,14 @@ impl ReleaseRowsForOutboundSequencesOutcome {
     }
 }
 
+/// Atomic transfer of an ingress allocation into the pending-delivery queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustodyInsertOutcome {
+    Inserted,
+    AlreadyCompleted,
+    QuotaExceeded,
+}
+
 /// Storage contract for `pending_delivery`.
 ///
 /// All operations are per-recipient (bare JID). FIFO ordering within a
@@ -136,6 +144,21 @@ pub trait PendingDeliveryStorage: Send + Sync {
     ) -> Result<InsertOutcome, PendingStorageError> {
         let _ = origin_stream_id;
         self.insert(row).await
+    }
+
+    /// Atomically insert the pending row and mark its exact ingress allocation
+    /// promoted, only while the durable allocation remains pending. Backends
+    /// must share a transaction with custody storage and hold the SM claim
+    /// fence when clustered; separate in-memory stores cannot emulate this.
+    async fn insert_ingress_custody(
+        &self,
+        row: PendingRow,
+        append: &crate::stream_management::persistence::PersistedIngressAppend,
+    ) -> Result<CustodyInsertOutcome, PendingStorageError> {
+        let _ = (row, append);
+        Err(PendingStorageError::Other(
+            "atomic ingress custody insertion is unsupported".to_owned(),
+        ))
     }
 
     /// List all rows for `recipient`, FIFO. Includes rows currently

@@ -386,7 +386,9 @@ pub(crate) fn parse_presence_payloads(
     Ok(wrapper.children().cloned().collect())
 }
 
-fn parse_stanza(element: xmpp_parsers::minidom::Element) -> Result<Stanza, SmPersistenceError> {
+pub(crate) fn parse_stanza(
+    element: xmpp_parsers::minidom::Element,
+) -> Result<Stanza, SmPersistenceError> {
     match element.name() {
         "message" => xmpp_parsers::message::Message::try_from(element)
             .map(Stanza::Message)

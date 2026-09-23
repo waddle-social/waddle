@@ -1352,3 +1352,7 @@ mod detached_fault_tests;
 #[cfg(test)]
 #[path = "execute_relay_detached_tests.rs"]
 pub(crate) mod relay_detached_tests;
+
+#[cfg(test)]
+#[path = "execute_custody_tests.rs"]
+mod custody_tests;

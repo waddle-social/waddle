@@ -1,3 +1,5 @@
+mod ingress_custody;
+pub(crate) use ingress_custody::run_ingress_custody_sweep;
 #[cfg(feature = "clustering")]
 mod remote_owner;
 #[cfg(all(test, feature = "clustering"))]
@@ -1028,19 +1030,28 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
         // Skip the first tick (immediate) so we don't sweep before the
         // server has accepted any connections.
         ticker.tick().await;
+        let mut custody_cursor = None;
         loop {
             ticker.tick().await;
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            run_sm_expiry_sweep(&state).await;
+            run_sm_expiry_sweep_with_custody_cursor(&state, &mut custody_cursor).await;
         }
     });
 }
 
 /// One SM-expiry sweep pass. `pub(crate)` so regression tests can drive the
 /// janitor's retry convergence directly instead of waiting on the interval.
+#[cfg(test)]
 pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
+    run_sm_expiry_sweep_with_custody_cursor(state, &mut None).await;
+}
+
+async fn run_sm_expiry_sweep_with_custody_cursor(
+    state: &Arc<WebSocketState>,
+    custody_cursor: &mut Option<waddle_xmpp::stream_management::SmIngressAppendKey>,
+) {
     async {
         let mut sweep_failed = false;
         let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
@@ -1319,14 +1330,17 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                     Vec::new()
                 }
             };
-            let summary = crate::sm_promotion::promote_session_unacked(
+            let summary = crate::sm_promotion::promote_session_with_custody(
                 &session,
-                &state.deps.protocol.connection_registry,
-                &state.deps.protocol.user_registry,
-                &state.deps.protocol.pending_delivery_storage,
-                &blocklist,
-                state.deps.auth_state.xmpp_domain.as_str(),
-                &recent_tombstones,
+                crate::sm_promotion::TerminalOverflowPromotionDeps {
+                    sm_registry: &state.deps.protocol.sm_session_registry,
+                    registry: &state.deps.protocol.connection_registry,
+                    user_registry: &state.deps.protocol.user_registry,
+                    pending_storage: &state.deps.protocol.pending_delivery_storage,
+                    blocklist: &blocklist,
+                    server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                    recent_tombstones: &recent_tombstones,
+                },
             )
             .await;
             // Finding B (retraction-vs-promotion TOCTOU): a
@@ -1593,6 +1607,9 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
             }
         }
         if !retry_pending_sm_ownership(state).await {
+            sweep_failed = true;
+        }
+        if !run_ingress_custody_sweep(state, custody_cursor).await {
             sweep_failed = true;
         }
         if !run_ingress_retirement_sweep(state).await {
@@ -4506,6 +4523,83 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         waddle_xmpp::stream_management::persistence::SmPersistenceError,
     > {
         self.inner.get_ingress_append(key).await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&waddle_xmpp::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn scrub_ingress_custody(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: waddle_xmpp::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
     }
 }
 
@@ -7868,14 +7962,17 @@ async fn run_graceful_shutdown_drain(
                 ) {
                     recent_tombstones = records;
                 }
-                let summary = crate::sm_promotion::promote_session_unacked(
+                let summary = crate::sm_promotion::promote_session_with_custody(
                     &session,
-                    &websocket_state.deps.protocol.connection_registry,
-                    &websocket_state.deps.protocol.user_registry,
-                    &websocket_state.deps.protocol.pending_delivery_storage,
-                    &blocklist,
-                    websocket_state.deps.auth_state.xmpp_domain.as_str(),
-                    &recent_tombstones,
+                    crate::sm_promotion::TerminalOverflowPromotionDeps {
+                        sm_registry: &websocket_state.deps.protocol.sm_session_registry,
+                        registry: &websocket_state.deps.protocol.connection_registry,
+                        user_registry: &websocket_state.deps.protocol.user_registry,
+                        pending_storage: &websocket_state.deps.protocol.pending_delivery_storage,
+                        blocklist: &blocklist,
+                        server_domain: websocket_state.deps.auth_state.xmpp_domain.as_str(),
+                        recent_tombstones: &recent_tombstones,
+                    },
                 )
                 .await;
                 // Finding B: same TOCTOU close-out as the SM janitor —

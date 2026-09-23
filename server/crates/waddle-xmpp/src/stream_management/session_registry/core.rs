@@ -2045,7 +2045,10 @@ impl InMemorySmSessionRegistry {
                     accepting_stream: accepting_stream.clone(),
                     sequence: append.sequence,
                     appended_at,
-                    supersedes: append.ticket.supersedes,
+                    payload: append.payload,
+                    original_receipt_at: append.original_receipt_at,
+                    disposition:
+                        crate::stream_management::persistence::IngressCustodyDisposition::Pending,
                 },
             )
             .collect::<Vec<_>>();

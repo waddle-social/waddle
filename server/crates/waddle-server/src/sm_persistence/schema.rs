@@ -94,6 +94,9 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                     accepting_stream_id TEXT NOT NULL,
                     sequence {bigint} NOT NULL,
                     appended_at_ms {bigint} NOT NULL,
+                    custody_payload TEXT NOT NULL,
+                    original_receipt_at_ms {bigint} NOT NULL,
+                    disposition INTEGER NOT NULL CHECK (disposition IN (0, 1, 2, 3)),
                     PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
                 )"
             ),
@@ -107,6 +110,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    storage.execute("CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms)", ()).await?;
     add_column_if_missing(
         storage,
         "sm_unacked",

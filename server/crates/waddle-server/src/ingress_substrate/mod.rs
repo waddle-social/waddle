@@ -1539,19 +1539,20 @@ const DELETE_ALIASES_POSTGRES: &str =
 const DELETE_ALIASES_SQLITE: &str = r#"DELETE FROM ingress_origin_aliases WHERE message_key = ?"#;
 const GC_DELETE_DELIVERIES_POSTGRES: &str =
     r#"DELETE FROM ingress_deliveries WHERE message_key = ?::uuid"#;
-// Append proofs outlive the SM session deliberately: the obligation, not the stream, owns their lifetime (#1756). Once the
-// canonical row is reclaimed the obligation can never be retried again, which
-// is exactly when the proof stops being load-bearing.
+// Pending custody owns its replay payload independently of both the session
+// and canonical ingress retention. Only positively discharged custody can be
+// reclaimed with its canonical row or by the orphan sweep (#1760).
 const GC_DELETE_INGRESS_APPENDS_POSTGRES: &str =
-    r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
+    r#"DELETE FROM sm_ingress_appends WHERE message_key = ? AND disposition <> 0"#;
 const GC_DELETE_INGRESS_APPENDS_SQLITE: &str =
-    r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
+    r#"DELETE FROM sm_ingress_appends WHERE message_key = ? AND disposition <> 0"#;
 const GC_ORPHAN_WINDOW_POSTGRES: &str = r#"
     SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
         NOT EXISTS (
             SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
         ) AS orphan
     FROM sm_ingress_appends a
+    WHERE a.disposition <> 0
     ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
     LIMIT ?
 "#;
@@ -1561,6 +1562,7 @@ const GC_ORPHAN_WINDOW_SQLITE: &str = r#"
             SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
         ) AS orphan
     FROM sm_ingress_appends a
+    WHERE a.disposition <> 0
     ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
     LIMIT ?
 "#;
@@ -1570,7 +1572,7 @@ const GC_ORPHAN_WINDOW_AFTER_POSTGRES: &str = r#"
             SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
         ) AS orphan
     FROM sm_ingress_appends a
-    WHERE (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
+    WHERE a.disposition <> 0 AND (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
     ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
     LIMIT ?
 "#;
@@ -1580,13 +1582,14 @@ const GC_ORPHAN_WINDOW_AFTER_SQLITE: &str = r#"
             SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
         ) AS orphan
     FROM sm_ingress_appends a
-    WHERE (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
+    WHERE a.disposition <> 0 AND (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
     ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
     LIMIT ?
 "#;
 const GC_DELETE_ORPHAN_PROOFS_POSTGRES: &str = r#"
     DELETE FROM sm_ingress_appends
     WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?
+      AND disposition <> 0
       AND NOT EXISTS (
           SELECT 1 FROM ingress_messages m WHERE m.message_key = sm_ingress_appends.message_key::uuid
       )
@@ -1594,6 +1597,7 @@ const GC_DELETE_ORPHAN_PROOFS_POSTGRES: &str = r#"
 const GC_DELETE_ORPHAN_PROOFS_SQLITE: &str = r#"
     DELETE FROM sm_ingress_appends
     WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?
+      AND disposition <> 0
       AND NOT EXISTS (
           SELECT 1 FROM ingress_messages m WHERE m.message_key = sm_ingress_appends.message_key
       )
@@ -1752,8 +1756,8 @@ mod tests {
         let mut tx = db.begin_immediate().await.expect("seed transaction");
         for index in 0..count {
             tx.execute(
-                "INSERT INTO sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                crate::db_params![key.to_storage().to_string(), 1i64, vec![7u8; 32], format!("gc@example.test/resource-{index:04}"), "retired-stream", 1i64, 0i64],
+                "INSERT INTO sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms, custody_payload, original_receipt_at_ms, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                crate::db_params![key.to_storage().to_string(), 1i64, vec![7u8; 32], format!("gc@example.test/resource-{index:04}"), "retired-stream", 1i64, 0i64, crate::sm_persistence::codec::serialize_stanza(&waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None))).expect("serialize custody"), 0i64, 1i64],
             ).await.expect("seed proof");
         }
         tx.commit().await.expect("commit proofs");
@@ -1859,6 +1863,59 @@ mod tests {
         );
         assert_eq!(budget.progress.committed_orphan_proofs(), 0);
         assert_eq!(gc_proof_count(db).await, 1);
+    }
+
+    async fn orphan_gc_retains_pending_custody(db: &Database) {
+        let key = MessageKey::new();
+        seed_gc_proofs(db, key, 1).await;
+        db.guard()
+            .await
+            .expect("connection")
+            .execute(
+                "UPDATE sm_ingress_appends SET disposition = 0 WHERE message_key = ?",
+                crate::db_params![key.to_storage().to_string()],
+            )
+            .await
+            .expect("pending custody");
+        let outcome = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("GC");
+        assert_eq!(outcome.deleted_orphan_proofs, 0);
+        assert_eq!(
+            gc_proof_count(db).await,
+            1,
+            "orphaned payload remains recoverable"
+        );
+        db.guard()
+            .await
+            .expect("connection")
+            .execute(
+                "UPDATE sm_ingress_appends SET disposition = 1 WHERE message_key = ?",
+                crate::db_params![key.to_storage().to_string()],
+            )
+            .await
+            .expect("ack custody");
+        let outcome = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("GC after ack");
+        assert_eq!(outcome.deleted_orphan_proofs, 1);
+        assert_eq!(gc_proof_count(db).await, 0);
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_retains_pending_custody() {
+        let db = Database::in_memory("custody-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_retains_pending_custody(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_retains_pending_custody() {
+        let Some(fixture) = Fixture::open("custody_gc").await else {
+            return;
+        };
+        orphan_gc_retains_pending_custody(&fixture.db).await;
+        fixture.close().await;
     }
 
     #[tokio::test]

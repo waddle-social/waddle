@@ -252,6 +252,33 @@ pub struct RoomSnapshot {
     pub departures: DepartureLedger,
 }
 
+impl RoomSnapshot {
+    /// Prove that a config commit occurred after the pre-ask snapshot and
+    /// installed the intended config. Lifecycle projections are not config
+    /// commits, and a recreated room cannot prove an earlier room's mutation.
+    pub fn config_committed_since(&self, previous: &Self, intended: &RoomConfig) -> bool {
+        self.room.config == *intended && self.config_commit_advanced_since(previous)
+    }
+
+    /// Whether this lifecycle committed configuration after the observation.
+    pub fn config_commit_advanced_since(&self, previous: &Self) -> bool {
+        match (
+            previous.durable_coordinates,
+            self.config_durable_coordinates,
+        ) {
+            (Some(before), Some(after)) => {
+                before.lifecycle == after.lifecycle
+                    && after.revision > before.revision
+                    && previous.config_durable_coordinates != Some(after)
+            }
+            (None, None) => self.config_revision == previous.config_revision.saturating_add(1),
+            // A previously volatile room has no durable identity with which
+            // to attribute a newly installed lifecycle to this ask.
+            _ => false,
+        }
+    }
+}
+
 /// Transfer the live, non-durable room state into an authoritative successor.
 /// Durable configuration, subject, and affiliations already installed on the
 /// successor remain authoritative; only the roster and its ephemeral state
@@ -859,6 +886,9 @@ impl RoomActor {
         let previous_admission_state = self.admission_policy_snapshot();
         self.durable_coordinates = state.coordinates;
         self.config_durable_coordinates = state.config_coordinates;
+        self.config_revision = state
+            .config_coordinates
+            .map_or(0, |coordinates| coordinates.revision.as_i64() as u64);
         self.projected_revision = state.coordinates.map(|coordinates| coordinates.revision);
         self.room.waddle_id = state.waddle_id;
         self.room.channel_id = state.channel_id;

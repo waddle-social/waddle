@@ -314,64 +314,6 @@ impl InMemorySmSessionRegistry {
         Ok(recorded.then(|| SmSessionId::new(stream_id)))
     }
 
-    /// Whether existing proof stands for a payload that can no longer be delivered.
-    ///
-    /// An acknowledged entry simply leaves the queue, so its absence is not loss.
-    /// An *evicted* one is different: the bounded queue drops the oldest entry and
-    /// records a replay gap through its sequence, which is exactly the durable
-    /// marker that the payload is gone. Proof covered by that gap is void, because
-    /// neither resume nor promotion can produce the stanza any more.
-    ///
-    /// Decided entirely from durable state, never from the in-memory map. Memory
-    /// can still show the entry after another append evicted it, committed, and
-    /// was cancelled before publishing; and a same-JID replacement moves the old
-    /// stream off both maps into promotion ownership while its durable row still
-    /// exists, so a missing map entry is not evidence that delivery completed.
-    async fn void_allocation(
-        &self,
-        storage: &Arc<dyn crate::stream_management::persistence::SmPersistenceStorage>,
-        proof: &crate::stream_management::persistence::PersistedIngressAppend,
-    ) -> Result<
-        Option<crate::stream_management::persistence::PriorIngressAllocation>,
-        SmRegistryError,
-    > {
-        use crate::stream_management::persistence::PriorIngressAllocation;
-        use crate::stream_management::sequence::sequence_gt;
-
-        // No durable session left: promotion drained the queue and confirmation
-        // retired the row, which only happens once the handed-out queue covered
-        // durable state, so the obligation was discharged rather than lost.
-        let Some(session) = storage
-            .get_session(&proof.accepting_stream)
-            .await
-            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
-        else {
-            return Ok(None);
-        };
-        // One row decides it. Reading the queue separately would tear: a
-        // concurrent eviction committing between the two reads pairs the old gap
-        // with the new queue. The queue read is also redundant — eviction always
-        // drops the OLDEST entry and marks the gap through its sequence, so every
-        // retained sequence is strictly above the gap. Gap-covered therefore
-        // already implies not retained.
-        //
-        // Acknowledged allocations are excluded first. Progress can fail after an
-        // append, the client can then resume and acknowledge the stanza, and a
-        // later overflow on the re-detached stream can advance the gap past that
-        // sequence. Gap coverage alone would misread it as lost and append a
-        // duplicate of a stanza the client has already acknowledged.
-        if !sequence_gt(proof.sequence, session.last_acked) {
-            return Ok(None);
-        }
-        let evicted = session
-            .replay_gap_through
-            .is_some_and(|gap| !sequence_gt(proof.sequence, gap));
-        Ok(evicted.then(|| PriorIngressAllocation {
-            accepting_stream: proof.accepting_stream.clone(),
-            sequence: proof.sequence,
-        }))
-    }
-
     /// Allocate one ingress obligation exactly once, even after resume or rebind.
     /// The ledger is consulted before looking at any detached session.
     ///
@@ -380,8 +322,8 @@ impl InMemorySmSessionRegistry {
     /// this future mid-`COMMIT`, and the SQLite driver completes an already
     /// submitted commit on its own worker thread regardless. Releasing the
     /// stream shard at that moment would let the next writer read pre-commit
-    /// state and overwrite the committed entry while its ledger proof survived,
-    /// which is unrecoverable message loss: the proof suppresses every retry.
+    /// state and overwrite the committed replay entry. Custody would survive,
+    /// but the replay snapshot and counters must still remain coherent.
     /// The persist therefore runs in a task that owns the shard guard, so the
     /// lock is released only once the write has actually resolved.
     pub async fn record_keyed_stanza_for_detached_bound_resource(
@@ -392,11 +334,11 @@ impl InMemorySmSessionRegistry {
         key: crate::stream_management::SmIngressAppendKey,
     ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::SmKeyedAppendOutcome;
-        let supersedes = match self.consult_ingress_append_ledger(&key).await? {
+        match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { accepting_stream } => {
                 return Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
             }
-            LedgerDecision::Unallocated { supersedes } => supersedes,
+            LedgerDecision::Unallocated => {}
         };
         if key.resource != *jid {
             return Err(SmRegistryError::Internal(
@@ -409,7 +351,7 @@ impl InMemorySmSessionRegistry {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
         let stanza_xml = Self::stanza_to_replay_xml(stanza);
-        self.commit_keyed_detached_entry(stream_id, key, supersedes, move |session| {
+        self.commit_keyed_detached_entry(stream_id, key, move |session| {
             session.record_detached_outbound(stanza_xml, original_receipt_at);
             session.unacked_stanzas.last().map(|entry| entry.sequence)
         })
@@ -435,13 +377,13 @@ impl InMemorySmSessionRegistry {
     ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
         let stanza_xml = Self::stanza_to_replay_xml(stanza);
         use crate::stream_management::SmKeyedAppendOutcome;
-        let supersedes = match self.consult_ingress_append_ledger(&key).await? {
+        match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { accepting_stream } => {
                 return Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
             }
-            LedgerDecision::Unallocated { supersedes } => supersedes,
+            LedgerDecision::Unallocated => {}
         };
-        self.commit_keyed_detached_entry(stream_id.to_owned(), key, supersedes, move |session| {
+        self.commit_keyed_detached_entry(stream_id.to_owned(), key, move |session| {
             session
                 .record_detached_outbound_at(sequence, stanza_xml, original_receipt_at)
                 .then_some(sequence)
@@ -451,7 +393,7 @@ impl InMemorySmSessionRegistry {
 
     /// Read the ledger for a frame about to be drained from a detaching socket.
     ///
-    /// `None` means the obligation already holds a deliverable allocation: drop the
+    /// `None` means the obligation already has durable custody: drop the
     /// frame uncounted. `Some` is unallocated as of this read; bind it to the frame's
     /// sequence and hand it to [`Self::store_session_with_drained_ingress_appends`].
     pub async fn reserve_drained_ingress_append(
@@ -460,8 +402,8 @@ impl InMemorySmSessionRegistry {
     ) -> Result<Option<crate::stream_management::SmDrainedAppendTicket>, SmRegistryError> {
         Ok(match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { .. } => None,
-            LedgerDecision::Unallocated { supersedes } => {
-                Some(crate::stream_management::SmDrainedAppendTicket { key, supersedes })
+            LedgerDecision::Unallocated => {
+                Some(crate::stream_management::SmDrainedAppendTicket { key })
             }
         })
     }
@@ -483,22 +425,10 @@ impl InMemorySmSessionRegistry {
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))?
         else {
-            return Ok(LedgerDecision::Unallocated { supersedes: None });
+            return Ok(LedgerDecision::Unallocated);
         };
-        Ok(match self.void_allocation(storage, &proof).await? {
-            // The allocated payload is still deliverable, or the session it
-            // belonged to was already promoted or expired away.
-            None => LedgerDecision::Allocated {
-                accepting_stream: proof.accepting_stream,
-            },
-            // The payload was evicted from the bounded queue, so the proof
-            // stands for a stanza nothing can deliver any more. Suppressing
-            // the retry against it would terminalize a lost message, so this
-            // allocation is replaced — gated on that exact row, so a racing
-            // writer that already replaced it still wins.
-            Some(prior) => LedgerDecision::Unallocated {
-                supersedes: Some(prior),
-            },
+        Ok(LedgerDecision::Allocated {
+            accepting_stream: proof.accepting_stream,
         })
     }
 
@@ -510,7 +440,6 @@ impl InMemorySmSessionRegistry {
         self: &Arc<Self>,
         stream_id: String,
         key: crate::stream_management::SmIngressAppendKey,
-        supersedes: Option<crate::stream_management::persistence::PriorIngressAllocation>,
         record: impl FnOnce(&mut super::super::DetachedSession) -> Option<u32>,
     ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::{
@@ -554,12 +483,20 @@ impl InMemorySmSessionRegistry {
         self.mark_snapshot_stale(&accepting_stream)?;
         let registry = Arc::clone(self);
         let storage = Arc::clone(storage);
+        let entry = rows
+            .iter()
+            .find(|entry| entry.sequence == sequence)
+            .ok_or_else(|| {
+                SmRegistryError::Internal("allocated payload missing from snapshot".into())
+            })?;
         let append = PersistedIngressAppend {
             key,
             accepting_stream: accepting_stream.clone(),
             sequence,
             appended_at: Utc::now(),
-            supersedes,
+            payload: *entry.stanza.clone(),
+            original_receipt_at: entry.original_receipt_at,
+            disposition: crate::stream_management::persistence::IngressCustodyDisposition::Pending,
         };
         // `guard` moves into the task: the shard stays locked until the write
         // resolves, even if this future is dropped first.
@@ -919,10 +856,6 @@ impl InMemorySmSessionRegistry {
 
 /// What the `sm_ingress_appends` ledger says about one obligation.
 enum LedgerDecision {
-    Allocated {
-        accepting_stream: SmSessionId,
-    },
-    Unallocated {
-        supersedes: Option<crate::stream_management::persistence::PriorIngressAllocation>,
-    },
+    Allocated { accepting_stream: SmSessionId },
+    Unallocated,
 }

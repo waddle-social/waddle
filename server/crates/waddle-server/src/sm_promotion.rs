@@ -19,6 +19,8 @@
 //! the type/hint matrix) and the resulting [`DmRouting`] gates which
 //! branch fires.
 
+mod custody;
+pub(crate) use custody::{promote_ingress_custody, promote_session_with_custody};
 mod live;
 mod pending;
 mod stanza;
@@ -48,7 +50,7 @@ use waddle_xmpp::stream_management::{
 use waddle_xmpp::Stanza;
 
 use live::{build_online_resources, collect_live_targets};
-use pending::{insert_pending, promote_as_transient, DeliveryHandles};
+use pending::{insert_pending, promote_as_transient, DeliveryHandles, PromotionOrigin};
 use stanza::{parse_stanza, promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionSummary};
 
@@ -157,7 +159,7 @@ pub async fn promote_session_unacked(
                     pending_storage,
                     original_receipt_fallback: entry.original_receipt_at,
                     server_domain,
-                    origin_stream_id: &session.stream_id,
+                    origin: PromotionOrigin::Stream(&session.stream_id),
                 };
                 promote_one(message, entry.sequence, ctx).await
             }
@@ -217,16 +219,7 @@ pub(crate) async fn promote_terminal_overflow_entry(
     deps: TerminalOverflowPromotionDeps<'_>,
 ) -> PromotionSummary {
     let session = detached_session_for_terminal_entry(source, entry);
-    promote_session_unacked(
-        &session,
-        deps.registry,
-        deps.user_registry,
-        deps.pending_storage,
-        deps.blocklist,
-        deps.server_domain,
-        deps.recent_tombstones,
-    )
-    .await
+    promote_session_with_custody(&session, deps).await
 }
 
 fn detached_session_for_terminal_entry(
@@ -257,7 +250,9 @@ fn detached_session_for_terminal_entry(
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct TerminalOverflowPromotionDeps<'a> {
+    pub(crate) sm_registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     pub(crate) registry: &'a ConnectionRegistry,
     pub(crate) user_registry: &'a ActorRef<UserRegistryActor>,
     pub(crate) pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
@@ -873,14 +868,17 @@ pub(crate) async fn promote_displaced_sessions(
         {
             recent_tombstones = records;
         }
-        let summary = promote_session_unacked(
+        let summary = promote_session_with_custody(
             &session,
-            deps.connection_registry,
-            deps.user_registry,
-            deps.pending_storage,
-            &blocklist,
-            deps.server_domain,
-            &recent_tombstones,
+            TerminalOverflowPromotionDeps {
+                sm_registry: deps.sm_registry,
+                registry: deps.connection_registry,
+                user_registry: deps.user_registry,
+                pending_storage: deps.pending_storage,
+                blocklist: &blocklist,
+                server_domain: deps.server_domain,
+                recent_tombstones: &recent_tombstones,
+            },
         )
         .await;
         if summary.queued > 0 {
@@ -1003,7 +1001,7 @@ struct PromotionContext<'a> {
     /// Phase 3 Slice 5 FIX 3) — threaded down into
     /// `pending::insert_pending`'s `insert_fenced` call so a cluster-fenced
     /// storage can fence the write against this exact claim.
-    origin_stream_id: &'a str,
+    origin: PromotionOrigin<'a>,
 }
 
 /// Promote a single typed [`xmpp_parsers::message::Message`] per the
@@ -1026,7 +1024,12 @@ async fn promote_one(
     // flush of an Archived row, which rehydrates from MAM without any
     // self-stamp — keeps the original time instead of drifting one
     // hop later on each expiry.
-    if let Some(stamp) = self_stamp_time(&message, ctx.server_domain) {
+    // Custody already froze the authoritative receipt time with its payload;
+    // the atomic handoff validates that immutable time. Legacy queue-only
+    // promotion may still recover an earlier self-stamped replay time.
+    if let (PromotionOrigin::Stream(_), Some(stamp)) =
+        (ctx.origin, self_stamp_time(&message, ctx.server_domain))
+    {
         ctx.original_receipt_fallback = stamp;
     }
 
@@ -1121,7 +1124,7 @@ async fn promote_one(
                                 registry: ctx.registry,
                                 user_registry: ctx.user_registry,
                             },
-                            ctx.origin_stream_id,
+                            ctx.origin,
                         )
                         .await;
                     }
@@ -1150,7 +1153,7 @@ async fn promote_one(
             registry: ctx.registry,
             user_registry: ctx.user_registry,
         },
-        ctx.origin_stream_id,
+        ctx.origin,
     )
     .await
 }

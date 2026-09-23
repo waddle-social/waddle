@@ -154,6 +154,18 @@ async fn append_resource(
     effect: &ExternalDeliveryEffect,
     resource: &FullJid,
 ) -> ResourceDelivery {
+    if let Some(outcome) = crate::server::routes::interpret::existing_ingress_delivery(
+        deps.sm_session_registry,
+        deps.ingress_append_context.as_ref(),
+        resource,
+    )
+    .await
+    {
+        return ResourceDelivery {
+            outcome,
+            certainty: DeliveryCertainty::Proven,
+        };
+    }
     let mut certainty = DeliveryCertainty::Proven;
     let outcome = match effect {
         ExternalDeliveryEffect::HostOwnedCopy { target, .. } if target == resource => {

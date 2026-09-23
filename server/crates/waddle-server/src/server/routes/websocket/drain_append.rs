@@ -125,7 +125,16 @@ pub(super) async fn reserve_live_recorded(
             .reserve_drained_ingress_append(obligation.key)
             .await
         {
-            Ok(Some(ticket)) => drained_appends.push(DrainedAppend(ticket.at(sequence))),
+            Ok(Some(ticket)) => {
+                if let Some((payload, received_at)) = sm_state.ingress_replay_payload(sequence) {
+                    drained_appends.push(DrainedAppend(ticket.at(sequence, payload, received_at)));
+                } else {
+                    warn!(
+                        sequence,
+                        "ingress replay payload unavailable at detach; entry stays unkeyed"
+                    );
+                }
+            }
             Ok(None) => {}
             Err(error) => {
                 warn!(%error, "ingress append ledger unreadable at detach; entry stays unkeyed");

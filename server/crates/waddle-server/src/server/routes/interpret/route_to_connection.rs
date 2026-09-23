@@ -1118,6 +1118,15 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
         );
         return FullJidDeliveryOutcome::Delivered;
     }
+    if let Some(outcome) = routing::existing_ingress_delivery(
+        deps.sm_session_registry,
+        deps.ingress_append_context.as_ref(),
+        target,
+    )
+    .await
+    {
+        return outcome;
+    }
     if let Some(outcome) = deliver_registered_remote_resource(
         deps,
         target,
@@ -1155,6 +1164,15 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
             },
         );
         return FullJidDeliveryOutcome::Delivered;
+    }
+    if let Some(outcome) = routing::existing_ingress_delivery(
+        deps.sm_session_registry,
+        deps.ingress_append_context.as_ref(),
+        target,
+    )
+    .await
+    {
+        return outcome;
     }
     if let Some(outcome) = deliver_registered_remote_resource(
         deps,

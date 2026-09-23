@@ -1828,8 +1828,8 @@ mod ownership_claims_tests {
                 })
                 .await
                 .expect("mutation after failed destroy"),
-            1,
-            "a failed durable destroy must leave the room serviceable"
+            2,
+            "a failed durable destroy must leave the room serviceable and advance its restored config revision"
         );
         assert_eq!(
             room.actor_ref.id(),
@@ -3677,6 +3677,7 @@ mod ownership_claims_tests {
     struct RecordingDurableStore {
         load_result: Option<DurableRoomState>,
         fail_load: bool,
+        fail_destroy_completion_probe: AtomicBool,
         lose_restore_ownership_on_call: Option<usize>,
         restore_loss_successor_on_call: Option<(usize, Arc<DeadOwnerClaimStore>, NodeIdentity)>,
         rotate_identity_during_load: Option<(SharedNodeIdentity, NodeIdentity)>,
@@ -3817,6 +3818,21 @@ mod ownership_claims_tests {
     }
 
     impl MucDurableStore for RecordingDurableStore {
+        fn destroy_completion_blocks_recreation<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, bool> {
+            Box::pin(async move {
+                if self.fail_destroy_completion_probe.load(Ordering::SeqCst) {
+                    Err(crate::XmppError::internal(
+                        "destroy completion lookup unavailable",
+                    ))
+                } else {
+                    Ok(false)
+                }
+            })
+        }
+
         fn commit_room_mutation<'a>(
             &'a self,
             room_jid: &'a BareJid,
@@ -4503,6 +4519,362 @@ mod ownership_claims_tests {
         }
     }
 
+    fn restore_existing(
+        room_jid: BareJid,
+        actor: &ActorRef<RoomActor>,
+        previous: &crate::muc::room_actor::RoomSnapshot,
+    ) -> GetOrRestoreRoom {
+        GetOrRestoreRoom {
+            room_jid,
+            previous_snapshot: previous.clone(),
+            stale_actor: actor.clone(),
+            live_restore: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_existing_recovers_a_dead_actor_without_creating_a_lifecycle() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room = test_room_jid("restore-dead");
+        let actor = registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("create")
+            .actor_ref;
+        let previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        actor.kill();
+        actor.wait_for_shutdown().await;
+        let before = store.recorded_commits().len();
+        let restored = registry
+            .ask(restore_existing(room, &actor, &previous))
+            .await
+            .expect("restore dead")
+            .expect("durable lifecycle survives");
+        assert_ne!(restored.id(), actor.id());
+        assert_eq!(
+            restored
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot")
+                .durable_coordinates
+                .expect("coordinates")
+                .lifecycle,
+            previous
+                .durable_coordinates
+                .expect("previous coordinates")
+                .lifecycle
+        );
+        assert!(!store.recorded_commits()[before..]
+            .iter()
+            .any(|(intent, _)| matches!(intent, crate::muc::RoomDurableMutation::Create { .. })));
+    }
+
+    #[tokio::test]
+    async fn restore_existing_retries_an_unavailable_destroy_completion_probe() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room = test_room_jid("restore-probe-unavailable");
+        let actor = registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("create")
+            .actor_ref;
+        let previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        store
+            .fail_destroy_completion_probe
+            .store(true, Ordering::SeqCst);
+        assert!(matches!(
+            registry
+                .ask(restore_existing(room.clone(), &actor, &previous))
+                .await,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipUnavailable(_)
+            ))
+        ));
+        store
+            .fail_destroy_completion_probe
+            .store(false, Ordering::SeqCst);
+        assert_eq!(
+            registry
+                .ask(restore_existing(room, &actor, &previous))
+                .await
+                .expect("retry")
+                .expect("existing actor")
+                .id(),
+            actor.id()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_existing_never_recreates_a_destroyed_lifecycle() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room = test_room_jid("restore-destroyed");
+        let actor = registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("create")
+            .actor_ref;
+        let previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: room.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy"),
+            DestroyRoomOutcome::Destroyed
+        );
+        let before = store.recorded_commits().len();
+        assert!(registry
+            .ask(restore_existing(room.clone(), &actor, &previous))
+            .await
+            .expect("restore absent")
+            .is_none());
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: room.clone()
+            })
+            .await
+            .expect("lookup")
+            .is_none());
+        assert_eq!(
+            store.recorded_commits().len(),
+            before,
+            "recovery must not write Create or Activate after destruction"
+        );
+        assert!(!store
+            .persisted_room_states
+            .lock()
+            .expect("states")
+            .contains_key(&room));
+    }
+
+    #[tokio::test]
+    async fn restore_existing_retries_a_destroying_actor_that_can_reopen() {
+        let registry = spawn_registry().await;
+        let room = test_room_jid("restore-destroying");
+        let actor = registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("create")
+            .actor_ref;
+        let previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        actor
+            .ask(SealForDestroy { attempt })
+            .await
+            .expect("seal destroy");
+        assert!(matches!(
+            registry
+                .ask(restore_existing(room.clone(), &actor, &previous))
+                .await,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(_)
+            ))
+        ));
+        assert_eq!(
+            actor.ask(GetRoomSealState).await.expect("seal"),
+            RoomSealState::Destroying { attempt }
+        );
+        assert!(actor
+            .ask(UnsealDestroy { attempt })
+            .await
+            .expect("failed destroy reopens"));
+        assert_eq!(
+            registry
+                .ask(restore_existing(room, &actor, &previous))
+                .await
+                .expect("retry")
+                .expect("same lifecycle reopened")
+                .id(),
+            actor.id()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_existing_reactivates_the_same_dormant_lifecycle() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room = test_room_jid("restore-dormant");
+        let actor = registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("create")
+            .actor_ref;
+        let previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        assert!(registry
+            .ask(DestroyRoomIfInactive {
+                room_jid: room.clone(),
+                expected_occupancy_revision: previous.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("dormancy")
+            .destroyed());
+        let before = store.recorded_commits().len();
+        let restored = registry
+            .ask(restore_existing(room, &actor, &previous))
+            .await
+            .expect("restore")
+            .expect("same lifecycle");
+        assert_ne!(restored.id(), actor.id());
+        assert_eq!(
+            restored
+                .ask(GetSnapshot)
+                .await
+                .expect("restored snapshot")
+                .durable_coordinates
+                .expect("coordinates")
+                .lifecycle,
+            previous
+                .durable_coordinates
+                .expect("previous coordinates")
+                .lifecycle
+        );
+        let commits = store.recorded_commits();
+        assert!(commits[before..]
+            .iter()
+            .any(|(intent, _)| matches!(intent, crate::muc::RoomDurableMutation::Activate)));
+        assert!(!commits[before..]
+            .iter()
+            .any(|(intent, _)| matches!(intent, crate::muc::RoomDurableMutation::Create { .. })));
+    }
+
+    #[tokio::test]
+    async fn restore_existing_refuses_a_different_live_lifecycle() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room = test_room_jid("restore-different-live");
+        let actor = registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("create")
+            .actor_ref;
+        let mut previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        previous
+            .durable_coordinates
+            .as_mut()
+            .expect("coordinates")
+            .lifecycle = crate::muc::RoomLifecycleId::generate();
+        let before = store.recorded_commits().len();
+        assert!(registry
+            .ask(restore_existing(room.clone(), &actor, &previous))
+            .await
+            .expect("lifecycle mismatch")
+            .is_none());
+        assert_eq!(
+            registry
+                .ask(GetRoom { room_jid: room })
+                .await
+                .expect("lookup")
+                .expect("existing actor")
+                .id(),
+            actor.id()
+        );
+        assert_eq!(store.recorded_commits().len(), before);
+    }
+
+    #[tokio::test]
+    async fn restore_existing_refuses_a_different_durable_lifecycle_before_activation() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room = test_room_jid("restore-different-durable");
+        let actor = registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("create")
+            .actor_ref;
+        let mut previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        assert!(registry
+            .ask(DestroyRoomIfInactive {
+                room_jid: room.clone(),
+                expected_occupancy_revision: previous.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("dormancy")
+            .destroyed());
+        previous
+            .durable_coordinates
+            .as_mut()
+            .expect("coordinates")
+            .lifecycle = crate::muc::RoomLifecycleId::generate();
+        let before = store.recorded_commits().len();
+        assert!(registry
+            .ask(restore_existing(room.clone(), &actor, &previous))
+            .await
+            .expect("lifecycle mismatch")
+            .is_none());
+        assert!(registry
+            .ask(GetRoom { room_jid: room })
+            .await
+            .expect("lookup")
+            .is_none());
+        assert_eq!(
+            store.recorded_commits().len(),
+            before,
+            "mismatched lifecycle must not be activated"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_existing_cannot_coalesce_with_a_pending_room_creator() {
+        let room = test_room_jid("restore-pending-creator");
+        let old_registry = spawn_registry().await;
+        let actor = old_registry
+            .ask(get_or_create(room.clone()))
+            .await
+            .expect("old actor")
+            .actor_ref;
+        let mut previous = actor.ask(GetSnapshot).await.expect("snapshot");
+        previous.durable_coordinates = Some(crate::muc::RoomCommittedCoordinates {
+            lifecycle: crate::muc::RoomLifecycleId::generate(),
+            revision: crate::muc::RoomRevision::from_stored(1).expect("revision"),
+        });
+        let registry = spawn_registry().await;
+        let (store, started, allow) = blocking_restore_store(room.clone());
+        wire_recording_store(&registry, store).await;
+        let creator_registry = registry.clone();
+        let creator_room = room.clone();
+        let creator =
+            tokio::spawn(async move { creator_registry.ask(get_or_create(creator_room)).await });
+        started.notified().await;
+        assert!(matches!(
+            registry
+                .ask(restore_existing(room.clone(), &actor, &previous))
+                .await,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(_)
+            ))
+        ));
+        assert_eq!(
+            registry
+                .ask(PendingPreparationWaitersForTest { room_jid: room })
+                .await
+                .expect("waiters"),
+            Some(1),
+            "old lifecycle recovery must not attach as a creation waiter"
+        );
+        allow.notify_one();
+        assert_eq!(
+            creator
+                .await
+                .expect("creator task")
+                .expect("creator acquisition")
+                .creation,
+            RoomCreation::Created
+        );
+    }
+
     /// #1647 (codex round 23): the durable destroy outbox must settle owed
     /// departure receipts — their holders already left the roster, so the
     /// live-occupant recipients alone would drop their terminal presence.
@@ -4683,6 +5055,7 @@ mod ownership_claims_tests {
 
         let room_jid = test_room_jid("stash-adopted");
         let stashed = std::sync::Arc::new(RoomCreationSpec {
+            expected_lifecycle: None,
             waddle_id: "stashed-waddle".to_string(),
             channel_id: "stashed-channel".to_string(),
             config: RoomConfig {

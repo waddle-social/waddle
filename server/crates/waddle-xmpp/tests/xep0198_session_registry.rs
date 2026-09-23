@@ -233,6 +233,79 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
     ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
         self.inner.get_ingress_append(key).await
     }
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&waddle_xmpp::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: waddle_xmpp::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
+    }
+    async fn scrub_ingress_custody(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
+    }
 }
 
 /// Storage double that mislabels rows: its
@@ -371,6 +444,79 @@ impl SmPersistenceStorage for MislabelingStore {
         key: &SmIngressAppendKey,
     ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
         self.inner.get_ingress_append(key).await
+    }
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&waddle_xmpp::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: waddle_xmpp::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
+    }
+    async fn scrub_ingress_custody(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
     }
 }
 
@@ -1826,6 +1972,16 @@ fn drain_principal() -> AuthenticatedPrincipalRef {
     )
 }
 
+fn drained_payload(sequence: u32) -> waddle_xmpp::Stanza {
+    let element: minidom::Element = drained_entry(sequence)
+        .stanza_xml
+        .parse()
+        .expect("parse drained stanza XML");
+    waddle_xmpp::Stanza::Message(
+        xmpp_parsers::message::Message::try_from(element).expect("decode drained message stanza"),
+    )
+}
+
 fn drained_entry(sequence: u32) -> waddle_xmpp::stream_management::DetachedUnackedStanza {
     waddle_xmpp::stream_management::DetachedUnackedStanza {
         ingress_receipts: Vec::new(),
@@ -1859,7 +2015,11 @@ async fn xep0198_session_store_proves_drained_obligations_with_the_snapshot() {
         .expect("ledger read")
         .expect("obligation is unallocated");
     let unproven = registry
-        .store_session_with_drained_ingress_appends(session, drain_principal(), vec![ticket.at(12)])
+        .store_session_with_drained_ingress_appends(
+            session,
+            drain_principal(),
+            vec![ticket.at(12, drained_payload(12), chrono::Utc::now())],
+        )
         .await
         .expect("store")
         .unproven;
@@ -1928,7 +2088,10 @@ async fn xep0198_session_store_keeps_the_entry_of_a_conflicting_obligation() {
         .store_session_with_drained_ingress_appends(
             session,
             drain_principal(),
-            vec![winner.at(12), loser.at(13)],
+            vec![
+                winner.at(12, drained_payload(12), chrono::Utc::now()),
+                loser.at(13, drained_payload(13), chrono::Utc::now()),
+            ],
         )
         .await
         .expect("store")
@@ -1943,4 +2106,48 @@ async fn xep0198_session_store_keeps_the_entry_of_a_conflicting_obligation() {
     let sequences: Vec<u32> = claimed.unacked_stanzas.iter().map(|e| e.sequence).collect();
     assert_eq!(sequences, vec![12, 13]);
     assert_eq!(claimed.outbound_count, 13);
+}
+
+/// A detach drain can overflow its bounded replay queue before the session
+/// snapshot is stored. The ticket owns its typed payload before that eviction.
+#[tokio::test]
+async fn xep0198_drained_custody_survives_eviction_before_snapshot() {
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(std::sync::Arc::new(InMemorySmPersistence::new()));
+    let mut session = detached_session("stream-drained-overflow", "alice@example.com/laptop");
+    let key = drain_obligation(&session.jid);
+    let received_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    let payload = drained_payload(12);
+    let ticket = registry
+        .reserve_drained_ingress_append(key.clone())
+        .await
+        .expect("reserve drained ingress custody")
+        .expect("drained ingress obligation is unallocated");
+    session.unacked_stanzas.clear();
+    session.outbound_count = 13;
+    session.replay_gap_through = Some(12);
+    registry
+        .store_session_with_drained_ingress_appends(
+            session,
+            drain_principal(),
+            vec![ticket.at(12, payload.clone(), received_at)],
+        )
+        .await
+        .expect("store drained custody after replay eviction");
+    let proof = registry
+        .get_ingress_append(&key)
+        .await
+        .expect("read drained custody after replay eviction")
+        .expect("drained custody survives replay eviction");
+    assert_eq!(proof.payload.to_element(), payload.to_element());
+    assert_eq!(proof.original_receipt_at, received_at);
+    assert_eq!(proof.sequence, 12);
+    assert_eq!(
+        registry
+            .list_pending_ingress_appends(10)
+            .await
+            .expect("list pending drained custody")
+            .len(),
+        1
+    );
 }

@@ -42,6 +42,7 @@ use xmpp_parsers::message::MessageType as XmppMessageType;
 
 mod batch_write;
 mod broadcast;
+mod custody_ack;
 mod disco_trace;
 mod dispatch;
 mod frame_parsing;

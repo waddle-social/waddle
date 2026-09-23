@@ -58,8 +58,14 @@ pub(super) async fn store_session_atomic_with_ingress_append(
     append: PersistedIngressAppend,
 ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
     Ok(
-        match store_session_atomic_inner(storage, None, session, unacked, Ledger::Exclusive(append))
-            .await?
+        match store_session_atomic_inner(
+            storage,
+            None,
+            session,
+            unacked,
+            Ledger::Exclusive(Box::new(append)),
+        )
+        .await?
         {
             StoreOutcome::Committed { .. } => KeyedSnapshotOutcome::Committed,
             StoreOutcome::ObligationAlreadyAllocated { accepting_stream } => {
@@ -73,7 +79,7 @@ pub(super) async fn store_session_atomic_with_ingress_append(
 enum Ledger {
     Untouched,
     /// One obligation gates the whole write: a conflict commits nothing.
-    Exclusive(PersistedIngressAppend),
+    Exclusive(Box<PersistedIngressAppend>),
     /// Drained entries already hold counted sequences: a conflict withholds only its proof.
     Drained(Vec<PersistedIngressAppend>),
 }
@@ -226,24 +232,7 @@ async fn store_session_atomic_inner(
     }
     if let Ledger::Exclusive(append) = ledger {
         match ingress_append::insert(&mut tx, &append).await {
-            Ok(true) => {}
-            Ok(false) => {
-                // A replacement whose prior row was already superseded: the
-                // standing allocation wins and nothing here commits.
-                tx.rollback()
-                    .await
-                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-                let winner = ingress_append::get(&storage.db, &append.key)
-                    .await?
-                    .ok_or_else(|| {
-                        SmPersistenceError::Other(
-                            "superseded ingress append vanished after rollback".into(),
-                        )
-                    })?;
-                return Ok(StoreOutcome::ObligationAlreadyAllocated {
-                    accepting_stream: winner.accepting_stream,
-                });
-            }
+            Ok(()) => {}
             Err(error) => {
                 let conflict = ingress_append::is_ledger_conflict(&error);
                 tx.rollback()

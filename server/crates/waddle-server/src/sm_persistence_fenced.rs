@@ -135,8 +135,8 @@ use waddle_xmpp::ownership::{
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession, PersistedUnackedStanza,
-    SmClaimFence, SmPersistenceError, SmPersistenceStorage,
+    IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
+    PersistedUnackedStanza, SmClaimFence, SmPersistenceError, SmPersistenceStorage,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
@@ -398,6 +398,9 @@ impl PostgresFencedSmPersistence {
                 accepting_stream_id TEXT NOT NULL,
                 sequence BIGINT NOT NULL,
                 appended_at_ms BIGINT NOT NULL,
+                custody_payload TEXT NOT NULL,
+                original_receipt_at_ms BIGINT NOT NULL,
+                disposition INTEGER NOT NULL CHECK (disposition IN (0, 1, 2, 3)),
                 PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
             )",
             (),
@@ -411,6 +414,7 @@ impl PostgresFencedSmPersistence {
         )
         .await
         .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms)", ()).await.map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
             (),
@@ -786,11 +790,6 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
 
         // Two statements rather than ON DELETE CASCADE, matching the
         // portable impl's observable lifecycle exactly.
-        // Retire proofs for allocations this session lost, while its replay gap
-        // still exists to identify them (#1756).
-        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -824,11 +823,6 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced_with_authority(&mut tx, stream_id, &fence, authority)
             .await?;
-        // Retire proofs for allocations this session lost, while its replay gap
-        // still exists to identify them (#1756).
-        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -861,11 +855,6 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let _identity_guard = self
             .assert_fenced(&mut tx, stream_id, expected_fence)
             .await?;
-        // Retire proofs for allocations this session lost, while its replay gap
-        // still exists to identify them (#1756).
-        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -969,6 +958,28 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         tx.commit()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        Ok(removed)
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        let fence = self.claim_fence_for(stream_id).await?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
+        let removed = crate::sm_persistence::ingress_append::delete_tombstoned_unacked(
+            &mut tx, stream_id, sequences,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         Ok(removed)
     }
 
@@ -1175,6 +1186,74 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         key: &waddle_xmpp::stream_management::SmIngressAppendKey,
     ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
         crate::sm_persistence::ingress_append::get(&self.db, key).await
+    }
+
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &SmSessionId,
+        sequence: u32,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError> {
+        crate::sm_persistence::ingress_append::get_for_sequence(&self.db, stream, sequence).await
+    }
+
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError> {
+        crate::sm_persistence::ingress_append::list_pending(&self.db, limit).await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&waddle_xmpp::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError> {
+        crate::sm_persistence::ingress_append::list_pending_after(&self.db, after, limit).await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+        accepting_stream: &SmSessionId,
+        sequence: u32,
+        disposition: IngressCustodyDisposition,
+    ) -> Result<bool, SmPersistenceError> {
+        crate::sm_persistence::ingress_append::complete(
+            &self.db,
+            key,
+            accepting_stream,
+            sequence,
+            disposition,
+        )
+        .await
+    }
+
+    async fn scrub_ingress_custody(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+        through: DateTime<Utc>,
+    ) -> Result<(), SmPersistenceError> {
+        crate::sm_persistence::ingress_append::scrub_custody(&self.db, target, through).await
+    }
+
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), SmPersistenceError> {
+        let fence = self.claim_fence_for(stream).await?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream, &fence).await?;
+        crate::sm_persistence::ingress_append::complete_through(&mut tx, stream, from_exclusive, h)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
     }
 
     async fn store_session_atomic_with_principal(

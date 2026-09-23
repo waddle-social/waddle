@@ -109,6 +109,8 @@ enum RoomPreparationWaiter {
 
 #[derive(Clone)]
 struct RoomCreationSpec {
+    /// Recovery may only restore this lifecycle; it must never create one.
+    expected_lifecycle: Option<super::RoomLifecycleId>,
     waddle_id: String,
     channel_id: String,
     config: RoomConfig,
@@ -118,7 +120,8 @@ struct RoomCreationSpec {
 
 impl PartialEq for RoomCreationSpec {
     fn eq(&self, other: &Self) -> bool {
-        self.waddle_id == other.waddle_id
+        self.expected_lifecycle == other.expected_lifecycle
+            && self.waddle_id == other.waddle_id
             && self.channel_id == other.channel_id
             && self.config == other.config
             && self.initial_affiliations == other.initial_affiliations
@@ -183,6 +186,7 @@ enum RoomPreparationReadiness {
     },
     Pending,
     RecreationBlocked,
+    LifecycleAbsent,
     ClaimLost,
     Unavailable,
 }
@@ -580,12 +584,21 @@ impl RoomRegistryActor {
     }
 
     async fn destroy_completion_blocks_recreation(&self, room_jid: &BareJid) -> bool {
+        self.destroy_completion_pending(room_jid)
+            .await
+            .unwrap_or(true)
+    }
+
+    async fn destroy_completion_pending(
+        &self,
+        room_jid: &BareJid,
+    ) -> Result<bool, RoomRegistryError> {
         if self
             .pending_unpublished_destroys
             .keys()
             .any(|(pending_room_jid, _)| pending_room_jid == room_jid)
         {
-            return true;
+            return Ok(true);
         }
         let locally_pending = self
             .destroy_completions_waiting
@@ -594,19 +607,19 @@ impl RoomRegistryActor {
             .chain(self.leased_destroy_completions.values())
             .any(|completion| completion.room_jid == *room_jid);
         if locally_pending {
-            return true;
+            return Ok(true);
         }
         let Some(store) = &self.durable_store else {
-            return false;
+            return Ok(false);
         };
         match store.destroy_completion_blocks_recreation(room_jid).await {
-            Ok(blocks) => blocks,
+            Ok(blocks) => Ok(blocks),
             Err(error) => {
                 // An unavailable durable outbox is not proof that a prior
                 // completion is gone.  Refuse recreation until a later
                 // request can query it successfully.
                 warn!(room = %room_jid, %error, "could not verify durable destroy completion before recreation");
-                true
+                Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()))
             }
         }
     }
@@ -2069,7 +2082,13 @@ impl RoomRegistryActor {
         // a registered successor or window expiry, so a failed adoption
         // leaves it in place for the next retry.
         let creation_spec = match self.stashed_handoff_spec(&room_jid) {
-            Some(stashed) if creation_spec.live_room_restore.is_none() => stashed,
+            Some(stashed)
+                if creation_spec.live_room_restore.is_none()
+                    && (creation_spec.expected_lifecycle.is_none()
+                        || creation_spec.expected_lifecycle == stashed.expected_lifecycle) =>
+            {
+                stashed
+            }
             _ => creation_spec,
         };
 
@@ -2219,6 +2238,60 @@ impl RoomRegistryActor {
                 },
                 other => Some(other),
             };
+            // Restoration is a fenced read, never demand creation. Validate
+            // the lifecycle before activation or transplanting a live roster:
+            // a terminal destroy (including destroy/recreate at this JID)
+            // cannot turn delayed config recovery into a new room creator.
+            if let Some(expected) = creation_spec
+                .as_ref()
+                .and_then(|spec| spec.expected_lifecycle)
+                .filter(|_| matches!(readiness, Some(Ok(DurableRestoreReadiness::Ready(_)))))
+            {
+                let lifecycle_matches = match readiness {
+                    Some(Ok(DurableRestoreReadiness::Ready(DurableRoomOrigin::New))) => Some(false),
+                    Some(Ok(DurableRestoreReadiness::Ready(DurableRoomOrigin::Restored))) => {
+                        match actor_ref
+                            .ask(GetSnapshot)
+                            .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                            .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                            .await
+                        {
+                            Ok(snapshot) => Some(
+                                snapshot
+                                    .durable_coordinates
+                                    .is_some_and(|coordinates| coordinates.lifecycle == expected),
+                            ),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+                match lifecycle_matches {
+                    Some(false) => {
+                        let _ = registry_ref
+                            .tell(CompleteRoomPreparation {
+                                room_jid,
+                                generation,
+                                readiness: RoomPreparationReadiness::LifecycleAbsent,
+                            })
+                            .await;
+                        return;
+                    }
+                    Some(true) => {}
+                    None => {
+                        // Do not let an unavailable lifecycle verification
+                        // fall through to activation or publication.
+                        let _ = registry_ref
+                            .tell(CompleteRoomPreparation {
+                                room_jid,
+                                generation,
+                                readiness: RoomPreparationReadiness::Unavailable,
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
             // A fresh actor is not published until its complete initial
             // snapshot is durably committed and then restored into memory.
             // Reclaimed rooms already have an authoritative snapshot and
@@ -3343,6 +3416,36 @@ impl kameo::message::Message<CompleteRoomPreparation> for RoomRegistryActor {
             return;
         }
 
+        if matches!(msg.readiness, RoomPreparationReadiness::LifecycleAbsent) {
+            let pending = self
+                .pending_room_preparations
+                .remove(&msg.room_jid)
+                .expect("generation was checked in the same mailbox turn");
+            let claim_fence = pending.claim_fence.clone();
+            drop(pending.guard);
+            self.handoff_pending.remove(&msg.room_jid);
+            self.transfer_exact_responsibility_to_pending_release(
+                msg.room_jid.clone(),
+                claim_fence.clone(),
+            );
+            self.start_detached_room_release(
+                msg.room_jid.clone(),
+                claim_fence,
+                ctx.actor_ref().clone(),
+            );
+            for waiter in pending.waiters {
+                match waiter {
+                    RoomPreparationWaiter::Lookup { reply } => reply.send(Ok(None)),
+                    waiter => Self::reply_preparation_failure(
+                        &msg.room_jid,
+                        vec![waiter],
+                        ReclaimedRoomOutcome::Released,
+                    ),
+                }
+            }
+            return;
+        }
+
         if matches!(msg.readiness, RoomPreparationReadiness::RecreationBlocked) {
             let pending = self
                 .pending_room_preparations
@@ -3385,7 +3488,8 @@ impl kameo::message::Message<CompleteRoomPreparation> for RoomRegistryActor {
             RoomPreparationReadiness::Pending | RoomPreparationReadiness::Unavailable => {
                 RoomPublicationError::OwnershipUnavailable
             }
-            RoomPreparationReadiness::RecreationBlocked => unreachable!("handled above"),
+            RoomPreparationReadiness::RecreationBlocked
+            | RoomPreparationReadiness::LifecycleAbsent => unreachable!("handled above"),
         };
         let pending = self
             .pending_room_preparations
@@ -3892,6 +3996,237 @@ impl kameo::message::Message<GetRoom> for RoomRegistryActor {
             )));
         }
         ctx.reply(self.live_room(&msg.room_jid).await)
+    }
+}
+
+/// Recover an existing room lifecycle after an interrupted mutation.
+/// Unlike demand creation, this request never creates a missing lifecycle.
+/// `live_restore` must be the sealed predecessor's final snapshot; it is
+/// transplanted only while `stale_actor` is still the exact registered actor.
+pub struct GetOrRestoreRoom {
+    pub room_jid: BareJid,
+    pub previous_snapshot: super::room_actor::RoomSnapshot,
+    pub stale_actor: ActorRef<RoomActor>,
+    pub live_restore: Option<super::room_actor::RoomSnapshot>,
+}
+
+impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
+    type Reply = DelegatedReply<Result<Option<ActorRef<RoomActor>>, RoomRegistryError>>;
+
+    async fn handle(
+        &mut self,
+        msg: GetOrRestoreRoom,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let room_jid = msg.room_jid;
+        let expected_lifecycle = msg
+            .previous_snapshot
+            .durable_coordinates
+            .map(|coordinates| coordinates.lifecycle);
+        // A destroy seal is only intent: the durable commit can fail and
+        // reopen the same lifecycle. Preserve recovery until its outcome is
+        // known. Ordinary lookup also redrives ambiguous retained attempts.
+        if self.destroy_attempts.contains_key(&room_jid) {
+            if let Err(error) = self.live_room(&room_jid).await {
+                return ctx.reply(Err(error));
+            }
+        }
+        if self
+            .destroy_completions_waiting
+            .values()
+            .any(|completion| completion.room_jid == room_jid)
+        {
+            return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                room_jid,
+            )));
+        }
+        // XEP-0045 §10.9 completed destruction is terminal for this recovery;
+        // it must never become demand creation.
+        if self
+            .pending_unpublished_destroys
+            .keys()
+            .any(|(room, _)| room == &room_jid)
+        {
+            return ctx.reply(Ok(None));
+        }
+        match self.destroy_completion_pending(&room_jid).await {
+            Ok(true) => return ctx.reply(Ok(None)),
+            Ok(false) => {}
+            Err(error) => return ctx.reply(Err(error)),
+        }
+        if let Some(pending) = self.pending_room_preparations.get_mut(&room_jid) {
+            // Only an already-verified restore request for this lifecycle
+            // can be shared. A fresh creator preparation must never hand a
+            // new incarnation to a delayed old-lifecycle recovery.
+            let matching_restore = expected_lifecycle.is_some()
+                && matches!(
+                    &pending.origin,
+                    RoomPreparationOrigin::Demand { prepared_spec }
+                        if prepared_spec.expected_lifecycle == expected_lifecycle
+                );
+            if !matching_restore || !Self::preparation_waiter_capacity_available(pending) {
+                return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                    room_jid,
+                )));
+            }
+            let (delegated, reply) = ctx.reply_sender();
+            if let Some(reply) = reply {
+                pending
+                    .waiters
+                    .push(RoomPreparationWaiter::Lookup { reply });
+            }
+            return delegated;
+        }
+        let mut live_restore = None;
+        if let Some(actor_ref) = match self.live_room(&room_jid).await {
+            Ok(actor) => actor,
+            Err(RoomRegistryError::RoomActorStateLost(_))
+                if expected_lifecycle.is_some()
+                    && self.durable_store.is_some()
+                    && !self.rooms.contains_key(&room_jid) =>
+            {
+                None
+            }
+            Err(error) => return ctx.reply(Err(error)),
+        } {
+            let snapshot = match actor_ref
+                .ask(GetSnapshot)
+                .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(_) => return ctx.reply(Err(RoomRegistryError::OwnershipUnavailable(room_jid))),
+            };
+            let same_lifecycle = match expected_lifecycle {
+                Some(expected) => snapshot
+                    .durable_coordinates
+                    .is_some_and(|coordinates| coordinates.lifecycle == expected),
+                None => {
+                    actor_ref.id() == msg.stale_actor.id() && snapshot.durable_coordinates.is_none()
+                }
+            };
+            if !same_lifecycle {
+                return ctx.reply(Ok(None));
+            }
+            match actor_ref
+                .ask(GetRoomSealState)
+                .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                .await
+            {
+                Ok(RoomSealState::Open) => return ctx.reply(Ok(Some(actor_ref))),
+                Ok(RoomSealState::Destroying { .. }) => {
+                    return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                        room_jid,
+                    )))
+                }
+                Ok(RoomSealState::OwnershipLost) if actor_ref.id() == msg.stale_actor.id() => {
+                    let Some(restore) = msg.live_restore else {
+                        return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                            room_jid,
+                        )));
+                    };
+                    if restore
+                        .durable_coordinates
+                        .map(|coordinates| coordinates.lifecycle)
+                        != expected_lifecycle
+                    {
+                        return ctx.reply(Ok(None));
+                    }
+                    // No durable lifecycle means there is nothing an absent
+                    // successor can restore. Leave the stale entry intact.
+                    if expected_lifecycle.is_none() || self.durable_store.is_none() {
+                        return ctx.reply(Ok(None));
+                    }
+                    if !self.can_admit_new_room_ownership_responsibility() {
+                        return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                            room_jid,
+                        )));
+                    }
+                    live_restore = Some(LiveRoomRestore {
+                        room: restore.room,
+                        occupancy_revision: restore.occupancy_revision,
+                        departures: restore.departures,
+                    });
+                    let entry = self
+                        .rooms
+                        .remove(&room_jid)
+                        .expect("exact actor checked in this registry turn");
+                    self.publish_room_count();
+                    self.handoff_pending.insert(
+                        room_jid.clone(),
+                        PendingHandoff {
+                            since: std::time::Instant::now(),
+                            stashed_spec: None,
+                        },
+                    );
+                    self.retire_ownership_lost_entry(&room_jid, entry).await;
+                }
+                Ok(_) => {
+                    return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                        room_jid,
+                    )))
+                }
+                Err(_) => return ctx.reply(Err(RoomRegistryError::OwnershipUnavailable(room_jid))),
+            }
+        }
+        let Some(expected) = expected_lifecycle.filter(|_| self.durable_store.is_some()) else {
+            return ctx.reply(Ok(None));
+        };
+        let previous = msg.previous_snapshot.room;
+        let mut creation_spec = Arc::new(RoomCreationSpec {
+            expected_lifecycle: Some(expected),
+            waddle_id: previous.waddle_id,
+            channel_id: previous.channel_id,
+            config: previous.config,
+            initial_affiliations: Vec::new(),
+            live_room_restore: live_restore,
+        });
+        if creation_spec.live_room_restore.is_none() {
+            if let Some(stashed) = self.stashed_handoff_spec(&room_jid) {
+                if stashed.expected_lifecycle == Some(expected) {
+                    creation_spec = stashed;
+                }
+            }
+        }
+        // Retain the final roster across a transient preparation failure.
+        if let Some(pending) = self.handoff_pending.get_mut(&room_jid) {
+            pending.stashed_spec = Some(Arc::clone(&creation_spec));
+        }
+        let preparation = self
+            .prepare_demand_room(
+                &room_jid,
+                RoomPreparationSpec {
+                    waddle_id: creation_spec.waddle_id.clone(),
+                    channel_id: creation_spec.channel_id.clone(),
+                    config: creation_spec.config.clone(),
+                    initial_affiliations: Vec::new(),
+                    live_room_restore: creation_spec.live_room_restore.clone(),
+                },
+                ctx.actor_ref(),
+            )
+            .await;
+        match preparation {
+            Ok(DemandRoomPreparation::Pending { guard, claim_fence }) => {
+                let (delegated, reply) = ctx.reply_sender();
+                self.start_pending_preparation(
+                    room_jid,
+                    claim_fence,
+                    RoomPreparationOrigin::Demand {
+                        prepared_spec: creation_spec,
+                    },
+                    guard,
+                    reply.map(|reply| RoomPreparationWaiter::Lookup { reply }),
+                    ctx.actor_ref().clone(),
+                );
+                delegated
+            }
+            Ok(DemandRoomPreparation::Published(_)) => {
+                unreachable!("durable restoration always requires asynchronous preparation")
+            }
+            Err(error) => ctx.reply(Err(error)),
+        }
     }
 }
 
@@ -4851,6 +5186,7 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
             )));
         }
         let creation_spec = Arc::new(RoomCreationSpec {
+            expected_lifecycle: None,
             waddle_id: msg.waddle_id,
             channel_id: msg.channel_id,
             config: msg.config,
@@ -4932,6 +5268,7 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             }
         }
         let creation_spec = Arc::new(RoomCreationSpec {
+            expected_lifecycle: None,
             waddle_id: msg.waddle_id.into_string(),
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
@@ -5036,6 +5373,7 @@ impl kameo::message::Message<GetOrCreateRoomWithInitialAffiliations> for RoomReg
             )));
         }
         let creation_spec = Arc::new(RoomCreationSpec {
+            expected_lifecycle: None,
             waddle_id: msg.waddle_id.into_string(),
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
@@ -5105,6 +5443,7 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
             ..RoomConfig::default()
         };
         let creation_spec = Arc::new(RoomCreationSpec {
+            expected_lifecycle: None,
             waddle_id,
             channel_id,
             config,
@@ -5164,6 +5503,7 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
             )));
         }
         let creation_spec = Arc::new(RoomCreationSpec {
+            expected_lifecycle: None,
             waddle_id: msg.waddle_id,
             channel_id: msg.channel_id,
             config: msg.config,
@@ -5219,6 +5559,7 @@ impl kameo::message::Message<CreateRoomWithInitialAffiliations> for RoomRegistry
             )));
         }
         let creation_spec = Arc::new(RoomCreationSpec {
+            expected_lifecycle: None,
             waddle_id: msg.waddle_id.into_string(),
             channel_id: msg.channel_id.into_string(),
             config: msg.config,

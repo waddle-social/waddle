@@ -163,43 +163,61 @@ async fn ingress_gc_stale_terminal_pending_intent_postgres() {
     }
 }
 
-/// #1756: append proofs are reclaimed with their canonical row, and only then.
-///
-/// Nothing else deletes them on purpose — the obligation owns their lifetime, not
-/// the SM session, because a resume deletes the detached snapshot while the stream
-/// continues. That makes retention GC the only place they can be retired, and it
-/// must not retire proof while the obligation could still be retried: a missing
-/// proof would authorize a second durable allocation.
+/// Completed custody follows canonical retention; pending payloads remain
+/// recoverable independently until positive acknowledgement or durable handoff.
 async fn append_proofs_retire_with_their_message(fixture: IngressFixture) {
     let submission = archive_plan(&fixture, Some("append-proof-gc"), "retained", "archive");
     let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("initial commit");
     let key = decision.message_key.expect("canonical key");
-    let proof_sql = "INSERT INTO sm_ingress_appends \
-         (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) \
-         VALUES (?, 1, ?, 'juliet@example.com/phone', 'stream-gc', 7, 0)";
-    fixture
-        .execute(
-            proof_sql,
-            waddle_server::db_params![key.to_storage().to_string(), vec![9u8; 32]],
-        )
-        .await;
-    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+    let payload =
+        waddle_xmpp::Stanza::Message(submission.plan.sanitized_message.clone()).to_element();
+    let mut bytes = Vec::new();
+    payload
+        .write_to(&mut bytes)
+        .expect("serialize custody at SQL boundary");
+    let payload = String::from_utf8(bytes).expect("XML is UTF-8");
+    for (resource, disposition) in [
+        ("juliet@example.com/phone", 1i64),
+        ("juliet@example.com/tablet", 0i64),
+    ] {
+        fixture.execute(
+            "INSERT INTO sm_ingress_appends \
+             (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms, custody_payload, original_receipt_at_ms, disposition) \
+             VALUES (?, 1, ?, ?, 'stream-gc', 7, 0, ?, 0, ?)",
+            waddle_server::db_params![key.to_storage().to_string(), vec![9u8; 32], resource, payload.clone(), disposition],
+        ).await;
+    }
+    assert_eq!(fixture.count("sm_ingress_appends").await, 2);
 
-    // Still inside the retention window: the obligation remains retryable, so the
-    // proof must survive even though the GC pass runs.
+    // Retention still protects completed proofs from duplicate allocation.
     assert_eq!(collect(&fixture, Utc::now()).await, 0);
-    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 2);
 
-    // Terminal and past retention: the canonical row goes, and its proofs with it.
     terminalize_expired(&fixture, key).await;
     assert_eq!(collect(&fixture, Utc::now() + Duration::days(9)).await, 1);
     assert_eq!(fixture.count("ingress_messages").await, 0);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+    assert_eq!(
+        fixture
+            .count("sm_ingress_appends WHERE disposition = 0")
+            .await,
+        1,
+        "canonical retention must not discard pending custody payloads"
+    );
+
+    fixture
+        .execute(
+            "UPDATE sm_ingress_appends SET disposition = 1 WHERE message_key = ?",
+            waddle_server::db_params![key.to_storage().to_string()],
+        )
+        .await;
+    assert_eq!(collect(&fixture, Utc::now() + Duration::days(9)).await, 0);
     assert_eq!(
         fixture.count("sm_ingress_appends").await,
         0,
-        "a reclaimed obligation can never be retried, so its proof is retired with it"
+        "orphan GC retires custody only after its payload is discharged"
     );
     fixture.close().await;
 }

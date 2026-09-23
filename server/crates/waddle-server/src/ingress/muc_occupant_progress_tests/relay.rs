@@ -256,7 +256,15 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
         )
         .await;
     assert!(report.receipt_failures.is_empty(), "{report:?}");
-    assert_eq!(*targets.lock().expect("targets"), vec![target.clone()]);
+    assert_eq!(
+        *targets.lock().expect("targets"),
+        if local {
+            Vec::new()
+        } else {
+            vec![target.clone()]
+        },
+        "durable local custody settles the retry without another relay attempt"
+    );
     let mut tx = fixture.uow.begin().await.expect("final progress");
     assert_eq!(
         DeliveryProgressRepository::load(&mut tx, key, &receipt)

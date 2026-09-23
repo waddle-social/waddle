@@ -4508,6 +4508,79 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
     > {
         self.inner.get_ingress_append(key).await
     }
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: crate::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
+    }
+    async fn scrub_ingress_custody(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
+    }
 }
 
 async fn assert_ambiguous_claim_survives_displacement(
@@ -6061,6 +6134,79 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
     > {
         self.inner.get_ingress_append(key).await
     }
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: crate::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
+    }
+    async fn scrub_ingress_custody(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
+    }
 }
 
 async fn assert_cross_shard_displacement_preserves_claim(snapshot_fails: bool) {
@@ -6756,6 +6902,79 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
     > {
         self.inner.get_ingress_append(key).await
     }
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: crate::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
+    }
+    async fn scrub_ingress_custody(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
+    }
 }
 
 #[tokio::test]
@@ -7444,6 +7663,79 @@ impl super::super::persistence::SmPersistenceStorage for ScopedProbePersistence 
         super::super::persistence::SmPersistenceError,
     > {
         self.inner.get_ingress_append(key).await
+    }
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::PersistedIngressAppend>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+        stream: &crate::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: crate::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
+    }
+    async fn scrub_ingress_custody(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
     }
 }
 

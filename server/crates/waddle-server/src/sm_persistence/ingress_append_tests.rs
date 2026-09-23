@@ -14,7 +14,9 @@ fn append_for(session: &PersistedSession) -> PersistedIngressAppend {
         },
         accepting_stream: session.stream_id.clone(),
         sequence: 12,
-        supersedes: None,
+        payload: *fixture_unacked(session.stream_id.as_str(), 12).stanza,
+        original_receipt_at: fixed_time(),
+        disposition: IngressCustodyDisposition::Pending,
         appended_at: fixed_time(),
     }
 }
@@ -499,6 +501,12 @@ async fn postgres_keyed_append_storage_contract() {
     let storage = DatabaseSmPersistence::open(Some(&url))
         .await
         .expect("storage open");
+    custody_survives_gap_and_completion_is_exact(&storage).await;
+    custody_acknowledgement_wraps_without_session(&storage).await;
+    custody_scrub_cutoff_and_exact_promotion(&storage).await;
+    custody_pagination_advances_after_completed_cursor(&storage).await;
+    tombstone_deletion_catches_allocation_after_initial_scrub(&storage).await;
+    sequence_lookup_retains_terminal_and_distinct_allocations(&storage).await;
     allocation_and_duplicate(&storage).await;
     concurrent_allocation(&url).await;
     distinct_obligations(&storage).await;
@@ -563,4 +571,443 @@ async fn sqlite_other_ledger_unique_constraint_is_error_and_rolls_back() {
             .expect("ledger read"),
         None
     );
+}
+
+async fn custody_survives_gap_and_completion_is_exact(storage: &DatabaseSmPersistence) {
+    let mut session = fixture_session(&format!("custody-{}", uuid::Uuid::new_v4()));
+    let mut proof = append_for(&session);
+    // Sort before ordinary fixtures so the bounded scan must return this row.
+    proof.appended_at = DateTime::<Utc>::from_timestamp_millis(1).expect("timestamp");
+    session.replay_gap_through = Some(proof.sequence);
+    storage
+        .store_session_atomic_with_ingress_append(session.clone(), Vec::new(), proof.clone())
+        .await
+        .expect("store custody even when its replay entry was evicted");
+    storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("delete session");
+    assert_eq!(
+        storage.get_ingress_append(&proof.key).await.expect("read"),
+        Some(proof.clone())
+    );
+    assert!(storage
+        .list_pending_ingress_appends(0)
+        .await
+        .expect("empty scan")
+        .is_empty());
+    assert_eq!(
+        storage
+            .list_pending_ingress_appends(1)
+            .await
+            .expect("bounded scan"),
+        vec![proof.clone()]
+    );
+    assert!(!storage
+        .complete_ingress_append(
+            &proof.key,
+            &SmSessionId::new("wrong-stream"),
+            proof.sequence,
+            IngressCustodyDisposition::Promoted
+        )
+        .await
+        .expect("stale stream"));
+    assert!(!storage
+        .complete_ingress_append(
+            &proof.key,
+            &proof.accepting_stream,
+            proof.sequence + 1,
+            IngressCustodyDisposition::Promoted
+        )
+        .await
+        .expect("stale sequence"));
+    assert!(storage
+        .complete_ingress_append(
+            &proof.key,
+            &proof.accepting_stream,
+            proof.sequence,
+            IngressCustodyDisposition::Pending
+        )
+        .await
+        .is_err());
+    assert!(storage
+        .complete_ingress_append(
+            &proof.key,
+            &proof.accepting_stream,
+            proof.sequence,
+            IngressCustodyDisposition::Promoted
+        )
+        .await
+        .expect("durable handoff"));
+    assert!(!storage
+        .complete_ingress_append(
+            &proof.key,
+            &proof.accepting_stream,
+            proof.sequence,
+            IngressCustodyDisposition::Acknowledged
+        )
+        .await
+        .expect("cannot replace terminal evidence"));
+    proof.disposition = IngressCustodyDisposition::Promoted;
+    assert_eq!(
+        storage
+            .get_ingress_append(&proof.key)
+            .await
+            .expect("immutable proof and payload"),
+        Some(proof)
+    );
+}
+
+async fn custody_acknowledgement_wraps_without_session(storage: &DatabaseSmPersistence) {
+    let session = fixture_session(&format!("custody-wrap-{}", uuid::Uuid::new_v4()));
+    let mut proofs = Vec::new();
+    for sequence in [u32::MAX - 1, u32::MAX, 0, 1] {
+        let mut proof = append_for(&session);
+        proof.sequence = sequence;
+        storage
+            .store_session_atomic_with_ingress_append(session.clone(), Vec::new(), proof.clone())
+            .await
+            .expect("allocate");
+        proofs.push(proof);
+    }
+    storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("resume deletes snapshot");
+    storage
+        .complete_ingress_appends_through(&session.stream_id, u32::MAX - 1, 0)
+        .await
+        .expect("ack wrap");
+    for proof in &mut proofs {
+        if proof.sequence == u32::MAX || proof.sequence == 0 {
+            proof.disposition = IngressCustodyDisposition::Acknowledged;
+        }
+        assert_eq!(
+            storage
+                .get_ingress_append(&proof.key)
+                .await
+                .expect("read custody"),
+            Some(proof.clone())
+        );
+    }
+    // A repeated h never acknowledges a new interval.
+    storage
+        .complete_ingress_appends_through(&session.stream_id, 1, 1)
+        .await
+        .expect("empty ack");
+    assert_eq!(
+        storage
+            .get_ingress_append(&proofs[3].key)
+            .await
+            .expect("read"),
+        Some(proofs[3].clone())
+    );
+}
+
+#[tokio::test]
+async fn sqlite_custody_survives_gap_and_exact_completion() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("storage");
+    custody_survives_gap_and_completion_is_exact(&storage).await;
+    custody_acknowledgement_wraps_without_session(&storage).await;
+}
+
+#[tokio::test]
+async fn sqlite_new_allocation_cannot_start_with_completed_custody() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("storage");
+    let session = fixture_session("invalid-custody-disposition");
+    let mut proof = append_for(&session);
+    proof.disposition = IngressCustodyDisposition::Acknowledged;
+    assert!(storage
+        .store_session_atomic_with_ingress_append(session.clone(), Vec::new(), proof.clone())
+        .await
+        .is_err());
+    assert!(storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("session")
+        .is_none());
+    assert!(storage
+        .get_ingress_append(&proof.key)
+        .await
+        .expect("proof")
+        .is_none());
+}
+
+async fn custody_scrub_cutoff_and_exact_promotion(storage: &DatabaseSmPersistence) {
+    let session = fixture_session(&format!("custody-scrub-{}", uuid::Uuid::new_v4()));
+    let mut proofs = Vec::new();
+    for index in 0..3 {
+        let mut proof = append_for(&session);
+        proof.sequence += index;
+        if index == 1 {
+            proof.original_receipt_at += chrono::Duration::seconds(1);
+        }
+        let Stanza::Message(message) = &mut proof.payload else {
+            panic!("message fixture")
+        };
+        message.id = Some(xmpp_parsers::message::Id("retracted-message".to_string()));
+        message.from = Some(
+            if index == 2 {
+                "mallory@example.com/phone"
+            } else {
+                "alice@example.com/phone"
+            }
+            .parse()
+            .expect("author"),
+        );
+        message.to = Some("bob@example.com/web".parse().expect("recipient"));
+        storage
+            .store_session_atomic_with_ingress_append(session.clone(), Vec::new(), proof.clone())
+            .await
+            .expect("store custody");
+        proofs.push(proof);
+    }
+    storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("delete replay snapshot");
+    let target = waddle_xmpp::tombstone::TombstoneTarget::Direct {
+        wire_id: "retracted-message".to_string(),
+        author: "alice@example.com".parse().expect("author"),
+        archive: "bob@example.com".parse().expect("archive"),
+    };
+    storage
+        .scrub_ingress_custody(&target, fixed_time())
+        .await
+        .expect("durable tombstone");
+    proofs[0].disposition = IngressCustodyDisposition::Tombstoned;
+    for proof in &proofs {
+        assert_eq!(
+            storage.get_ingress_append(&proof.key).await.expect("read"),
+            Some(proof.clone())
+        );
+    }
+    assert!(storage
+        .complete_ingress_append(
+            &proofs[1].key,
+            &session.stream_id,
+            proofs[1].sequence,
+            IngressCustodyDisposition::Promoted,
+        )
+        .await
+        .expect("exact promotion"));
+    proofs[1].disposition = IngressCustodyDisposition::Promoted;
+    for proof in &proofs {
+        assert_eq!(
+            storage.get_ingress_append(&proof.key).await.expect("read"),
+            Some(proof.clone())
+        );
+    }
+}
+
+#[tokio::test]
+async fn sqlite_custody_scrub_respects_cutoff_author_and_exact_promotion() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("storage");
+    custody_scrub_cutoff_and_exact_promotion(&storage).await;
+}
+
+async fn custody_pagination_advances_after_completed_cursor(storage: &DatabaseSmPersistence) {
+    let session = fixture_session("custody-pagination");
+    let base = append_for(&session);
+    for (hash, resource) in [
+        (1, "alice@example.com/phone"),
+        (1, "alice@example.com/web"),
+        (2, "alice@example.com/phone"),
+    ] {
+        let mut proof = base.clone();
+        proof.key.semantic_identity_hash = [hash; 32];
+        proof.key.resource = resource.parse().expect("resource");
+        storage
+            .store_session_atomic_with_ingress_append(session.clone(), Vec::new(), proof)
+            .await
+            .expect("allocate");
+    }
+    let mut before_first = base.key.clone();
+    before_first.semantic_identity_hash = [0; 32];
+    let first = storage
+        .list_pending_ingress_appends_after(Some(&before_first), 1)
+        .await
+        .expect("first page");
+    assert_eq!(first.len(), 1);
+    storage
+        .complete_ingress_append(
+            &first[0].key,
+            &first[0].accepting_stream,
+            first[0].sequence,
+            IngressCustodyDisposition::Acknowledged,
+        )
+        .await
+        .expect("complete cursor allocation");
+    let second = storage
+        .list_pending_ingress_appends_after(Some(&first[0].key), 1)
+        .await
+        .expect("second page");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].key.semantic_identity_hash, [1; 32]);
+    assert_eq!(second[0].key.resource.to_string(), "alice@example.com/web");
+    let third = storage
+        .list_pending_ingress_appends_after(Some(&second[0].key), 1)
+        .await
+        .expect("third page");
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].key.semantic_identity_hash, [2; 32]);
+    assert!(storage
+        .list_pending_ingress_appends_after(Some(&third[0].key), 1)
+        .await
+        .expect("end")
+        .iter()
+        .all(|row| row.key.message_key != base.key.message_key));
+}
+
+#[tokio::test]
+async fn sqlite_pending_custody_pagination_advances_after_completed_cursor() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("storage");
+    custody_pagination_advances_after_completed_cursor(&storage).await;
+}
+
+async fn tombstone_deletion_catches_allocation_after_initial_scrub(
+    storage: &DatabaseSmPersistence,
+) {
+    let session = fixture_session(&format!("late-tombstone-custody-{}", uuid::Uuid::new_v4()));
+    let mut proof = append_for(&session);
+    let Stanza::Message(message) = &mut proof.payload else {
+        panic!("message fixture")
+    };
+    message.id = Some(xmpp_parsers::message::Id("late-allocation".to_string()));
+    message.from = Some("alice@example.com/phone".parse().expect("author"));
+    message.to = Some("bob@example.com/web".parse().expect("recipient"));
+    let target = waddle_xmpp::tombstone::TombstoneTarget::Direct {
+        wire_id: "late-allocation".to_string(),
+        author: "alice@example.com".parse().expect("author"),
+        archive: "bob@example.com".parse().expect("archive"),
+    };
+    storage
+        .scrub_ingress_custody(&target, fixed_time())
+        .await
+        .expect("initial scrub precedes allocation");
+    let mut queued = fixture_unacked(session.stream_id.as_str(), proof.sequence);
+    queued.stanza = Box::new(proof.payload.clone());
+    storage
+        .store_session_atomic_with_ingress_append(session.clone(), vec![queued], proof.clone())
+        .await
+        .expect("late allocation");
+    assert_eq!(
+        storage
+            .delete_tombstoned_unacked(&session.stream_id, &[proof.sequence])
+            .await
+            .expect("targeted scrub"),
+        1
+    );
+    assert!(storage
+        .list_unacked(&session.stream_id)
+        .await
+        .expect("queue")
+        .is_empty());
+    proof.disposition = IngressCustodyDisposition::Tombstoned;
+    assert_eq!(
+        storage
+            .get_ingress_append(&proof.key)
+            .await
+            .expect("suppressed custody"),
+        Some(proof.clone())
+    );
+    assert_eq!(
+        storage
+            .delete_tombstoned_unacked(&session.stream_id, &[proof.sequence])
+            .await
+            .expect("idempotent scrub"),
+        0
+    );
+    assert_eq!(
+        storage
+            .get_ingress_append(&proof.key)
+            .await
+            .expect("immutable terminal proof"),
+        Some(proof)
+    );
+}
+
+#[tokio::test]
+async fn sqlite_tombstone_deletion_catches_allocation_after_initial_scrub() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("storage");
+    tombstone_deletion_catches_allocation_after_initial_scrub(&storage).await;
+}
+
+#[tokio::test]
+async fn sqlite_tombstone_custody_failure_rolls_back_replay_deletion() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("storage");
+    let session = fixture_session("atomic-tombstone-failure");
+    let proof = append_for(&session);
+    storage
+        .store_session_atomic_with_ingress_append(
+            session.clone(),
+            vec![fixture_unacked(session.stream_id.as_str(), proof.sequence)],
+            proof.clone(),
+        )
+        .await
+        .expect("allocate");
+    storage.execute("CREATE TRIGGER fail_custody_tombstone BEFORE UPDATE OF disposition ON sm_ingress_appends BEGIN SELECT RAISE(ABORT, 'injected custody update failure'); END", ()).await.expect("install fault");
+    assert!(storage
+        .delete_tombstoned_unacked(&session.stream_id, &[proof.sequence])
+        .await
+        .is_err());
+    assert_eq!(
+        storage
+            .list_unacked(&session.stream_id)
+            .await
+            .expect("replay remains")
+            .len(),
+        1
+    );
+    assert_eq!(
+        storage
+            .get_ingress_append(&proof.key)
+            .await
+            .expect("custody remains"),
+        Some(proof)
+    );
+}
+
+async fn sequence_lookup_retains_terminal_and_distinct_allocations(
+    storage: &DatabaseSmPersistence,
+) {
+    let session = fixture_session(&format!("custody-sequence-{}", uuid::Uuid::new_v4()));
+    let mut first = append_for(&session);
+    let second = append_for(&session);
+    let mut other_sequence = append_for(&session);
+    other_sequence.sequence += 1;
+    for proof in [&first, &second, &other_sequence] {
+        storage
+            .store_session_atomic_with_ingress_append(session.clone(), Vec::new(), proof.clone())
+            .await
+            .expect("allocate");
+    }
+    storage
+        .complete_ingress_append(
+            &first.key,
+            &first.accepting_stream,
+            first.sequence,
+            IngressCustodyDisposition::Acknowledged,
+        )
+        .await
+        .expect("acknowledge first");
+    first.disposition = IngressCustodyDisposition::Acknowledged;
+    let allocations = storage
+        .get_ingress_appends_for_sequence(&session.stream_id, first.sequence)
+        .await
+        .expect("lookup sequence");
+    assert_eq!(allocations.len(), 2);
+    assert!(allocations.contains(&first));
+    assert!(allocations.contains(&second));
+    assert!(storage
+        .get_ingress_appends_for_sequence(&SmSessionId::new("unrelated-stream"), first.sequence)
+        .await
+        .expect("different stream")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_sequence_lookup_retains_terminal_and_distinct_allocations() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("storage");
+    sequence_lookup_retains_terminal_and_distinct_allocations(&storage).await;
 }
