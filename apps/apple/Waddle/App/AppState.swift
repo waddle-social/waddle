@@ -221,7 +221,7 @@ final class AppState {
 
     private func start(_ auth: AuthSession) {
         guard let active = ActiveSession(auth: auth, server: server, preferences: preferences) else {
-            errorMessage = "The server returned an invalid account address."
+            errorMessage = "The server returned an invalid account or connection address."
             phase = .signedOut
             return
         }
@@ -295,10 +295,12 @@ final class ActiveSession {
     let navigation = NavigationModel()
 
     init?(auth: AuthSession, server: URL, preferences: Preferences) {
-        guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare else { return nil }
+        guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare,
+              let webSocket = AuthClient.xmppWebSocketURL(auth.xmppWebsocketURL, server: server)
+        else { return nil }
         let account = AccountIdentity(jid: jid, nick: auth.username)
         let config = WaddleConfig(
-            serverUrl: auth.xmppWebsocketURL,
+            serverUrl: webSocket.absoluteString,
             jid: jid.description,
             accessToken: auth.sessionID,
             resource: ServerSettings.resource

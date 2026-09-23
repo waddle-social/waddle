@@ -69,16 +69,38 @@ struct AuthClient {
         _ = try await request("/api/auth/logout", method: "POST", body: body)
     }
 
-    /// The page the user approves the device code on.
+    /// The page the user approves the device code on. Only an http(s) page
+    /// is ever opened, whatever the server answered.
     func verificationURL(for authorization: DeviceAuthorization) -> URL? {
-        if let raw = authorization.verificationURIComplete, let url = URL(string: raw) {
+        if let url = Self.webPage(authorization.verificationURIComplete) {
             return url
         }
-        let base = authorization.verificationURI.flatMap(URL.init(string:))
+        let base = Self.webPage(authorization.verificationURI)
             ?? baseURL.appending(path: "/api/auth/device/verify")
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "code", value: authorization.userCode)]
         return components?.url
+    }
+
+    private static func webPage(_ raw: String?) -> URL? {
+        guard let raw, let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              url.host?.isEmpty == false
+        else { return nil }
+        return url
+    }
+
+    /// The XMPP WebSocket the session id is presented to. It must be TLS
+    /// (`wss`), except a plain `ws` endpoint for a plain-http development
+    /// server, so the bearer credential never crosses an unencrypted link
+    /// the user did not already choose.
+    static func xmppWebSocketURL(_ raw: String, server: URL) -> URL? {
+        guard let url = URL(string: raw), url.host?.isEmpty == false else { return nil }
+        switch url.scheme?.lowercased() {
+        case "wss": return url
+        case "ws": return server.scheme?.lowercased() == "http" ? url : nil
+        default: return nil
+        }
     }
 
     private func request(

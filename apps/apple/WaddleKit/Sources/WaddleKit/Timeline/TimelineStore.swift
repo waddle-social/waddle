@@ -71,7 +71,11 @@ public final class TimelineStore {
             apply(mutation, in: conversation, timestamp: message.timestamp)
             return .mutation
         }
-        guard let body = message.body, let id = primaryID(of: message, in: conversation) else {
+        // An archived XEP-0424 tombstone may carry no body; it still takes
+        // (or marks) its row so history shows the deletion.
+        guard let body = message.body ?? (message.isRetracted ? "" : nil),
+              let id = primaryID(of: message, in: conversation)
+        else {
             return .ignored
         }
         let item = TimelineItem(
@@ -141,8 +145,16 @@ public final class TimelineStore {
             return roomID
         }
         let identity = message.identity
-        if conversation.isRoom, let authored = identity.originID ?? identity.messageID {
-            return authored
+        if conversation.isRoom {
+            // Never a stanza id another authority assigned: an occupant can
+            // put any id there. An archive row falls back to its MAM id.
+            if let authored = identity.originID ?? identity.messageID {
+                return authored
+            }
+            if case let .archive(mamID) = message.source {
+                return mamID
+            }
+            return nil
         }
         if let primary = identity.primary {
             return primary
@@ -167,7 +179,14 @@ public final class TimelineStore {
            }) {
             let existing = list[index]
             recordWireDate(item.timestamp, in: conversation)
-            if let replaced = superseding(existing, with: item, isLocalEcho: isLocalEcho) {
+            var updated = superseding(existing, with: item, isLocalEcho: isLocalEcho)
+            if let tombstone, (updated ?? existing).mutations.tombstone == nil {
+                // An archive tombstone for a row loaded before it was retracted.
+                var marked = updated ?? existing
+                marked.mutations.tombstone = tombstone
+                updated = marked
+            }
+            if let replaced = updated {
                 list[index] = replaced
                 list.sort(by: Entry.precedes)
                 entries[conversation] = list

@@ -62,7 +62,9 @@ public extension AccountIdentity {
     /// compares bare JIDs (carbons of our own sends route to the peer).
     func route(from: JID?, to: JID?, isGroupchat: Bool) -> MessageRoute? {
         if isGroupchat {
-            guard let room = from?.bare ?? to?.bare else { return nil }
+            // A groupchat stanza comes from the room; without a sender it
+            // cannot name one (the recipient is our own account).
+            guard let room = from?.bare else { return nil }
             let isMine = from?.resource == nick
             return MessageRoute(conversation: .room(room), isMine: isMine)
         }

@@ -23,21 +23,27 @@ enum AttachmentImageInfo {
         #endif
     }
 
-    /// Re-encodes a photo as JPEG without its GPS metadata, so a shared
-    /// photo does not leak where it was taken and HEIC reaches clients
-    /// that cannot decode it.
+    /// Re-encodes a photo as JPEG from its pixels, without any source
+    /// metadata, so a shared photo does not leak where it was taken and
+    /// HEIC reaches clients that cannot decode it.
     static func sanitizedJPEG(from data: Data, quality: Double = 0.85) -> Data? {
         #if canImport(ImageIO)
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return nil }
         let output = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, "public.jpeg" as CFString, 1, nil) else {
             return nil
         }
-        let options: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: quality,
-            kCGImagePropertyGPSDictionary: kCFNull as Any,
-        ]
-        CGImageDestinationAddImageFromSource(destination, source, 0, options as CFDictionary)
+        // Pixels only: EXIF, XMP, IPTC and maker notes are not copied, so no
+        // location survives in any of them. Orientation is kept so the
+        // photo displays upright.
+        var options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        if let orientation = properties?[kCGImagePropertyOrientation] {
+            options[kCGImagePropertyOrientation] = orientation
+        }
+        CGImageDestinationAddImage(destination, image, options as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return output as Data
         #else

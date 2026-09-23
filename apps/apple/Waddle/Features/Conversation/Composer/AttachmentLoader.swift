@@ -13,10 +13,11 @@ enum AttachmentLoader {
         }.value
     }
 
-    /// Photos arrive as raw library bytes. HEIC and JPEG are re-encoded as
-    /// JPEG without location metadata, and any other image that carries a
-    /// location is too, so no picked photo leaks where it was taken. A
-    /// photo that cannot be re-encoded is refused, never sent as is.
+    /// Photos arrive as raw library bytes. Every still image is re-encoded
+    /// as a JPEG from its pixels alone, dropping all metadata; a GIF keeps
+    /// its animation unless it carries a location, in which case it is
+    /// flattened too. A photo that cannot be re-encoded is refused, never
+    /// sent as is.
     static func payload(fromPhoto data: Data, mediaType: String?, fileExtension: String?) async throws -> AttachmentPayload {
         try await Task.detached(priority: .userInitiated) {
             try Self.photoPayload(data, mediaType: mediaType, fileExtension: fileExtension)
@@ -49,8 +50,8 @@ enum AttachmentLoader {
     private static func photoPayload(_ data: Data, mediaType: String?, fileExtension: String?) throws -> AttachmentPayload {
         let type = mediaType?.lowercased() ?? "application/octet-stream"
         let stamp = Int(Date().timeIntervalSince1970)
-        let mustReencode = ["image/heic", "image/heif", "image/jpeg"].contains(type)
-            || (type.hasPrefix("image/") && AttachmentImageInfo.hasLocation(data))
+        let isImage = type.hasPrefix("image/")
+        let mustReencode = isImage && (type != "image/gif" || AttachmentImageInfo.hasLocation(data))
         if mustReencode {
             guard let jpeg = AttachmentImageInfo.sanitizedJPEG(from: data) else { throw AttachmentUploadError.unsanitizable }
             let size = AttachmentImageInfo.pixelSize(of: jpeg)

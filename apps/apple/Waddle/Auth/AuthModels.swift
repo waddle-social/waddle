@@ -19,7 +19,6 @@ struct AuthProvider: Decodable, Identifiable, Hashable {
 /// the XMPP bearer credential.
 struct AuthSession: Decodable, Equatable {
     let sessionID: String
-    let userID: String
     let username: String
     let jid: String
     let xmppWebsocketURL: String
@@ -27,7 +26,6 @@ struct AuthSession: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
-        case userID = "user_id"
         case username
         case jid
         case xmppWebsocketURL = "xmpp_websocket_url"
