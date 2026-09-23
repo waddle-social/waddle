@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use jid::BareJid;
-use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
