@@ -84,6 +84,19 @@ enum PushRegistrationStore {
         UserDefaults.standard.set(allTokens, forKey: tokensKey)
     }
 
+    /// The account whose registration owns a push node, for routing a
+    /// tapped APNs push on an install with several accounts.
+    static func account(forNode node: String) -> BareJID? {
+        for (key, data) in registrations {
+            guard let registration = try? JSONDecoder().decode(PushRegistration.self, from: data),
+                  registration.node == node,
+                  let separator = key.lastIndex(of: "|")
+            else { continue }
+            return BareJID(parsing: String(key[key.index(after: separator)...]))
+        }
+        return nil
+    }
+
     static func forget(_ owner: Owner) {
         var all = registrations
         all[owner.key] = nil

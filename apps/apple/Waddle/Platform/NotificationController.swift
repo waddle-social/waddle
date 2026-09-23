@@ -25,6 +25,8 @@ final class NotificationController: NSObject {
         static let conversationKey = "conversation"
         static let kindKey = "kind"
         static let accountKey = "account"
+        /// The object the Push Service adds next to `aps`.
+        static let pushRoutingKey = "waddle"
     }
 
     override init() {
@@ -106,6 +108,28 @@ final class NotificationController: NSObject {
         (userInfo[Identifier.accountKey] as? String).flatMap { BareJID(parsing: $0) }
     }
 
+    /// The account and conversation a tapped notification leads to: the
+    /// keys a local alert carries, else the routing object of an APNs push.
+    nonisolated private static func target(from userInfo: [AnyHashable: Any]) -> (BareJID, ConversationID)? {
+        if let account = account(from: userInfo), let conversation = conversation(from: userInfo) {
+            return (account, conversation)
+        }
+        guard let route = pushRoute(from: userInfo),
+              let account = PushRegistrationStore.account(forNode: route.node)
+        else { return nil }
+        return (account, route.conversation)
+    }
+
+    nonisolated private static func pushRoute(from userInfo: [AnyHashable: Any]) -> PushRoute? {
+        guard let object = userInfo[Identifier.pushRoutingKey] as? [String: Any] else { return nil }
+        return PushRoute(
+            version: object["v"] as? Int,
+            node: object["node"] as? String,
+            conversation: object["conversation"] as? String,
+            notificationClass: object["class"] as? String
+        )
+    }
+
     nonisolated private static func conversation(from userInfo: [AnyHashable: Any]) -> ConversationID? {
         guard let raw = userInfo[Identifier.conversationKey] as? String,
               let jid = BareJID(parsing: raw)
@@ -119,7 +143,12 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound, .list]
+        // In the foreground the live session posts its own alert, with the
+        // sender and preview; the push would only repeat it without them.
+        if notification.request.trigger is UNPushNotificationTrigger {
+            return []
+        }
+        return [.banner, .sound, .list]
     }
 
     nonisolated func userNotificationCenter(
@@ -128,9 +157,8 @@ extension NotificationController: UNUserNotificationCenterDelegate {
     ) async {
         // Parse before hopping: the userInfo dictionary is not Sendable.
         let userInfo = response.notification.request.content.userInfo
-        guard let account = Self.account(from: userInfo),
-              let conversation = Self.conversation(from: userInfo)
-        else { return }
+        guard let target = Self.target(from: userInfo) else { return }
+        let (account, conversation) = target
         let action = response.actionIdentifier
         let text = (response as? UNTextInputNotificationResponse)?.userText
         await MainActor.run {
