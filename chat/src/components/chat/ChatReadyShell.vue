@@ -91,6 +91,7 @@ const {
   xmppClient,
   notifySettings,
   activeMessages,
+  activeRoomChannel,
   activeFirstUnseenId,
   channelExtensionRoutes,
   activeExtensionRouteKey,
@@ -937,8 +938,8 @@ async function recoverSupersededFromShell() {
               v-model:forum-title="activeForumTitle"
               :pinned-panel-open="activeRightPanel === 'pinned' && ui.showPinnedPanel.value"
               :waddle="waddles.currentSpace.value"
-              :channel="threadPanelIsDm ? null : waddles.currentChannel.value"
-              :room-jid="threadPanelIsDm ? null : activeChannelRoomJid"
+              :channel="activeRoomChannel"
+              :room-jid="activeRoomChannel ? activeChannelRoomJid : null"
               :dm-peer="activeDmPeer"
               :sidebar-mode="ui.sidebarMode.value"
               :messages="activeMessages"

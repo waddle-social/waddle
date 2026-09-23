@@ -1,4 +1,4 @@
-import { computed, type ComputedRef, type Ref, ref, watch } from "vue";
+import { computed, type ComputedRef, nextTick, type Ref, ref, watch } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
 import type { useDirectMessageConversations } from "@/dms/conversations";
 import type { useWaddleDirectory } from "@/waddles/directory";
@@ -27,6 +27,7 @@ interface RoomSyncDeps {
   managedMucDomain: ComputedRef<string>;
   memberJidByNick: Ref<Record<string, string>>;
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
+  cancelPendingRoute: () => void;
   updateUrl: () => void;
 }
 
@@ -48,6 +49,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
     managedMucDomain,
     memberJidByNick,
     activeExtensionRouteKey,
+    cancelPendingRoute,
     updateUrl,
   } = deps;
 
@@ -108,8 +110,11 @@ export function useRoomSync(deps: RoomSyncDeps) {
       roomJid?: string;
       surface?: "channels" | "dms";
       intent?: ChannelLoadIntent;
+      /** The route already owns navigation, including explicit history retries. */
+      fromRoute?: boolean;
     } = {},
   ) {
+    if (options.intent !== "automatic" && !options.fromRoute) cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = options.surface ?? "channels";
@@ -126,6 +131,8 @@ export function useRoomSync(deps: RoomSyncDeps) {
       messaging.rememberChannelRoomJid(channelId, selectedRoomJid);
     }
     waddles.activeChannelId.value = channelId;
+    // The panel watcher must clear the previous room's thread before URL sync.
+    if (options.intent !== "automatic" && !options.fromRoute) void nextTick(updateUrl);
     void waddles.reloadChannelMembers(channelId);
     messaging.clearMessages();
     // XEP-0502: Clear activity indicator for this channel
@@ -154,6 +161,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
     );
     if (!channelId) {
       if (isTrustedManagedRoomJid(normalizedRoomJid, managedMucDomain.value)) {
+        cancelPendingRoute();
         pendingChannelRoomJidSelection.value = normalizedRoomJid;
         ui.activePage.value = "chat";
         ui.sidebarMode.value = "channels";
@@ -171,7 +179,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
 
   async function selectGroupDm(
     roomJid: string,
-    options: { updateUrl?: boolean; intent?: ChannelLoadIntent } = {},
+    options: { updateUrl?: boolean; intent?: ChannelLoadIntent; fromRoute?: boolean } = {},
   ) {
     const normalizedRoomJid = barePeerJid(roomJid);
     const group = waddles.groupDms.value.find((candidate) => barePeerJid(candidate.roomJid) === normalizedRoomJid);
@@ -186,6 +194,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
       managedMucDomain.value,
     );
     if (!channelId) {
+      if (options.intent !== "automatic" && !options.fromRoute) cancelPendingRoute();
       ui.actionError.value = "Group message is not available yet.";
       navigate({ id: "dmList" }, { replace: true });
       return false;
@@ -195,6 +204,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
       roomJid: normalizedRoomJid,
       surface: "dms",
       intent: options.intent ?? "explicit-navigation",
+      fromRoute: options.fromRoute,
     });
     if (options.updateUrl !== false) updateUrl();
     return true;

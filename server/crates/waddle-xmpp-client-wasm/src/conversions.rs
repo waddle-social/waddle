@@ -234,6 +234,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         reaction_emojis: message.reaction_emojis,
         in_call,
         is_muc: message.message_type == "groupchat",
+        muc_pm: message.muc_pm,
         thread: message.thread_id.or(message.thread),
         parent_thread_id: message.parent_thread_id,
         reply_to_id: message.reply_to_id,
@@ -370,6 +371,7 @@ pub(crate) fn inbox_push_to_js(
         reaction_emojis: Vec::new(),
         in_call: None,
         is_muc: false,
+        muc_pm: false,
         thread: None,
         parent_thread_id: None,
         reply_to_id: None,
@@ -474,6 +476,7 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
         from: archived.from,
         to: archived.to,
         message_type: archived.message_type,
+        muc_pm: parsed.is_some_and(|message| message.muc_pm),
         body: archived.body,
         subject: parsed.and_then(|message| message.subject.clone()),
         replaces_id: parsed.and_then(|message| message.replaces_id.clone()),
@@ -1490,6 +1493,57 @@ mod inbound_to_js_tests {
         );
 
         assert!(archived_to_js(archived).is_none());
+    }
+
+    #[test]
+    fn xep0045_private_message_marker_reaches_js_from_live_and_mam() {
+        use waddle_xmpp_core::mam::{FORWARD_NS, MAM_NS, MUC_USER_NS};
+
+        for marked in [false, true] {
+            let mut message = Element::builder("message", messaging::NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                .attr(
+                    minidom::rxml::xml_ncname!("from").to_owned(),
+                    "room@conference.example/nick/phone",
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    "alice@example/web",
+                )
+                .append(
+                    Element::builder("body", messaging::NS_CLIENT)
+                        .append("private")
+                        .build(),
+                );
+            if marked {
+                message = message.append(Element::builder("x", MUC_USER_NS).build());
+            }
+            let message = message.build();
+            let messaging::MessagingEvent::Message(inbound) =
+                messaging::parse(&message).expect("message parses")
+            else {
+                panic!("expected message");
+            };
+            let value = serde_json::to_value(inbound_to_js(*inbound)).expect("serializes");
+            assert_eq!(value["muc_pm"], marked);
+
+            let mam = Element::builder("message", messaging::NS_CLIENT)
+                .append(
+                    Element::builder("result", MAM_NS)
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "archive-pm")
+                        .append(
+                            Element::builder("forwarded", FORWARD_NS)
+                                .append(message)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build();
+            let archived = waddle_xmpp_client::mam::parse_mam_result(&mam).expect("MAM parses");
+            let value = serde_json::to_value(archived_to_js(archived).expect("MAM converts"))
+                .expect("serializes");
+            assert_eq!(value["muc_pm"], marked);
+        }
     }
 
     /// XEP-0280 (#1243): the typed carbon direction crosses the JS

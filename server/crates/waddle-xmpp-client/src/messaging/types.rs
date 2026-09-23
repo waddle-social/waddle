@@ -225,6 +225,8 @@ pub struct InboundMessage {
     pub from: Option<String>,
     pub to: Option<String>,
     pub message_type: String,
+    /// XEP-0045 §7.5 private-message marker. Its absence does not rule out a MUC PM.
+    pub muc_pm: bool,
     pub id: Option<String>,
     /// First-listed XEP-0359 `<stanza-id/>` (a stanza may carry several,
     /// one per archiving entity). The `by` attribute is preserved but NOT

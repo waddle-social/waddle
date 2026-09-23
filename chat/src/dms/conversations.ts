@@ -8,7 +8,7 @@ import type {
   LiveDmMessage,
   PresenceUpdateEvent,
 } from "@/lib/xmpp-client";
-import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import { bareJidKey, barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
 
 function peerUsername(peerJid: string): string {
   return jidLocalpart(peerJid);
@@ -53,6 +53,7 @@ function sortByRecent(conversations: DmConversation[]): DmConversation[] {
 export function useDirectMessageConversations(
   session: Ref<WaddleSession | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
+  roomJids: Readonly<Ref<readonly string[]>>,
 ) {
   const conversations = ref<DmConversation[]>([]);
   const activePeerJid = ref<string | null>(null);
@@ -67,6 +68,12 @@ export function useDirectMessageConversations(
     conversations.value.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount), 0)
   );
   const selfBareJid = computed(() => barePeerJid(session.value?.jid ?? ""));
+  const knownRoomKeys = computed(() => new Set([
+    ...roomJids.value.map(bareJidKey),
+    ...conversations.value.filter((conversation) => conversation.mucPm)
+      .map((conversation) => bareJidKey(conversation.peerJid)),
+  ]));
+  const inboxRoomKeys = new Set<string>();
   const activeConversationScope = computed<DmConversationScope | null>(() => {
     const active = activePeerJid.value;
     if (!active) return null;
@@ -80,6 +87,20 @@ export function useDirectMessageConversations(
   const inboxAccountedMessageIdsByJid = new Map<string, Set<string>>();
   let lastPeerCallHydrationKey = "";
   let lastPeerCallHydrationClient: BrowserXmppClient | null = null;
+
+  function isRoomPeer(peerJid: string): boolean {
+    if (peerJid.includes("/")) return false;
+    const key = bareJidKey(peerJid);
+    return knownRoomKeys.value.has(key)
+      || inboxRoomKeys.has(key)
+      || xmppClient.value?.isKnownMucRoom?.(key) === true;
+  }
+
+  function pruneRoomConversations() {
+    const remaining = conversations.value.filter((conversation) => !isRoomPeer(conversation.peerJid));
+    if (remaining.length !== conversations.value.length) conversations.value = remaining;
+    if (activePeerJid.value && isRoomPeer(activePeerJid.value)) activePeerJid.value = null;
+  }
 
   function storageKey() {
     const bare = session.value ? barePeerJid(session.value.jid) : "";
@@ -263,25 +284,20 @@ export function useDirectMessageConversations(
   }
 
   function mergeInboxConversations(entries: InboxEntry[]) {
+    for (const entry of entries) {
+      if (entry.kind === "muc") inboxRoomKeys.add(bareJidKey(entry.partner));
+    }
+    // Discovery and inbox classification can arrive after a saved or live DM
+    // row. Remove the room identity even if it has no direct inbox entry now.
+    pruneRoomConversations();
     const merged = new Map(conversations.value.map((conversation) => [conversation.peerJid, conversation]));
 
     for (const entry of entries) {
       if (entry.kind !== "direct") continue;
       const bare = barePeerJid(entry.partner);
-      // #1256: the server's inbox projects MUC PMs under the room bare
-      // JID (it can't attribute the occupant yet — #1257). Merging that
-      // entry would create a phantom room-bare "DM" alongside the
-      // occupant-keyed conversation and double-count unread — skip it.
-      // Deliberately WITHOUT rememberInboxAccountedMessage: the live
-      // arrival must still increment the occupant conversation once
-      // (unread for offline-missed PMs stays server-unattributable
-      // until #1257 teaches the inbox about occupants). Also purge any
-      // phantom room-bare conversation an earlier session created
-      // before the room became known.
-      if (xmppClient.value?.isKnownMucRoom?.(bare)) {
-        merged.delete(bare);
-        continue;
-      }
+      // A bare room is never an account DM. Occupant PMs retain their full
+      // JID and account for unread on the live-message path.
+      if (isRoomPeer(bare)) continue;
       rememberInboxAccountedMessage(entry);
       merged.set(bare, mergeInboxEntry(merged.get(bare), entry));
     }
@@ -290,7 +306,6 @@ export function useDirectMessageConversations(
   }
 
   function onInboxPush(entry: InboxEntry) {
-    if (entry.kind !== "direct") return;
     mergeInboxConversations([entry]);
   }
 
@@ -349,12 +364,10 @@ export function useDirectMessageConversations(
       ) return true;
 
       const directConversations = inbox.conversations.filter((conversation) => conversation.kind === "direct");
-      mergeInboxConversations(directConversations);
+      mergeInboxConversations(inbox.conversations);
       for (const conversation of directConversations) {
         const bare = barePeerJid(conversation.partner);
-        // #1256: never presence-subscribe to a MUC room bare JID (the
-        // server projects MUC PMs under the room until #1257).
-        if (xmppClient.value?.isKnownMucRoom?.(bare)) continue;
+        if (isRoomPeer(bare)) continue;
         void currentClient.subscribeToPeerPresence(bare).catch(() => undefined);
       }
       void dmCallActivityHydration;
@@ -368,6 +381,7 @@ export function useDirectMessageConversations(
 
   function markRead(peerJid: string, opts: { forceSync?: boolean } = {}) {
     const bare = conversationKeyFor(peerJid);
+    if (isRoomPeer(bare)) return;
     const conversation = ensureConversation(bare);
     rememberRead(bare, conversation.lastMessageAt);
 
@@ -385,6 +399,7 @@ export function useDirectMessageConversations(
 
   async function openDm(peerJid: string) {
     const bare = conversationKeyFor(peerJid);
+    if (isRoomPeer(bare)) return;
     // #1256: an initiated MUC-PM conversation gets the same provenance
     // metadata as a received one, and no presence subscribe is sent —
     // the PresenceManager would bare-fold the occupant JID and target
@@ -420,6 +435,7 @@ export function useDirectMessageConversations(
     // occupant's self-chosen nick can never render byte-identical to a
     // real account's DM entry (nick-spoofing hardening).
     const bare = msg.mucPm ? msg.peerJid : barePeerJid(msg.peerJid);
+    if (isRoomPeer(bare)) return;
     const mucPmUsername = msg.mucPm ? mucPmDisplayName(msg.peerJid) : undefined;
     const existing = ensureConversation(bare, mucPmUsername, msg.mucPm ? barePeerJid(msg.peerJid) : undefined);
     const isSelfMessage = barePeerJid(msg.fromJid) === selfBareJid.value;
@@ -465,6 +481,9 @@ export function useDirectMessageConversations(
     ));
   }
 
+  watch([conversations, activePeerJid], persist, { deep: true });
+  watch([knownRoomKeys, xmppClient], () => pruneRoomConversations());
+
   watch(
     () => session.value?.jid,
     () => {
@@ -474,12 +493,14 @@ export function useDirectMessageConversations(
       pendingMarkRead.clear();
       queuedMarkRead.clear();
       inboxAccountedMessageIdsByJid.clear();
+      inboxRoomKeys.clear();
       conversations.value = [];
       activePeerJid.value = null;
       presenceByJid.value = {};
       presenceIdleByJid.value = {};
       localReadAtByJid.value = {};
       restore();
+      pruneRoomConversations();
       for (const c of conversations.value) {
         // #1256: occupant rows have no presence identity of their own —
         // subscribing would bare-fold to the room JID.
@@ -497,8 +518,6 @@ export function useDirectMessageConversations(
       if (activePeerJid.value) hydratePeerDmCallActivity(activePeerJid.value);
     },
   );
-
-  watch([conversations, activePeerJid], persist, { deep: true });
 
   return {
     conversations,

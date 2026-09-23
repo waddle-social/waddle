@@ -86,7 +86,11 @@ describe("applyMatchToShellState", () => {
   });
 });
 
-function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } = {}) {
+function makeHarness(overrides: {
+  openDm?: (peerJid: string) => Promise<void>;
+  loadMessages?: () => Promise<void>;
+  selectGroupDm?: () => Promise<boolean>;
+} = {}) {
   const ui = useChatShellState();
   const activeThreadStack = ref<string[]>([]);
   const activeThreadTargetMessageId = ref<string | null>(null);
@@ -100,12 +104,12 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
 
   const closeDm = mock(() => {});
   const clearMessages = mock(() => {});
-  const loadMessages = mock(async () => {});
+  const loadMessages = mock(overrides.loadMessages ?? (async () => {}));
   const channelBackfill = mock(async () => {});
   const dmBackfill = mock(async () => {});
   const reloadChannelMembers = mock(async () => {});
   const openDm = mock(overrides.openDm ?? (async () => {}));
-  const selectGroupDm = mock(async () => true);
+  const selectGroupDm = mock(overrides.selectGroupDm ?? (async () => true));
   const clearPendingChannelRoomJidSelection = mock(() => {});
   const clearPendingChannelRoute = mock(() => {});
 
@@ -180,10 +184,64 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
     channels,
     hasLoadedStructure,
     clearPendingChannelRoomJidSelection,
+    clearPendingChannelRoute,
+    isApplyingRoute,
   };
 }
 
 describe("useRouteSync applyRouteTarget", () => {
+  test("a cancelled route cannot apply its shell state or retain the URL lock", async () => {
+    const h = makeHarness();
+    const requestId = h.routeSync.beginRouteRequest();
+    h.isApplyingRoute.value = true;
+    h.ui.sidebarMode.value = "dms";
+    h.activeChannelId.value = null;
+
+    h.routeSync.cancelPendingRoute();
+    await h.routeSync.applyRouteTarget({
+      id: "channel",
+      params: { channelId: "general" },
+      search: { thread: [], pinned: false },
+    }, requestId);
+
+    expect(h.ui.sidebarMode.value).toBe("dms");
+    expect(h.activeChannelId.value).toBeNull();
+    expect(h.isApplyingRoute.value).toBe(false);
+    expect(h.clearPendingChannelRoute).toHaveBeenCalledTimes(1);
+    expect(h.loadMessages).not.toHaveBeenCalled();
+    h.scope.stop();
+  });
+
+  test.each([false, true])("late channel route completion cannot restore panels after cancellation (group DM: %s)", async (isGroupDm) => {
+    let finishLoad!: () => void;
+    const load = new Promise<void>((resolve) => { finishLoad = resolve; });
+    const h = makeHarness({ loadMessages: () => load, selectGroupDm: async () => { await load; return true; } });
+    if (isGroupDm) {
+      h.channels.value = [{ id: "general", name: "Crew", jid: "crew@muc.example.com", isGroupDm: true }];
+    }
+    const pendingRoute = h.routeSync.applyRouteTarget({
+      id: "channel",
+      params: { channelId: "general" },
+      search: { thread: ["old-thread"], pinned: true },
+    }, h.routeSync.beginRouteRequest());
+
+    h.routeSync.cancelPendingRoute();
+    h.activeChannelId.value = null;
+    h.activeChannelId.value = "general";
+    h.activeThreadStack.value = [];
+    h.activeRightPanel.value = null;
+    h.ui.showPinnedPanel.value = false;
+    finishLoad();
+    await pendingRoute;
+
+    expect(h.activeChannelId.value).toBe("general");
+    expect(h.activeThreadStack.value).toEqual([]);
+    expect(h.activeRightPanel.value).toBeNull();
+    expect(h.ui.showPinnedPanel.value).toBe(false);
+    expect(h.channelBackfill).not.toHaveBeenCalled();
+    h.scope.stop();
+  });
+
   test("home route drops the whole chat context", async () => {
     const h = makeHarness();
     h.activeChannelId.value = "general";
@@ -211,7 +269,7 @@ describe("useRouteSync applyRouteTarget", () => {
       search: { thread: ["t1", "t2", "t1"], pinned: false },
     } as RouteMatch, h.routeSync.beginRouteRequest());
 
-    expect(h.openDm).toHaveBeenCalledWith("bob@example.com");
+    expect(h.openDm).toHaveBeenCalledWith("bob@example.com", { intent: "automatic" });
     expect(h.activeThreadStack.value).toEqual(["t1", "t2", "t1"]);
     expect(h.activeRightPanel.value).toBe("thread");
     // Dedup: the stack repeats t1 but each thread backfills once.
@@ -268,6 +326,7 @@ describe("useRouteSync applyRouteTarget", () => {
     expect(h.forgetPeer).toHaveBeenCalledWith("group-dm-abc@example.com");
     expect(h.selectGroupDm).toHaveBeenCalledWith("group-dm-abc@muc.example.com", {
       updateUrl: false,
+      fromRoute: true,
       intent: "automatic",
     });
     expect(h.ui.sidebarMode.value).toBe("dms");
@@ -342,7 +401,7 @@ describe("useRouteSync applyRouteTarget", () => {
         params: { username: "chat" },
         search: { thread: [], pinned: false },
       } as RouteMatch, h.routeSync.beginRouteRequest());
-      expect(h.openDm).toHaveBeenCalledWith("chat@example.com");
+      expect(h.openDm).toHaveBeenCalledWith("chat@example.com", { intent: "automatic" });
 
       h.openDm.mockClear();
       h.channels.value = [

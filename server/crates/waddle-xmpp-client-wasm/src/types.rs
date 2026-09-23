@@ -64,6 +64,7 @@ pub struct WaddleMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_call: Option<WaddleInCallSignal>,
     pub is_muc: bool,
+    pub muc_pm: bool,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,
     pub reply_to_id: Option<String>,
@@ -302,6 +303,7 @@ pub struct WaddleArchivedMessage {
     pub from: Option<String>,
     pub to: Option<String>,
     pub message_type: String,
+    pub muc_pm: bool,
     pub body: Option<String>,
     pub subject: Option<String>,
     pub replaces_id: Option<String>,

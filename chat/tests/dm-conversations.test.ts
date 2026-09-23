@@ -1,8 +1,9 @@
 import { describe, test, expect, mock } from "bun:test";
-import { nextTick, ref } from "vue";
+import { effectScope, markRaw, nextTick, ref } from "vue";
 import { useDirectMessageConversations } from "../src/dms/conversations";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { BrowserXmppClient, InboxEntry, LiveDmMessage } from "../src/lib/xmpp-client";
+import { BrowserXmppClient, type InboxEntry, type LiveDmMessage } from "../src/lib/xmpp-client";
+import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
 
 function makeSession(jid = "alice@example.com/web"): WaddleSession {
   return { jid, username: "alice", token: "tok" } as WaddleSession;
@@ -27,11 +28,12 @@ function makeClient(conversations: InboxEntry[] = []): MockClient {
 }
 
 function makeComposable(
-  { jid = "alice@example.com/web", client = null }: { jid?: string; client?: MockClient | null } = {},
+  { jid = "alice@example.com/web", client = null, rooms = [] }: { jid?: string; client?: BrowserXmppClient | null; rooms?: string[] } = {},
 ) {
   const session = ref<WaddleSession | null>(makeSession(jid));
   const clientRef = ref<BrowserXmppClient | null>(client);
-  return { composable: useDirectMessageConversations(session, clientRef), session, client: clientRef };
+  const roomJids = ref(rooms);
+  return { composable: useDirectMessageConversations(session, clientRef, roomJids), session, client: clientRef, roomJids };
 }
 
 function makeDmMessage(overrides: Partial<LiveDmMessage> = {}): LiveDmMessage {
@@ -423,6 +425,177 @@ describe("useDirectMessageConversations", () => {
     await composable.hydrateFromInbox();
 
     expect(composable.conversations.value.map((c) => c.peerJid)).toEqual(["bob@example.com"]);
+  });
+
+  test("late discovery removes a false room DM but keeps account and occupant chats", async () => {
+    const { composable, roomJids } = makeComposable();
+    composable.receiveIncomingDm(makeDmMessage({ peerJid: "room@muc.example.com" }));
+    composable.receiveIncomingDm(makeDmMessage({ peerJid: "room@example.com" }));
+    composable.receiveIncomingDm(makeDmMessage({ peerJid: "other@muc.example.com/bob", mucPm: true }));
+    await composable.openDm("room@muc.example.com");
+    expect(composable.activePeerJid.value).toBe("room@muc.example.com");
+
+    roomJids.value = ["ROOM@muc.example.com"];
+    await nextTick();
+
+    expect(composable.conversations.value.map((c) => c.peerJid).sort()).toEqual([
+      "other@muc.example.com/bob", "room@example.com",
+    ]);
+    expect(composable.activePeerJid.value).toBeNull();
+  });
+
+  test("MUC inbox updates remove a saved false DM without room discovery", async () => {
+    const room = "room@muc.example.com";
+    const entry: InboxEntry = { partner: room, kind: "muc", unread: 1, lastUpdated: 1 };
+    const client = makeClient([entry]);
+    const { composable } = makeComposable({ client });
+    composable.receiveIncomingDm(makeDmMessage({ peerJid: room }));
+    composable.receiveIncomingDm(makeDmMessage({ peerJid: "other@muc.example.com/bob", mucPm: true }));
+
+    await composable.hydrateFromInbox();
+    expect(composable.conversations.value.map((c) => c.peerJid)).toEqual(["other@muc.example.com/bob"]);
+
+    const { composable: pushed } = makeComposable();
+    pushed.receiveIncomingDm(makeDmMessage({ peerJid: room }));
+    pushed.receiveIncomingDm(makeDmMessage({ peerJid: "other@muc.example.com/bob", mucPm: true }));
+    await pushed.openDm(room);
+    pushed.onInboxPush(entry);
+    expect(pushed.conversations.value.map((c) => c.peerJid)).toEqual(["other@muc.example.com/bob"]);
+    expect(pushed.activePeerJid.value).toBeNull();
+  });
+
+  test("an identified occupant removes the false room DM without discovery or inbox help", async () => {
+    const room = "room@rooms.custom.example";
+    const occupant = `${room}/bob/phone`;
+    const client = markRaw(new BrowserXmppClient(makeSession(), nullResumePersistence));
+    client.subscribeToPeerPresence = mock(async () => undefined);
+    client.hydrateRecentDmCallActivity = mock(async () => undefined);
+    const scope = effectScope();
+    try {
+      const { composable, roomJids } = scope.run(() => makeComposable({ client }))!;
+      composable.receiveIncomingDm(makeDmMessage({ peerJid: room }));
+      await composable.openDm(room);
+      expect(composable.activePeerJid.value).toBe(room);
+
+      composable.receiveIncomingDm(makeDmMessage({ peerJid: occupant, fromJid: occupant, mucPm: true }));
+      await nextTick();
+      expect(roomJids.value).toEqual([]);
+      expect(composable.activePeerJid.value).toBeNull();
+      expect(composable.conversations.value.map((c) => c.peerJid)).toEqual([occupant]);
+      expect(composable.totalUnreadCount.value).toBe(1);
+
+      composable.onInboxPush({ partner: room, kind: "direct", unread: 5, lastUpdated: 1 });
+      await composable.openDm(room);
+      expect(composable.conversations.value.map((c) => c.peerJid)).toEqual([occupant]);
+      expect(composable.activePeerJid.value).toBeNull();
+      expect(composable.totalUnreadCount.value).toBe(1);
+    } finally {
+      scope.stop();
+    }
+  });
+
+  test("known rooms cannot enter through live messages, open, or mark-read", async () => {
+    const room = "room@muc.example.com";
+    const client = makeClient();
+    const { composable } = makeComposable({ client, rooms: [room] });
+    composable.receiveIncomingDm(makeDmMessage({ peerJid: room }));
+    await composable.openDm(room);
+    composable.markRead(room);
+    expect(composable.conversations.value).toEqual([]);
+    expect(composable.activePeerJid.value).toBeNull();
+    expect(client.subscribeToPeerPresence).not.toHaveBeenCalled();
+  });
+
+  test("restoring a known room DM removes it without presence subscription", async () => {
+    const room = "room@muc.example.com";
+    const storage = new Map<string, string>([["waddle.chat.dms.alice@example.com", JSON.stringify({
+      conversations: [{ peerJid: room, peerUsername: "room", unreadCount: 2 }],
+      activePeerJid: room,
+    })]]);
+    const originalWindow = globalThis.window;
+    (globalThis as unknown as { window?: unknown }).window = {
+      sessionStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      },
+    };
+    try {
+      const client = makeClient();
+      const { composable } = makeComposable({ client, rooms: [room] });
+      await nextTick();
+      expect(composable.conversations.value).toEqual([]);
+      expect(composable.activePeerJid.value).toBeNull();
+      expect(client.subscribeToPeerPresence).not.toHaveBeenCalled();
+      expect(JSON.parse(storage.get("waddle.chat.dms.alice@example.com")!).conversations).toEqual([]);
+    } finally {
+      if (originalWindow === undefined) delete (globalThis as unknown as { window?: unknown }).window;
+      else globalThis.window = originalWindow;
+    }
+  });
+
+  test.each([
+    [false, "MUC.example.com", false],
+    [true, "MUC.example.com", false],
+    [false, "rooms.custom.example", true],
+    [true, "rooms.custom.example", true],
+  ] as const)("restoring before discovery prunes known room DMs (late client: %s, service: %s, occupant evidence: %s)", async (attachLate, service, occupantEvidence) => {
+    const room = `room@${service}`;
+    const occupant = `${occupantEvidence ? room : "other@rooms.custom.example"}/bob/phone`;
+    const account = "room@example.com";
+    const storageKey = "waddle.chat.dms.alice@example.com";
+    const storage = new Map([[storageKey, JSON.stringify({
+      conversations: [
+        { peerJid: room, peerUsername: "room", unreadCount: 2 },
+        { peerJid: occupant, peerUsername: "bob/phone (room)", mucPm: true, unreadCount: 3 },
+        { peerJid: account, peerUsername: "room", unreadCount: 1 },
+      ],
+      activePeerJid: room,
+    })]]);
+    const client = markRaw(new BrowserXmppClient(makeSession(), nullResumePersistence));
+    const subscribeToPeerPresence = mock(async () => undefined);
+    client.subscribeToPeerPresence = subscribeToPeerPresence;
+    client.hydrateRecentDmCallActivity = mock(async () => undefined);
+    const scope = effectScope();
+    const originalWindow = globalThis.window;
+    (globalThis as unknown as { window?: unknown }).window = {
+      sessionStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      },
+    };
+    try {
+      const { composable, client: clientRef, roomJids } = scope.run(() =>
+        makeComposable({ client: attachLate ? null : client })
+      )!;
+      if (attachLate) {
+        await nextTick();
+        clientRef.value = client;
+      }
+      await nextTick();
+
+      expect(roomJids.value).toEqual([]);
+      expect(composable.conversations.value.map((c) => c.peerJid).sort()).toEqual([occupant, account].sort());
+      expect(composable.activePeerJid.value).toBeNull();
+      expect(composable.totalUnreadCount.value).toBe(4);
+      expect(subscribeToPeerPresence).not.toHaveBeenCalledWith(room);
+      expect(subscribeToPeerPresence).not.toHaveBeenCalledWith(occupant);
+      if (!attachLate) expect(subscribeToPeerPresence).toHaveBeenCalledWith(account);
+
+      await composable.openDm(room);
+      composable.markRead(room);
+      composable.receiveIncomingDm(makeDmMessage({ peerJid: room }));
+      await nextTick();
+      expect(composable.activePeerJid.value).toBeNull();
+      expect(composable.totalUnreadCount.value).toBe(4);
+      expect(subscribeToPeerPresence).not.toHaveBeenCalledWith(room);
+      const persisted = JSON.parse(storage.get(storageKey)!);
+      expect(persisted.activePeerJid).toBeNull();
+      expect(persisted.conversations.map((c: { peerJid: string }) => c.peerJid).sort()).toEqual([occupant, account].sort());
+    } finally {
+      scope.stop();
+      if (originalWindow === undefined) delete (globalThis as unknown as { window?: unknown }).window;
+      else globalThis.window = originalWindow;
+    }
   });
 
   test("restamp-only dispatches never touch conversations or unread", () => {

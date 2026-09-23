@@ -1,4 +1,4 @@
-import { type ComputedRef, type Ref, watch } from "vue";
+import { type ComputedRef, nextTick, type Ref, watch } from "vue";
 import type { useDirectMessageConversations } from "@/dms/conversations";
 import type { useDirectMessages } from "@/dms/messages";
 import type { useWaddleDirectory } from "@/waddles/directory";
@@ -23,6 +23,8 @@ interface DmSyncDeps {
   selfDomain: ComputedRef<string>;
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   clearPendingChannelRoomJidSelection: () => void;
+  cancelPendingRoute: () => void;
+  updateUrl: () => void;
   selectGroupDm: (roomJid: string, options?: { updateUrl?: boolean }) => Promise<boolean>;
   selectChannel: (
     channelId: string,
@@ -47,6 +49,8 @@ export function useDmSync(deps: DmSyncDeps) {
     selfDomain,
     activeExtensionRouteKey,
     clearPendingChannelRoomJidSelection,
+    cancelPendingRoute,
+    updateUrl,
     selectGroupDm,
     selectChannel,
   } = deps;
@@ -83,15 +87,20 @@ export function useDmSync(deps: DmSyncDeps) {
     { deep: true },
   );
 
-  async function handleOpenDm(peerJid: string) {
+  async function handleOpenDm(peerJid: string, options: { intent?: ChannelLoadIntent } = {}) {
     // Full JIDs are not slug-ambiguous: a user-domain partner whose node
     // matches a channel id is still a 1:1 (#917). Room-wins applies only
     // to `/dm/:username` and the New DM username field.
+    if (options.intent !== "automatic") cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "dms";
     activeExtensionRouteKey.value = null;
-    await dmConversations.openDm(peerJid);
+    const opening = dmConversations.openDm(peerJid);
+    // Let the panel watcher clear the old thread; reselecting a restored peer
+    // still needs a URL update even when no watched ref changes.
+    if (options.intent !== "automatic") void nextTick(updateUrl);
+    await opening;
     dmMessaging.clearMessages();
     const activePeer = dmConversations.activePeerJid.value;
     if (activePeer) {

@@ -39,6 +39,11 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
   function isActiveDirectDmSurface(): boolean {
     return ui.sidebarMode.value === "dms" && !!dmConversations.activePeerJid.value;
   }
+  const activeRoomChannel = computed(() => {
+    if (isActiveDirectDmSurface()) return null;
+    const channel = waddles.currentChannel.value;
+    return ui.sidebarMode.value === "channels" || channel?.isGroupDm ? channel : null;
+  });
 
   watchEffect(() => {
     const timeline = contentAreaRef.value?.messagesContainer ?? null;
@@ -57,7 +62,7 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
   });
 
   const activeMessages = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.messages.value : messaging.messages.value,
+    isActiveDirectDmSurface() ? dmMessaging.messages.value : activeRoomChannel.value ? messaging.messages.value : [],
   );
   const activeFirstUnseenId = computed(() =>
     isActiveDirectDmSurface() ? dmMessaging.firstUnseenId.value : messaging.firstUnseenId.value,
@@ -79,7 +84,7 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
     },
   });
   const activeTypingUsers = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.typingUsers.value : messaging.typingUsers.value,
+    isActiveDirectDmSurface() ? dmMessaging.typingUsers.value : activeRoomChannel.value ? messaging.typingUsers.value : [],
   );
   const activeIsLoadingMessages = computed(() =>
     isActiveDirectDmSurface() ? dmMessaging.isLoadingMessages.value : messaging.isLoadingMessages.value,
@@ -130,7 +135,7 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
   );
 
   const activeRoomAccessRequirement = computed(() =>
-    isActiveDirectDmSurface() ? null : messaging.currentRoomAccessRequirement.value,
+    activeRoomChannel.value ? messaging.currentRoomAccessRequirement.value : null,
   );
   const activeActionError = computed(() =>
     activeRoomAccessRequirement.value ? "" : ui.actionError.value,
@@ -149,6 +154,7 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
     contentAreaRef,
     setContentAreaRef,
     isActiveDirectDmSurface,
+    activeRoomChannel,
     activeMessages,
     activeFirstUnseenId,
     activeDraft,

@@ -362,15 +362,17 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       } finally {
         initialStructureLoadFinished = true;
       }
-      if (channelRouteTargetMissing(match)) {
+      if (routeSync.isCurrentRouteRequest(requestId) && channelRouteTargetMissing(match)) {
         pendingChannelRouteMatch = match;
       }
       await refreshMissingStructureAfterReconnect();
-      if (channelRouteTargetMissing(match)) {
-        pendingChannelRouteMatch = match;
-        preserveCurrentUrl = true;
-      } else {
-        await refreshExtensionRoutes();
+      if (routeSync.isCurrentRouteRequest(requestId)) {
+        if (channelRouteTargetMissing(match)) {
+          pendingChannelRouteMatch = match;
+          preserveCurrentUrl = true;
+        } else {
+          await refreshExtensionRoutes();
+        }
       }
       if (!preserveCurrentUrl && routeSync.isCurrentRouteRequest(requestId)) {
         await routeSync.applyRouteTarget(match, requestId);

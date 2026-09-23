@@ -52,7 +52,14 @@ export function useWaddleDirectory(
   let spaceRequestId = 0;
   let structureRequestId = 0;
   let memberRequestId = 0;
+  let selectionRequestId = 0;
   const memberSnapshotsByChannelId = new Map<string, MemberSummary[]>();
+
+  // Count every change, including leaving and returning before Vue's next tick.
+  watch(activeChannelId, () => {
+    selectionRequestId++;
+    memberRequestId++;
+  }, { flush: "sync" });
 
   const editWaddleForm = ref<CommunityFormData>({
     name: "",
@@ -181,6 +188,7 @@ export function useWaddleDirectory(
     if (!xmppClient.value) return null;
 
     const requestId = ++structureRequestId;
+    const selectionId = selectionRequestId;
     isLoadingStructure.value = true;
     clearActionError();
 
@@ -231,6 +239,9 @@ export function useWaddleDirectory(
       channels.value = allRooms;
       hasLoadedStructure.value = true;
 
+      // Refresh the directory without restoring a selection the user has left.
+      if (selectionId !== selectionRequestId) return null;
+
       if (opts?.noChannelSelect) {
         activeChannelId.value = null;
         selectedSpaceId.value = null;
@@ -241,14 +252,14 @@ export function useWaddleDirectory(
       }
 
       const nextChannelId =
-        preferredChannelId && channelList.some((c) => c.id === preferredChannelId)
+        preferredChannelId && allRooms.some((c) => c.id === preferredChannelId)
           ? preferredChannelId
-          : activeChannelId.value && channelList.some((c) => c.id === activeChannelId.value)
+          : activeChannelId.value && allRooms.some((c) => c.id === activeChannelId.value)
             ? activeChannelId.value
             : channelList.find((c) => c.id === "chat" || c.name.toLowerCase() === "chat")?.id ?? channelList[0]?.id ?? null;
 
       activeChannelId.value = nextChannelId;
-      const nextChannel = channelList.find((channel) => channel.id === nextChannelId);
+      const nextChannel = allRooms.find((channel) => channel.id === nextChannelId);
       selectedSpaceId.value = nextChannel ? nextChannel.spaceId ?? null : selectedSpaceId.value;
       if (nextChannelId && xmppClient.value) {
         const memberReqId = ++memberRequestId;

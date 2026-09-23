@@ -81,10 +81,10 @@ interface RouteSyncDeps {
   activeRightPanel: Ref<ActiveRightPanel | null>;
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   clearPendingChannelRoomJidSelection: () => void;
-  openDm: (peerJid: string) => Promise<void>;
+  openDm: (peerJid: string, options?: { intent?: ChannelLoadIntent }) => Promise<void>;
   selectGroupDm: (
     roomJid: string,
-    options?: { updateUrl?: boolean; intent?: ChannelLoadIntent },
+    options?: { updateUrl?: boolean; intent?: ChannelLoadIntent; fromRoute?: boolean },
   ) => Promise<boolean>;
   /** Owned by the connection lifecycle's structure-retry state: a user
    * navigation supersedes any channel route parked for a structure reload. */
@@ -127,6 +127,12 @@ export function useRouteSync(deps: RouteSyncDeps) {
 
   function isCurrentRouteRequest(requestId: number): boolean {
     return requestId === routeRequestId;
+  }
+
+  function cancelPendingRoute() {
+    beginRouteRequest();
+    isApplyingRoute.value = false;
+    clearPendingChannelRoute();
   }
 
   function updateUrl() {
@@ -242,6 +248,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
     requestId: number,
     options: { intent?: ChannelLoadIntent } = {},
   ) {
+    if (!isCurrentRouteRequest(requestId)) return;
     clearPendingChannelRoomJidSelection();
     applyMatchToShellState(ui, match);
     if (match.id === "stories") {
@@ -310,7 +317,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
             return;
           }
         }
-        await openDm(`${username}@${domain}`);
+        await openDm(`${username}@${domain}`, { intent: "automatic" });
         if (requestId !== routeRequestId) return;
       }
       activeThreadTargetMessageId.value = null;
@@ -336,6 +343,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
       dmConversations.closeDm();
       await selectGroupDm(match.params.roomJid, {
         updateUrl: false,
+        fromRoute: true,
         intent: options.intent ?? "automatic",
       });
       if (requestId !== routeRequestId) return;
@@ -404,8 +412,10 @@ export function useRouteSync(deps: RouteSyncDeps) {
       }, { replace: true });
       await selectGroupDm(ch.jid, {
         updateUrl: false,
+        fromRoute: true,
         intent: options.intent ?? "automatic",
       });
+      if (!isCurrentRouteRequest(requestId)) return;
       ui.showPinnedPanel.value = match.search.pinned;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
@@ -425,6 +435,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
     await messaging.loadMessages(ch.spaceId ?? "", ch.id, 0, [], {
       intent: options.intent ?? "automatic",
     });
+    if (!isCurrentRouteRequest(requestId)) return;
 
     // Restore the thread panel from the URL and initialize paging for every
     // visible thread pane. Dedupe in the messaging composable keeps already
@@ -477,6 +488,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
   return {
     beginRouteRequest,
     isCurrentRouteRequest,
+    cancelPendingRoute,
     updateUrl,
     applyRouteTarget,
   };

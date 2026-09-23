@@ -44,6 +44,57 @@ function makeWaddles(client: BrowserXmppClient | null = null) {
 }
 
 describe("useWaddleDirectory.loadStructure", () => {
+  test.each([null, "random"])("keeps a newer selection (%s) when discovery completes", async (selection) => {
+    let resolveDiscovery!: (value: typeof BASE_TOPOLOGY) => void;
+    const discovery = new Promise<typeof BASE_TOPOLOGY>((resolve) => { resolveDiscovery = resolve; });
+    const listRoomMembers = mock(async () => [ALICE]);
+    const { w } = makeWaddles(makeClient({ discoverTopology: () => discovery, listRoomMembers }));
+    w.activeChannelId.value = "general";
+
+    const reload = w.loadStructure("general");
+    w.activeChannelId.value = selection;
+    resolveDiscovery(BASE_TOPOLOGY);
+    await reload;
+
+    expect(w.activeChannelId.value).toBe(selection);
+    expect(w.channels.value.map((channel) => channel.id)).toEqual(["general", "random"]);
+    expect(w.hasLoadedStructure.value).toBe(true);
+    expect(w.isLoadingStructure.value).toBe(false);
+    expect(listRoomMembers).not.toHaveBeenCalled();
+  });
+
+  test("does not clear a channel selected after a no-selection refresh starts, even after returning to it", async () => {
+    let resolveDiscovery!: (value: typeof BASE_TOPOLOGY) => void;
+    const discovery = new Promise<typeof BASE_TOPOLOGY>((resolve) => { resolveDiscovery = resolve; });
+    const { w } = makeWaddles(makeClient({ discoverTopology: () => discovery }));
+    w.activeChannelId.value = "general";
+
+    const reload = w.loadStructure(null, { noChannelSelect: true });
+    w.activeChannelId.value = null;
+    w.activeChannelId.value = "general";
+    resolveDiscovery(BASE_TOPOLOGY);
+    await reload;
+
+    expect(w.activeChannelId.value).toBe("general");
+  });
+
+  test("preserves a confirmed group DM during a background refresh", async () => {
+    const group = { id: "crew", name: "Crew", jid: "crew@conference.example.com", channelType: "text" as const, isGroupDm: true };
+    const listRoomMembers = mock(async () => [BOB]);
+    const { w } = makeWaddles(makeClient({
+      discoverTopology: async () => ({ ...BASE_TOPOLOGY, rooms: [...BASE_TOPOLOGY.rooms, group] }),
+      listRoomMembers,
+    }));
+    w.activeChannelId.value = group.id;
+
+    await w.loadStructure(group.id);
+
+    expect(w.activeChannelId.value).toBe(group.id);
+    expect(w.currentChannel.value?.isGroupDm).toBe(true);
+    expect(w.sortedChannels.value.map((channel) => channel.id)).toEqual(["general", "random"]);
+    expect(listRoomMembers).toHaveBeenCalledWith(group.id, { roomJid: group.jid });
+  });
+
   test("loads members for the first channel when no preferred channel is supplied", async () => {
     const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [ALICE]);
     const client = makeClient({ listRoomMembers });
@@ -109,6 +160,21 @@ describe("useWaddleDirectory.loadStructure", () => {
 });
 
 describe("useWaddleDirectory.reloadChannelMembers", () => {
+  test("ignores members from before leaving and returning to the same channel", async () => {
+    let finishLoad!: (members: MemberSummary[]) => void;
+    const load = new Promise<MemberSummary[]>((resolve) => { finishLoad = resolve; });
+    const { w } = makeWaddles(makeClient({ listRoomMembers: () => load }));
+    w.activeChannelId.value = "general";
+    const pendingMembers = w.reloadChannelMembers("general");
+
+    w.activeChannelId.value = null;
+    w.activeChannelId.value = "general";
+    finishLoad([ALICE]);
+    await pendingMembers;
+
+    expect(w.members.value).toEqual([]);
+  });
+
   test("loads members for the active channel using its discovered JID", async () => {
     const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [ALICE]);
     const client = makeClient({ listRoomMembers });
