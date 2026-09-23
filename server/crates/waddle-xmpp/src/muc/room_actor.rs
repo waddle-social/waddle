@@ -409,7 +409,6 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         msg: RestoreLiveRoster,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let restoring_admin = msg.pending_admin_projection.is_some();
         let (pending_admin_projection, admin_mutation_resolution) = match msg
             .pending_admin_projection
         {
@@ -443,6 +442,19 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             }
             None => (None, None),
         };
+        // Only a batch proven committed may prune by final affiliation, and
+        // only the JIDs it touched: its outbox rows own their removal
+        // presences. An unproven projection proves nothing about anyone.
+        let admin_pruned_jids: Vec<BareJid> = pending_admin_projection
+            .as_ref()
+            .map(|projection| {
+                projection
+                    .expected_affiliations
+                    .iter()
+                    .map(|(jid, _)| jid.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let occupant_count_before = self.room.occupant_count();
         let config = self.room.config.clone();
         let subject = self.room.subject.clone();
@@ -466,14 +478,17 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             // this actor was sealed. Its durable authorization applies to every
             // restore, not only admin recovery: the banning owner's outbox
             // already owns the removal presence, so nothing local is owed.
-            // Admin recovery additionally drops every occupant its final
-            // affiliations reject; only the original batch's intermediate
-            // removals require its ID. Membership revocations are left to the
-            // paths that owe their presences (group-DM leave reconciliation,
-            // members-only config enforcement), which need the session present.
+            // A proven admin batch additionally drops the occupants it touched
+            // whose final affiliation cannot join; only its intermediate
+            // removals require its ID. Every other membership revocation is
+            // left to the path that owes its presence (group-DM leave
+            // reconciliation, members-only config enforcement), which needs
+            // the session present.
             let affiliation = restored.get_affiliation(&jid);
             let banned = affiliation == Affiliation::Outcast;
-            if banned || (restoring_admin && !restored.can_user_join(&jid)) {
+            let pruned_by_proven_admin_batch =
+                admin_pruned_jids.contains(&jid) && !restored.can_user_join(&jid);
+            if banned || pruned_by_proven_admin_batch {
                 restored.remove_occupant(&nick);
                 continue;
             }

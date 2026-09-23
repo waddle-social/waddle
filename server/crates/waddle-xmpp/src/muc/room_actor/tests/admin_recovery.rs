@@ -532,3 +532,50 @@ async fn later_durable_batch_does_not_displace_an_unconsumed_verdict() {
         })
     );
 }
+
+/// An unproven projection proves nothing about anyone: a member whose
+/// affiliation another flow already revoked stays for that flow's leave.
+#[tokio::test]
+async fn restoring_live_roster_with_unproven_projection_keeps_revoked_members() {
+    let mut fixture = AdminRecoveryFixture::new();
+    add_unaffiliated_occupant(&mut fixture.source, "carol");
+    fixture.source.config.members_only = true;
+    fixture.authoritative.config.members_only = true;
+    let actor = fixture.spawn();
+    actor
+        .ask(fixture.restore())
+        .await
+        .expect("restore rolled-back batch");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(snapshot.room.get_occupant("bob").is_none(), "durable ban");
+    assert!(
+        snapshot.room.get_occupant("carol").is_some(),
+        "a NotCommitted projection must not prune untouched members"
+    );
+}
+
+/// A proven batch prunes only the JIDs it touched.
+#[tokio::test]
+async fn restoring_live_roster_with_committed_projection_prunes_only_touched_jids() {
+    let mut fixture = AdminRecoveryFixture::new();
+    fixture.record_commit();
+    add_unaffiliated_occupant(&mut fixture.source, "carol");
+    fixture.source.config.members_only = true;
+    fixture.authoritative.config.members_only = true;
+    let actor = fixture.spawn();
+    actor
+        .ask(fixture.restore())
+        .await
+        .expect("restore proven batch");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        snapshot.room.get_occupant("alice").is_none(),
+        "intermediate ban"
+    );
+    assert!(snapshot.room.get_occupant("bob").is_none(), "final ban");
+    assert!(
+        snapshot.room.get_occupant("carol").is_some(),
+        "an untouched non-member is owed its own leave presence elsewhere"
+    );
+}
