@@ -14,10 +14,10 @@ enum AttachmentLoader {
     }
 
     /// Photos arrive as raw library bytes. Every still image is re-encoded
-    /// as a JPEG from its pixels alone, dropping all metadata; a GIF keeps
-    /// its animation unless it carries a location, in which case it is
-    /// flattened too. A photo that cannot be re-encoded is refused, never
-    /// sent as is.
+    /// from its pixels alone (JPEG, or PNG when it has transparency),
+    /// dropping all metadata; a GIF keeps its animation unless it carries a
+    /// location, in which case it is flattened too. A photo that cannot be
+    /// re-encoded is refused, never sent as is.
     static func payload(fromPhoto data: Data, mediaType: String?, fileExtension: String?) async throws -> AttachmentPayload {
         try await Task.detached(priority: .userInitiated) {
             try Self.photoPayload(data, mediaType: mediaType, fileExtension: fileExtension)
@@ -53,9 +53,15 @@ enum AttachmentLoader {
         let isImage = type.hasPrefix("image/")
         let mustReencode = isImage && (type != "image/gif" || AttachmentImageInfo.hasLocation(data))
         if mustReencode {
-            guard let jpeg = AttachmentImageInfo.sanitizedJPEG(from: data) else { throw AttachmentUploadError.unsanitizable }
-            let size = AttachmentImageInfo.pixelSize(of: jpeg)
-            return AttachmentPayload(data: jpeg, filename: "Photo-\(stamp).jpg", mediaType: "image/jpeg", width: size?.width, height: size?.height)
+            guard let clean = AttachmentImageInfo.sanitized(from: data) else { throw AttachmentUploadError.unsanitizable }
+            let size = AttachmentImageInfo.pixelSize(of: clean.data)
+            return AttachmentPayload(
+                data: clean.data,
+                filename: "Photo-\(stamp).\(clean.fileExtension)",
+                mediaType: clean.mediaType,
+                width: size?.width,
+                height: size?.height
+            )
         }
         let size = type.hasPrefix("image/") ? AttachmentImageInfo.pixelSize(of: data) : nil
         let name = type.hasPrefix("video/") ? "Video" : "Photo"

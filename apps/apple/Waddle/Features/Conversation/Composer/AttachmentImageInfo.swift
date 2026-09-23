@@ -3,6 +3,13 @@ import Foundation
 import ImageIO
 #endif
 
+/// A photo re-encoded from its pixels, and the format it was written in.
+struct SanitizedImage {
+    let data: Data
+    let mediaType: String
+    let fileExtension: String
+}
+
 /// Image metadata and re-encoding for attachments, through ImageIO so it
 /// works the same on iOS and macOS.
 enum AttachmentImageInfo {
@@ -23,16 +30,22 @@ enum AttachmentImageInfo {
         #endif
     }
 
-    /// Re-encodes a photo as JPEG from its pixels, without any source
-    /// metadata, so a shared photo does not leak where it was taken and
-    /// HEIC reaches clients that cannot decode it.
-    static func sanitizedJPEG(from data: Data, quality: Double = 0.85) -> Data? {
+    /// Re-encodes a photo from its pixels, without any source metadata, so
+    /// a shared photo does not leak where it was taken and HEIC reaches
+    /// clients that cannot decode it. Opaque images become JPEG; images
+    /// with an alpha channel become PNG so transparency survives.
+    static func sanitized(from data: Data, quality: Double = 0.85) -> SanitizedImage? {
         #if canImport(ImageIO)
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { return nil }
+        let opaque: [CGImageAlphaInfo] = [.none, .noneSkipFirst, .noneSkipLast]
+        let hasAlpha = !opaque.contains(image.alphaInfo)
+        let format = hasAlpha
+            ? (type: "public.png", mediaType: "image/png", fileExtension: "png")
+            : (type: "public.jpeg", mediaType: "image/jpeg", fileExtension: "jpg")
         let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, "public.jpeg" as CFString, 1, nil) else {
+        guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, format.type as CFString, 1, nil) else {
             return nil
         }
         // Pixels only: EXIF, XMP, IPTC and maker notes are not copied, so no
@@ -45,7 +58,7 @@ enum AttachmentImageInfo {
         }
         CGImageDestinationAddImage(destination, image, options as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
-        return output as Data
+        return SanitizedImage(data: output as Data, mediaType: format.mediaType, fileExtension: format.fileExtension)
         #else
         return nil
         #endif
