@@ -7,20 +7,7 @@ use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, NodeIdentity, Share
 
 #[tokio::test]
 async fn xep_0045_room_plan_foreign_occupant_uses_room_origin_and_gate_keeps_caller() {
-    let (registry, actor, room, claims, fence, store) = spawn_subject_mutation_test_room().await;
-    // The subject fixture fixes every commit at revision 1; two occupancy
-    // projections require distinct revisions on the same room incarnation.
-    actor
-        .ask(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
-            store: Arc::new(OccupancyProjectionStore {
-                inner: store,
-                lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                revision: std::sync::Mutex::new(waddle_xmpp::muc::RoomRevision::initial()),
-            }),
-            claim_fence: fence.clone(),
-        })
-        .await
-        .expect("install monotonic projection store");
+    let (registry, actor, room, claims, fence, _store) = spawn_subject_mutation_test_room().await;
     let alice: jid::FullJid = "alice@example.com/web".parse().expect("sender");
     let bob: jid::FullJid = "bob@example.com/web".parse().expect("remote occupant");
     for (nick, jid) in [("alice", &alice), ("bob", &bob)] {
@@ -134,50 +121,4 @@ async fn xep_0045_room_plan_foreign_occupant_uses_room_origin_and_gate_keeps_cal
     ));
     assert_eq!(origin.sender_entity, sender_entity);
     assert_eq!(origin.inbound_sequence, 17);
-}
-
-struct OccupancyProjectionStore {
-    inner: Arc<SubjectMutationStore>,
-    lifecycle: waddle_xmpp::muc::RoomLifecycleId,
-    revision: std::sync::Mutex<waddle_xmpp::muc::RoomRevision>,
-}
-
-impl waddle_xmpp::muc::MucDurableStore for OccupancyProjectionStore {
-    fn load_room_state_fenced<'a>(
-        &'a self,
-        room: &'a jid::BareJid,
-        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-    ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>> {
-        self.inner.load_room_state_fenced(room, fence)
-    }
-
-    fn check_exact_claim_fence<'a>(
-        &'a self,
-        room: &'a jid::BareJid,
-        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-    ) -> waddle_xmpp::muc::MucDurableFuture<'a, bool> {
-        self.inner.check_exact_claim_fence(room, fence)
-    }
-
-    fn commit_room_mutation<'a>(
-        &'a self,
-        room: &'a jid::BareJid,
-        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
-        intent: waddle_xmpp::muc::RoomDurableMutation,
-        effects: waddle_xmpp::muc::RoomMutationEffects,
-    ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
-        Box::pin(async move {
-            let mut outcome = self
-                .inner
-                .commit_room_mutation(room, fence, intent, effects)
-                .await?;
-            let mut revision = self.revision.lock().expect("projection revision lock");
-            outcome.coordinates = waddle_xmpp::muc::RoomCommittedCoordinates {
-                lifecycle: self.lifecycle,
-                revision: *revision,
-            };
-            *revision = revision.next().expect("test revision overflow");
-            Ok(outcome)
-        })
-    }
 }
