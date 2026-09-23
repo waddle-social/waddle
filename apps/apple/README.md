@@ -68,11 +68,16 @@ cd apps/apple/WaddleKit && swift test
 ## Push notifications
 
 The app registers its APNs token with `push.<domain>` (Waddle's XEP-0050
-register-device command) and enables XEP-0357 on the account. To receive
-pushes, add the Push Notifications capability to your signing team's App ID
-and an `aps-environment` entitlement. The server's APNs dispatcher is still a
-stub (see `server/crates/waddle-server/src/push_service/worker.rs`), so iOS
-currently relies on local notifications while the app is running.
+register-device command) and enables XEP-0357 on the account. The Push Service
+sends each device a minimal alert: a generic banner chosen by notification
+class (the strings live in `Waddle/en.lproj/Localizable.strings`), the unread
+badge, and a routing object that opens the right account and conversation when
+tapped. It never carries the sender or the message.
+
+To receive pushes, add the Push Notifications capability to your signing
+team's App ID. The server needs `WADDLE_APNS_KEY_PATH`, `WADDLE_APNS_TEAM_ID`,
+`WADDLE_APNS_KEY_ID` and `WADDLE_APNS_BUNDLE_ID` (all four, or none to leave
+APNs off); debug builds register as `sandbox`, release builds as `prod`.
 
 ## Xcode Cloud
 

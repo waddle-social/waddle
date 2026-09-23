@@ -34,7 +34,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Reactions | 0444 | 🟡 | ✅ | XEP-0444 replace-set semantics, room-assigned ids only in rooms. Baseline: rendered, never sent |
 | Replies | 0461, 0428 | ✅ | ✅ | Reply ids follow XEP-0461 (room-assigned ids in rooms) |
 | Threads | 0201 | 🟡 | ✅ | Thread panel (inspector on iPad/Mac), reply counts |
-| Delivery acks | 0198 | ❌ | ✅ | Sending / queued / sent / acknowledged / failed with retry and discard. Baseline: acks were logged and dropped |
+| Delivery acks | 0198 | ❌ | ✅ | Sending / queued / sent / acknowledged / failed with retry and discard; unsent and unconfirmed messages survive the app being killed and resend with the same origin-id. Baseline: acks were logged and dropped |
 | Typing / chat states | 0085 | 🟡 | ✅ | Sent with pause timeout; received with expiry. Baseline: received; `sendChatState` was an empty stub |
 | Read markers + sync | 0333, 0490 | ❌ | ✅ | XEP-0333 (room ids, 1:1 @id when requested) and XEP-0490 cursors. Baseline: `sendDisplayedMarker` was an empty stub |
 
@@ -64,7 +64,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
 | Local notifications | — | ❌ | ✅ | Inline reply and mark-read actions, grouped per conversation. Baseline: in-app toast for broadcast mentions only |
-| Push (APNs) | 0357 + push.<domain> 0050 | ❌ | 🟡 | Client registers with push.<domain>; server APNs dispatch is still stubbed (#529). Baseline: `enablePushNotifications` was an empty stub |
+| Push (APNs) | 0357 + push.<domain> 0050 | ❌ | ✅ | Client registers with push.<domain>; the Push Service delivers a minimal alert (class-specific banner, badge, routing context; no sender or body) and a tap opens the conversation on the right account. Baseline: `enablePushNotifications` was an empty stub |
 
 ## Media
 
