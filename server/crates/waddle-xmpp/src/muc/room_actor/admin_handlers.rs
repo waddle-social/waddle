@@ -971,6 +971,14 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 previous_coordinates: coordinates,
                                 expected_affiliations: touched_jids
                                     .iter()
+                                    // A no-op request owns no removal presence.
+                                    // Retain its session for the pending leave
+                                    // that revoked its membership earlier.
+                                    .filter(|jid| {
+                                        changed_affiliations
+                                            .iter()
+                                            .any(|(changed, _)| changed == *jid)
+                                    })
                                     .map(|jid| (jid.clone(), staged_room.get_affiliation(jid)))
                                     .collect(),
                                 removed_sessions: removed_by_moderation.clone(),

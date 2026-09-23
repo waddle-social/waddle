@@ -163,6 +163,7 @@ struct LiveRoomRestore {
     room: MucRoom,
     occupancy_revision: u64,
     departures: super::room_actor::DepartureLedger,
+    pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
     pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
     admin_mutation_resolutions: Vec<super::room_actor::AdminMutationResolution>,
 }
@@ -1786,6 +1787,7 @@ impl RoomRegistryActor {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
                         departures: restore.departures,
+                        pending_affiliation_departures: restore.pending_affiliation_departures,
                         pending_admin_projection: restore.pending_admin_projection,
                         admin_mutation_resolutions: restore.admin_mutation_resolutions,
                     })
@@ -2407,6 +2409,7 @@ impl RoomRegistryActor {
                             room: restore.room,
                             occupancy_revision: restore.occupancy_revision,
                             departures: restore.departures,
+                            pending_affiliation_departures: restore.pending_affiliation_departures,
                             pending_admin_projection: restore.pending_admin_projection,
                             admin_mutation_resolutions: restore.admin_mutation_resolutions,
                         })
@@ -4162,6 +4165,7 @@ impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
                         departures: restore.departures,
+                        pending_affiliation_departures: restore.pending_affiliation_departures,
                         pending_admin_projection: restore.pending_admin_projection,
                         admin_mutation_resolutions: restore.admin_mutation_resolutions,
                     });
@@ -5179,6 +5183,12 @@ pub struct GetOrCreateRoomWithLiveRoster {
     /// The predecessor's unacknowledged departure receipts (see
     /// [`super::room_actor::RestoreLiveRoster`]).
     pub departures: super::room_actor::DepartureLedger,
+    /// Affiliation revocations whose callers still own the departure effects.
+    pub pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    /// Preserve unresolved admin effects and exact attempt verdicts across
+    /// every live-roster handoff, including mediated-invite recovery.
+    pub pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
+    pub admin_mutation_resolutions: Vec<super::room_actor::AdminMutationResolution>,
     /// Demote this exact stale actor in the SAME registry turn as the
     /// successor's publication, so no `GetRoom` can observe a gap in which
     /// the room appears absent (cleanup and the departure janitor treat a
@@ -5293,8 +5303,9 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
                 room: msg.live_room_restore,
                 occupancy_revision: msg.occupancy_revision,
                 departures: msg.departures,
-                pending_admin_projection: None,
-                admin_mutation_resolutions: Vec::new(),
+                pending_affiliation_departures: msg.pending_affiliation_departures,
+                pending_admin_projection: msg.pending_admin_projection,
+                admin_mutation_resolutions: msg.admin_mutation_resolutions,
             }),
         });
         let transition = self

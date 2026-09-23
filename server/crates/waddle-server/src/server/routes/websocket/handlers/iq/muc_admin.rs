@@ -2,7 +2,7 @@ use super::*;
 use crate::admin::channels::{
     acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
 };
-use crate::permissions::{ExclusiveRelationSwap, SwapExclusiveRelation};
+use crate::permissions::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
 
 /// Upper bound on the mutating room-actor asks below. The room actor
@@ -78,39 +78,21 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
     jid: &BareJid,
     affiliation: Affiliation,
 ) -> Result<(), String> {
-    let object = Object::new(ObjectType::Channel, channel_id);
-    let subject = Subject::user(jid.to_string());
-
-    for relation in CHANNEL_AFFILIATION_RELATIONS {
-        let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
-        match state
-            .deps
-            .app_state
-            .permission_actor
-            .ask(DeleteTuple { tuple })
-            .await
-        {
-            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {
-            }
-            Err(error) => return Err(format!("delete affiliation tuple failed: {error}")),
-        }
-    }
-
-    let Some(relation) = channel_affiliation_relation(affiliation) else {
-        return Ok(());
-    };
-    let tuple = Tuple::new(object, Relation::new(relation), subject);
-    match state
+    state
         .deps
         .app_state
         .permission_actor
-        .ask(WriteTuple { tuple })
+        .ask(ReplaceExclusiveRelation {
+            object: Object::new(ObjectType::Channel, channel_id),
+            subject: Subject::user(jid.to_string()),
+            family: CHANNEL_AFFILIATION_RELATIONS
+                .into_iter()
+                .map(Relation::new)
+                .collect(),
+            replacement: channel_affiliation_relation(affiliation).map(Relation::new),
+        })
         .await
-    {
-        Ok(())
-        | Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
-        Err(error) => Err(format!("write affiliation tuple failed: {error}")),
-    }
+        .map_err(|error| format!("replace affiliation tuple failed: {error}"))
 }
 
 /// The mutually exclusive channel relations one managed affiliation occupies.
@@ -124,6 +106,21 @@ fn final_affiliation_of(list: &[(BareJid, Affiliation)], jid: &BareJid) -> Optio
         .rev()
         .find(|(candidate, _)| candidate == jid)
         .map(|(_, affiliation)| *affiliation)
+}
+
+/// Persist each target once, at its final batch value. Keep no-op final
+/// values too: the authorization projection can need repair independently of
+/// room memory. Original admin items still drive validation and room effects.
+fn final_affiliation_writes(updates: &[(BareJid, Affiliation)]) -> Vec<(BareJid, Affiliation)> {
+    let mut writes: Vec<(BareJid, Affiliation)> = Vec::new();
+    for (jid, affiliation) in updates {
+        if let Some((_, current)) = writes.iter_mut().find(|(target, _)| target == jid) {
+            *current = *affiliation;
+        } else {
+            writes.push((jid.clone(), *affiliation));
+        }
+    }
+    writes
 }
 
 /// Roll back optimistically-persisted channel tuples after the room actor
@@ -148,13 +145,7 @@ async fn rollback_admin_affiliations(
     let object = Object::new(ObjectType::Channel, channel_id);
     for (previous_jid, previous_affiliation) in durable_previous_affiliations {
         let Some(optimistic) = final_affiliation_of(optimistic_affiliations, previous_jid) else {
-            let _ = persist_managed_channel_affiliation(
-                state,
-                channel_id,
-                previous_jid,
-                *previous_affiliation,
-            )
-            .await;
+            // A snapshot alone does not mean this attempt wrote the target.
             continue;
         };
         if optimistic == *previous_affiliation {
@@ -1253,6 +1244,9 @@ pub(super) async fn handle_muc_admin_iq(
     } else {
         None
     };
+    // Collapse only the external projection, after validating all original
+    // items. A failed duplicate write must not leave an intermediate ban.
+    let affiliation_updates = final_affiliation_writes(&affiliation_updates);
     let managed_channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid);
     let durable_previous_affiliations = if affiliation_updates.is_empty() {
         Vec::new()
@@ -1284,7 +1278,7 @@ pub(super) async fn handle_muc_admin_iq(
         Vec::new()
     };
     if let Some(channel_id) = managed_channel_id.as_deref() {
-        for (jid, affiliation) in &affiliation_updates {
+        for (index, (jid, affiliation)) in affiliation_updates.iter().enumerate() {
             if let Err(error) =
                 persist_managed_channel_affiliation(state, channel_id, jid, *affiliation).await
             {
@@ -1294,15 +1288,15 @@ pub(super) async fn handle_muc_admin_iq(
                     error = %error,
                     "Failed to persist MUC admin affiliation change before actor update"
                 );
-                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
-                    let _ = persist_managed_channel_affiliation(
-                        state,
-                        channel_id,
-                        previous_jid,
-                        *previous_affiliation,
-                    )
-                    .await;
-                }
+                // Include the failed write: its reply can be lost after the
+                // backend commits. Later batch items were never attempted.
+                rollback_admin_affiliations(
+                    state,
+                    Some(channel_id),
+                    &durable_previous_affiliations,
+                    &affiliation_updates[..=index],
+                )
+                .await;
                 return vec![build_iq_error_xml_typed(
                     iq.id(),
                     response_from,
@@ -3215,6 +3209,130 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Affiliation::Member, Affiliation::Admin],
             "only the tuple still holding this attempt's value is restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_rolls_back_only_attempted_targets_still_holding_our_values() {
+        let state = create_test_websocket_state().await;
+        let channel_id = "cas-partial-persistence-channel";
+        let applied: BareJid = "applied@example.com".parse().expect("applied");
+        let moved: BareJid = "moved@example.com".parse().expect("moved");
+        let failed: BareJid = "failed@example.com".parse().expect("failed");
+        let untouched: BareJid = "untouched@example.com".parse().expect("untouched");
+        let targets = [
+            applied.clone(),
+            moved.clone(),
+            failed.clone(),
+            untouched.clone(),
+        ];
+        let previous: Vec<_> = targets
+            .iter()
+            .cloned()
+            .map(|jid| (jid, Affiliation::Member))
+            .collect();
+        let updates: Vec<_> = targets
+            .iter()
+            .cloned()
+            .map(|jid| (jid, Affiliation::Outcast))
+            .collect();
+        for (jid, affiliation) in &previous {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("pre-ask affiliation");
+        }
+        // The third write committed but its reply was lost. The fourth was
+        // never attempted, although its old value was already snapshotted.
+        for (jid, affiliation) in &updates[..=2] {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("attempted write");
+        }
+        for jid in [&moved, &untouched] {
+            persist_managed_channel_affiliation(&state, channel_id, jid, Affiliation::Admin)
+                .await
+                .expect("foreign newer affiliation");
+        }
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &updates[..=2]).await;
+        let current =
+            explicit_channel_affiliations_for_jids(&state.deps.app_state, channel_id, targets)
+                .await
+                .expect("current tuples");
+        assert_eq!(current.into_iter().map(|(_, affiliation)| affiliation).collect::<Vec<_>>(),
+            vec![Affiliation::Member, Affiliation::Admin, Affiliation::Member, Affiliation::Admin],
+            "restore our applied prefix, including the ambiguous failed write, without touching newer values or unattempted targets");
+    }
+
+    async fn duplicate_projection_failure_preserves_original_affiliation(
+        commit_failed_write: bool,
+    ) {
+        let state = create_test_websocket_state().await;
+        let channel_id = "duplicate-projection-failure";
+        let jid: BareJid = "target@example.com".parse().expect("jid");
+        persist_managed_channel_affiliation(&state, channel_id, &jid, Affiliation::Member)
+            .await
+            .expect("initial member");
+        let previous = vec![(jid.clone(), Affiliation::Member)];
+        let requested = vec![
+            (jid.clone(), Affiliation::Outcast),
+            (jid.clone(), Affiliation::Admin),
+        ];
+        let writes = final_affiliation_writes(&requested);
+        assert_eq!(
+            writes,
+            vec![(jid.clone(), Affiliation::Admin)],
+            "the intermediate ban must never be published to the projection"
+        );
+        if !commit_failed_write {
+            state
+                .deps
+                .app_state
+                .db_pool
+                .global()
+                .execute(
+                    "CREATE TRIGGER reject_duplicate_admin BEFORE INSERT ON permission_tuples \
+                 WHEN NEW.relation = 'admin' BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+                )
+                .await
+                .expect("inject definitive failure");
+        }
+        let result =
+            persist_managed_channel_affiliation(&state, channel_id, &jid, writes[0].1).await;
+        assert_eq!(result.is_ok(), commit_failed_write);
+        // Treat a successful commit as a lost reply in the ambiguous case.
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &writes).await;
+        let current =
+            explicit_channel_affiliations_for_jids(&state.deps.app_state, channel_id, [jid])
+                .await
+                .expect("current affiliation");
+        assert_eq!(
+            current[0].1,
+            Affiliation::Member,
+            "definite failure and committed-but-lost reply both preserve the original membership"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_projection_definite_failure_does_not_leave_an_intermediate_ban() {
+        duplicate_projection_failure_preserves_original_affiliation(false).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_projection_ambiguous_commit_rolls_back_the_final_write() {
+        duplicate_projection_failure_preserves_original_affiliation(true).await;
+    }
+
+    #[test]
+    fn final_projection_writes_keep_noop_values_and_target_order() {
+        let first: BareJid = "first@example.com".parse().expect("first");
+        let second: BareJid = "second@example.com".parse().expect("second");
+        assert_eq!(
+            final_affiliation_writes(&[
+                (first.clone(), Affiliation::Outcast),
+                (second.clone(), Affiliation::None),
+                (first.clone(), Affiliation::Member),
+            ]),
+            vec![(first, Affiliation::Member), (second, Affiliation::None)]
         );
     }
 

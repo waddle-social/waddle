@@ -92,6 +92,7 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("restore live roster");
@@ -128,6 +129,7 @@ async fn restoring_live_roster_preserves_pending_members_only_config_removals() 
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("restore before members-only enforcement");
@@ -163,6 +165,7 @@ async fn restoring_live_roster_preserves_explicit_roles_without_authorization_ch
                 departures: Default::default(),
                 pending_admin_projection: None,
                 admin_mutation_resolutions: Vec::new(),
+                pending_affiliation_departures: Default::default(),
             })
             .await
             .expect("restore explicit role");
@@ -5135,6 +5138,7 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
             departures: snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("transfer");
@@ -5891,6 +5895,7 @@ async fn receipts_are_transferred_on_live_roster_restore() {
             departures: snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("restore successor live roster");
@@ -5937,6 +5942,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             departures: newer_snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("restore newer receipt");
@@ -5947,6 +5953,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             departures: older_snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("restore older receipt");
@@ -7355,6 +7362,7 @@ async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("transfer");
@@ -7373,6 +7381,7 @@ async fn live_roster_transfer_preserves_actor_room_jid() {
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         })
         .await
         .expect("transfer");

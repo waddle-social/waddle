@@ -13,6 +13,7 @@ struct AdminReceiptStore {
     /// When set, the next durable commit succeeds at these coordinates and
     /// records the batch's receipt; otherwise commits are refused.
     commit_next: Mutex<Option<RoomCommittedCoordinates>>,
+    commit_reply_lost: AtomicBool,
 }
 
 impl MucDurableStore for AdminReceiptStore {
@@ -47,6 +48,9 @@ impl MucDurableStore for AdminReceiptStore {
                 .lock()
                 .expect("receipts")
                 .insert(attempt, coordinates);
+        }
+        if self.commit_reply_lost.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(crate::muc::RoomCommitError::CommitOutcomeUnknown) });
         }
         Box::pin(async move {
             Ok(crate::muc::RoomCommitOutcome {
@@ -150,6 +154,7 @@ impl AdminRecoveryFixture {
     fn spawn(&self) -> ActorRef<RoomActor> {
         let mut actor = RoomActor::new(self.authoritative.clone(), test_secret());
         actor.durable_coordinates = Some(self.coordinates);
+        actor.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::Restored);
         actor.durable_store = Some(self.store.clone());
         actor.durable_claim_fence = Some(test_claim_fence(&self.authoritative.room_jid));
         RoomActor::spawn(actor)
@@ -162,6 +167,7 @@ impl AdminRecoveryFixture {
             departures: Default::default(),
             pending_admin_projection: Some(self.projection.clone()),
             admin_mutation_resolutions: Vec::new(),
+            pending_affiliation_departures: Default::default(),
         }
     }
 }
@@ -386,6 +392,7 @@ fn restore_without_projection(fixture: &AdminRecoveryFixture) -> RestoreLiveRost
         departures: Default::default(),
         pending_admin_projection: None,
         admin_mutation_resolutions: Vec::new(),
+        pending_affiliation_departures: Default::default(),
     }
 }
 
@@ -578,4 +585,184 @@ async fn restoring_live_roster_with_committed_projection_prunes_only_touched_jid
         snapshot.room.get_occupant("carol").is_some(),
         "an untouched non-member is owed its own leave presence elsewhere"
     );
+}
+
+#[tokio::test]
+async fn ambiguous_admin_batch_keeps_noop_removal_for_pending_leave() {
+    let mut fixture = AdminRecoveryFixture::new();
+    fixture.source.config.members_only = true;
+    fixture
+        .source
+        .set_affiliation(test_full_jid("alice").to_bare(), Affiliation::Owner);
+    add_unaffiliated_occupant(&mut fixture.source, "carol");
+    fixture.authoritative = fixture.source.clone();
+    let predecessor = fixture.spawn();
+    let committed = RoomCommittedCoordinates {
+        revision: fixture.coordinates.revision.next().expect("next revision"),
+        ..fixture.coordinates
+    };
+    *fixture.store.commit_next.lock().expect("commit") = Some(committed);
+    fixture
+        .store
+        .commit_reply_lost
+        .store(true, Ordering::SeqCst);
+    let attempt = AdminMutationId::generate();
+    let result = predecessor
+        .ask(ApplyAdminItems {
+            attempt,
+            sender_jid: test_full_jid("alice"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: ["bob", "carol"]
+                .into_iter()
+                .map(|nick| AdminItem {
+                    jid: Some(test_full_jid(nick).to_bare()),
+                    nick: None,
+                    affiliation: Some(Affiliation::None),
+                    role: None,
+                    reason: None,
+                })
+                .collect(),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(kameo::error::SendError::HandlerError(
+            AdminApplyError::CommitOutcomeUnknown
+        ))
+    ));
+    let snapshot = predecessor.ask(GetSnapshot).await.expect("sealed snapshot");
+    fixture
+        .authoritative
+        .set_affiliation(test_full_jid("bob").to_bare(), Affiliation::None);
+    fixture.coordinates = committed;
+    let successor = fixture.spawn();
+    successor
+        .ask(RestoreLiveRoster {
+            room: snapshot.room,
+            occupancy_revision: snapshot.occupancy_revision,
+            departures: snapshot.departures,
+            pending_admin_projection: snapshot.pending_admin_projection,
+            admin_mutation_resolutions: snapshot.admin_mutation_resolutions,
+            pending_affiliation_departures: snapshot.pending_affiliation_departures,
+        })
+        .await
+        .expect("restore committed batch");
+    let restored = successor
+        .ask(GetSnapshot)
+        .await
+        .expect("successor snapshot");
+    assert!(
+        restored.room.get_occupant("bob").is_none(),
+        "the real membership removal is projected"
+    );
+    assert!(
+        restored.room.get_occupant("carol").is_some(),
+        "the no-op removal owes no presence; retain its pending leave session"
+    );
+    assert_eq!(
+        restored.admin_mutation_resolution(attempt),
+        Some(AdminMutationResolution::Committed {
+            attempt,
+            coordinates: committed
+        })
+    );
+}
+
+#[tokio::test]
+async fn restoring_live_roster_prunes_foreign_membership_revocation() {
+    let mut fixture = AdminRecoveryFixture::new();
+    fixture.source.config.members_only = true;
+    fixture.authoritative.config.members_only = true;
+    fixture
+        .authoritative
+        .set_affiliation(test_full_jid("alice").to_bare(), Affiliation::None);
+    let actor = fixture.spawn();
+    actor
+        .ask(restore_without_projection(&fixture))
+        .await
+        .expect("restore subject roster");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        snapshot.room.get_occupant("alice").is_none(),
+        "foreign membership revocation must not restore occupancy"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_local_affiliation_removal_retains_departure_custody() {
+    let mut fixture = AdminRecoveryFixture::new();
+    fixture.source.config.members_only = true;
+    fixture.authoritative = fixture.source.clone();
+    let predecessor = fixture.spawn();
+    *fixture.store.commit_next.lock().expect("next commit") = Some(fixture.coordinates);
+    fixture
+        .store
+        .commit_reply_lost
+        .store(true, Ordering::SeqCst);
+    let leaver = test_full_jid("alice");
+    assert!(matches!(
+        predecessor
+            .ask(ChangeAffiliation {
+                jid: leaver.to_bare(),
+                affiliation: Affiliation::None
+            })
+            .await,
+        Err(kameo::error::SendError::HandlerError(
+            AffiliationMutationError::CommitOutcomeUnknown
+        ))
+    ));
+    let before = predecessor.ask(GetSnapshot).await.expect("sealed snapshot");
+    assert!(before
+        .pending_affiliation_departures
+        .contains(&leaver.to_bare()));
+    fixture
+        .authoritative
+        .set_affiliation(leaver.to_bare(), Affiliation::None);
+    let successor = fixture.spawn();
+    successor
+        .ask(RestoreLiveRoster {
+            room: before.room,
+            occupancy_revision: before.occupancy_revision,
+            departures: before.departures,
+            pending_admin_projection: before.pending_admin_projection,
+            admin_mutation_resolutions: before.admin_mutation_resolutions,
+            pending_affiliation_departures: before.pending_affiliation_departures,
+        })
+        .await
+        .expect("restore local leave");
+    let after = successor.ask(GetSnapshot).await.expect("restored snapshot");
+    assert!(
+        after.room.find_occupant_by_real_jid(&leaver).is_some(),
+        "local leave still owes removal presence"
+    );
+    assert_eq!(
+        after.room.get_affiliation(&leaver.to_bare()),
+        Affiliation::None
+    );
+    assert!(
+        after.pending_affiliation_departures.is_empty(),
+        "projecting the durable affiliation consumes the ambiguity marker"
+    );
+    fixture
+        .store
+        .commit_reply_lost
+        .store(false, Ordering::SeqCst);
+    *fixture.store.commit_next.lock().expect("leave commit") = Some(RoomCommittedCoordinates {
+        revision: fixture.coordinates.revision.next().expect("leave revision"),
+        ..fixture.coordinates
+    });
+    assert!(matches!(
+        successor
+            .ask(LeaveByRealJid {
+                sender_jid: leaver,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("finish local leave"),
+        LeaveDisposition::Left(_)
+    ));
 }

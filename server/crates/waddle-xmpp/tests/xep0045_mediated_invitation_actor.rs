@@ -324,3 +324,80 @@ async fn rolling_back_a_joined_invitee_emits_xep0045_status_321() {
         })
     }));
 }
+
+#[tokio::test]
+async fn live_roster_handoffs_preserve_each_unconsumed_admin_verdict() {
+    use waddle_xmpp::muc::durable::{AdminMutationId, ChannelId, WaddleId};
+    use waddle_xmpp::muc::room_actor::{AdminMutationResolution, GetSnapshot, RestoreLiveRoster};
+    use waddle_xmpp::muc::room_registry_actor::{
+        CreateRoom, GetOrCreateRoomWithLiveRoster, RoomRegistryActor,
+    };
+
+    let room_jid: BareJid = "invite-handoffs@muc.example.com".parse().expect("room JID");
+    let secret =
+        OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("occupant-id secret");
+    let registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".to_string(),
+        secret,
+    ));
+    let mut actor = registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "waddle-1".to_string(),
+            channel_id: "channel-1".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+    let verdicts = vec![
+        AdminMutationResolution::NotCommitted {
+            attempt: AdminMutationId::generate(),
+        },
+        AdminMutationResolution::NotCommitted {
+            attempt: AdminMutationId::generate(),
+        },
+    ];
+    let snapshot = actor.ask(GetSnapshot).await.expect("initial snapshot");
+    actor
+        .ask(RestoreLiveRoster {
+            room: snapshot.room,
+            occupancy_revision: snapshot.occupancy_revision,
+            departures: snapshot.departures,
+            pending_affiliation_departures: Default::default(),
+            pending_admin_projection: None,
+            admin_mutation_resolutions: verdicts.clone(),
+        })
+        .await
+        .expect("retain admin recovery verdicts");
+
+    // Successive invite recoveries may replace the actor before either admin
+    // caller resumes; both exact outcomes must remain available to their asks.
+    for _ in 0..2 {
+        let snapshot = actor.ask(GetSnapshot).await.expect("handoff snapshot");
+        actor = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: room_jid.clone(),
+                waddle_id: WaddleId::new(snapshot.room.waddle_id.clone()),
+                channel_id: ChannelId::new(snapshot.room.channel_id.clone()),
+                config: snapshot.room.config.clone(),
+                live_room_restore: snapshot.room,
+                occupancy_revision: snapshot.occupancy_revision,
+                departures: snapshot.departures,
+                pending_affiliation_departures: snapshot.pending_affiliation_departures,
+                pending_admin_projection: snapshot.pending_admin_projection,
+                admin_mutation_resolutions: snapshot.admin_mutation_resolutions,
+                demote_first: Some(actor),
+            })
+            .await
+            .expect("publish successor")
+            .actor_ref;
+        let recovered = actor.ask(GetSnapshot).await.expect("successor snapshot");
+        for verdict in &verdicts {
+            assert_eq!(
+                recovered.admin_mutation_resolution(verdict.attempt()),
+                Some(*verdict),
+                "a later invitation must not erase an admin attempt's exact result"
+            );
+        }
+    }
+}

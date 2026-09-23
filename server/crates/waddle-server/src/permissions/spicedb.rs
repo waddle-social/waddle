@@ -9,7 +9,7 @@ use prescience::{
 
 use crate::config::SpiceDbConfig;
 
-use super::actor::{ExclusiveRelationSwap, SwapExclusiveRelation};
+use super::actor::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
 };
@@ -69,6 +69,32 @@ impl SpiceDbPermissionBackend {
         let relationship = relationship_from_tuple(&tuple)?;
         self.client
             .write_relationships(vec![RelationshipUpdate::create(relationship)])
+            .await
+            .map_err(map_spicedb_error)?;
+        Ok(())
+    }
+
+    /// The complete family is written in one SpiceDB transaction, which
+    /// serializes with the preconditions of conditional rollback swaps.
+    pub async fn replace_exclusive_relation(
+        &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        let updates = msg
+            .family
+            .iter()
+            .map(|relation| {
+                let tuple = Tuple::new(msg.object.clone(), relation.clone(), msg.subject.clone());
+                let relationship = relationship_from_tuple(&tuple)?;
+                Ok(if msg.replacement.as_ref() == Some(relation) {
+                    RelationshipUpdate::touch(relationship)
+                } else {
+                    RelationshipUpdate::delete(relationship)
+                })
+            })
+            .collect::<Result<Vec<_>, PermissionError>>()?;
+        self.client
+            .write_relationships(updates)
             .await
             .map_err(map_spicedb_error)?;
         Ok(())

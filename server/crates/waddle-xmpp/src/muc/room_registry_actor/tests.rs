@@ -5057,6 +5057,9 @@ mod ownership_claims_tests {
                 live_room_restore: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: source_snapshot.departures,
+                pending_affiliation_departures: Default::default(),
+                pending_admin_projection: None,
+                admin_mutation_resolutions: Vec::new(),
                 demote_first: None,
             })
             .await
@@ -5124,6 +5127,7 @@ mod ownership_claims_tests {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: Default::default(),
+                pending_affiliation_departures: source_snapshot.pending_affiliation_departures,
                 pending_admin_projection: source_snapshot.pending_admin_projection,
                 admin_mutation_resolutions: Vec::new(),
             }),
@@ -5226,6 +5230,9 @@ mod ownership_claims_tests {
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: Default::default(),
+                pending_affiliation_departures: Default::default(),
+                pending_admin_projection: None,
+                admin_mutation_resolutions: Vec::new(),
                 demote_first: None,
             })
             .await
@@ -5355,6 +5362,9 @@ mod ownership_claims_tests {
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: Default::default(),
+                pending_affiliation_departures: Default::default(),
+                pending_admin_projection: None,
+                admin_mutation_resolutions: Vec::new(),
                 demote_first: Some(source_actor.clone()),
             })
             .await
@@ -5391,6 +5401,9 @@ mod ownership_claims_tests {
                 live_room_restore: source_snapshot_room_for_refusal,
                 occupancy_revision: 0,
                 departures: Default::default(),
+                pending_affiliation_departures: Default::default(),
+                pending_admin_projection: None,
+                admin_mutation_resolutions: Vec::new(),
                 demote_first: Some(source_actor.clone()),
             })
             .await;

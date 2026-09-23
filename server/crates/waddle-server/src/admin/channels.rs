@@ -3582,6 +3582,9 @@ async fn recover_group_dm_actor_after_demote(
             live_room_restore: stale_snapshot.room,
             occupancy_revision: stale_snapshot.occupancy_revision,
             departures: stale_snapshot.departures,
+            pending_affiliation_departures: stale_snapshot.pending_affiliation_departures,
+            pending_admin_projection: stale_snapshot.pending_admin_projection,
+            admin_mutation_resolutions: stale_snapshot.admin_mutation_resolutions,
             demote_first: Some(stale_actor.clone()),
         })
         .await

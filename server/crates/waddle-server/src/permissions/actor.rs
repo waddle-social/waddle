@@ -167,6 +167,27 @@ impl PermissionActor {
         }
     }
 
+    async fn replace_exclusive_relation(
+        &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => {
+                backend.replace_exclusive_relation(msg).await
+            }
+            PermissionActorBackend::Local { tuple_store, .. } => {
+                tuple_store
+                    .replace_exclusive_relation(
+                        &msg.object,
+                        &msg.subject,
+                        &msg.family,
+                        msg.replacement.as_ref(),
+                    )
+                    .await
+            }
+        }
+    }
+
     async fn swap_exclusive_relation(
         &self,
         msg: SwapExclusiveRelation,
@@ -340,6 +361,29 @@ impl kameo::message::Message<DeleteTuple> for PermissionActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.delete_tuple(&msg.tuple).await?;
+        self.clear_cache().await;
+        Ok(())
+    }
+}
+
+/// Atomically replace all relations in a mutually exclusive family. Normal
+/// writes and conditional rollback swaps serialize against the same scope.
+pub struct ReplaceExclusiveRelation {
+    pub object: Object,
+    pub subject: Subject,
+    pub family: Vec<Relation>,
+    pub replacement: Option<Relation>,
+}
+
+impl kameo::message::Message<ReplaceExclusiveRelation> for PermissionActor {
+    type Reply = Result<(), PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ReplaceExclusiveRelation,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.replace_exclusive_relation(msg).await?;
         self.clear_cache().await;
         Ok(())
     }

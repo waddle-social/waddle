@@ -6,7 +6,7 @@ use tracing::{debug, instrument};
 use super::super::PermissionError;
 use super::types::{Object, ObjectType, Relation, Subject, SubjectType, Tuple};
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase, RowValues};
-use crate::db::{row_value, DatabaseDriver, DatabaseError, Value, ValueExt};
+use crate::db::{row_value, Database, DatabaseDriver, DatabaseError, Transaction, Value, ValueExt};
 
 /// Storage layer for permission tuples.
 pub struct TupleStore {
@@ -219,10 +219,77 @@ impl TupleStore {
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
         let db_error = |e: DatabaseError| PermissionError::DatabaseError(e.to_string());
-        let mut tx = match db.driver() {
-            DatabaseDriver::Sqlite => db.begin_immediate().await.map_err(db_error)?,
+        let mut tx = Self::begin_exclusive_relation(&db, object, subject).await?;
+        let rows = tx.execute(&sql, params).await.map_err(db_error)?;
+        tx.commit().await.map_err(db_error)?;
+        Ok(rows > 0)
+    }
+
+    /// Replace the complete family atomically, sharing the serialization lock
+    /// with conditional rollback swaps on every database connection.
+    #[instrument(skip(self, family))]
+    pub async fn replace_exclusive_relation(
+        &self,
+        object: &Object,
+        subject: &Subject,
+        family: &[Relation],
+        replacement: Option<&Relation>,
+    ) -> Result<(), PermissionError> {
+        let db = self
+            .actor
+            .ask(GetDatabase)
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+        let mut tx = Self::begin_exclusive_relation(&db, object, subject).await?;
+        // Delete each member inside the same transaction; readers can observe
+        // only the old complete family or its committed replacement.
+        for relation in family {
+            tx.execute(
+                "DELETE FROM permission_tuples WHERE object_type = ? AND object_id = ? \
+                 AND subject_type = ? AND subject_id = ? AND relation = ? \
+                 AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))",
+                crate::db_params![
+                    object.object_type.to_string(),
+                    object.id.as_str(),
+                    subject.subject_type.to_string(),
+                    subject.id.as_str(),
+                    relation.name.as_str(),
+                    subject.relation.as_deref(),
+                    subject.relation.as_deref(),
+                ],
+            )
+            .await?;
+        }
+        if let Some(replacement) = replacement {
+            let tuple = Tuple::new(object.clone(), replacement.clone(), subject.clone());
+            tx.execute(
+                "INSERT INTO permission_tuples (id, object_type, object_id, relation, \
+                 subject_type, subject_id, subject_relation) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                crate::db_params![
+                    tuple.id,
+                    object.object_type.to_string(),
+                    object.id.as_str(),
+                    replacement.name.as_str(),
+                    subject.subject_type.to_string(),
+                    subject.id.as_str(),
+                    subject.relation.as_deref(),
+                ],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn begin_exclusive_relation<'a>(
+        db: &'a Database,
+        object: &Object,
+        subject: &Subject,
+    ) -> Result<Transaction<'a>, PermissionError> {
+        let tx = match db.driver() {
+            DatabaseDriver::Sqlite => db.begin_immediate().await?,
             DatabaseDriver::Postgres => {
-                let mut tx = db.begin().await.map_err(db_error)?;
+                let mut tx = db.begin().await?;
                 let scope_key = format!(
                     "permission_tuples|{}|{}|{}|{}",
                     object.object_type, object.id, subject.subject_type, subject.id
@@ -231,14 +298,11 @@ impl TupleStore {
                     "SELECT pg_advisory_xact_lock(hashtext(?))",
                     crate::db_params![scope_key],
                 )
-                .await
-                .map_err(db_error)?;
+                .await?;
                 tx
             }
         };
-        let rows = tx.execute(&sql, params).await.map_err(db_error)?;
-        tx.commit().await.map_err(db_error)?;
-        Ok(rows > 0)
+        Ok(tx)
     }
 
     /// Check if a specific tuple exists.

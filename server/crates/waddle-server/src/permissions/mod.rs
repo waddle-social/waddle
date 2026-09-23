@@ -8,8 +8,8 @@ mod tuple;
 
 pub use actor::{
     CheckPermission, DeleteTuple, EnsureSchema, ExclusiveRelationSwap, ListRelations, ListSubjects,
-    LookupResources, LookupSubjects, Permission, PermissionActor, SwapExclusiveRelation,
-    WriteTuple,
+    LookupResources, LookupSubjects, Permission, PermissionActor, ReplaceExclusiveRelation,
+    SwapExclusiveRelation, WriteTuple,
 };
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
 pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};

@@ -256,6 +256,8 @@ pub struct RoomSnapshot {
     /// keyed by attempt so a later batch cannot overwrite an unconsumed
     /// verdict and a handoff carries every retained verdict along.
     pub admin_mutation_resolutions: Vec<AdminMutationResolution>,
+    /// Local affiliation removals whose ambiguous commit still owes a leave.
+    pub pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
 }
 
 impl RoomSnapshot {
@@ -393,6 +395,8 @@ pub struct RestoreLiveRoster {
     /// The predecessor's retained admin verdicts, so a recovery caller whose
     /// lookup lands on the successor still finds its exact attempt.
     pub admin_mutation_resolutions: Vec<AdminMutationResolution>,
+    /// Local affiliation removals whose ambiguous commit still owes a leave.
+    pub pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
 }
 
 #[derive(Debug, Clone, Copy, Error)]
@@ -461,6 +465,7 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         let affiliations = self.room.affiliation_list.clone();
         let mut restored = msg.room;
         let moderation_changed = restored.config.moderated != config.moderated;
+        let previous_affiliations = restored.affiliation_list.clone();
         // The transplant restores THIS room's live roster; its identity is
         // never the restored value's (durable commits key their claim fence
         // by the actor's room JID).
@@ -480,15 +485,25 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             // already owns the removal presence, so nothing local is owed.
             // A proven admin batch additionally drops the occupants it touched
             // whose final affiliation cannot join; only its intermediate
-            // removals require its ID. Every other membership revocation is
-            // left to the path that owes its presence (group-DM leave
-            // reconciliation, members-only config enforcement), which needs
-            // the session present.
+            // removals require its ID. Local leave/config custody is retained
+            // below until the path owing its presence consumes the session.
             let affiliation = restored.get_affiliation(&jid);
             let banned = affiliation == Affiliation::Outcast;
             let pruned_by_proven_admin_batch =
                 admin_pruned_jids.contains(&jid) && !restored.can_user_join(&jid);
-            if banned || pruned_by_proven_admin_batch {
+            // Only a fenced, restored durable snapshot proves a revocation;
+            // new/volatile room defaults are not authoritative membership.
+            // A member revoked while this actor was sealed cannot regain
+            // occupancy on recovery. An ambiguous local affiliation removal
+            // is different: its leave path still owns presence/SFU cleanup.
+            // Already-unaffiliated sessions likewise belong to pending leave
+            // or members-only configuration enforcement.
+            let revoked_by_another_mutation = self.restore_state
+                == DurableRestoreState::Ready(DurableRoomOrigin::Restored)
+                && previous_affiliations.get(&jid) >= Affiliation::Member
+                && !restored.can_user_join(&jid)
+                && !msg.pending_affiliation_departures.contains(&jid);
+            if banned || pruned_by_proven_admin_batch || revoked_by_another_mutation {
                 restored.remove_occupant(&nick);
                 continue;
             }
@@ -515,6 +530,10 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         );
         self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
         self.absorb_departure_ledger(msg.departures);
+        // The durable affiliation is now projected. Retained local leavers
+        // are already unaffiliated, so later handoffs preserve their custody
+        // without exempting a future membership grant/revocation from pruning.
+        self.pending_affiliation_departures.clear();
         for resolution in msg.admin_mutation_resolutions {
             self.record_admin_mutation_resolution(resolution);
         }
@@ -844,6 +863,7 @@ pub struct RoomActor {
     pending_admin_projection: Option<PendingAdminProjection>,
     /// Retained per attempt (bounded) until the minting caller reads it.
     admin_mutation_resolutions: std::collections::VecDeque<AdminMutationResolution>,
+    pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
     admin_receipt_after_publication: Option<super::durable::AdminMutationId>,
     /// Completed departures retained for attempt replay (see
     /// [`occupancy_handlers::LeaveAttemptId`]).
@@ -1077,6 +1097,7 @@ impl RoomActor {
             projected_revision: None,
             pending_admin_projection: None,
             admin_mutation_resolutions: std::collections::VecDeque::new(),
+            pending_affiliation_departures: Default::default(),
             admin_receipt_after_publication: None,
             departure_receipts: std::collections::VecDeque::new(),
             latest_generations: std::collections::HashMap::new(),
@@ -2704,6 +2725,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 occupancy_revision: self.occupancy_revision,
                 departures: self.departure_ledger(),
                 pending_admin_projection: self.pending_admin_projection.clone(),
+                pending_affiliation_departures: self.pending_affiliation_departures.clone(),
                 admin_mutation_resolutions: self
                     .admin_mutation_resolutions
                     .iter()
@@ -2873,19 +2895,29 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         }
         let changed = self.room.get_affiliation(&msg.jid) != msg.affiliation;
         if changed {
-            self.commit_durable(
-                RoomDurableMutation::Affiliation(super::durable::AffiliationEntry::new(
-                    msg.jid.clone(),
-                    (msg.affiliation != Affiliation::None).then_some(msg.affiliation),
-                )),
-                super::RoomMutationEffects::none(),
-            )
-            .await?;
+            if let Err(error) = self
+                .commit_durable(
+                    RoomDurableMutation::Affiliation(super::durable::AffiliationEntry::new(
+                        msg.jid.clone(),
+                        (msg.affiliation != Affiliation::None).then_some(msg.affiliation),
+                    )),
+                    super::RoomMutationEffects::none(),
+                )
+                .await
+            {
+                if matches!(error, DurablePersistError::CommitOutcomeUnknown)
+                    && msg.affiliation == Affiliation::None
+                {
+                    self.pending_affiliation_departures.insert(msg.jid.clone());
+                }
+                return Err(error.into());
+            }
         } else {
             self.gate_pre_mutation_ownership()
                 .await
                 .map_err(RoomMutationError::from)?;
         }
+        self.pending_affiliation_departures.remove(&msg.jid);
         self.invalidate_invite_grant(&msg.jid);
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if self
@@ -3309,6 +3341,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             departures: self.departure_ledger(),
             pending_admin_projection: self.pending_admin_projection.clone(),
             admin_mutation_resolutions: self.admin_mutation_resolutions.iter().copied().collect(),
+            pending_affiliation_departures: self.pending_affiliation_departures.clone(),
         })
     }
 }

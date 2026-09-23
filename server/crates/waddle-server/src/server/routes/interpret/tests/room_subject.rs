@@ -1281,3 +1281,115 @@ async fn xep0045_subject_recovery_timeout_retires_unresponsive_exact_actor() {
     );
     registry.kill();
 }
+
+#[tokio::test]
+async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
+    use waddle_xmpp::muc::room_actor::{
+        ChangeAffiliation, ConfigEffectPlan, GetSnapshot, Join, SetSubject, SetSubjectError,
+        UpdateConfig,
+    };
+    use waddle_xmpp::{Affiliation, Role};
+
+    let (registry, actor, room, _claims, _fence, store) = spawn_subject_mutation_test_room().await;
+    for nick in ["alice", "bob"] {
+        let jid: jid::FullJid = format!("{nick}@example.com/web").parse().expect("session");
+        actor
+            .ask(ChangeAffiliation {
+                jid: jid.to_bare(),
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("seed membership");
+        actor
+            .ask(Join {
+                nick: nick.to_owned(),
+                real_jid: jid,
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join member");
+    }
+    actor
+        .ask(UpdateConfig {
+            config: waddle_xmpp::muc::RoomConfig {
+                members_only: true,
+                ..Default::default()
+            },
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await
+        .expect("members-only room");
+    let previous = actor.ask(GetSnapshot).await.expect("pre-subject snapshot");
+    let intended = waddle_xmpp::muc::SubjectState {
+        texts: waddle_xmpp::muc::RoomSubjectTexts::from_iter([(
+            String::new(),
+            "restored subject".to_owned(),
+        )]),
+        setter: "alice@example.com".parse().expect("setter"),
+        setter_nick: "alice".to_owned(),
+        set_at: chrono::Utc::now(),
+    };
+    store.set_mode(SubjectMutationStoreMode::CommitOutcomeUnknown);
+    assert!(matches!(
+        actor
+            .ask(SetSubject {
+                texts: intended.texts.clone(),
+                setter: intended.setter.clone(),
+                setter_nick: intended.setter_nick.clone(),
+                set_at: intended.set_at,
+            })
+            .await,
+        Err(kameo::error::SendError::HandlerError(
+            SetSubjectError::CommitOutcomeUnknown
+        ))
+    ));
+    // A different durable mutation revokes Bob while this actor is sealed.
+    // Its outbox owns the status-321 presence; recovery must not restore Bob.
+    {
+        let mut state = store.stored_state.lock().expect("stored state");
+        let state = state.as_mut().expect("durable room");
+        state.config.members_only = true;
+        state.affiliations = vec![waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+            intended.setter.clone(),
+            Affiliation::Member,
+        )];
+        let coordinates = state.coordinates.as_mut().expect("coordinates");
+        coordinates.revision = coordinates.revision.next().expect("foreign revision");
+    }
+    assert!(
+        super::super::room_subject::reconcile_ambiguous_subject_commit(
+            &registry,
+            &room,
+            &actor,
+            Some(&previous),
+            intended,
+        )
+        .await
+    );
+    let successor = registry
+        .ask(GetRoom { room_jid: room })
+        .await
+        .expect("lookup")
+        .expect("successor");
+    let snapshot = successor.ask(GetSnapshot).await.expect("restored snapshot");
+    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(snapshot.room.get_occupant("bob").is_none());
+    let dispatch = successor
+        .ask(GetRoomSnapshot {
+            sender_jid: "bob@example.com/web".parse().expect("revoked session"),
+        })
+        .await
+        .expect("dispatch snapshot");
+    assert!(
+        dispatch.sender_nick.is_none(),
+        "revoked member cannot send messages"
+    );
+    assert!(
+        dispatch
+            .occupants
+            .iter()
+            .all(|occupant| occupant.nick != "bob"),
+        "revoked member cannot receive messages"
+    );
+}

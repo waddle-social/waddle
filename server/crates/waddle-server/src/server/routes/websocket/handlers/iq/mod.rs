@@ -237,8 +237,8 @@ use crate::db::roster::{
 };
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
-    CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError, Relation,
-    Subject, SubjectType, Tuple, WriteTuple,
+    CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
+    SubjectType, Tuple, WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::managed_channel_policy::{
