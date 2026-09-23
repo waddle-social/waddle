@@ -92,16 +92,38 @@ struct ConversationComposer: View {
             )
             ComposerSendButton(isEditing: model.isEditing, isEnabled: model.canSend, action: submit)
         }
-        .padding(.horizontal, Theme.Spacing.s)
-        .padding(.vertical, Theme.Spacing.s - 2)
+        .padding(.horizontal, Theme.Spacing.xs)
+        .padding(.vertical, Theme.Spacing.xs + 2)
+        #if os(iOS)
         .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
-                .fill(Color.secondaryBackground)
+            RoundedRectangle(cornerRadius: inputCornerRadius, style: .continuous)
+                .fill(.regularMaterial)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: inputCornerRadius, style: .continuous)
+                .strokeBorder(
+                    isFocused ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.08),
+                    lineWidth: 1
+                )
+        )
+        .animation(.easeInOut(duration: 0.18), value: isFocused)
+        #else
+        .padding(.horizontal, Theme.Spacing.s - Theme.Spacing.xs)
+        .padding(.vertical, Theme.Spacing.s - 2 - Theme.Spacing.xs - 2)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous).fill(Color.secondaryBackground))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
                 .strokeBorder(isFocused ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.2), lineWidth: 1)
         )
+        #endif
+    }
+
+    private var inputCornerRadius: CGFloat {
+        #if os(iOS)
+        28
+        #else
+        Theme.Radius.large
+        #endif
     }
 
     private var uploader: AttachmentUploader {

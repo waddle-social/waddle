@@ -13,7 +13,7 @@ struct WaddleApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
-                .onAppear { appDelegate.appState = appState }
+                .onAppear { appDelegate.attach(appState) }
         }
         #if os(macOS)
         .defaultSize(width: 1_280, height: 840)

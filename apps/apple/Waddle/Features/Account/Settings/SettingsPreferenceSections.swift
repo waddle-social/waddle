@@ -38,11 +38,24 @@ struct SettingsPrivacySection: View {
 
 struct SettingsNotificationsSection: View {
     @Bindable var preferences: Preferences
+    let pushRegistrationStatus: AppState.PushRegistrationStatus
+    let notificationPermissionGranted: Bool?
     @Environment(\.openURL) private var openURL
 
     var body: some View {
         Section {
             Toggle("Show message previews", isOn: $preferences.showsNotificationPreviews)
+            LabeledContent("Push registration", value: pushRegistrationStatus.title)
+            if case let .failed(message) = pushRegistrationStatus {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+            if notificationPermissionGranted == false {
+                Label("Notifications are turned off in system settings.", systemImage: "bell.slash")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
             Button {
                 if let url = Self.systemSettingsURL {
                     openURL(url)
@@ -53,7 +66,7 @@ struct SettingsNotificationsSection: View {
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Choose how each conversation notifies you from its details.")
+            Text("Choose how each conversation notifies you from its details. Push delivery also depends on APNs being configured for this app by the server.")
         }
     }
 

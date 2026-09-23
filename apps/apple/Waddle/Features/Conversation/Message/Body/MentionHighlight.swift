@@ -28,6 +28,7 @@ enum MentionHighlight {
             isEdited: item.isEdited,
             spans: item.message.markupSpans,
             references: item.message.references,
+            ownNick: account.nick,
             mentionKind: { kind(of: $0, account: account, in: item.conversation) }
         )
     }

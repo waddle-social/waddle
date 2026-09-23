@@ -74,6 +74,11 @@ struct ReviewRegressionTests {
         coordinator.isSendReady = true
         await coordinator.flushOutboundQueue()
         #expect(coordinator.outboundQueue.map(\.clientID) == [first, second])
+        // The simulated online fixture does not consume FakePort.events, so
+        // model the next ready stream after the transient failure explicitly.
+        coordinator.isConnectResetting = false
+        coordinator.status.connection = .online
+        coordinator.isSendReady = true
         await coordinator.flushOutboundQueue()
         #expect(port.sent.map(\.clientID) == [first, first, second])
         // A send while not ready never overtakes the queue.
