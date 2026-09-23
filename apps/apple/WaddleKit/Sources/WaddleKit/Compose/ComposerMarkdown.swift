@@ -270,8 +270,9 @@ private func applyInlineMarkers(_ body: Scalars, protected: [ScalarRange]) -> In
 private func earliestInlineMatch(_ body: Scalars, from: Int, protected: [ScalarRange]) -> InlineMatch? {
     var position = from
     while position < body.count {
-        if let match = firstRuleMatch(body, at: position) {
-            if !protected.contains(where: { $0.overlaps(match.range) }) { return match }
+        if let match = firstRuleMatch(body, at: position),
+           !protected.contains(where: { $0.overlaps(match.range) }) {
+            return match
         }
         position += 1
     }
