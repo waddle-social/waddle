@@ -118,17 +118,20 @@ android_module_source_sets() {
 check_apple() {
   require_file "apps/apple/project.yml"
   require_file "apps/apple/Waddle.xcodeproj/project.pbxproj"
-  require_file "apps/apple/Waddle/App/AppModel.swift"
-  require_file "apps/apple/Waddle/RustClient/RustXmppClient.swift"
+  require_file "apps/apple/Waddle/App/AppState.swift"
+  require_file "apps/apple/Waddle/Bridge/FFIXmppPort.swift"
+  require_file "apps/apple/WaddleKit/Package.swift"
   require_file "server/crates/waddle-xmpp-client/Cargo.toml"
   require_file "server/crates/waddle-xmpp-core/Cargo.toml"
   require_file "server/crates/waddle-xmpp-client-ffi/Cargo.toml"
   local -a apple_dependency_paths=(
     "$repo_root/apps/apple/project.yml"
     "$repo_root/apps/apple/Waddle.xcodeproj/project.pbxproj"
+    "$repo_root/apps/apple/WaddleKit/Package.swift"
   )
   local -a apple_exporter_paths=(
     "$repo_root/apps/apple/Waddle"
+    "$repo_root/apps/apple/WaddleKit/Sources"
   )
   local path cargo_closure
   if ! cargo_closure="$(discover_cargo_closure_paths \

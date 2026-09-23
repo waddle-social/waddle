@@ -1,6 +1,9 @@
 name: Waddle
 options:
   createIntermediateGroups: true
+packages:
+  WaddleKit:
+    path: WaddleKit
 settings:
   base:
     SWIFT_VERSION: 5.0
@@ -24,11 +27,17 @@ targets:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
         link: true
+      - package: WaddleKit
     preBuildScripts:
       - name: Sync Waddle Brand Assets
         script: |
           set -euo pipefail
           env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
+    entitlements:
+      path: Waddle/Platform/Waddle-iOS.entitlements
+      properties:
+        # APNs for XEP-0357 push; export swaps in production for release.
+        aps-environment: development
     settings:
       base:
         PRODUCT_NAME: Waddle-iOS
@@ -56,11 +65,16 @@ targets:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
         link: true
+      - package: WaddleKit
     preBuildScripts:
       - name: Sync Waddle Brand Assets
         script: |
           set -euo pipefail
           env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
+    entitlements:
+      path: Waddle/Platform/Waddle-macOS.entitlements
+      properties:
+        com.apple.developer.aps-environment: development
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS
