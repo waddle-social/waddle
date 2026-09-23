@@ -1,6 +1,6 @@
 import { ConfigMap, Deployment, Service, useResourceRef, useSecret } from "@apsides/kubernetes";
 import { NetworkPolicy, PodDisruptionBudget } from "./builtin-resources.ts";
-import { serverImage } from "./release.ts";
+import { extensions, gitSha, serverImage } from "./release.ts";
 import { namespace, xmppHost } from "./site.ts";
 
 // Objects the waddle-server chart renders for the production values in
@@ -36,7 +36,7 @@ const config = {
   WADDLE_XMPP_PUBLIC_WEBSOCKET_URL: `wss://${xmppHost}/ws`,
   WADDLE_NATIVE_AUTH_ENABLED: "true",
   WADDLE_REGISTRATION_ENABLED: "false",
-  WADDLE_EXTENSIONS_JSON: JSON.stringify({ cacheDir: "/var/lib/waddle/extensions", enabled: false, modules: [] }),
+  WADDLE_EXTENSIONS_JSON: JSON.stringify(extensions),
   WADDLE_DRAIN_TIMEOUT_SECS: "30",
   WADDLE_CLUSTERING_ENABLED: "true",
   WADDLE_CLUSTERING_LISTEN_ADDRS: "/ip4/0.0.0.0/tcp/7900",
@@ -130,7 +130,7 @@ export const WaddleServer = () => {
               containers: [{
                 name: "waddle-server",
                 image: serverImage,
-                imagePullPolicy: "IfNotPresent",
+                imagePullPolicy: "Always",
                 // GAP-CONTAINER-SECURITY: capabilities, runAsUser/runAsGroup,
                 // runAsNonRoot and allowPrivilegeEscalation are all rejected
                 // by the SDK. GAP-PROBES: liveness/readiness probes and the
@@ -156,6 +156,7 @@ export const WaddleServer = () => {
                   databaseUrl("WADDLE_XMPP_MAM_DATABASE_URL"),
                   databaseUrl("WADDLE_XMPP_INBOX_DATABASE_URL"),
                   databaseUrl("WADDLE_XMPP_PUBSUB_DATABASE_URL"),
+                  ...(gitSha === undefined ? [] : [{ name: "WADDLE_GIT_SHA", value: gitSha }]),
                 ],
                 resources: {
                   requests: { cpu: "100m", memory: "512Mi" },

@@ -47,7 +47,7 @@
     },
     {
       "path": "release.ts",
-      "sha256": "24e9903e3615c9ac48b275beaef20642f89c182f94fb1879903829579f1e4f98"
+      "sha256": "b0e6a6297c7493519b8a4f1fe615888c3e1f25e44b20dfa453acd39c918f951a"
     },
     {
       "path": "runtime-secrets.tsx",
@@ -63,7 +63,7 @@
     },
     {
       "path": "waddle-server.tsx",
-      "sha256": "970ff37dcb30871f3056f9824a602d1693356f6e6b750405814ef08c493442e2"
+      "sha256": "7dc41552cd47c0efd76e6cec7d955e00dbb822eff878cf4935066559a8e52bfb"
     }
   ],
   "schemaVersion": "apsides.dev/source-lock/v1"

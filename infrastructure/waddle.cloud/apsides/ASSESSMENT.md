@@ -40,10 +40,10 @@ Where it is better than the Flux bundle:
   It uses an HMAC revision and never reads the values into the program. That
   replaces three pieces of Flux plumbing: the `WADDLE_RUNTIME_SECRETS_CHECKSUM`
   template key, `valuesFrom` into `extraSecretChecksum`, and the
-  `reconcile.fluxcd.io/watch` label. Today the chart hashes the extra
-  Secrets with Helm `lookup`, so a rotation reaches the Pod template only
-  when Flux next renders the release. That is immediate for the two Secrets
-  labelled for Flux's watch, and otherwise waits for the 30-minute interval.
+  `reconcile.fluxcd.io/watch` label. Today only `waddle-runtime-secrets`
+  (the one Secret in `valuesFrom`) rolls the Pods immediately. The chart
+  hashes the other extra Secrets with Helm `lookup` only when the release
+  upgrades, so LiveKit and keypool rotations wait for the next publish.
   `postgresql-app` is not hashed at all, so a CNPG credential rotation never
   triggers a rollout.
 - **Custom resources are typed.** CNPG, ExternalSecret, Certificate, HTTPRoute,
@@ -52,7 +52,8 @@ Where it is better than the Flux bundle:
   `flux reconcile`.
 - **Risks are explicit.** The compiled plan lists them, each needing platform
   approval before deploy:
-  - `mutable-workload-image`: the `:main` tag;
+  - `mutable-workload-image`: the `:main` tag, which the publish pipeline
+    replaces with a digest;
   - `opaque-custom-resource-effects`: CNPG and SpiceDB create workloads
     Apsides cannot see;
   - Secret-read authority.
@@ -104,8 +105,10 @@ Each gap has a probe in [`gaps/`](gaps) that `gaps/check.sh` requires to fail.
 
 ### Delivery model
 
-Flux takes a new server image as a values edit. The server pipeline rewrites
-the digest in `helmrelease.yaml` and pushes an OCI artifact.
+Flux takes a new server release as a values edit. The server pipeline
+rewrites the image digest, the extension modules and `WADDLE_GIT_SHA` in
+`helmrelease.yaml` and pushes an OCI artifact. `release.ts` collects the
+same values for this program.
 
 In Apsides, desired state is compiled into the controller binary. Every
 server release, extension digest bump or config change would require:
