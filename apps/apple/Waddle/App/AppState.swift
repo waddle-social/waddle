@@ -35,8 +35,7 @@ final class AppState {
         self.server = server
         self.client = AuthClient(baseURL: server)
         notifications.onOpenConversation = { [weak self] account, conversation in
-            guard let session = self?.session, session.coordinator.account.jid == account else { return }
-            session.navigation.open(conversation)
+            Task { await self?.perform(.open(conversation), for: account) }
         }
         notifications.onReply = { [weak self] account, conversation, text in
             await self?.perform(.reply(conversation, text), for: account)
@@ -50,17 +49,21 @@ final class AppState {
     /// (the app was launched by the action) waits for it instead of being
     /// dropped. Actions only ever run as the account they were posted for.
     enum NotificationAction {
+        case open(ConversationID)
         case reply(ConversationID, String)
         case markRead(ConversationID)
     }
 
     func perform(_ action: NotificationAction, for account: BareJID) async {
-        guard let coordinator = session?.coordinator else {
+        guard let active = session else {
             pendingNotificationActions.append((account, action))
             return
         }
+        let coordinator = active.coordinator
         guard coordinator.account.jid == account else { return }
         switch action {
+        case let .open(conversation):
+            active.navigation.open(conversation)
         case let .reply(conversation, text):
             await coordinator.send(Draft(text: text), in: conversation)
         case let .markRead(conversation):

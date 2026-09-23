@@ -4,11 +4,13 @@ import Foundation
 ///
 /// `discover_topology` answers an empty topology both when discovery
 /// failed (reported as an `error` event) and when no session is live, so
-/// an empty result alone cannot be trusted.
+/// an empty result alone cannot be trusted. Any error emitted while a
+/// discovery is in flight counts, so no diagnostic wording is parsed.
 final class FFISessionSignals: Sendable {
     private struct State: Sendable {
         var isConnected = false
-        var topologyFailed = false
+        var isDiscovering = false
+        var sawErrorWhileDiscovering = false
     }
 
     private let state = FFILocked(State())
@@ -22,18 +24,28 @@ final class FFISessionSignals: Sendable {
     }
 
     func beginTopologyDiscovery() {
-        state.withLock { $0.topologyFailed = false }
+        state.withLock {
+            $0.isDiscovering = true
+            $0.sawErrorWhileDiscovering = false
+        }
     }
 
-    func recordTopologyFailure() {
-        state.withLock { $0.topologyFailed = true }
-    }
-
-    /// Whether discovery failed since `beginTopologyDiscovery`; resets.
-    func takeTopologyFailure() -> Bool {
+    func recordError() {
         state.withLock { current in
-            defer { current.topologyFailed = false }
-            return current.topologyFailed
+            if current.isDiscovering {
+                current.sawErrorWhileDiscovering = true
+            }
+        }
+    }
+
+    /// Ends the discovery window; whether an error was emitted during it.
+    func endTopologyDiscovery() -> Bool {
+        state.withLock { current in
+            defer {
+                current.isDiscovering = false
+                current.sawErrorWhileDiscovering = false
+            }
+            return current.sawErrorWhileDiscovering
         }
     }
 }

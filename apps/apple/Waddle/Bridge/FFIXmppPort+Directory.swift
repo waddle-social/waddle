@@ -7,11 +7,13 @@ extension FFIXmppPort {
 
     /// The FFI answers an empty topology on failure and when no session
     /// is live; both must keep the last known directory, so neither is
-    /// reported as success.
+    /// reported as success. A non-empty topology is always a real answer.
     func discoverTopology() async -> Result<Topology, PortError> {
         signals.beginTopologyDiscovery()
         let topology = await client.discoverTopology()
-        if signals.takeTopologyFailure() {
+        let sawError = signals.endTopologyDiscovery()
+        let isEmpty = topology.spaces.isEmpty && topology.channels.isEmpty
+        if isEmpty, sawError {
             return .failure(.failed)
         }
         guard signals.isConnected else {

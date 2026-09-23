@@ -40,8 +40,6 @@ public enum XmppEvent: Sendable {
     case inboxPush(InboxEntry)
     /// SASL failure: the presented credential is dead.
     case authenticationFailed
-    /// Human-readable diagnostic for logs only.
-    case error(String)
 }
 
 /// Stream lifecycle and presence.

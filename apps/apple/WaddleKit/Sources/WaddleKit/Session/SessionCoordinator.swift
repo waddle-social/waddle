@@ -244,8 +244,6 @@ public final class SessionCoordinator {
             reconnectTask = nil
             status.connection = .authenticationFailed
             onAuthenticationFailed?()
-        case .error:
-            break
         }
     }
 

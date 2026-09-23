@@ -4,10 +4,6 @@ import WaddleKit
 /// Receives `WaddleClient` callbacks on Rust's threads and republishes
 /// them as typed `XmppEvent`s.
 final class FFIEventListener: WaddleEventListener {
-    /// The error-channel prefix the FFI uses when `discover_topology`
-    /// fails; it then returns an empty topology.
-    static let topologyFailurePrefix = "discover_topology failed:"
-
     private let continuation: AsyncStream<XmppEvent>.Continuation
     private let signals: FFISessionSignals
 
@@ -51,17 +47,11 @@ final class FFIEventListener: WaddleEventListener {
             signals.setConnected(false)
             return .authenticationFailed
         case let .error(description):
-            return errorEvent(description)
-        }
-    }
-
-    private func errorEvent(_ description: String) -> XmppEvent? {
-        if description.hasPrefix(Self.topologyFailurePrefix) {
-            signals.recordTopologyFailure()
+            // Diagnostics stay at the logging boundary. Verbs that answer a
+            // failure with an empty value consult the signal instead.
+            signals.recordError()
             BridgeLog.error(description)
             return nil
         }
-        BridgeLog.debug(description)
-        return .error(description)
     }
 }

@@ -1,8 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// Picks between the first-load skeleton, the empty conversation state and
-/// the message list.
+/// Picks between the first-load skeleton, a failed first load, the empty
+/// conversation state and the message list.
 struct ConversationTimelineContainer: View {
     @Environment(SessionCoordinator.self) private var session
     let conversation: ConversationID
@@ -15,6 +15,10 @@ struct ConversationTimelineContainer: View {
         if !timeline.items.contains(where: \.isFeedVisible) {
             if history.hasLoadedLatest {
                 ConversationEmptyState(conversation: conversation, header: header)
+            } else if history.failed, !history.isLoading {
+                TimelineLoadFailed {
+                    Task { await session.loadLatest(conversation) }
+                }
             } else {
                 TimelineSkeleton()
             }
@@ -24,6 +28,22 @@ struct ConversationTimelineContainer: View {
                 header: header,
                 unreadAnchorID: unreadAnchorID
             )
+        }
+    }
+}
+
+/// The newest page could not be fetched and nothing is cached to show.
+struct TimelineLoadFailed: View {
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Couldn't Load Messages", systemImage: "exclamationmark.bubble")
+        } description: {
+            Text("Check your connection and try again.")
+        } actions: {
+            Button("Try Again", action: retry)
+                .buttonStyle(.borderedProminent)
         }
     }
 }
