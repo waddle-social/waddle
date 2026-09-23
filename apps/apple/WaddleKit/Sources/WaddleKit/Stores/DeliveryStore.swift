@@ -42,18 +42,27 @@ public final class DeliveryStore {
         states[clientID] = .queued
     }
 
+    /// Settles a send. An ack or failure that arrived while the send was
+    /// suspended (recorded in `states`, or early before `began`) is kept:
+    /// the outcome never downgrades it. Early markers are consumed so a
+    /// retry under the same id starts clean.
     public func outcome(_ outcome: SendOutcome, for clientID: String) {
+        let current = states[clientID]
+        let ackedEarly = consume(clientID, from: &earlyAcks)
+        let failedEarly = consume(clientID, from: &earlyFailures)
+        let acknowledged = current == .acknowledged || ackedEarly
         switch outcome {
         case .sent:
-            if earlyAcks.contains(clientID) {
+            if acknowledged {
                 states[clientID] = .acknowledged
-            } else if earlyFailures.contains(clientID) {
+            } else if current == .failed || failedEarly {
                 states[clientID] = .failed
             } else {
                 states[clientID] = .sent
             }
         case .notConnected, .transportError:
-            states[clientID] = .queued
+            // The server acknowledged it, so it is not re-sent.
+            states[clientID] = acknowledged ? .acknowledged : .queued
         case .rejected:
             states[clientID] = .failed
         }
@@ -91,6 +100,12 @@ public final class DeliveryStore {
         states.removeAll()
         earlyAcks.removeAll()
         earlyFailures.removeAll()
+    }
+
+    private func consume(_ id: String, from list: inout [String]) -> Bool {
+        guard let index = list.firstIndex(of: id) else { return false }
+        list.remove(at: index)
+        return true
     }
 
     private func remember(_ id: String, in list: inout [String]) {

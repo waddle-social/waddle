@@ -68,9 +68,11 @@ public extension AccountIdentity {
             let isMine = from?.resource == nick
             return MessageRoute(conversation: .room(room), isMine: isMine)
         }
-        let isMine = from?.bare == jid
-        let peer = isMine ? (to?.bare ?? from?.bare) : (from?.bare ?? to?.bare)
-        guard let peer else { return nil }
+        // Without a sender the stanza came from our own server (RFC 6120
+        // §8.1.2.1), not from a peer: it names no 1:1 conversation.
+        guard let sender = from?.bare else { return nil }
+        let isMine = sender == jid
+        let peer = isMine ? (to?.bare ?? sender) : sender
         return MessageRoute(conversation: .direct(peer), isMine: isMine)
     }
 }

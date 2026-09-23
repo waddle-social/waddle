@@ -37,6 +37,10 @@ extension SessionCoordinator {
         let conversation: ConversationID = directory.isRoom(cursor.conversation)
             ? .room(cursor.conversation)
             : .direct(cursor.conversation)
+        // XEP-0490: a room cursor names the room's own stanza id, a 1:1
+        // cursor our archive's. Any other authority is not trusted.
+        let authority = conversation.isRoom ? conversation.jid : account.jid
+        guard cursor.stanzaIDBy == authority else { return }
         let items = timelines.timeline(for: conversation).items
         // Match only on the id the cursor's authority assigned: the room's
         // stanza id in a room, our own archive's id in 1:1.

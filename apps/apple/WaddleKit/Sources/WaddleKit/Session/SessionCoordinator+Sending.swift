@@ -50,15 +50,20 @@ extension SessionCoordinator {
             deliveries.began(next.clientID)
             let outcome = await port.send(next)
             deliveries.outcome(outcome, for: next.clientID)
-            switch outcome {
-            case .sent:
+            // Act on the settled state: an ack or failure that arrived while
+            // the send was suspended outranks the call's own result.
+            switch (outcome, deliveries.state(of: next.clientID)) {
+            case (_, .acknowledged?):
                 outboundQueue.removeAll { $0.clientID == next.clientID }
                 rememberSent(next)
-            case .notConnected, .transportError:
-                return
-            case .rejected:
+            case (.rejected, _), (.sent, .failed?):
                 outboundQueue.removeAll { $0.clientID == next.clientID }
                 failedOutbound[next.clientID] = next
+            case (.sent, _):
+                outboundQueue.removeAll { $0.clientID == next.clientID }
+                rememberSent(next)
+            case (.notConnected, _), (.transportError, _):
+                return
             }
         }
     }

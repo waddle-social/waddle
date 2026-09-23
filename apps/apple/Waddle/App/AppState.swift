@@ -230,8 +230,11 @@ final class AppState {
             guard let self else { return }
             self.notifications.post(alert, for: account, isVisible: self.isOnScreen(alert.conversation))
         }
-        active.coordinator.onAuthenticationFailed = { [weak self] in
-            Task { await self?.expireSession() }
+        active.coordinator.onAuthenticationFailed = { [weak self, weak active] in
+            // Only the live session may expire it; a late callback from a
+            // session already ended must not sign the next one out.
+            guard let self, let active, self.session === active else { return }
+            Task { await self.expireSession() }
         }
         session = active
         phase = .signedIn
