@@ -23,6 +23,7 @@ use waddle_xmpp::push::{encrypt, WebPushRequest, WebPushSender};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
 
+use super::commands::PushDeviceEnvironment;
 use super::{PushDevicePlatform, PushSecretCipher};
 
 /// `urn:waddle:push:context:0` — the typed routing envelope the chat
@@ -198,8 +199,15 @@ fn parse_summary_message_count(notification: &Element) -> Option<u64> {
 pub(crate) struct SealedActiveDevice {
     pub device_id: String,
     pub platform: PushDevicePlatform,
+    /// `push_devices.environment` parsed at the load boundary. `None`
+    /// when the stored value is neither `prod` nor `sandbox` (only
+    /// possible for rows not written by the XEP-0050 `register-device`
+    /// command, which requires one of the two).
+    pub environment: Option<PushDeviceEnvironment>,
     pub sealed_endpoint: Option<String>,
-    pub sealed_auth: Option<String>,
+    /// `push_devices.provider_token`: the Web Push `auth` secret or
+    /// the APNs device token, sealed.
+    pub sealed_provider_token: Option<String>,
     pub sealed_key_material: Option<String>,
 }
 
@@ -212,9 +220,6 @@ pub(crate) struct WebPushTarget {
 /// Reason a device row was not converted into a [`WebPushTarget`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeviceSkipReason {
-    /// Not the Web Push platform (APNS/FCM are handled by sibling
-    /// provider slices #529 / #530).
-    WrongPlatform,
     /// Missing sealed material (endpoint, p256dh, or auth).
     MissingProviderMaterial,
     /// Unseal failed (root key drift or tampering).
@@ -226,21 +231,19 @@ pub(crate) enum DeviceSkipReason {
 }
 
 impl WebPushTarget {
-    /// Unseal a `push_devices` row into a typed `WebPushTarget`.
-    /// Returns `Ok(Err(reason))` for rows that are intentionally
-    /// non-deliverable (e.g. wrong platform, missing material), so the
+    /// Unseal a Web Push `push_devices` row into a typed
+    /// `WebPushTarget`. The worker only calls this for
+    /// [`PushDevicePlatform::Web`] rows. Returns `Err(reason)` for rows
+    /// that are non-deliverable (missing or malformed material), so the
     /// worker can record a clear typed attempt status without bubbling
     /// the row up as a hard error.
     pub fn try_from_sealed(
         device: &SealedActiveDevice,
         cipher: &PushSecretCipher,
     ) -> Result<WebPushTarget, DeviceSkipReason> {
-        if device.platform != PushDevicePlatform::Web {
-            return Err(DeviceSkipReason::WrongPlatform);
-        }
         let (Some(ep_sealed), Some(auth_sealed), Some(p256dh_sealed)) = (
             device.sealed_endpoint.as_ref(),
-            device.sealed_auth.as_ref(),
+            device.sealed_provider_token.as_ref(),
             device.sealed_key_material.as_ref(),
         ) else {
             return Err(DeviceSkipReason::MissingProviderMaterial);
@@ -327,11 +330,10 @@ pub(crate) fn outcome_to_attempt_status(outcome: &WebPushOutcome) -> &'static st
     }
 }
 
-/// Status string written when a device row was non-deliverable (wrong
-/// platform, missing material, etc.) so an operator can see why.
+/// Status string written when a device row was non-deliverable
+/// (missing material, etc.) so an operator can see why.
 pub(crate) fn skip_reason_to_attempt_status(reason: DeviceSkipReason) -> &'static str {
     match reason {
-        DeviceSkipReason::WrongPlatform => ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
         DeviceSkipReason::MissingProviderMaterial => ATTEMPT_STATUS_WEB_MISSING_MATERIAL,
         DeviceSkipReason::UnsealFailed => ATTEMPT_STATUS_WEB_UNSEAL_FAILED,
         DeviceSkipReason::InvalidEndpoint => ATTEMPT_STATUS_WEB_INVALID_ENDPOINT,
@@ -353,8 +355,8 @@ pub(crate) const ATTEMPT_STATUS_WEB_MISSING_MATERIAL: &str = "web-missing-materi
 pub(crate) const ATTEMPT_STATUS_WEB_UNSEAL_FAILED: &str = "web-unseal-failed";
 pub(crate) const ATTEMPT_STATUS_WEB_INVALID_ENDPOINT: &str = "web-invalid-endpoint";
 pub(crate) const ATTEMPT_STATUS_WEB_INVALID_KEYS: &str = "web-invalid-keys";
-/// Recorded for non-Web platforms (APNS/FCM) until #529/#530 land
-/// their real senders. Mirrors the historical `fake-sent` marker.
+/// Recorded for FCM devices until #530 lands the real FCM sender.
+/// APNs devices are dispatched for real (#529) and never record it.
 pub(crate) const ATTEMPT_STATUS_FAKE_SENT_NON_WEB: &str = "fake-sent";
 
 #[cfg(test)]
@@ -621,12 +623,19 @@ mod tests {
     }
 
     #[test]
-    fn skip_reason_status_uses_fake_sent_for_non_web() {
-        assert_eq!(
-            skip_reason_to_attempt_status(DeviceSkipReason::WrongPlatform),
-            "fake-sent",
-            "non-web platforms continue to record fake-sent until #529/#530"
-        );
+    fn skip_reason_status_never_records_fake_sent() {
+        for reason in [
+            DeviceSkipReason::MissingProviderMaterial,
+            DeviceSkipReason::UnsealFailed,
+            DeviceSkipReason::InvalidEndpoint,
+            DeviceSkipReason::InvalidSubscriptionKeys,
+        ] {
+            assert_ne!(
+                skip_reason_to_attempt_status(reason),
+                ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+                "a non-deliverable Web Push row must not look delivered"
+            );
+        }
     }
 
     #[test]

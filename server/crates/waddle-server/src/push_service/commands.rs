@@ -62,6 +62,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
+use waddle_xmpp::push::apns::ApnsDeviceToken;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType};
 use waddle_xmpp::xep::xep0050::AdHocCommandCondition;
 use waddle_xmpp::XmppError;
@@ -142,6 +143,15 @@ pub enum PushDeviceEnvironment {
 }
 
 impl PushDeviceEnvironment {
+    /// Parse the wire / storage spelling (`prod` / `sandbox`).
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        match value {
+            ENVIRONMENT_WIRE_PROD => Some(Self::Production),
+            ENVIRONMENT_WIRE_SANDBOX => Some(Self::Sandbox),
+            _ => None,
+        }
+    }
+
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Production => ENVIRONMENT_WIRE_PROD,
@@ -167,7 +177,9 @@ pub enum RegisterDeviceRequest {
     Apns {
         app_id: String,
         environment: PushDeviceEnvironment,
-        device_token: String,
+        /// Hex APNs token, validated at the form boundary so the Push
+        /// Service never stores a token APNs would reject as malformed.
+        device_token: ApnsDeviceToken,
     },
     /// Firebase Cloud Messaging registration.
     Fcm {
@@ -477,15 +489,11 @@ pub fn parse_register_request(form: &DataForm) -> Result<RegisterDeviceRequest, 
     require_form_type(form, REGISTER_DEVICE_FORM_TYPE)?;
     let app_id = require_value(form, FIELD_APP_ID)?.to_string();
     let environment_raw = require_value(form, FIELD_ENVIRONMENT)?;
-    let environment = match environment_raw {
-        ENVIRONMENT_WIRE_PROD => PushDeviceEnvironment::Production,
-        ENVIRONMENT_WIRE_SANDBOX => PushDeviceEnvironment::Sandbox,
-        other => {
-            return Err(format!(
-                "{FIELD_ENVIRONMENT} must be '{ENVIRONMENT_WIRE_PROD}' or '{ENVIRONMENT_WIRE_SANDBOX}', got '{other}'"
-            ))
-        }
-    };
+    let environment = PushDeviceEnvironment::from_wire_str(environment_raw).ok_or_else(|| {
+        format!(
+            "{FIELD_ENVIRONMENT} must be '{ENVIRONMENT_WIRE_PROD}' or '{ENVIRONMENT_WIRE_SANDBOX}', got '{environment_raw}'"
+        )
+    })?;
     let platform_raw = require_value(form, FIELD_PLATFORM)?;
     match platform_raw {
         PLATFORM_WIRE_WEB => {
@@ -501,7 +509,8 @@ pub fn parse_register_request(form: &DataForm) -> Result<RegisterDeviceRequest, 
             })
         }
         PLATFORM_WIRE_APNS => {
-            let device_token = require_value(form, FIELD_APNS_TOKEN)?.to_string();
+            let device_token = ApnsDeviceToken::parse(require_value(form, FIELD_APNS_TOKEN)?)
+                .map_err(|error| format!("{FIELD_APNS_TOKEN}: {error}"))?;
             Ok(RegisterDeviceRequest::Apns {
                 app_id,
                 environment,
@@ -582,7 +591,7 @@ fn build_registration(
             crate::push_service::PushDevicePlatform::Apns,
             environment.as_wire_str(),
         )
-        .with_provider_token(Some(device_token.clone())),
+        .with_provider_token(Some(device_token.as_str().to_owned())),
         RegisterDeviceRequest::Fcm {
             environment,
             registration_token,
@@ -690,7 +699,7 @@ mod tests {
             Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_APNS),
             Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_SANDBOX),
             Field::text_single(FIELD_APP_ID, "ios-app"),
-            Field::text_single(FIELD_APNS_TOKEN, "apns-device-token"),
+            Field::text_single(FIELD_APNS_TOKEN, "0A1B2C3D4E5F"),
         ]);
         let request = parse_register_request(&form).expect("parses");
         match request {
@@ -701,10 +710,23 @@ mod tests {
             } => {
                 assert_eq!(app_id, "ios-app");
                 assert_eq!(environment, PushDeviceEnvironment::Sandbox);
-                assert_eq!(device_token, "apns-device-token");
+                // Normalized to the lowercase hex APNs expects.
+                assert_eq!(device_token.as_str(), "0a1b2c3d4e5f");
             }
             other => panic!("expected Apns, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_apns_request_rejects_a_non_hex_token() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_APNS),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "ios-app"),
+            Field::text_single(FIELD_APNS_TOKEN, "apns-device-token"),
+        ]);
+        let err = parse_register_request(&form).expect_err("non-hex token must reject");
+        assert!(err.contains(FIELD_APNS_TOKEN), "{err}");
     }
 
     #[test]
@@ -773,7 +795,7 @@ mod tests {
             Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_APNS),
             Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_SANDBOX),
             Field::text_single(FIELD_APP_ID, "ios-app"),
-            Field::text_single(FIELD_APNS_TOKEN, "apns-device-token"),
+            Field::text_single(FIELD_APNS_TOKEN, "abcdef01"),
         ]);
         let request = parse_register_request(&form).expect("parses");
         assert_eq!(request.environment(), PushDeviceEnvironment::Sandbox);

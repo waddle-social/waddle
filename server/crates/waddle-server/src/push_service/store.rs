@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use jid::BareJid;
 use waddle_xmpp::pubsub::PubSubStorage;
+use waddle_xmpp::push::apns::{ApnsProviderTokenSource, ApnsSender, ApnsTopic};
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
@@ -13,6 +14,7 @@ use waddle_xmpp::XmppError;
 
 use crate::db::{Database, IntoParams};
 
+use super::apns_dispatch::ApnsProvider;
 use super::secrets::PushSecretCipher;
 
 #[derive(Clone)]
@@ -33,6 +35,9 @@ pub struct DatabasePushServiceStore {
     /// Web Push delivery. Set together with [`Self::vapid_signer`] and
     /// [`Self::web_push_sender`]; all three are Some or all three are None.
     pub(super) vapid_sub: Option<VapidSub>,
+    /// APNs provider (#529). `None` when `WADDLE_APNS_*` is unset:
+    /// Apple devices then record `apns-not-configured`.
+    pub(super) apns: Option<ApnsProvider>,
 }
 
 #[derive(Clone)]
@@ -91,6 +96,7 @@ impl DatabasePushServiceStore {
             vapid_signer: None,
             web_push_sender: None,
             vapid_sub: None,
+            apns: None,
         };
         store.initialize().await?;
         Ok(store)
@@ -112,6 +118,7 @@ impl DatabasePushServiceStore {
             vapid_signer: None,
             web_push_sender: None,
             vapid_sub: None,
+            apns: None,
         };
         store.initialize().await?;
         Ok(store)
@@ -131,6 +138,23 @@ impl DatabasePushServiceStore {
         self.vapid_signer = Some(vapid_signer);
         self.web_push_sender = Some(web_push_sender);
         self.vapid_sub = Some(vapid_sub);
+        self
+    }
+
+    /// Install the APNs provider token source, HTTP/2 transport and the
+    /// configured bundle id (`apns-topic`). Called once at boot from
+    /// `server::http` when `WADDLE_APNS_*` is configured.
+    pub fn with_apns_provider(
+        mut self,
+        tokens: Arc<dyn ApnsProviderTokenSource>,
+        sender: Arc<dyn ApnsSender>,
+        topic: ApnsTopic,
+    ) -> Self {
+        self.apns = Some(ApnsProvider {
+            tokens,
+            sender,
+            topic,
+        });
         self
     }
 
@@ -346,12 +370,17 @@ impl DatabasePushServiceStore {
     }
 
     /// `true` when all three Web Push provider slots are wired
-    /// (`vapid_signer`, `web_push_sender`, `vapid_sub`). The worker only
-    /// parses the XEP-0357 payload + encrypts + signs + sends when this
-    /// returns `true`; otherwise it records the legacy `fake-sent`
-    /// marker for every device.
+    /// (`vapid_signer`, `web_push_sender`, `vapid_sub`). Without them,
+    /// Web devices record the transient `web-not-configured` marker.
     pub(super) fn web_push_provider_ready(&self) -> bool {
         self.vapid_signer.is_some() && self.web_push_sender.is_some() && self.vapid_sub.is_some()
+    }
+
+    /// `true` when any real provider (Web Push or APNs) is wired, i.e.
+    /// when the worker needs the parsed XEP-0357 payload to build a
+    /// provider request.
+    pub(super) fn any_provider_ready(&self) -> bool {
+        self.web_push_provider_ready() || self.apns.is_some()
     }
 
     /// Public snapshot of the Web Push capability — `Ready` when the

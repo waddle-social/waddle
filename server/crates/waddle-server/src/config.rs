@@ -1120,6 +1120,10 @@ pub struct ServerConfig {
     /// ADR-0017 Phase 2 clustering (owned libp2p swarm) configuration. With
     /// `enabled` false (the default) the swarm subsystem never starts.
     pub clustering: ClusteringConfig,
+    /// APNs provider configuration from `WADDLE_APNS_*` (#529). `None`
+    /// when unset: the Push Service then records `apns-not-configured`
+    /// for Apple devices instead of sending.
+    pub apns: Option<crate::push_service::ApnsConfig>,
 }
 
 /// Dedicated ingress authority transaction limits.
@@ -1581,6 +1585,7 @@ impl Default for ServerConfig {
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
+            apns: None,
         }
     }
 }
@@ -1610,6 +1615,8 @@ impl ServerConfig {
         let ingress = IngressConfig::from_env().map_err(|error| error.to_string())?;
 
         let clustering = ClusteringConfig::from_env()?;
+        let apns =
+            crate::push_service::ApnsConfig::from_env().map_err(|error| error.to_string())?;
 
         Ok(Self {
             mode,
@@ -1623,6 +1630,7 @@ impl ServerConfig {
             occupant_id_secret,
             ingress,
             clustering,
+            apns,
         })
     }
 
@@ -1658,6 +1666,7 @@ impl ServerConfig {
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
+            apns: None,
         }
     }
 
@@ -1675,6 +1684,7 @@ impl ServerConfig {
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
+            apns: None,
         }
     }
 }

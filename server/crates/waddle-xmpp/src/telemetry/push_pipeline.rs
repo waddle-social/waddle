@@ -1,6 +1,7 @@
 //! Typed OpenTelemetry counters for push-pipeline transitions.
 
 use super::attributes::{PushProvider, PushStage};
+use crate::push::apns::{ApnsOutcome, ApnsTransient};
 use crate::push::types::{TransientFailure, WebPushOutcome};
 
 fn add_pipeline(stage: PushStage, count: u64) {
@@ -134,6 +135,42 @@ pub fn record_web_push_outcome(outcome: &WebPushOutcome) -> Option<PushStage> {
     Some(stage)
 }
 
+/// Classify and record a typed result returned by APNs.
+///
+/// Mirrors [`record_web_push_outcome`]: network and timeout failures do
+/// not increment the provider family (APNs never answered), and a local
+/// preflight rejection (`status: 0`, no HTTP exchange) is not a
+/// provider response either.
+pub fn record_apns_outcome(outcome: &ApnsOutcome) -> Option<PushStage> {
+    let stage = match outcome {
+        ApnsOutcome::Sent { .. } => {
+            increment_provider_sent(PushProvider::Apns);
+            PushStage::ProviderSent
+        }
+        ApnsOutcome::DeviceGone { .. } => {
+            increment_provider_token_expired(PushProvider::Apns);
+            PushStage::ProviderTokenExpired
+        }
+        ApnsOutcome::ProviderAuth { .. }
+        | ApnsOutcome::Rejected { status: 1.., .. }
+        | ApnsOutcome::Transient {
+            cause:
+                ApnsTransient::RateLimited { .. }
+                | ApnsTransient::Failure(TransientFailure::ServerError { .. }),
+            ..
+        } => {
+            increment_provider_rejected(PushProvider::Apns);
+            PushStage::ProviderRejected
+        }
+        ApnsOutcome::Rejected { status: 0, .. }
+        | ApnsOutcome::Transient {
+            cause: ApnsTransient::Failure(TransientFailure::Network | TransientFailure::Timeout),
+            ..
+        } => return None,
+    };
+    Some(stage)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +262,47 @@ mod tests {
         assert_eq!(
             guard.metric_unit("waddle.push.provider"),
             Some("{notification}".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn apns_sent_exports_sent_for_the_apns_provider() {
+        let guard = crate::telemetry::test_support::acquire().await;
+        record_apns_outcome(&ApnsOutcome::Sent { apns_id: None });
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.push.provider",
+                &[("stage", "provider_sent"), ("provider", "apns")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn apns_device_gone_exports_token_expired() {
+        let guard = crate::telemetry::test_support::acquire().await;
+        record_apns_outcome(&ApnsOutcome::DeviceGone {
+            status: 410,
+            reason: crate::push::apns::ApnsReason::Unregistered,
+        });
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.push.provider",
+                &[("stage", "provider_token_expired"), ("provider", "apns")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn apns_network_failure_exports_nothing() {
+        let _guard = crate::telemetry::test_support::acquire().await;
+        assert_eq!(
+            record_apns_outcome(&ApnsOutcome::Transient {
+                cause: ApnsTransient::Failure(TransientFailure::Network),
+                retry_after: None,
+            }),
+            None
         );
     }
 }

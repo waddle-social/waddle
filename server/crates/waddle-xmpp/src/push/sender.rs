@@ -325,7 +325,7 @@ fn allow_non_https_for_test(endpoint: &Url) -> bool {
 /// HTTP-date. Only the delta-seconds form is honored — HTTP-date
 /// parsing would pull in another dep for a value the publish-job
 /// worker already clamps against `next_retry_at_ms` policy.
-fn parse_retry_after(value: &str) -> Option<Duration> {
+pub(super) fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
