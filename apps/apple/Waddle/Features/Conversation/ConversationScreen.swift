@@ -33,6 +33,9 @@ private struct ConversationContent: View {
     @State private var actions: MessageActionModel
     @State private var unreadAnchorID: String?
     @State private var showsPinsSheet = false
+    /// A focus request whose row is not loaded yet, while history pages in.
+    @State private var pendingFocus: FocusRequest?
+    @State private var showsRevealMiss = false
     private var placement = ConversationInspectorPlacement()
 
     let conversation: ConversationID
@@ -47,6 +50,15 @@ private struct ConversationContent: View {
     var body: some View {
         let header = ConversationHeaderText.make(for: conversation, session: session)
         ConversationTimelineContainer(conversation: conversation, header: header, unreadAnchorID: unreadAnchorID)
+            .overlay(alignment: .top) {
+                ZStack {
+                    if let phase = revealPhase {
+                        TimelineRevealBanner(phase: phase)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: revealPhase)
+            }
             .safeAreaInset(edge: .top, spacing: 0) {
                 ConnectionBanner(status: session.connection)
             }
@@ -90,9 +102,16 @@ private struct ConversationContent: View {
             .onChange(of: navigation.focusRequest, initial: true) { _, request in
                 guard let request, request.conversation == conversation else { return }
                 navigation.focusRequest = nil
-                // Rows are keyed by their primary id; resolve any alias.
-                let timeline = session.timelines.timeline(for: conversation)
-                actions.scrollRequest = timeline.item(withID: request.messageID)?.id ?? request.messageID
+                focus(on: request)
+            }
+            .task(id: pendingFocus) {
+                await reveal(pendingFocus)
+            }
+            .task(id: showsRevealMiss) {
+                guard showsRevealMiss else { return }
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard !Task.isCancelled else { return }
+                showsRevealMiss = false
             }
             .onDisappear {
                 session.close(conversation)
@@ -108,6 +127,38 @@ private struct ConversationContent: View {
         guard unread > 0, !Task.isCancelled else { return }
         let items = session.timelines.timeline(for: conversation).feedItems
         unreadAnchorID = TimelineUnreadAnchor.firstUnreadID(in: items, unreadCount: unread)
+    }
+
+    private var revealPhase: TimelineRevealBanner.Phase? {
+        if pendingFocus != nil { return .finding }
+        return showsRevealMiss ? .missed : nil
+    }
+
+    /// Scrolls to a loaded row at once; otherwise hands the request to
+    /// `reveal`, replacing (and so cancelling) any search still running.
+    private func focus(on request: FocusRequest) {
+        showsRevealMiss = false
+        // Rows are keyed by their primary id; resolve any alias.
+        if let item = session.timelines.timeline(for: conversation).item(withID: request.messageID) {
+            pendingFocus = nil
+            actions.scrollRequest = item.id
+        } else {
+            pendingFocus = request
+        }
+    }
+
+    /// Pages history back until the requested row is loaded, then scrolls
+    /// to it and highlights it.
+    private func reveal(_ request: FocusRequest?) async {
+        guard let request else { return }
+        let outcome = await session.reveal(messageID: request.messageID, in: conversation)
+        guard !Task.isCancelled else { return }
+        pendingFocus = nil
+        if case let .found(itemID) = outcome {
+            actions.scrollRequest = itemID
+        } else {
+            showsRevealMiss = true
+        }
     }
 
     private func showPins() {

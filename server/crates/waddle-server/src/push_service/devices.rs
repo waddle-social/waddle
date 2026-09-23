@@ -5,6 +5,7 @@
 use jid::BareJid;
 use waddle_xmpp::XmppError;
 
+use super::commands::PushDeviceEnvironment;
 use super::dispatch;
 use super::nodes::{ensure_node_tx, get_node_tx, MAX_NODE_ID_LEN};
 use super::publish_jobs::wake_queued_publish_jobs_for_node_tx;
@@ -231,7 +232,8 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
     let mut rows = tx
         .query(
             r#"
-            SELECT device_id, platform, provider_endpoint, provider_token, provider_key_material
+            SELECT device_id, platform, environment, provider_endpoint, provider_token,
+                   provider_key_material
             FROM push_devices
             WHERE node = ? AND status = ?
             ORDER BY device_id ASC
@@ -253,20 +255,25 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
             &row.get::<String>(1)
                 .map_err(|error| XmppError::internal(error.to_string()))?,
         )?;
+        let environment = PushDeviceEnvironment::from_wire_str(
+            &row.get::<String>(2)
+                .map_err(|error| XmppError::internal(error.to_string()))?,
+        );
         let sealed_endpoint: Option<String> = row
-            .get(2)
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-        let sealed_auth: Option<String> = row
             .get(3)
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        let sealed_key_material: Option<String> = row
+        let sealed_provider_token: Option<String> = row
             .get(4)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let sealed_key_material: Option<String> = row
+            .get(5)
             .map_err(|error| XmppError::internal(error.to_string()))?;
         devices.push(dispatch::SealedActiveDevice {
             device_id,
             platform,
+            environment,
             sealed_endpoint,
-            sealed_auth,
+            sealed_provider_token,
             sealed_key_material,
         });
     }

@@ -73,21 +73,22 @@ extension FFIInbound {
             height: file.height.map(Int.init),
             description: file.desc,
             disposition: file.disposition == "inline" ? .inline : .attachment,
+            digests: FileDigests(xep0300: file.hashes.map { (algorithm: $0.algo, base64: $0.valueB64) }),
             encrypted: encrypted
         )
     }
 
-    /// XEP-0448 envelope; nil when none of its sources parse. The first
-    /// digest per algorithm wins.
+    /// XEP-0448 envelope; nil when its cipher is not a XEP-0448 cipher or
+    /// none of its sources parse.
     static func encryptedSource(_ envelope: WaddleEncryptedFile) -> EncryptedFileSource? {
+        guard let cipher = FileCipher(rawValue: envelope.cipher) else { return nil }
         let sources = envelope.sources.compactMap(webURL)
         guard !sources.isEmpty else { return nil }
-        let hashes = Dictionary(envelope.hashes.map { ($0.algo, $0.valueB64) }, uniquingKeysWith: { first, _ in first })
         return EncryptedFileSource(
-            cipher: envelope.cipher,
+            cipher: cipher,
             keyBase64: envelope.keyB64,
             ivBase64: envelope.ivB64,
-            hashes: hashes,
+            digests: FileDigests(xep0300: envelope.hashes.map { (algorithm: $0.algo, base64: $0.valueB64) }),
             sources: sources
         )
     }

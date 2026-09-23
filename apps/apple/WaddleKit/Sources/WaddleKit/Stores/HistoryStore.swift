@@ -9,6 +9,10 @@ public struct HistoryState: Hashable, Sendable {
     /// RSM `<first/>` of the oldest page loaded; the next `before` cursor.
     public var olderCursor: String?
     public var failed = false
+    /// A trim moved `olderCursor` back (or reset it) while a page was
+    /// loading; an older page landing then must not move it past the rows
+    /// the rewind refetches.
+    var rewoundDuringLoad = false
 
     public init() {}
 }
@@ -17,6 +21,10 @@ public struct HistoryState: Hashable, Sendable {
 @Observable
 public final class HistoryStore {
     public private(set) var states: [ConversationID: HistoryState] = [:]
+    /// Bumped by `clear()`, so a long-running pager can tell its paging
+    /// state was thrown away underneath it.
+    @ObservationIgnored private(set) var generation = 0
+    @ObservationIgnored private var idleWaiters: [ConversationID: [UUID: CheckedContinuation<Void, Never>]] = [:]
 
     public init() {}
 
@@ -37,6 +45,11 @@ public final class HistoryStore {
     func finish(_ conversation: ConversationID, page: ArchivePage, wasLatest: Bool) {
         var state = self.state(of: conversation)
         state.isLoading = false
+        // After a rewind, an older page leaves the cursor where the rewind
+        // put it. A newest page is safe either way: every trimmed row is in
+        // it or older.
+        let olderPageAfterRewind = state.rewoundDuringLoad && !wasLatest
+        state.rewoundDuringLoad = false
         if wasLatest {
             state.hasLoadedLatest = true
             // A refresh of the newest page only moves the older cursor on
@@ -45,18 +58,65 @@ public final class HistoryStore {
                 state.olderCursor = page.first
                 state.hasMoreOlder = !page.isComplete && page.first != nil
             }
-        } else {
+        } else if !olderPageAfterRewind {
             let advanced = page.first != nil && page.first != state.olderCursor
             state.olderCursor = page.first ?? state.olderCursor
             state.hasMoreOlder = !page.isComplete && advanced
         }
         states[conversation] = state
+        resumeIdleWaiters(conversation)
     }
 
     func fail(_ conversation: ConversationID) {
         var state = self.state(of: conversation)
         state.isLoading = false
+        state.rewoundDuringLoad = false
         state.failed = true
+        states[conversation] = state
+        resumeIdleWaiters(conversation)
+    }
+
+    /// Returns once no load of `conversation` is running, or at once when
+    /// the calling task is cancelled.
+    func waitUntilIdle(_ conversation: ConversationID) async {
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                guard state(of: conversation).isLoading, !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                idleWaiters[conversation, default: [:]][id] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor in self.resumeIdleWaiter(id, of: conversation) }
+        }
+    }
+
+    private func resumeIdleWaiter(_ id: UUID, of conversation: ConversationID) {
+        idleWaiters[conversation]?.removeValue(forKey: id)?.resume()
+    }
+
+    private func resumeIdleWaiters(_ conversation: ConversationID) {
+        let waiters = idleWaiters.removeValue(forKey: conversation) ?? [:]
+        waiters.values.forEach { $0.resume() }
+    }
+
+    /// The timeline dropped archived rows: page older from the oldest one
+    /// still loaded, or reload the newest page when none is left. A page
+    /// already in flight leaves the rewound state alone.
+    func rewind(_ conversation: ConversationID, toOlderCursor cursor: String?) {
+        guard var state = states[conversation] else { return }
+        if let cursor {
+            state.olderCursor = cursor
+            state.hasMoreOlder = true
+            state.rewoundDuringLoad = state.isLoading
+        } else {
+            let isLoading = state.isLoading
+            state = HistoryState()
+            state.isLoading = isLoading
+            state.rewoundDuringLoad = isLoading
+        }
         states[conversation] = state
     }
 
@@ -69,6 +129,10 @@ public final class HistoryStore {
 
     public func clear() {
         states.removeAll()
+        generation += 1
+        for conversation in Array(idleWaiters.keys) {
+            resumeIdleWaiters(conversation)
+        }
     }
 }
 

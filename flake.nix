@@ -29,6 +29,40 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
+      # cuengine (a waddle-server dev-dependency) links a cgo archive of its
+      # Go bridge. Its build.rs otherwise `go build`s it from source, which
+      # downloads Go modules and cannot work in the Nix sandbox; every
+      # derivation that rebuilds Rust dependencies failed once the cached
+      # ones went stale. Build the archive here from the crate Cargo.lock
+      # pins, with vendored modules, and hand it over via CUE_BRIDGE_PATH
+      # (build.rs picks up `$CUE_BRIDGE_PATH/release/libcue_bridge.{a,h}`).
+      # Bump the version and both hashes with cuengine in server/Cargo.lock.
+      mkCueBridge =
+        pkgs:
+        pkgs.buildGoModule {
+          pname = "cuengine-libcue-bridge";
+          version = "0.40.6";
+          src = pkgs.fetchurl {
+            name = "cuengine-0.40.6.tar.gz";
+            url = "https://crates.io/api/v1/crates/cuengine/0.40.6/download";
+            # server/Cargo.lock checksum for cuengine 0.40.6.
+            hash = "sha256-NiBB1SR/dnaX/iny5A+Jb/ZycV+u5gVE3CRA5VC1PAM=";
+          };
+          vendorHash = "sha256-UD/YJvkzTVVI2gx8LsY8DSKaNIYcDsx+RrtzgryUec8=";
+          env.CGO_ENABLED = "1";
+          buildPhase = ''
+            runHook preBuild
+            mkdir -p "$out/release"
+            go build -mod=vendor -buildmode=c-archive -o "$out/release/libcue_bridge.a" bridge.go
+            runHook postBuild
+          '';
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            test -f "$out/release/libcue_bridge.h"
+            runHook postInstall
+          '';
+        };
       mkTestRustcWrapper =
         pkgs:
         pkgs.writeShellScript "waddle-test-archive-rustc" ''
@@ -332,6 +366,7 @@
           };
           checkBaseArgs = baseArgs // {
             src = serverCheckSrc;
+            CUE_BRIDGE_PATH = mkCueBridge pkgs;
             nativeBuildInputs = baseArgs.nativeBuildInputs ++ [
               pkgs.go
             ];
@@ -475,6 +510,7 @@
             version = "0.1.0";
             src = serverCheckSrc;
             strictDeps = true;
+            CUE_BRIDGE_PATH = mkCueBridge pkgs;
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.protobuf

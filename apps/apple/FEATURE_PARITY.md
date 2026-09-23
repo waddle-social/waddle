@@ -28,13 +28,13 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | 1:1 direct messages | — | 🟡 | ✅ | XEP-0359 dedupe across live, carbon and archive copies. Baseline: appended live and archived copies without dedupe |
 | Group DMs | 0045 | ❌ | 🟡 | Create, list and chat; rename, invite and leave not surfaced yet |
 | History (MAM) | 0313 | 🟡 | ✅ | RSM paging for rooms and DMs; refetch of the newest page after reconnect. Baseline: rooms paged; DMs fetched one page only |
-| Message search | 0313 | ❌ | 🟡 | Per-conversation archive search; results do not jump to the message yet |
-| Corrections | 0308 | 🟡 | ✅ | Full-stanza re-send per XEP-0308; received corrections replace markup and references. Baseline: rendered, never sent |
+| Message search | 0313 | ❌ | ✅ | Per-conversation archive search; a result jumps to the message, paging older history in when it is not loaded |
+| Corrections | 0308 | 🟡 | ✅ | Full-stanza re-send per XEP-0308, keeping the original's mentions and markup; received corrections replace markup and references. Baseline: rendered, never sent |
 | Retraction | 0424 | ❌ | ✅ | Room retractions wait for the reflection. Baseline: `retractMessage` was an empty stub |
 | Reactions | 0444 | 🟡 | ✅ | XEP-0444 replace-set semantics, room-assigned ids only in rooms. Baseline: rendered, never sent |
 | Replies | 0461, 0428 | ✅ | ✅ | Reply ids follow XEP-0461 (room-assigned ids in rooms) |
 | Threads | 0201 | 🟡 | ✅ | Thread panel (inspector on iPad/Mac), reply counts |
-| Delivery acks | 0198 | ❌ | ✅ | Sending / queued / sent / acknowledged / failed with retry and discard. Baseline: acks were logged and dropped |
+| Delivery acks | 0198 | ❌ | ✅ | Sending / queued / sent / acknowledged / failed with retry and discard; unsent and unconfirmed messages survive the app being killed and resend with the same origin-id. Baseline: acks were logged and dropped |
 | Typing / chat states | 0085 | 🟡 | ✅ | Sent with pause timeout; received with expiry. Baseline: received; `sendChatState` was an empty stub |
 | Read markers + sync | 0333, 0490 | ❌ | ✅ | XEP-0333 (room ids, 1:1 @id when requested) and XEP-0490 cursors. Baseline: `sendDisplayedMarker` was an empty stub |
 
@@ -64,14 +64,14 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
 | Local notifications | — | ❌ | ✅ | Inline reply and mark-read actions, grouped per conversation. Baseline: in-app toast for broadcast mentions only |
-| Push (APNs) | 0357 + push.<domain> 0050 | ❌ | 🟡 | Client registers with push.<domain>; server APNs dispatch is still stubbed (#529). Baseline: `enablePushNotifications` was an empty stub |
+| Push (APNs) | 0357 + push.<domain> 0050 | ❌ | ✅ | Client registers with push.<domain>; the Push Service delivers a minimal alert (class-specific banner, badge, routing context; no sender or body) and a tap opens the conversation on the right account. Baseline: `enablePushNotifications` was an empty stub |
 
 ## Media
 
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
 | File upload + attachments | 0363, 0447 | ✅ | ✅ | Photos re-encoded as JPEG without location data |
-| Encrypted attachments | 0448 | ❌ | ❌ | Shown as a locked card; no decryption yet |
+| Encrypted attachments | 0448 | ❌ | 🟡 | Received files are downloaded, verified (XEP-0300 sha-256/sha-512, GCM tag) and decrypted in memory (AES-128/256-GCM with or without tag, AES-256-CBC), then shown like plain attachments. Sending encrypted files is not implemented |
 | Link previews | urn:waddle:link-preview:0 | ❌ | ✅ | Renders server-attached cards |
 | Stickers | 0449 | 🟡 | 🟡 | Render only |
 | GIF picker | — | ❌ | ❌ | Removed the fake picker; not rebuilt. Baseline: shipped six hardcoded GIF URLs |

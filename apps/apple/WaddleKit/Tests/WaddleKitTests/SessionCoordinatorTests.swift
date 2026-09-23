@@ -174,7 +174,7 @@ struct SessionCoordinatorTests {
         let (coordinator, port) = online()
         await coordinator.send(Draft(text: "tpyo"), in: bobConversation)
         let item = coordinator.timelines.timeline(for: bobConversation).items[0]
-        #expect(await coordinator.edit(item, to: "typo"))
+        #expect(await coordinator.edit(item, draft: Draft(text: "typo")))
         #expect(port.corrections.last?.target == item.correctionTargetID)
         #expect(coordinator.timelines.timeline(for: bobConversation).items[0].body == "typo")
         #expect(await coordinator.retract(item))
@@ -221,7 +221,7 @@ struct ConnectionLifecycleTests {
         )
         coordinator.start()
         #expect(coordinator.connection == .connecting)
-        try await Task.sleep(nanoseconds: 300_000_000)
+        await eventually { port.connectCount >= 2 }
         // The silent failure was noticed and a new attempt started.
         #expect(port.connectCount >= 2)
         await coordinator.stop()
@@ -229,10 +229,12 @@ struct ConnectionLifecycleTests {
 
     @Test func readyCancelsTheWatchdog() async throws {
         let port = FakePort()
-        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
+        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.5)
         coordinator.start()
         port.emit(.connected)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await eventually { coordinator.connection == .online }
+        // Past the budget: a watchdog left running would have fired.
+        try await Task.sleep(nanoseconds: 700_000_000)
         #expect(coordinator.connection == .online)
         #expect(port.connectCount == 1)
         await coordinator.stop()

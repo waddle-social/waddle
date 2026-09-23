@@ -46,13 +46,17 @@ public final class SessionCoordinator {
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var typingSweepTask: Task<Void, Never>?
-    @ObservationIgnored private var readyTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var readyTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
-    @ObservationIgnored private var isStopped = false
+    @ObservationIgnored private(set) var isStopped = false
     @ObservationIgnored var outboundQueue: [OutboundMessage] = []
     @ObservationIgnored var failedOutbound: [String: OutboundMessage] = [:]
     @ObservationIgnored var sentOutbound: [String: OutboundMessage] = [:]
     @ObservationIgnored var sentOrder: [String] = []
+    @ObservationIgnored let outboxStore: any OutboxStore
+    /// The saved outbox was loaded this start; only then is it saved.
+    @ObservationIgnored var isOutboxLoaded = false
+    @ObservationIgnored var savedOutbox: [PersistedOutbound] = []
     /// True once the ready pipeline rejoined rooms; sends drain only then.
     @ObservationIgnored var isSendReady = false
     @ObservationIgnored var isFlushing = false
@@ -76,20 +80,24 @@ public final class SessionCoordinator {
 
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
-    /// only as diagnostics, never as a disconnect).
+    /// only as diagnostics, never as a disconnect). `outboxStore`: where
+    /// unsent messages are kept across launches.
     public init(
         account: AccountIdentity,
         port: any XmppPort,
         reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
-        connectBudget: TimeInterval = 15
+        connectBudget: TimeInterval = 15,
+        outboxStore: any OutboxStore = InMemoryOutboxStore(),
+        timelineCapacity: Int = 500
     ) {
         self.account = account
         self.port = port
+        self.outboxStore = outboxStore
         self.reconnectPolicy = reconnectPolicy
         self.connectBudget = connectBudget
         let directory = DirectoryStore()
         self.directory = directory
-        self.timelines = TimelineStore()
+        self.timelines = TimelineStore(maxItemsPerConversation: timelineCapacity)
         self.presence = PresenceStore(isRoom: { directory.isRoom($0) })
         self.typing = TypingStore()
         self.unread = UnreadStore()
@@ -100,13 +108,17 @@ public final class SessionCoordinator {
         self.inbox = InboxStore()
         self.readCursors = ReadCursorStore()
         timelines.account = account
+        timelines.onArchiveTrimmed = { [weak self] conversation, cursor in
+            self?.archiveTrimmed(conversation, cursor: cursor)
+        }
     }
 
     // MARK: - Lifecycle
 
-    /// Starts consuming events and connects.
+    /// Restores the saved outbox, starts consuming events and connects.
     public func start() {
         isStopped = false
+        restoreOutboxIfNeeded()
         guard eventTask == nil else { return }
         let events = port.events
         eventTask = Task { [weak self] in
@@ -118,7 +130,8 @@ public final class SessionCoordinator {
         connectNow()
     }
 
-    /// Disconnects for good (sign-out). Clears all session state.
+    /// Disconnects and clears all session state. The saved outbox is kept
+    /// for the next `start()`; `signOut()` also deletes it.
     public func stop() async {
         isStopped = true
         reconnectTask?.cancel()
@@ -138,6 +151,7 @@ public final class SessionCoordinator {
 
     /// Reconnects immediately if offline (app foregrounded, network back).
     public func resume() {
+        restoreOutboxIfNeeded()
         switch status.connection {
         case .offline, .connecting:
             if case .connecting = status.connection { return }
@@ -234,6 +248,8 @@ public final class SessionCoordinator {
         failedOutbound.removeAll()
         sentOutbound.removeAll()
         sentOrder.removeAll()
+        isOutboxLoaded = false
+        savedOutbox.removeAll()
         isSendReady = false
         sentChatStates.removeAll()
         typingPauseTasks.values.forEach { $0.cancel() }
@@ -278,6 +294,7 @@ public final class SessionCoordinator {
             presence.apply(wirePresence)
         case let .deliveryAcked(stanzaID):
             deliveries.acknowledged(stanzaID)
+            persistOutbox()
         case let .deliveryFailed(stanzaID):
             sentMessageFailed(stanzaID, bounced: false)
         case let .inboxPush(entry):
@@ -349,6 +366,12 @@ public final class SessionCoordinator {
         }
         trackChatState(message, route: route)
         let result = timelines.ingest(message, route: route)
+        if route.isMine {
+            // Our own copy back from the server confirms an unacked send,
+            // and delivers one the core had reported failed and replayed.
+            confirmOwnCopy(message)
+            persistOutbox()
+        }
         guard case let .inserted(item) = result else { return }
         if !route.conversation.isRoom, message.isLive {
             directory.touchDirect(route.conversation.jid, at: item.sentAt, preview: preview(of: item))

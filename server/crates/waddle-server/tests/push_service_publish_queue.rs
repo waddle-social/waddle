@@ -17,7 +17,8 @@ use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
 
-/// Mirrors `crate::push_service::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB`.
+/// Mirrors `crate::push_service::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB`
+/// (recorded for the stubbed FCM platform until #530).
 const ATTEMPT_STATUS_FAKE_SENT_NON_WEB: &str = "fake-sent";
 
 async fn store() -> DatabasePushServiceStore {
@@ -83,16 +84,16 @@ async fn scalar_optional_i64(
 
 #[tokio::test]
 async fn publish_notification_fans_out_to_active_devices_only() {
-    // Queue-mechanics test: uses Apns platform so we don't need a
-    // Web Push provider wired. APNS sender lands in #529; until
-    // then non-Web platforms record the legacy `fake-sent` marker.
+    // Queue-mechanics test: uses the FCM platform so no real provider
+    // needs wiring. FCM records the `fake-sent` stub until #530 lands
+    // its sender (APNs is dispatched for real since #529).
     let store = store().await;
     let owner = owner();
     let node = store.ensure_node(&owner, "web").await.expect("push node");
     store
         .upsert_device(
             &owner,
-            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test")
+            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test")
                 .with_provider_endpoint(Some("https://push.example.com/one".to_string())),
         )
         .await
@@ -100,7 +101,7 @@ async fn publish_notification_fans_out_to_active_devices_only() {
     store
         .upsert_device(
             &owner,
-            PushDeviceRegistration::new("dev-2", node.node(), PushDevicePlatform::Apns, "test")
+            PushDeviceRegistration::new("dev-2", node.node(), PushDevicePlatform::Fcm, "test")
                 .with_provider_endpoint(Some("https://push.example.com/two".to_string())),
         )
         .await
@@ -166,7 +167,7 @@ async fn push_delivery_attempts_survive_store_reopen() {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
             )
             .await
             .expect("device");
@@ -195,8 +196,8 @@ async fn push_delivery_attempts_survive_store_reopen() {
 
 #[tokio::test]
 async fn queued_publish_job_survives_reopen_and_retries_after_dispatch_failure() {
-    // Queue-mechanics: uses Apns so the fake-sent path applies; the
-    // Web platform now requires a wired provider.
+    // Queue-mechanics: uses FCM so the fake-sent stub applies; Web
+    // and APNs require a wired provider.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("push-service-publish-jobs.sqlite3");
     let owner = owner();
@@ -209,7 +210,7 @@ async fn queued_publish_job_survives_reopen_and_retries_after_dispatch_failure()
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
             )
             .await
             .expect("device");
@@ -338,7 +339,7 @@ async fn zero_device_publish_job_remains_retryable_until_device_returns() {
     store
         .upsert_device(
             &owner,
-            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
+            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
         )
         .await
         .expect("device");
@@ -364,7 +365,7 @@ async fn zero_device_publish_job_remains_retryable_until_device_returns() {
     store
         .upsert_device(
             &owner,
-            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
+            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
         )
         .await
         .expect("reenable device");

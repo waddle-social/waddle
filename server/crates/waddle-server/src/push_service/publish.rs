@@ -266,7 +266,7 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
             )
             .await
             .expect("device");

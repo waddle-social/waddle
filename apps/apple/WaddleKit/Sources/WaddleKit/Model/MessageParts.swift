@@ -95,8 +95,8 @@ public enum ChatState: Hashable, Sendable {
 }
 
 /// XEP-0394 markup span. Offsets count Unicode scalars over the wire body.
-public struct MarkupSpan: Hashable, Sendable {
-    public enum Kind: Hashable, Sendable {
+public struct MarkupSpan: Hashable, Sendable, Codable {
+    public enum Kind: Hashable, Sendable, Codable {
         case bold
         case italic
         case strikethrough
@@ -118,8 +118,8 @@ public struct MarkupSpan: Hashable, Sendable {
 }
 
 /// XEP-0372 reference. Offsets count Unicode scalars over the wire body.
-public struct Reference: Hashable, Sendable {
-    public enum Kind: Hashable, Sendable {
+public struct Reference: Hashable, Sendable, Codable {
+    public enum Kind: Hashable, Sendable, Codable {
         case mention
         case data
         case other(String)
@@ -146,26 +146,26 @@ public struct Reference: Hashable, Sendable {
 }
 
 /// XEP-0448 encryption envelope of a shared file.
-public struct EncryptedFileSource: Hashable, Sendable {
-    public let cipher: String
+public struct EncryptedFileSource: Hashable, Sendable, Codable {
+    public let cipher: FileCipher
     public let keyBase64: String
     public let ivBase64: String
-    /// `algo` → base64 digest of the ciphertext (XEP-0448 `<encrypted>` hashes).
-    public let hashes: [String: String]
+    /// Digests of the ciphertext (XEP-0448 `<encrypted>` hashes).
+    public let digests: FileDigests
     public let sources: [URL]
 
-    public init(cipher: String, keyBase64: String, ivBase64: String, hashes: [String: String], sources: [URL]) {
+    public init(cipher: FileCipher, keyBase64: String, ivBase64: String, digests: FileDigests, sources: [URL]) {
         self.cipher = cipher
         self.keyBase64 = keyBase64
         self.ivBase64 = ivBase64
-        self.hashes = hashes
+        self.digests = digests
         self.sources = sources
     }
 }
 
 /// XEP-0446/0447 file metadata.
-public struct SharedFile: Hashable, Sendable {
-    public enum Disposition: Hashable, Sendable {
+public struct SharedFile: Hashable, Sendable, Codable {
+    public enum Disposition: Hashable, Sendable, Codable {
         case inline
         case attachment
     }
@@ -178,6 +178,8 @@ public struct SharedFile: Hashable, Sendable {
     public let height: Int?
     public let description: String?
     public let disposition: Disposition
+    /// Digests of the plaintext file (XEP-0446 `<file>` hashes).
+    public let digests: FileDigests
     public let encrypted: EncryptedFileSource?
 
     public init(
@@ -189,6 +191,7 @@ public struct SharedFile: Hashable, Sendable {
         height: Int? = nil,
         description: String? = nil,
         disposition: Disposition = .attachment,
+        digests: FileDigests = FileDigests(),
         encrypted: EncryptedFileSource? = nil
     ) {
         self.url = url
@@ -199,6 +202,7 @@ public struct SharedFile: Hashable, Sendable {
         self.height = height
         self.description = description
         self.disposition = disposition
+        self.digests = digests
         self.encrypted = encrypted
     }
 

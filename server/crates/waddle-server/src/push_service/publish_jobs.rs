@@ -179,7 +179,8 @@ pub(super) async fn get_publish_job_payload_xml_tx(
 
 /// Device ids that already recorded a terminal-success attempt for
 /// this `(node, item_id)` — `web-delivered` for real Web Push sends,
-/// `fake-sent` for the stubbed APNS/FCM platforms. A retried publish
+/// `apns-delivered` for real APNs sends, `fake-sent` for the stubbed
+/// FCM platform. A retried publish
 /// job filters its fan-out against this set so one transiently
 /// failing sibling does not turn into duplicate OS notifications on
 /// every device that already received the item (#1123).
@@ -193,12 +194,13 @@ pub(super) async fn delivered_device_ids_for_item_tx(
             r#"
             SELECT DISTINCT device_id
             FROM push_delivery_attempts
-            WHERE node = ? AND item_id = ? AND status IN (?, ?)
+            WHERE node = ? AND item_id = ? AND status IN (?, ?, ?)
             "#,
             crate::db_params![
                 node,
                 item_id,
                 super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+                super::apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
                 super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
             ],
         )
@@ -301,10 +303,10 @@ pub(super) async fn prune_delivery_attempts_tx(
 ) -> Result<(), XmppError> {
     // Terminal-success attempts of a still-retryable job are exempt
     // from the retention tail (#1123, Greptile review): the per-device
-    // idempotency filter reads `web-delivered`/`fake-sent` rows for
-    // the job's `(node, item_id)` on every retry, so evicting one
-    // mid-retry would re-push the item to a device that already
-    // received it. Only that narrow slice is protected — failure/
+    // idempotency filter reads `web-delivered`/`apns-delivered`/
+    // `fake-sent` rows for the job's `(node, item_id)` on every retry,
+    // so evicting one mid-retry would re-push the item to a device that
+    // already received it. Only that narrow slice is protected — failure/
     // transient attempts (pure audit) and attempts of terminal jobs
     // (published/failed/deleted — no re-dispatch to protect) prune
     // normally.
@@ -320,7 +322,7 @@ pub(super) async fn prune_delivery_attempts_tx(
               LIMIT ?
           )
           AND NOT (
-              status IN (?, ?)
+              status IN (?, ?, ?)
               AND item_id IN (
                   SELECT item_id
                   FROM push_publish_jobs
@@ -334,6 +336,7 @@ pub(super) async fn prune_delivery_attempts_tx(
             node,
             limit,
             super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
+            super::apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
             super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
             node,
             PUBLISH_JOB_STATUS_QUEUED,

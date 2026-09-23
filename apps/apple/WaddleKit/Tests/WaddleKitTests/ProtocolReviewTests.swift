@@ -69,7 +69,9 @@ struct ProtocolReviewTests {
         let coordinator = SessionCoordinator(account: me, port: port)
         coordinator.start()
         port.emit(.connected)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        // Opening mid-pipeline would also join through its reload step.
+        await eventually { coordinator.isSendReady }
+        await coordinator.readyTask?.value
         #expect(port.joined.isEmpty)
 
         await coordinator.open(.room(quiet))
@@ -77,7 +79,8 @@ struct ProtocolReviewTests {
 
         port.emit(.disconnected)
         port.emit(.connected)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await eventually { port.joined.count >= 2 }
+        await coordinator.readyTask?.value
         #expect(port.joined == [quiet, quiet])
         await coordinator.stop()
     }
@@ -153,7 +156,10 @@ struct StaleConnectionTests {
         let port = FakePort()
         let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
         coordinator.start()
-        try await Task.sleep(nanoseconds: 150_000_000)
+        await eventually {
+            if case .offline = coordinator.connection { return true }
+            return false
+        }
         guard case .offline = coordinator.connection else {
             Issue.record("expected the watchdog to schedule a retry, got \(coordinator.connection)")
             await coordinator.stop()

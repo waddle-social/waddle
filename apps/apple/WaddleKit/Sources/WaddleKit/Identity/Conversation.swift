@@ -1,7 +1,7 @@
 import Foundation
 
 /// Which kind of XMPP conversation a timeline belongs to.
-public enum ConversationKind: Hashable, Sendable {
+public enum ConversationKind: Hashable, Sendable, Codable {
     /// A XEP-0045 room: a channel or a group DM.
     case room
     /// A 1:1 `type='chat'` conversation with a peer's bare JID.
@@ -10,7 +10,7 @@ public enum ConversationKind: Hashable, Sendable {
 
 /// Stable identity of a conversation: the room bare JID or the peer bare
 /// JID, plus its kind. Every store keys on this value.
-public struct ConversationID: Hashable, Sendable, CustomStringConvertible {
+public struct ConversationID: Hashable, Sendable, Codable, CustomStringConvertible {
     public let jid: BareJID
     public let kind: ConversationKind
 

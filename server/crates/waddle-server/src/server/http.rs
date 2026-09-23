@@ -1014,7 +1014,7 @@ async fn create_websocket_state(
     // contact when our deliveries misbehave.
     let vapid_sub = waddle_xmpp::push::types::VapidSub::default_for_domain(&xmpp_domain)
         .map_err(|error| anyhow::anyhow!("failed to derive VAPID sub claim: {error}"))?;
-    let push_service = Arc::new(
+    let push_service =
         crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
@@ -1023,8 +1023,35 @@ async fn create_websocket_state(
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
-        .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub),
-    );
+        .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub);
+    // APNs (#529): the `.p8` provider key is read once here. A
+    // configured-but-unusable key fails boot rather than leaving Apple
+    // devices silently undeliverable; no `WADDLE_APNS_*` at all leaves
+    // APNs disabled (`apns-not-configured` attempts).
+    let push_service = match server_config.apns.as_ref() {
+        Some(apns_config) => {
+            let tokens = apns_config
+                .load_token_signer()
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to load APNs provider key: {error}"))?;
+            let sender = waddle_xmpp::push::apns::HttpApnsSender::new()
+                .map_err(|error| anyhow::anyhow!("failed to build APNs sender: {error}"))?;
+            info!(
+                apns_topic = apns_config.topic.as_str(),
+                "APNs delivery enabled for the XMPP Push Service"
+            );
+            push_service.with_apns_provider(
+                Arc::new(tokens),
+                Arc::new(sender),
+                apns_config.topic.clone(),
+            )
+        }
+        None => {
+            info!("APNs delivery disabled: WADDLE_APNS_* is not configured");
+            push_service
+        }
+    };
+    let push_service = Arc::new(push_service);
     // XEP-0050 ad-hoc command handlers for `register-device` and
     // `disable-device` on `push.<domain>`. The command dispatcher
     // routes by node ([`CommandBoundary::PushService`]); registration

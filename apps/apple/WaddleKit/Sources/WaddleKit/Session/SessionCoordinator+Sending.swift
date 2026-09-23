@@ -38,6 +38,7 @@ extension SessionCoordinator {
         failedOutbound[clientID] = nil
         deliveries.forget(clientID)
         timelines.removeLocalEcho(id: clientID, in: conversation)
+        persistOutbox()
     }
 
     /// Sends queued messages in order. A transient failure stops the drain
@@ -65,6 +66,7 @@ extension SessionCoordinator {
             case (.notConnected, _), (.transportError, _):
                 return
             }
+            persistOutbox()
         }
     }
 
@@ -73,6 +75,8 @@ extension SessionCoordinator {
         if !outboundQueue.contains(where: { $0.clientID == message.clientID }) {
             outboundQueue.append(message)
         }
+        // Saved before the port sees it, so a kill mid-send loses nothing.
+        persistOutbox()
     }
 
     /// Keeps written messages (bounded) so a later XEP-0198 failure or an
@@ -96,6 +100,7 @@ extension SessionCoordinator {
         } else {
             deliveries.failed(clientID)
         }
+        persistOutbox()
     }
 
     /// The optimistic row: our occupant JID in a room (so the reflection
@@ -153,14 +158,16 @@ extension SessionCoordinator {
     }
 
     /// XEP-0308 correction of one of our own messages. The correction
-    /// re-sends the whole message (reply, thread, attachments) with only
-    /// the text changed, as the XEP requires.
-    public func edit(_ item: TimelineItem, to text: String) async -> Bool {
+    /// re-sends the whole message, as the XEP requires: the draft's text
+    /// and mentions (markup and references are recomputed against the new
+    /// body) with the original's reply, thread and attachments. The draft's
+    /// own reply, thread and attachments are ignored.
+    public func edit(_ item: TimelineItem, draft: Draft) async -> Bool {
         guard item.isMine,
               item.tombstone == nil,
               let target = item.correctionTargetID,
               let from = ownJID(in: item.conversation),
-              let composed = MessageComposer.compose(correctionDraft(of: item, text: text))
+              let composed = MessageComposer.compose(correctionDraft(of: item, draft: draft))
         else { return false }
         let outcome = await port.sendCorrection(of: target, body: composed.body, in: item.conversation, options: composed.options)
         guard case .sent = outcome else { return false }
@@ -174,7 +181,7 @@ extension SessionCoordinator {
         return true
     }
 
-    private func correctionDraft(of item: TimelineItem, text: String) -> Draft {
+    private func correctionDraft(of item: TimelineItem, draft: Draft) -> Draft {
         let timeline = timelines.timeline(for: item.conversation)
         let reply = item.message.reply.flatMap { target -> ReplyContext? in
             guard let author = target.author else { return nil }
@@ -186,7 +193,13 @@ extension SessionCoordinator {
                 parentAuthorName: parent?.authorName ?? ""
             )
         }
-        return Draft(text: text, reply: reply, thread: item.message.thread, attachments: item.message.sharedFiles)
+        return Draft(
+            text: draft.text,
+            mentions: draft.mentions,
+            reply: reply,
+            thread: item.message.thread,
+            attachments: item.message.sharedFiles
+        )
     }
 
     /// XEP-0424 retraction of one of our own messages. A room may reject

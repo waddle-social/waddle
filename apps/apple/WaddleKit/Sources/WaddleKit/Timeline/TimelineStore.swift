@@ -26,10 +26,17 @@ public enum TimelineIngestResult: Equatable, Sendable {
 ///   arrive before their target (backwards MAM paging loads a reaction
 ///   before its message) are parked, bounded, and applied on insert.
 /// - Only live inserts trim to `maxItemsPerConversation`, from the oldest
-///   end; explicitly requested history is never evicted as it merges.
+///   end; explicitly requested history is never evicted as it merges. A
+///   trim that drops archived rows reports the oldest archived row left, so
+///   paging can refetch what was dropped instead of skipping past it.
 @MainActor
 public final class TimelineStore {
     public var account: AccountIdentity?
+    /// Called after a live insert trimmed archived rows, with the MAM id of
+    /// the oldest archived row still loaded, or nil when none is. (A live
+    /// row's stanza-id is no cursor: live rows sort after all archived
+    /// ones, so one can be older than archived rows that were trimmed.)
+    var onArchiveTrimmed: (@MainActor (ConversationID, String?) -> Void)?
 
     private let maxItemsPerConversation: Int
     private let maxPendingMutations: Int
@@ -38,6 +45,9 @@ public final class TimelineStore {
     private var parked: [ConversationID: [RankedMutation]] = [:]
     private var newestWireDate: [ConversationID: Date] = [:]
     private var insertionCounter: Int64 = 0
+
+    /// Rows a conversation keeps once live inserts start trimming.
+    public var capacity: Int { maxItemsPerConversation }
 
     public init(maxItemsPerConversation: Int = 500, maxPendingMutations: Int = 200) {
         self.maxItemsPerConversation = maxItemsPerConversation
@@ -207,14 +217,19 @@ public final class TimelineStore {
         entry = drainParked(into: entry, conversation: conversation)
         list.append(entry)
         list.sort(by: Entry.precedes)
+        var trimmedArchive = false
         if !entry.isArchived {
             let overflow = list.count - maxItemsPerConversation
             if overflow > 0 {
+                trimmedArchive = list.prefix(overflow).contains(where: \.isArchived)
                 list.removeFirst(overflow)
             }
         }
         entries[conversation] = list
         publish(conversation)
+        if trimmedArchive {
+            onArchiveTrimmed?(conversation, list.lazy.compactMap(\.archiveID).first)
+        }
         return .inserted(enriched(entry))
     }
 
@@ -459,6 +474,11 @@ private struct Entry: Hashable {
     var mutations: MutationState
     var isLocalEcho: Bool
     var isArchived: Bool
+
+    var archiveID: String? {
+        guard case let .archive(mamID) = item.message.source else { return nil }
+        return mamID
+    }
 
     /// Timestamped rows first by time; timestampless (live) rows are the
     /// newest; insertion order breaks ties.

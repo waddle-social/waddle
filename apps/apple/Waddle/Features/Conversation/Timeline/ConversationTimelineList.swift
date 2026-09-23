@@ -65,9 +65,11 @@ struct ConversationTimelineList: View {
                 guard let anchor else { return }
                 proxy.scrollTo(anchor, anchor: .top)
             }
-            .onChange(of: actions.scrollRequest) { _, target in
+            .onChange(of: actions.scrollRequest, initial: true) { _, target in
                 guard let target else { return }
-                actions.scrollRequest = nil
+                // Cleared on the next turn, so a page prepended in this same
+                // update sees the request and leaves the scroll to it.
+                Task { @MainActor in actions.scrollRequest = nil }
                 withAnimation(reduceMotion ? nil : .easeInOut) {
                     proxy.scrollTo(target, anchor: .center)
                 }
@@ -104,7 +106,9 @@ struct ConversationTimelineList: View {
     /// Older rows were inserted above: put the previously first row back
     /// at the top so the reader's place does not jump.
     private func keepPlaceAfterPrepend(oldFirst: String?, entries: [TimelineFeedEntry], proxy: ScrollViewProxy) {
-        guard let oldFirst, entries.first?.id != oldFirst, entries.contains(where: { $0.id == oldFirst }) else { return }
+        guard actions.scrollRequest == nil,
+              let oldFirst, entries.first?.id != oldFirst, entries.contains(where: { $0.id == oldFirst })
+        else { return }
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {

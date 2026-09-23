@@ -38,7 +38,8 @@ enum MessageAccessibilityText {
         }
         for file in item.message.sharedFiles {
             let kind = MessageAttachmentKind(file)
-            parts.append(kind == .encrypted ? kind.noun : "\(kind.noun), \(file.displayName)")
+            let label = "\(kind.noun), \(file.displayName)"
+            parts.append(file.encrypted == nil ? label : "\(label), encrypted")
         }
         return parts.joined(separator: ", ")
     }

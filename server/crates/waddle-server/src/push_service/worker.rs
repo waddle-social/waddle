@@ -11,6 +11,7 @@ use waddle_xmpp::push::WebPushSender;
 use waddle_xmpp::telemetry::attributes::MetricAttribute;
 use waddle_xmpp::XmppError;
 
+use super::apns_dispatch;
 use super::devices::{
     active_devices_with_subscription_for_node_tx, count_active_devices_for_node_tx,
     mark_device_disabled_tx,
@@ -79,6 +80,10 @@ struct PublishWorkPhase1 {
     job: PushPublishJob,
     sealed_devices: Vec<dispatch::SealedActiveDevice>,
     payload_xml: String,
+    /// `push_nodes.app_id` of the job's node. For Apple devices this is
+    /// the bundle id the registration was made for; APNs dispatch
+    /// refuses to send when it differs from the configured topic.
+    app_id: String,
     /// How many active devices were filtered out of this pass because
     /// an earlier pass already delivered the item to them (#1123).
     /// Finalize uses this to disable the "all devices returned an
@@ -93,7 +98,7 @@ struct PublishWorkPhase1 {
 /// devices). The short-circuit variant carries the final
 /// [`PushFanoutResult`] (or `None` when there was nothing to do).
 enum Phase1Outcome {
-    Continue(PublishWorkPhase1),
+    Continue(Box<PublishWorkPhase1>),
     ShortCircuit(Option<PushFanoutResult>),
 }
 
@@ -304,6 +309,8 @@ fn attempt_status_is_transient(status: &str) -> bool {
             | dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED
             | dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW
             | ATTEMPT_STATUS_WEB_NOT_CONFIGURED
+            | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
+            | apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED
     )
     // `web-internal-error` is deliberately NOT transient: encrypt /
     // sign / aud-derive failures are deterministic bugs that recur
@@ -325,6 +332,14 @@ fn attempt_status_is_transient(status: &str) -> bool {
 ///   signals a root-key drift across boots, which is fixable without
 ///   the user re-registering their device. Disabling on that would
 ///   compound a configuration mistake into data loss.
+/// - `apns-gone` is the APNs equivalent of `web-gone`: 410
+///   (`Unregistered` / `ExpiredToken`), `BadDeviceToken` or
+///   `DeviceTokenNotForTopic`. `apns-invalid-token` is a stored token
+///   that is not hex, the APNs twin of `web-invalid-keys`.
+/// - Provider-wide APNs failures (`apns-provider-auth`,
+///   `apns-topic-mismatch`, `apns-not-configured`) are deliberately
+///   NOT listed: they are server configuration errors that would
+///   otherwise disable every Apple device at once.
 /// - Transient statuses are handled by the retry path; we keep the
 ///   device row active so the next attempt has somewhere to land.
 fn attempt_status_warrants_device_disable(status: &str) -> bool {
@@ -333,18 +348,22 @@ fn attempt_status_warrants_device_disable(status: &str) -> bool {
         dispatch::ATTEMPT_STATUS_WEB_GONE
             | dispatch::ATTEMPT_STATUS_WEB_INVALID_KEYS
             | dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT
+            | apns_dispatch::ATTEMPT_STATUS_APNS_GONE
+            | apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_TOKEN
     )
 }
 
 /// If every attempt in the fan-out carries the same encoder/config-bug
-/// status (i.e. all `web-bad-request` or all `web-payload-too-large`),
-/// return that status so the worker can finalize the job as FAILED
-/// instead of silently marking it PUBLISHED. Returns `None` otherwise.
+/// status (e.g. all `web-bad-request`, all `web-payload-too-large`, or
+/// all of one APNs provider-wide failure), return that status so the
+/// worker can finalize the job as FAILED instead of silently marking it
+/// PUBLISHED. Returns `None` otherwise.
 ///
-/// Both statuses are deterministic on the fan-out: every device hits
-/// the same encoder/padding bug, so the job will recur identically on
-/// retry. Surfacing FAILED on `push_publish_jobs.status` lets monitors
-/// alert without auditing the attempts table.
+/// These statuses are deterministic on the fan-out: every device hits
+/// the same encoder/padding bug or server misconfiguration (APNs key,
+/// bundle id, missing `WADDLE_APNS_*`), so the job will recur
+/// identically on retry. Surfacing FAILED on `push_publish_jobs.status`
+/// lets monitors alert without auditing the attempts table.
 fn all_attempts_with_encoder_bug_signature(attempts: &[DispatchedAttempt]) -> Option<&'static str> {
     if attempts.is_empty() {
         return None;
@@ -352,7 +371,13 @@ fn all_attempts_with_encoder_bug_signature(attempts: &[DispatchedAttempt]) -> Op
     let first = attempts[0].status;
     let uniform = matches!(
         first,
-        dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST | dispatch::ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE
+        dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST
+            | dispatch::ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE
+            | apns_dispatch::ATTEMPT_STATUS_APNS_REJECTED
+            | apns_dispatch::ATTEMPT_STATUS_APNS_PAYLOAD_TOO_LARGE
+            | apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_AUTH
+            | apns_dispatch::ATTEMPT_STATUS_APNS_TOPIC_MISMATCH
+            | apns_dispatch::ATTEMPT_STATUS_APNS_NOT_CONFIGURED
     ) && attempts.iter().all(|a| a.status == first);
     if uniform {
         Some(first)
@@ -467,28 +492,30 @@ impl DatabasePushServiceStore {
         // window covers phases 2+3 without holding a DB transaction
         // across the network round-trip.
         let phase1 = match self.process_publish_phase1(job_id, now_ms).await? {
-            Phase1Outcome::Continue(state) => state,
+            Phase1Outcome::Continue(state) => *state,
             Phase1Outcome::ShortCircuit(result) => return Ok(result),
         };
         let PublishWorkPhase1 {
             job,
             sealed_devices,
             payload_xml,
+            app_id,
             prior_delivered_devices,
         } = phase1;
 
         // ---- Phase 2: outside any tx — encrypt, sign, and send.
-        // The XEP-0357 payload only needs to be parsed when we have a
-        // real Web Push provider wired up. Without one, every device
-        // records the legacy `fake-sent` marker and we never look at
-        // the conversation / class / message-count fields. Parsing
-        // unconditionally would reject test fixtures whose
-        // `<notification>` payload omits the `urn:waddle:push:context:0`
-        // child the chat publisher attaches in production.
-        let web_push_provider_ready = self.web_push_provider_ready();
+        // The XEP-0357 payload only needs to be parsed when a real
+        // provider (Web Push or APNs) is wired up. Without one, every
+        // device records a not-configured (or FCM `fake-sent`) marker
+        // and we never look at the conversation / class /
+        // message-count fields. Parsing unconditionally would reject
+        // test fixtures whose `<notification>` payload omits the
+        // `urn:waddle:push:context:0` child the chat publisher attaches
+        // in production.
+        let any_provider_ready = self.any_provider_ready();
         let parsed = match dispatch::parse_publish_payload(&payload_xml) {
             Ok(parsed) => Some(parsed),
-            Err(error) if web_push_provider_ready => {
+            Err(error) if any_provider_ready => {
                 // Bad payload is permanent: mark the job failed in a
                 // tiny dedicated tx and return zero attempts.
                 self.mark_publish_job_failed_after_phase1(
@@ -515,7 +542,11 @@ impl DatabasePushServiceStore {
                 &sealed_devices,
                 job.owner_bare_jid(),
                 parsed.as_ref(),
-                job.item_id(),
+                apns_dispatch::ApnsJobContext {
+                    item_id: job.item_id(),
+                    node: job.node(),
+                    app_id: &app_id,
+                },
             )
             .await;
 
@@ -726,12 +757,13 @@ impl DatabasePushServiceStore {
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        Ok(Phase1Outcome::Continue(PublishWorkPhase1 {
+        Ok(Phase1Outcome::Continue(Box::new(PublishWorkPhase1 {
             job,
             sealed_devices,
             payload_xml,
+            app_id: push_node.app_id,
             prior_delivered_devices,
-        }))
+        })))
     }
 
     /// Phase 2 helper: drive each sealed device row through the typed
@@ -750,7 +782,7 @@ impl DatabasePushServiceStore {
         sealed_devices: &[dispatch::SealedActiveDevice],
         recipient: &BareJid,
         parsed: Option<&dispatch::ParsedPushPayload>,
-        item_id: &str,
+        job: apns_dispatch::ApnsJobContext<'_>,
     ) -> Vec<DispatchedAttempt> {
         use futures::stream::{self, StreamExt};
         const DISPATCH_FAN_OUT: usize = 64;
@@ -773,7 +805,16 @@ impl DatabasePushServiceStore {
             )),
             _ => None,
         };
-        let item_id_arc: Arc<str> = Arc::from(item_id);
+        // APNs needs the parsed payload too; a parse failure with any
+        // provider wired already failed the job in phase 2.
+        let apns_provider = match (self.apns.as_ref(), parsed) {
+            (Some(provider), Some(parsed)) => Some((provider.clone(), parsed.clone())),
+            _ => None,
+        };
+        let item_id_arc: Arc<str> = Arc::from(job.item_id);
+        let node_arc: Arc<str> = Arc::from(job.node);
+        let app_id_arc: Arc<str> = Arc::from(job.app_id);
+        let secrets = Arc::clone(&self.secrets);
         let recipient = recipient.clone();
         // `Arc` so the per-device fan-out clones a refcount, not the
         // parsed payload, for the web-arm log context.
@@ -782,7 +823,11 @@ impl DatabasePushServiceStore {
         stream::iter(sealed_devices.iter().cloned())
             .map(move |device| {
                 let item_id = Arc::clone(&item_id_arc);
+                let node = Arc::clone(&node_arc);
+                let app_id = Arc::clone(&app_id_arc);
+                let secrets = Arc::clone(&secrets);
                 let web_provider = web_provider.clone();
+                let apns_provider = apns_provider.clone();
                 let recipient = recipient.clone();
                 let log_context = Arc::clone(&log_context);
                 async move {
@@ -805,9 +850,7 @@ impl DatabasePushServiceStore {
                         // No Web Push provider wired up. Web devices
                         // get the typed `web-not-configured` marker
                         // (transient, so the job retries once the
-                        // operator fixes the boot config); APNS/FCM
-                        // devices retain the legacy `fake-sent` marker
-                        // (their senders ship in #529 / #530).
+                        // operator fixes the boot config).
                         (None, PushDevicePlatform::Web) => {
                             if let Some(parsed) = log_context.as_ref() {
                                 tracing::warn!(
@@ -828,11 +871,60 @@ impl DatabasePushServiceStore {
                                 retry_after: None,
                             }
                         }
-                        (_, PushDevicePlatform::Apns | PushDevicePlatform::Fcm) => {
-                            // APNS/FCM are stubbed until #529/#530 land
-                            // their real senders. Keep the historical
-                            // `fake-sent` marker so existing tests /
-                            // dashboards keep working.
+                        (_, PushDevicePlatform::Apns) => match &apns_provider {
+                            Some((provider, parsed)) => {
+                                let attempt = apns_dispatch::dispatch_apns_device(
+                                    &device,
+                                    &recipient,
+                                    parsed,
+                                    apns_dispatch::ApnsJobContext {
+                                        item_id: &item_id,
+                                        node: &node,
+                                        app_id: &app_id,
+                                    },
+                                    provider,
+                                    &secrets,
+                                )
+                                .await;
+                                DispatchedAttempt {
+                                    device_id: device.device_id.clone(),
+                                    platform: device.platform,
+                                    status: attempt.status,
+                                    last_error: attempt
+                                        .last_error
+                                        .map(|error| truncate_last_error(&error)),
+                                    retry_after: attempt.retry_after,
+                                }
+                            }
+                            // No `WADDLE_APNS_*` configuration. Recorded
+                            // as a permanent, non-disabling status: the
+                            // device is fine and retrying cannot help
+                            // until the operator configures APNs.
+                            None => {
+                                if let Some(parsed) = log_context.as_ref() {
+                                    tracing::warn!(
+                                        recipient = %recipient,
+                                        conversation = %parsed.conversation,
+                                        notification_class = parsed.class.as_db_value(),
+                                        provider = "apns",
+                                        push_stage = "provider_not_configured",
+                                        provider_outcome =
+                                            apns_dispatch::ATTEMPT_STATUS_APNS_NOT_CONFIGURED,
+                                        "push provider transition"
+                                    );
+                                }
+                                DispatchedAttempt {
+                                    device_id: device.device_id.clone(),
+                                    platform: device.platform,
+                                    status: apns_dispatch::ATTEMPT_STATUS_APNS_NOT_CONFIGURED,
+                                    last_error: Some("APNs provider not configured".to_string()),
+                                    retry_after: None,
+                                }
+                            }
+                        },
+                        (_, PushDevicePlatform::Fcm) => {
+                            // FCM is stubbed until #530 lands its real
+                            // sender and keeps the `fake-sent` marker.
                             DispatchedAttempt {
                                 device_id: device.device_id.clone(),
                                 platform: device.platform,
@@ -1236,6 +1328,8 @@ mod tests {
             dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED,
             dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW,
             ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT,
+            apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED,
         ] {
             assert!(
                 attempt_status_is_transient(transient),
@@ -1253,6 +1347,18 @@ mod tests {
             dispatch::ATTEMPT_STATUS_WEB_MISSING_MATERIAL,
             dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
             ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+            apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_GONE,
+            apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_AUTH,
+            apns_dispatch::ATTEMPT_STATUS_APNS_REJECTED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_PAYLOAD_TOO_LARGE,
+            apns_dispatch::ATTEMPT_STATUS_APNS_TOPIC_MISMATCH,
+            apns_dispatch::ATTEMPT_STATUS_APNS_NOT_CONFIGURED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_MISSING_TOKEN,
+            apns_dispatch::ATTEMPT_STATUS_APNS_UNSEAL_FAILED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_TOKEN,
+            apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_ENVIRONMENT,
+            apns_dispatch::ATTEMPT_STATUS_APNS_INTERNAL_ERROR,
         ] {
             assert!(
                 !attempt_status_is_transient(permanent),
@@ -1277,6 +1383,12 @@ mod tests {
         assert!(attempt_status_warrants_device_disable(
             dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT
         ));
+        assert!(attempt_status_warrants_device_disable(
+            apns_dispatch::ATTEMPT_STATUS_APNS_GONE
+        ));
+        assert!(attempt_status_warrants_device_disable(
+            apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_TOKEN
+        ));
         for never_disable in [
             dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
             dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW,
@@ -1289,12 +1401,97 @@ mod tests {
             dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
             ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
             ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+            apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT,
+            apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_AUTH,
+            apns_dispatch::ATTEMPT_STATUS_APNS_REJECTED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_PAYLOAD_TOO_LARGE,
+            apns_dispatch::ATTEMPT_STATUS_APNS_TOPIC_MISMATCH,
+            apns_dispatch::ATTEMPT_STATUS_APNS_NOT_CONFIGURED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_MISSING_TOKEN,
+            apns_dispatch::ATTEMPT_STATUS_APNS_UNSEAL_FAILED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_ENVIRONMENT,
+            apns_dispatch::ATTEMPT_STATUS_APNS_INTERNAL_ERROR,
         ] {
             assert!(
                 !attempt_status_warrants_device_disable(never_disable),
                 "{never_disable} must not trigger device disable"
             );
         }
+    }
+
+    // #529: without `WADDLE_APNS_*`, Apple devices record the typed
+    // `apns-not-configured` status (never `fake-sent`), stay active,
+    // and the job is not requeued; FCM keeps its `fake-sent` stub
+    // until #530.
+    #[tokio::test]
+    async fn unconfigured_apns_is_not_fake_sent_and_fcm_still_is() {
+        let store = store().await;
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, "p4x.waddle.social")
+            .await
+            .expect("node");
+        for (device_id, platform) in [
+            ("ios-1", PushDevicePlatform::Apns),
+            ("android-1", PushDevicePlatform::Fcm),
+        ] {
+            store
+                .upsert_device(
+                    &owner,
+                    PushDeviceRegistration::new(device_id, node.node(), platform, "prod")
+                        .with_provider_token(Some("abcdef0123".to_string())),
+                )
+                .await
+                .expect("device");
+        }
+        store
+            .enqueue_notification_publish_job_from_user_server(
+                node.node(),
+                &notification_item("unconfigured-apns"),
+                &owner,
+            )
+            .await
+            .expect("enqueue");
+
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("drain");
+
+        let attempts = store
+            .delivery_attempts_for_node(node.node())
+            .await
+            .expect("attempts");
+        let status_of = |device_id: &str| {
+            attempts
+                .iter()
+                .find(|attempt| attempt.device_id() == device_id)
+                .map(|attempt| attempt.status().to_string())
+        };
+        assert_eq!(
+            status_of("ios-1").as_deref(),
+            Some(apns_dispatch::ATTEMPT_STATUS_APNS_NOT_CONFIGURED)
+        );
+        assert_eq!(
+            status_of("android-1").as_deref(),
+            Some(dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB)
+        );
+        assert!(store
+            .queued_publish_jobs()
+            .await
+            .expect("queued")
+            .is_empty());
+        let mut rows = store
+            .query(
+                "SELECT status FROM push_devices WHERE node = ? AND device_id = ?",
+                crate::db_params![node.node(), "ios-1"],
+            )
+            .await
+            .expect("device status");
+        let row = rows.next().await.expect("row").expect("device row");
+        assert_eq!(row.get::<String>(0).expect("status"), "active");
     }
 
     #[tokio::test]
@@ -1305,7 +1502,7 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
             )
             .await
             .expect("device");
@@ -1348,7 +1545,7 @@ mod tests {
         store
             .upsert_device(
                 &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Apns, "test"),
+                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
             )
             .await
             .expect("device");
@@ -1400,14 +1597,17 @@ mod tests {
         let store = store().await;
         let owner = owner();
         let zero_device_node = store.ensure_node(&owner, "web").await.expect("zero node");
-        let live_node = store.ensure_node(&owner, "ios").await.expect("live node");
+        let live_node = store
+            .ensure_node(&owner, "android")
+            .await
+            .expect("live node");
         store
             .upsert_device(
                 &owner,
                 PushDeviceRegistration::new(
-                    "ios-1",
+                    "android-1",
                     live_node.node(),
-                    PushDevicePlatform::Apns,
+                    PushDevicePlatform::Fcm,
                     "test",
                 ),
             )

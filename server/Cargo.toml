@@ -73,7 +73,8 @@ anyhow = "1.0"
 proptest = "1.5"
 
 # HTTP Client
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+# `http2`: the APNs provider API only speaks HTTP/2 (#529).
+reqwest = { version = "0.13", features = ["json", "rustls", "http2"], default-features = false }
 
 # CLI Arguments & Config
 clap = { version = "4.6", features = ["derive"] }

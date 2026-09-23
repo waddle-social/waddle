@@ -1,11 +1,10 @@
 import Foundation
-import WaddleKit
 
 /// Maps XEP-0394/XEP-0372 offsets, which count Unicode scalars over the
 /// wire body, onto the displayed body: the wire body with the XEP-0428
 /// reply fallback removed and, when one was removed, trimmed
 /// (`ReplyFallback.strip`).
-struct WireBodyMapping: Equatable {
+public struct WireBodyMapping: Equatable, Sendable {
     /// Removed fallback scalars over the wire body; empty when none.
     let removed: Range<Int>
     /// Whitespace scalars trimmed from the front after the removal.
@@ -15,7 +14,7 @@ struct WireBodyMapping: Equatable {
 
     /// Nil when `displayedBody` is not derived from `wireBody` (a XEP-0308
     /// correction replaced it), so the wire offsets no longer apply.
-    init?(wireBody: String, fallback: Range<Int>?, displayedBody: String) {
+    public init?(wireBody: String, fallback: Range<Int>?, displayedBody: String) {
         guard ReplyFallback.strip(wireBody, range: fallback) == displayedBody else { return nil }
         let scalars = Array(wireBody.unicodeScalars)
         let removed = Self.clamped(fallback, count: scalars.count)
@@ -42,7 +41,7 @@ struct WireBodyMapping: Equatable {
     /// range (the original's wire body stays on the row). Its wire body
     /// was the fallback followed by the body, which the composer trims, so
     /// offsets past the fallback shift by the fallback length.
-    init(correctedBody: String, fallback: Range<Int>?) {
+    public init(correctedBody: String, fallback: Range<Int>?) {
         if let fallback, fallback.lowerBound >= 0, fallback.lowerBound < fallback.upperBound {
             removed = fallback
         } else {
@@ -52,9 +51,23 @@ struct WireBodyMapping: Equatable {
         displayedLength = correctedBody.unicodeScalars.count
     }
 
+    /// The mapping for a row's current offsets: the correction's once
+    /// corrected, else the original wire body's. Nil when the row's
+    /// offsets cannot be rebased.
+    public init?(item: TimelineItem) {
+        let fallback = item.message.reply?.fallback
+        if item.isEdited {
+            self.init(correctedBody: item.body, fallback: fallback)
+        } else if let wireBody = item.message.body {
+            self.init(wireBody: wireBody, fallback: fallback, displayedBody: item.body)
+        } else {
+            return nil
+        }
+    }
+
     /// The displayed range for a wire range. Ranges inside the fallback
     /// are dropped; ranges crossing its edge are clipped to what remains.
-    func displayedRange(ofWire lower: Int, _ upper: Int) -> Range<Int>? {
+    public func displayedRange(ofWire lower: Int, _ upper: Int) -> Range<Int>? {
         guard lower < upper else { return nil }
         if !removed.isEmpty, lower >= removed.lowerBound, upper <= removed.upperBound {
             return nil
