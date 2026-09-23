@@ -45,7 +45,10 @@ final class FakePort: XmppPort {
         }
     }
 
-    func disconnect() async { disconnectCount += 1 }
+    func disconnect() async {
+        disconnectCount += 1
+        emit(.disconnected)
+    }
     func sendPresence(_ availability: Availability, status: String?) async {}
 
     func send(_ message: OutboundMessage) async -> SendOutcome {

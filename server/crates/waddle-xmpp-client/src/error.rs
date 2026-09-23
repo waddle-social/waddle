@@ -60,6 +60,9 @@ pub enum ClientError {
     InvalidWebSocketRequest(#[source] tokio_tungstenite::tungstenite::http::Error),
     #[error("websocket connection timed out after {timeout:?}")]
     WebSocketConnectTimeout { timeout: Duration },
+    #[error("websocket write timed out after {timeout:?}")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    WebSocketWriteTimeout { timeout: Duration },
     #[error("iq request timed out after {timeout:?}")]
     IqTimeout { timeout: Duration },
     #[error("websocket transport failed")]

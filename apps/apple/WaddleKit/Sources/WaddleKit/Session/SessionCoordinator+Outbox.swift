@@ -62,23 +62,54 @@ extension SessionCoordinator {
         // A failed send the core replayed on a fresh stream can still be
         // acknowledged, or its server copy may already have replaced the
         // local echo (reflected before the stream failed): neither is saved.
-        // A failed send whose echo live traffic trimmed stays saved.
+        // A recipient bounce remains retryable even when the server copy
+        // replaced the local echo before the delayed error arrived.
         let failed = failedOutbound.values
-            .filter { deliveries.state(of: $0.clientID) == .failed && echo(of: $0)?.isLocalEcho != false }
+            .filter {
+                deliveries.state(of: $0.clientID) == .failed
+                    && (deliveries.wasBounced($0.clientID) || echo(of: $0)?.isLocalEcho != false)
+            }
             .map { persisted($0, state: .failed) }
             .sorted { $0.createdAt < $1.createdAt }
         var seen = Set<String>()
         return (pending + failed).filter { seen.insert($0.message.clientID).inserted }
     }
 
-    /// The server's copy of a send the core reported failed: it was
-    /// delivered after all (replayed on a fresh stream), so it is no
-    /// longer failed or retryable.
+    /// Our own server reflection confirms the stanza, including a retry that
+    /// succeeded after an earlier bounce.
     func confirmOwnCopy(_ message: WireMessage) {
         guard let clientID = message.identity.originID ?? message.identity.messageID,
-              failedOutbound.removeValue(forKey: clientID) != nil
+              sentOutbound[clientID] != nil
+                || failedOutbound[clientID] != nil
+                || outboundQueue.contains(where: { $0.clientID == clientID })
+                || recentlyAcknowledgedOutbound[clientID] != nil
         else { return }
-        deliveries.acknowledged(clientID)
+        deliveries.confirmedByReflection(clientID)
+        sentMessageAcknowledged(clientID)
+    }
+
+    /// Requeues written messages whose stream-management state was discarded
+    /// when the FFI creates a fresh stream. The stable client id makes uncertain
+    /// delivery an at-least-once retry, matching the persisted outbox policy.
+    func requeueUnconfirmedSendsForFreshStream() {
+        var seen = Set<String>()
+        let unconfirmed = sentOrder.compactMap { clientID -> OutboundMessage? in
+            guard seen.insert(clientID).inserted,
+                  let message = sentOutbound[clientID],
+                  isAwaitingConfirmation(message)
+            else { return nil }
+            return message
+        }
+        guard !unconfirmed.isEmpty else { return }
+
+        let clientIDs = Set(unconfirmed.map(\.clientID))
+        for message in unconfirmed {
+            sentOutbound[message.clientID] = nil
+            deliveries.queued(message.clientID)
+        }
+        sentOrder.removeAll { clientIDs.contains($0) }
+        outboundQueue = unconfirmed + outboundQueue.filter { !clientIDs.contains($0.clientID) }
+        persistOutbox()
     }
 
     private func restore(_ entries: [PersistedOutbound]) {
@@ -100,7 +131,7 @@ extension SessionCoordinator {
     /// Written to the stream, but the server has neither acknowledged it
     /// nor sent back its copy (which replaces the local echo).
     private func isAwaitingConfirmation(_ message: OutboundMessage) -> Bool {
-        deliveries.state(of: message.clientID) == .sent && echo(of: message)?.isLocalEcho == true
+        deliveries.state(of: message.clientID) == .sent && echo(of: message)?.isLocalEcho != false
     }
 
     private func persisted(_ message: OutboundMessage, state: PersistedOutbound.State) -> PersistedOutbound {

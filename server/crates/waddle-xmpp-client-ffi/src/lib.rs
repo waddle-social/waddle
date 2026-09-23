@@ -23,6 +23,7 @@ mod messaging;
 mod messaging_verbs;
 mod muji;
 mod notify_settings;
+mod ping;
 mod profile_verbs;
 mod push;
 mod room_admin;
@@ -219,9 +220,14 @@ impl WaddleClient {
     }
 
     pub async fn disconnect(&self) {
-        let mut guard = self.handle.lock().await;
-        if let Some(h) = guard.take() {
+        let handle = self.handle.lock().await.take();
+        if let Some(h) = handle {
             let _ = h.disconnect().await;
+        } else {
+            // The Swift coordinator may discover a stale online state after
+            // the FFI handle has already ended. Surface the terminal state so
+            // its normal reconnect loop can proceed.
+            self.listener.on_event(WaddleClientEvent::Disconnected);
         }
     }
 }

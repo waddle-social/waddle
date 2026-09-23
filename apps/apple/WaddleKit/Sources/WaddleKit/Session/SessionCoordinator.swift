@@ -45,6 +45,7 @@ public final class SessionCoordinator {
     @ObservationIgnored private let reconnectPolicy: ReconnectPolicy
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    @ObservationIgnored var foregroundProbeTask: Task<Void, Never>?
     @ObservationIgnored private var typingSweepTask: Task<Void, Never>?
     @ObservationIgnored private(set) var readyTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
@@ -53,6 +54,16 @@ public final class SessionCoordinator {
     @ObservationIgnored var failedOutbound: [String: OutboundMessage] = [:]
     @ObservationIgnored var sentOutbound: [String: OutboundMessage] = [:]
     @ObservationIgnored var sentOrder: [String] = []
+    /// Bounded correlation window for a recipient bounce that arrives after
+    /// the server already acknowledged the stanza.
+    @ObservationIgnored var recentlyAcknowledgedOutbound: [String: OutboundMessage] = [:]
+    @ObservationIgnored var recentlyAcknowledgedOrder: [String] = []
+    /// IDs explicitly retried while a previous send continuation may still
+    /// be suspended. Its eventual result must not settle the retry.
+    @ObservationIgnored var retryingOutboundIDs: Set<String> = []
+    /// A bounce can arrive after a generic failure was retried but before
+    /// that retry begins; retire the still-live stream before sending it.
+    @ObservationIgnored var resetBeforeRetryIDs: Set<String> = []
     @ObservationIgnored let outboxStore: any OutboxStore
     /// The saved outbox was loaded this start; only then is it saved.
     @ObservationIgnored var isOutboxLoaded = false
@@ -74,9 +85,13 @@ public final class SessionCoordinator {
     /// One connect at a time: the FFI keeps a single stream handle and a
     /// second attempt would overwrite, and orphan, the first one's stream.
     @ObservationIgnored private var isConnectInFlight = false
-    /// A retry was due while a connect was still running.
+    /// A transport is being retired; the next attempt must wait for its
+    /// terminal `.disconnected` event.
+    @ObservationIgnored var isConnectResetting = false
+    /// A retry was due while the FFI connect call was still running.
     @ObservationIgnored private var retryWhenConnectSettles = false
     @ObservationIgnored private var attempt = 0
+    @ObservationIgnored var connectionEpoch = 0
 
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
@@ -118,6 +133,9 @@ public final class SessionCoordinator {
     /// Restores the saved outbox, starts consuming events and connects.
     public func start() {
         isStopped = false
+        connectionEpoch += 1
+        isConnectResetting = false
+        retryWhenConnectSettles = false
         restoreOutboxIfNeeded()
         guard eventTask == nil else { return }
         let events = port.events
@@ -136,6 +154,11 @@ public final class SessionCoordinator {
         isStopped = true
         reconnectTask?.cancel()
         reconnectTask = nil
+        foregroundProbeTask?.cancel()
+        foregroundProbeTask = nil
+        connectionEpoch += 1
+        isConnectResetting = false
+        retryWhenConnectSettles = false
         typingSweepTask?.cancel()
         typingSweepTask = nil
         readyTask?.cancel()
@@ -149,7 +172,8 @@ public final class SessionCoordinator {
         clearStores()
     }
 
-    /// Reconnects immediately if offline (app foregrounded, network back).
+    /// Recovers the session on foreground, including queued sends on a
+    /// transport that still appears online after iOS suspended the app.
     public func resume() {
         restoreOutboxIfNeeded()
         switch status.connection {
@@ -158,13 +182,48 @@ public final class SessionCoordinator {
             reconnectTask?.cancel()
             reconnectTask = nil
             connectNow()
-        case .online, .signedOut, .authenticationFailed:
+        case .online:
+            guard !isConnectResetting else { return }
+            guard foregroundProbeTask == nil else { return }
+            let epoch = connectionEpoch
+            foregroundProbeTask = Task { [weak self] in
+                guard let self else { return }
+                let isHealthy = await self.port.probeConnection()
+                guard !Task.isCancelled, epoch == self.connectionEpoch else { return }
+                self.foregroundProbeTask = nil
+                guard !self.isStopped, self.status.connection == .online else { return }
+                guard isHealthy else {
+                    await self.resetStaleConnection()
+                    return
+                }
+                if self.isSendReady, !self.outboundQueue.isEmpty {
+                    await self.flushOutboundQueue()
+                }
+            }
+        case .signedOut, .authenticationFailed:
             return
         }
     }
 
+    /// Retires a transport whose health or send result is uncertain. The
+    /// reconnect loop starts only after the port emits its terminal event.
+    func resetStaleConnection() async {
+        guard !isStopped, status.connection == .online, !isConnectResetting else { return }
+        isConnectResetting = true
+        foregroundProbeTask?.cancel()
+        foregroundProbeTask = nil
+        isSendReady = false
+        readyTask?.cancel()
+        readyTask = nil
+        await port.disconnect()
+    }
+
     private func connectNow() {
         guard !isStopped, status.connection != .online else { return }
+        guard !isConnectResetting else {
+            retryWhenConnectSettles = true
+            return
+        }
         guard !isConnectInFlight else {
             retryWhenConnectSettles = true
             return
@@ -193,29 +252,37 @@ public final class SessionCoordinator {
         }
     }
 
-    /// The in-flight connect returned. Run a retry that came due while it
-    /// was running; a `.connected` event from it cancels that retry.
+    /// The FFI connect call returned. Retire its driver first if a retry
+    /// became due while transport setup was still running.
     private func connectSettled() {
         isConnectInFlight = false
         guard retryWhenConnectSettles else { return }
         retryWhenConnectSettles = false
-        if status.connection != .online {
-            scheduleReconnect()
+        guard !isStopped else { return }
+        guard status.connection != .online else {
+            isConnectResetting = false
+            return
         }
+        // `port.connect()` can return after opening the transport but before
+        // XMPP binding finishes. If a retry became due while it was pending,
+        // close this attempt and wait for its terminal event before opening
+        // another driver.
+        isConnectResetting = true
+        Task { [weak self] in await self?.port.disconnect() }
     }
 
     private func connectAttemptTimedOut(_ timedOut: Int) async {
         guard timedOut == attempt, status.connection == .connecting, !isStopped else { return }
-        await port.disconnect()
-        guard timedOut == attempt, status.connection == .connecting else { return }
         guard !isConnectInFlight else {
-            // Still negotiating: show offline, but retry only once it settles
-            // so two attempts never race for the one stream handle.
-            status.connection = .offline(retryAt: nil)
+            // The FFI has not returned a handle yet, so a disconnect cannot
+            // stop this attempt. Wait for it to settle, then close it before
+            // allowing the reconnect loop to start another driver.
+            isConnectResetting = true
             retryWhenConnectSettles = true
             return
         }
-        scheduleReconnect()
+        isConnectResetting = true
+        await port.disconnect()
     }
 
     private func scheduleReconnect() {
@@ -248,6 +315,10 @@ public final class SessionCoordinator {
         failedOutbound.removeAll()
         sentOutbound.removeAll()
         sentOrder.removeAll()
+        recentlyAcknowledgedOutbound.removeAll()
+        recentlyAcknowledgedOrder.removeAll()
+        retryingOutboundIDs.removeAll()
+        resetBeforeRetryIDs.removeAll()
         isOutboxLoaded = false
         savedOutbox.removeAll()
         isSendReady = false
@@ -265,6 +336,11 @@ public final class SessionCoordinator {
         case .connected:
             // Signed out: a late connect is torn down by its own task.
             guard !isStopped else { return }
+            guard !isConnectResetting else { return }
+            connectionEpoch += 1
+            foregroundProbeTask?.cancel()
+            foregroundProbeTask = nil
+            retryWhenConnectSettles = false
             connectWatchdog?.cancel()
             connectWatchdog = nil
             // A slow attempt that succeeds after the watchdog gave up wins;
@@ -277,6 +353,14 @@ public final class SessionCoordinator {
             readyTask?.cancel()
             readyTask = Task { [weak self] in await self?.sessionReady() }
         case .disconnected:
+            // Every disconnect creates a fresh FFI driver; its old
+            // XEP-0198 state is not resumed, so replay unconfirmed sends.
+            requeueUnconfirmedSendsForFreshStream()
+            isConnectResetting = false
+            retryWhenConnectSettles = false
+            connectionEpoch += 1
+            foregroundProbeTask?.cancel()
+            foregroundProbeTask = nil
             readyTask?.cancel()
             readyTask = nil
             isSendReady = false
@@ -294,12 +378,20 @@ public final class SessionCoordinator {
             presence.apply(wirePresence)
         case let .deliveryAcked(stanzaID):
             deliveries.acknowledged(stanzaID)
+            // A late ack can arrive after a reset has put this message back
+            // in the queue. The server already has it, so don't send it again.
+            if deliveries.state(of: stanzaID) == .acknowledged {
+                sentMessageAcknowledged(stanzaID)
+            }
             persistOutbox()
         case let .deliveryFailed(stanzaID):
             sentMessageFailed(stanzaID, bounced: false)
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
+            connectionEpoch += 1
+            foregroundProbeTask?.cancel()
+            foregroundProbeTask = nil
             isStopped = true
             reconnectTask?.cancel()
             reconnectTask = nil

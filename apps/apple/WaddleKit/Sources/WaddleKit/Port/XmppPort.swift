@@ -48,7 +48,14 @@ public protocol ConnectionPort: AnyObject, Sendable {
     var events: AsyncStream<XmppEvent> { get }
     func connect() async
     func disconnect() async
+    /// Confirms that an online XMPP stream still answers requests.
+    func probeConnection() async -> Bool
     func sendPresence(_ availability: Availability, status: String?) async
+}
+
+public extension ConnectionPort {
+    /// Ports without an explicit health probe keep their existing behavior.
+    func probeConnection() async -> Bool { true }
 }
 
 /// Conversation messaging verbs.

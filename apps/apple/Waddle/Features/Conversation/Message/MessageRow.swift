@@ -27,6 +27,8 @@ private struct MessageRowContent: View {
     @Environment(NavigationModel.self) private var navigation
     @Environment(MessageActionModel.self) private var actions
     @State private var isHovering = false
+    @State private var imagePreviewFile: SharedFile?
+    @State private var isImagePreviewPresented = false
     private var placement = ConversationInspectorPlacement()
 
     let entry: TimelineFeedEntry
@@ -50,7 +52,12 @@ private struct MessageRowContent: View {
                 if entry.startsGroup {
                     MessageRowHeader(author: author, item: item)
                 }
-                MessageRowBody(entry: entry, showsThreadChip: showsThreadChip, openThread: openThread)
+                MessageRowBody(
+                    entry: entry,
+                    showsThreadChip: showsThreadChip,
+                    openThread: openThread,
+                    openImage: openImage
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -70,7 +77,17 @@ private struct MessageRowContent: View {
             replyCount: entry.replyCount,
             time: item.sentAt.formatted(date: .omitted, time: .shortened)
         )))
-        .modifier(MessageAccessibilityActions(item: item, replyCount: entry.replyCount, openThread: openThread))
+        .modifier(MessageAccessibilityActions(
+            item: item,
+            replyCount: entry.replyCount,
+            openThread: openThread,
+            openImage: openImage
+        ))
+        .fullScreenCover(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
+            if let imagePreviewFile {
+                MessageImagePreviewView(file: imagePreviewFile)
+            }
+        }
     }
 
     private var occupant: Occupant? {
@@ -110,6 +127,11 @@ private struct MessageRowContent: View {
         guard let root = item.threadRootID else { return }
         navigation.openThread(root, in: item.conversation, usesInspector: placement.usesInspector)
     }
+
+    private func openImage(_ file: SharedFile) {
+        imagePreviewFile = file
+        isImagePreviewPresented = true
+    }
 }
 
 /// Everything under the header: reply quote, body or tombstone, files,
@@ -120,6 +142,7 @@ private struct MessageRowBody: View {
     let entry: TimelineFeedEntry
     let showsThreadChip: Bool
     let openThread: () -> Void
+    let openImage: (SharedFile) -> Void
 
     private var item: TimelineItem { entry.item }
 
@@ -147,7 +170,11 @@ private struct MessageRowBody: View {
             MessageRichBody(item: item, account: session.account, showsEditedMark: item.isEdited && !entry.startsGroup)
         }
         if !item.message.sharedFiles.isEmpty {
-            MessageAttachmentsView(files: item.message.sharedFiles, isSticker: item.message.isSticker)
+            MessageAttachmentsView(
+                files: item.message.sharedFiles,
+                isSticker: item.message.isSticker,
+                openImage: openImage
+            )
         }
         ForEach(item.message.linkPreviews, id: \.url) { preview in
             MessageLinkPreviewCard(preview: preview)

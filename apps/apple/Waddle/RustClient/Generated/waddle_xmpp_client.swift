@@ -1157,6 +1157,11 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func setRoomNotificationMode(roomJid: String, mode: WaddleNotifyMode, name: String?, richPayloadOptIn: Bool) async throws  -> WaddleSetRoomNotificationModeOutcome
 
     /**
+     * XEP-0199 client-to-server ping used to detect a half-open stream.
+     */
+    func pingServer() async throws
+
+    /**
      * XEP-0084 §4.3: publish the empty `<metadata/>` "no avatar"
      * item so subscribers drop their cached avatar.
      */
@@ -3173,6 +3178,26 @@ open func setRoomNotificationMode(roomJid: String, mode: WaddleNotifyMode, name:
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeWaddleSetRoomNotificationModeOutcome_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0199 client-to-server ping used to detect a half-open stream.
+     */
+open func pingServer()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_ping_server(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -16918,6 +16943,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server() != 33996) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar() != 59493) {

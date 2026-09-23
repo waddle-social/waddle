@@ -6,6 +6,7 @@ import WaddleKit
 struct MessageAttachmentsView: View {
     let files: [SharedFile]
     let isSticker: Bool
+    let openImage: (SharedFile) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.s - 2) {
@@ -31,23 +32,23 @@ struct MessageAttachmentsView: View {
         case .image where isSticker:
             MessageStickerView(file: file)
         case .image:
-            MessageImageAttachment(file: file)
+            MessageImageAttachment(file: file, open: openImage)
         default:
             MessageFileCard(file: file, kind: kind)
         }
     }
 }
 
-/// An inline image capped to the media width; tap opens it.
+/// An inline image capped to the media width; tap opens an in-app preview.
 struct MessageImageAttachment: View {
-    @Environment(\.openURL) private var openURL
     let file: SharedFile
+    let open: (SharedFile) -> Void
 
     static let maxHeight: CGFloat = 320
 
     var body: some View {
         Button {
-            openURL(file.url)
+            open(file)
         } label: {
             image
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
@@ -56,6 +57,7 @@ struct MessageImageAttachment: View {
         .buttonStyle(.plain)
         .accessibilityLabel(Text(file.description ?? file.displayName))
         .accessibilityAddTraits(.isImage)
+        .accessibilityHint(Text("Opens an image preview"))
     }
 
     @ViewBuilder
@@ -203,5 +205,54 @@ struct MessageFileCardLabel: View {
                 .strokeBorder(Color.secondary.opacity(0.15), lineWidth: 1)
         )
         .contentShape(Rectangle())
+    }
+}
+
+/// Full-screen in-app preview for an image shared in a message.
+struct MessageImagePreviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    let file: SharedFile
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            AsyncImage(url: file.url) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .failure:
+                    ContentUnavailableView("Couldn't Load Image", systemImage: "photo.badge.exclamationmark")
+                        .foregroundStyle(.white)
+                case .empty:
+                    ProgressView()
+                        .tint(.white)
+                @unknown default:
+                    ProgressView()
+                        .tint(.white)
+                }
+            }
+            .accessibilityLabel(Text(file.description ?? file.displayName))
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button("Close", systemImage: "xmark") {
+                        dismiss()
+                    }
+                    .labelStyle(.iconOnly)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .background(.black.opacity(0.55), in: Circle())
+                }
+                Spacer()
+            }
+            .padding()
+        }
+        .preferredColorScheme(.dark)
     }
 }

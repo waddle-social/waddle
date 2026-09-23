@@ -20,6 +20,12 @@ OUT="$APPLE/Generated"
 BINDINGS_DIR="$APPLE/Waddle/RustClient/Generated"
 XCFW="$OUT/WaddleXmppClientFFI.xcframework"
 
+# Keep Rust object deployment targets aligned with the Apple app targets.
+# Xcode Cloud invokes this script before Xcode's build settings can affect
+# cargo's Apple-target compilation.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+
 PROFILE="release"
 CARGO_FLAG="--release"
 if [[ "${1:-}" == "--debug" ]]; then

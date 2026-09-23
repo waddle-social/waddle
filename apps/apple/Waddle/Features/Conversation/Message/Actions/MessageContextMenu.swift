@@ -112,6 +112,7 @@ struct MessageAccessibilityActions: ViewModifier {
     let item: TimelineItem
     let replyCount: Int
     let openThread: () -> Void
+    let openImage: (SharedFile) -> Void
 
     func body(content: Content) -> some View {
         content.accessibilityActions {
@@ -123,7 +124,13 @@ struct MessageAccessibilityActions: ViewModifier {
                 Button("Open thread", action: openThread)
             }
             if let file = item.message.sharedFiles.first, file.encrypted == nil {
-                Button("Open attachment") { openURL(file.url) }
+                Button("Open attachment") {
+                    if MessageAttachmentKind(file) == .image {
+                        openImage(file)
+                    } else {
+                        openURL(file.url)
+                    }
+                }
             }
             if let preview = item.message.linkPreviews.first {
                 Button("Open link") { openURL(preview.url) }

@@ -26,6 +26,7 @@ public final class DeliveryStore {
 
     @ObservationIgnored private var earlyAcks: [String] = []
     @ObservationIgnored private var earlyFailures: [String] = []
+    @ObservationIgnored private var bouncedIDs: Set<String> = []
     @ObservationIgnored private let cap = 256
 
     public init() {}
@@ -35,6 +36,10 @@ public final class DeliveryStore {
     }
 
     public func began(_ clientID: String) {
+        // A bounced retry waits for the old stream to be retired before it
+        // starts. The marker can now be cleared: subsequent acks belong to
+        // the retry's fresh stream.
+        bouncedIDs.remove(clientID)
         states[clientID] = .sending
     }
 
@@ -55,9 +60,12 @@ public final class DeliveryStore {
         let current = states[clientID]
         let ackedEarly = consume(clientID, from: &earlyAcks)
         let failedEarly = consume(clientID, from: &earlyFailures)
+        let bounced = bouncedIDs.contains(clientID)
         let acknowledged = current == .acknowledged || ackedEarly
         let failed = current == .failed || failedEarly
         if outcome == .rejected {
+            states[clientID] = .failed
+        } else if bounced {
             states[clientID] = .failed
         } else if acknowledged {
             // The server has the stanza; it is never re-sent.
@@ -78,7 +86,28 @@ public final class DeliveryStore {
             remember(clientID, in: &earlyAcks)
             return
         }
+        if bouncedIDs.contains(clientID) {
+            // A late ack from the bounced attempt cannot settle an explicit
+            // retry that is queued for a fresh stream.
+            if states[clientID] != .queued {
+                states[clientID] = .failed
+            }
+        } else {
+            states[clientID] = .acknowledged
+        }
+    }
+
+    /// The server reflected our own stanza, including after an error bounce
+    /// when a later replay succeeded.
+    public func confirmedByReflection(_ clientID: String) {
+        bouncedIDs.remove(clientID)
+        earlyAcks.removeAll { $0 == clientID }
+        earlyFailures.removeAll { $0 == clientID }
         states[clientID] = .acknowledged
+    }
+
+    public func wasBounced(_ clientID: String) -> Bool {
+        bouncedIDs.contains(clientID)
     }
 
     public func failed(_ clientID: String) {
@@ -93,18 +122,21 @@ public final class DeliveryStore {
 
     /// The recipient returned an error for the stanza.
     public func bounced(_ clientID: String) {
+        bouncedIDs.insert(clientID)
         guard states[clientID] != nil else { return }
         states[clientID] = .failed
     }
 
     public func forget(_ clientID: String) {
         states[clientID] = nil
+        bouncedIDs.remove(clientID)
     }
 
     public func clear() {
         states.removeAll()
         earlyAcks.removeAll()
         earlyFailures.removeAll()
+        bouncedIDs.removeAll()
     }
 
     private func consume(_ id: String, from list: inout [String]) -> Bool {
