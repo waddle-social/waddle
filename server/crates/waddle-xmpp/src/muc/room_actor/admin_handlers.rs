@@ -161,6 +161,74 @@ fn admin_effects_for_applied(
     )
 }
 
+/// Reconcile removals that a foreign owner could not address because its
+/// actor did not have the transferred live sessions. Keep the complete
+/// pre-removal audience and the exact SFU sessions in the durable outbox.
+pub(super) fn restored_roster_removal_effects(
+    room: &MucRoom,
+    removed_sessions: &[FullJid],
+    already_removed: &[FullJid],
+) -> crate::muc::RoomMutationEffects {
+    if removed_sessions.is_empty() {
+        return crate::muc::RoomMutationEffects::none();
+    }
+    let recipients: Vec<_> = all_room_sessions(room)
+        .into_iter()
+        .filter(|session| !already_removed.contains(session))
+        .collect();
+    let mut self_updates = Vec::new();
+    let mut remaining_updates = Vec::new();
+    for occupant in room.occupants.values() {
+        let sessions = room.get_occupant_sessions(&occupant.nick);
+        if !sessions
+            .iter()
+            .any(|session| removed_sessions.contains(session))
+        {
+            continue;
+        }
+        let mut occupant = occupant.clone();
+        occupant.affiliation = room.get_affiliation(&occupant.real_jid.to_bare());
+        let occupant_jid = room
+            .room_jid
+            .with_resource_str(&occupant.nick)
+            .expect("nick was previously accepted as resource");
+        let kind = if occupant.affiliation == Affiliation::Outcast {
+            AdminPresenceKind::Banned
+        } else {
+            AdminPresenceKind::AffiliationRemoved
+        };
+        for recipient in &recipients {
+            let update = durable_admin_update(
+                room,
+                &occupant,
+                DurableAdminUpdateInput {
+                    occupant_jid: &occupant_jid,
+                    recipient,
+                    is_self: sessions.contains(recipient),
+                    kind,
+                    actor: None,
+                    reason: None,
+                },
+            );
+            // Each recipient belongs to exactly one ordinal even when a
+            // restore removes multiple occupants at once. The status-110
+            // flag still describes only that recipient's own nickname.
+            if removed_sessions.contains(recipient) {
+                self_updates.push(update);
+            } else {
+                remaining_updates.push(update);
+            }
+        }
+    }
+    crate::muc::RoomMutationEffects::admin(
+        room.room_jid.clone(),
+        self_updates,
+        remaining_updates,
+        removed_sessions.to_vec(),
+        Vec::new(),
+    )
+}
+
 fn removal_presence_updates(
     room: &MucRoom,
     occupant_id_secret: &OccupantIdSecret,

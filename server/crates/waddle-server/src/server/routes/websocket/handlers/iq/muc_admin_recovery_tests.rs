@@ -10,7 +10,7 @@ struct AmbiguousAdminStore {
     receipts: std::sync::Mutex<
         std::collections::HashMap<
             (BareJid, waddle_xmpp::muc::AdminMutationId),
-            RoomCommittedCoordinates,
+            waddle_xmpp::muc::AdminMutationReceipt,
         >,
     >,
     block_next_load: std::sync::atomic::AtomicBool,
@@ -50,7 +50,7 @@ impl waddle_xmpp::muc::durable::MucDurableStore for AmbiguousAdminStore {
         if !self.commit_admin
             && matches!(
                 intent,
-                waddle_xmpp::muc::RoomDurableMutation::AffiliationBatch(_)
+                waddle_xmpp::muc::RoomDurableMutation::AffiliationBatch(ref entries) if !entries.is_empty()
             )
         {
             return Box::pin(async {
@@ -66,6 +66,7 @@ impl waddle_xmpp::muc::durable::MucDurableStore for AmbiguousAdminStore {
         state.coordinates = Some(coordinates);
         let ambiguous =
             if let waddle_xmpp::muc::RoomDurableMutation::AffiliationBatch(entries) = intent {
+                let changed = !entries.is_empty();
                 for entry in entries {
                     state
                         .affiliations
@@ -79,15 +80,15 @@ impl waddle_xmpp::muc::durable::MucDurableStore for AmbiguousAdminStore {
                         );
                     }
                 }
-                true
+                changed
             } else {
                 false
             };
         if let Some(attempt) = effects.admin_mutation_id() {
-            self.receipts
-                .lock()
-                .expect("admin receipts")
-                .insert((room.clone(), attempt), coordinates);
+            self.receipts.lock().expect("admin receipts").insert(
+                (room.clone(), attempt),
+                waddle_xmpp::muc::AdminMutationReceipt::from_effects(coordinates, &effects),
+            );
         }
         Box::pin(async move {
             if ambiguous {
@@ -105,13 +106,14 @@ impl waddle_xmpp::muc::durable::MucDurableStore for AmbiguousAdminStore {
         &'a self,
         room: &'a BareJid,
         attempt: waddle_xmpp::muc::AdminMutationId,
-    ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<RoomCommittedCoordinates>> {
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::AdminMutationReceipt>>
+    {
         let receipt = self
             .receipts
             .lock()
             .expect("admin receipts")
             .get(&(room.clone(), attempt))
-            .copied();
+            .cloned();
         Box::pin(async move { Ok(receipt) })
     }
 
@@ -405,7 +407,7 @@ async fn assert_admin_recovery_preserves_final_roster(
         .lock()
         .expect("admin receipts")
         .get(&(room_jid.clone(), mutation_attempt))
-        .copied();
+        .map(|receipt| receipt.coordinates);
     let expected_reservation = if let Some(coordinates) = committed_coordinates {
         let pre = before.durable_coordinates.expect("pre-ask coordinates");
         assert!(coordinates.revision > pre.revision.next().expect("next revision"));

@@ -3582,6 +3582,7 @@ async fn recover_group_dm_actor_after_demote(
             live_room_restore: stale_snapshot.room,
             occupancy_revision: stale_snapshot.occupancy_revision,
             departures: stale_snapshot.departures,
+            live_roster_restore_attempt: stale_snapshot.live_roster_restore_attempt,
             pending_affiliation_departures: stale_snapshot.pending_affiliation_departures,
             pending_admin_projection: stale_snapshot.pending_admin_projection,
             admin_mutation_resolutions: stale_snapshot.admin_mutation_resolutions,
@@ -6262,6 +6263,12 @@ mod group_dm_durable_reconciliation_tests {
     struct TestGroupDmDurableStore {
         mode: DurableMode,
         outbox: Option<Arc<crate::room_effect_outbox::RoomEffectOutboxStore>>,
+        admin_receipts: Mutex<
+            HashMap<
+                (BareJid, waddle_xmpp::muc::AdminMutationId),
+                waddle_xmpp::muc::durable::AdminMutationReceipt,
+            >,
+        >,
         states: Mutex<HashMap<BareJid, DurableRoomState>>,
         fences: Mutex<HashMap<BareJid, waddle_xmpp::muc::RoomClaimFenceContext>>,
         coordinates: Mutex<HashMap<BareJid, (RoomLifecycleId, i64)>>,
@@ -6289,6 +6296,7 @@ mod group_dm_durable_reconciliation_tests {
             Arc::new(Self {
                 mode,
                 outbox,
+                admin_receipts: Mutex::new(HashMap::new()),
                 states: Mutex::new(HashMap::new()),
                 fences: Mutex::new(HashMap::new()),
                 coordinates: Mutex::new(HashMap::new()),
@@ -6404,6 +6412,32 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     impl MucDurableStore for TestGroupDmDurableStore {
+        fn load_admin_mutation_receipt<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            attempt: waddle_xmpp::muc::AdminMutationId,
+        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::AdminMutationReceipt>> {
+            let receipt = self
+                .admin_receipts
+                .lock()
+                .expect("admin receipts lock")
+                .get(&(room_jid.clone(), attempt))
+                .cloned();
+            Box::pin(async move { Ok(receipt) })
+        }
+
+        fn delete_admin_mutation_receipt<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            attempt: waddle_xmpp::muc::AdminMutationId,
+        ) -> MucDurableFuture<'a, ()> {
+            self.admin_receipts
+                .lock()
+                .expect("admin receipts lock")
+                .remove(&(room_jid.clone(), attempt));
+            Box::pin(async { Ok(()) })
+        }
+
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,
@@ -6519,6 +6553,18 @@ mod group_dm_durable_reconciliation_tests {
                 }
                 self.apply_mutation(room_jid, intent);
                 self.record_coordinates(room_jid, coordinates, is_config_commit);
+                if let Some(attempt) = effects.admin_mutation_id() {
+                    self.admin_receipts
+                        .lock()
+                        .expect("admin receipts lock")
+                        .insert(
+                            (room_jid.clone(), attempt),
+                            waddle_xmpp::muc::durable::AdminMutationReceipt::from_effects(
+                                coordinates,
+                                &effects,
+                            ),
+                        );
+                }
                 if mode == DurableMode::ProjectionLeaveSecondDelayed
                     && projection_leave_attempt == Some(2)
                 {

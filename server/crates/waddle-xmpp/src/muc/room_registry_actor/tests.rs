@@ -3875,6 +3875,14 @@ mod ownership_claims_tests {
     }
 
     impl MucDurableStore for RecordingDurableStore {
+        fn load_admin_mutation_receipt<'a>(
+            &'a self,
+            _room: &'a jid::BareJid,
+            _attempt: crate::muc::AdminMutationId,
+        ) -> crate::muc::MucDurableFuture<'a, Option<crate::muc::AdminMutationReceipt>> {
+            Box::pin(async { Ok(None) })
+        }
+
         fn destroy_completion_blocks_recreation<'a>(
             &'a self,
             _room_jid: &'a BareJid,
@@ -5056,6 +5064,7 @@ mod ownership_claims_tests {
                 config: RoomConfig::default(),
                 live_room_restore: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
+                live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
                 departures: source_snapshot.departures,
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,
@@ -5126,6 +5135,7 @@ mod ownership_claims_tests {
             live_room_restore: Some(LiveRoomRestore {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
+                live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
                 departures: Default::default(),
                 pending_affiliation_departures: source_snapshot.pending_affiliation_departures,
                 pending_admin_projection: source_snapshot.pending_admin_projection,
@@ -5229,6 +5239,7 @@ mod ownership_claims_tests {
                 },
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
+                live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
                 departures: Default::default(),
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,
@@ -5361,6 +5372,7 @@ mod ownership_claims_tests {
                 },
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
+                live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
                 departures: Default::default(),
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,
@@ -5400,6 +5412,7 @@ mod ownership_claims_tests {
                 config: RoomConfig::default(),
                 live_room_restore: source_snapshot_room_for_refusal,
                 occupancy_revision: 0,
+                live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
                 departures: Default::default(),
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,

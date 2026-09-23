@@ -32,7 +32,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 
 use super::affiliation::AffiliationEntry as StoredAffiliationEntry;
 use super::{RoomConfig, SubjectState};
@@ -98,6 +98,52 @@ impl AdminMutationId {
 
     pub const fn as_uuid(self) -> uuid::Uuid {
         self.0
+    }
+
+    /// A stable next batch for removals discovered during a retried handoff.
+    /// Follow this only after proving the preceding batch's exact receipt.
+    pub(crate) fn next_restore_attempt(self) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(b"waddle-muc-restored-departures-v1");
+        digest.update(self.0.as_bytes());
+        let hash = digest.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        // RFC 9562 UUIDv8: application-defined, domain-separated hash data.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(uuid::Uuid::from_bytes(bytes))
+    }
+}
+
+/// Exact committed effect custody, retained even after outbox delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminMutationReceipt {
+    pub coordinates: RoomCommittedCoordinates,
+    pub removed_sessions: Vec<FullJid>,
+}
+
+impl AdminMutationReceipt {
+    pub fn from_effects(
+        coordinates: RoomCommittedCoordinates,
+        effects: &RoomMutationEffects,
+    ) -> Self {
+        let removed_sessions = effects
+            .effects()
+            .iter()
+            .flat_map(|effect| match effect {
+                RoomEffect::AdminRemainingBroadcast {
+                    removed_sessions, ..
+                } => removed_sessions.as_slice(),
+                _ => &[],
+            })
+            .cloned()
+            .collect();
+        Self {
+            coordinates,
+            removed_sessions,
+        }
     }
 }
 
@@ -385,7 +431,7 @@ pub trait MucDurableStore: Send + Sync {
         &'a self,
         room_jid: &'a BareJid,
         attempt: AdminMutationId,
-    ) -> MucDurableFuture<'a, Option<RoomCommittedCoordinates>> {
+    ) -> MucDurableFuture<'a, Option<AdminMutationReceipt>> {
         let _ = (room_jid, attempt);
         Box::pin(async {
             Err(XmppError::internal(

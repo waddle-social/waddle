@@ -362,6 +362,7 @@ async fn live_roster_handoffs_preserve_each_unconsumed_admin_verdict() {
         .ask(RestoreLiveRoster {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
+            live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
             departures: snapshot.departures,
             pending_affiliation_departures: Default::default(),
             pending_admin_projection: None,
@@ -382,6 +383,7 @@ async fn live_roster_handoffs_preserve_each_unconsumed_admin_verdict() {
                 config: snapshot.room.config.clone(),
                 live_room_restore: snapshot.room,
                 occupancy_revision: snapshot.occupancy_revision,
+                live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
                 departures: snapshot.departures,
                 pending_affiliation_departures: snapshot.pending_affiliation_departures,
                 pending_admin_projection: snapshot.pending_admin_projection,

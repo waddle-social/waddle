@@ -162,6 +162,7 @@ struct RoomPreparationSpec {
 struct LiveRoomRestore {
     room: MucRoom,
     occupancy_revision: u64,
+    live_roster_restore_attempt: super::durable::AdminMutationId,
     departures: super::room_actor::DepartureLedger,
     pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
     pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
@@ -1786,6 +1787,7 @@ impl RoomRegistryActor {
                     .ask(RestoreLiveRoster {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
+                        live_roster_restore_attempt: restore.live_roster_restore_attempt,
                         departures: restore.departures,
                         pending_affiliation_departures: restore.pending_affiliation_departures,
                         pending_admin_projection: restore.pending_admin_projection,
@@ -2408,6 +2410,7 @@ impl RoomRegistryActor {
                         .ask(RestoreLiveRoster {
                             room: restore.room,
                             occupancy_revision: restore.occupancy_revision,
+                            live_roster_restore_attempt: restore.live_roster_restore_attempt,
                             departures: restore.departures,
                             pending_affiliation_departures: restore.pending_affiliation_departures,
                             pending_admin_projection: restore.pending_admin_projection,
@@ -4164,6 +4167,7 @@ impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
                     live_restore = Some(LiveRoomRestore {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
+                        live_roster_restore_attempt: restore.live_roster_restore_attempt,
                         departures: restore.departures,
                         pending_affiliation_departures: restore.pending_affiliation_departures,
                         pending_admin_projection: restore.pending_admin_projection,
@@ -5180,6 +5184,7 @@ pub struct GetOrCreateRoomWithLiveRoster {
     pub config: RoomConfig,
     pub live_room_restore: MucRoom,
     pub occupancy_revision: u64,
+    pub live_roster_restore_attempt: super::durable::AdminMutationId,
     /// The predecessor's unacknowledged departure receipts (see
     /// [`super::room_actor::RestoreLiveRoster`]).
     pub departures: super::room_actor::DepartureLedger,
@@ -5302,6 +5307,7 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             live_room_restore: Some(LiveRoomRestore {
                 room: msg.live_room_restore,
                 occupancy_revision: msg.occupancy_revision,
+                live_roster_restore_attempt: msg.live_roster_restore_attempt,
                 departures: msg.departures,
                 pending_affiliation_departures: msg.pending_affiliation_departures,
                 pending_admin_projection: msg.pending_admin_projection,

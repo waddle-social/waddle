@@ -89,6 +89,7 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
         .ask(RestoreLiveRoster {
             room: stale_room,
             occupancy_revision: 0,
+            live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -126,6 +127,7 @@ async fn restoring_live_roster_preserves_pending_members_only_config_removals() 
         .ask(RestoreLiveRoster {
             room: stale_room,
             occupancy_revision: 0,
+            live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -162,6 +164,7 @@ async fn restoring_live_roster_preserves_explicit_roles_without_authorization_ch
             .ask(RestoreLiveRoster {
                 room: stale_room,
                 occupancy_revision: 0,
+                live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
                 departures: Default::default(),
                 pending_admin_projection: None,
                 admin_mutation_resolutions: Vec::new(),
@@ -4258,6 +4261,14 @@ impl FakeDurableStore {
 }
 
 impl crate::muc::durable::MucDurableStore for FakeDurableStore {
+    fn load_admin_mutation_receipt<'a>(
+        &'a self,
+        _room: &'a jid::BareJid,
+        _attempt: crate::muc::AdminMutationId,
+    ) -> crate::muc::MucDurableFuture<'a, Option<crate::muc::AdminMutationReceipt>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn commit_room_mutation<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -4489,6 +4500,14 @@ impl FailNthAffiliationSaveStore {
 }
 
 impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
+    fn load_admin_mutation_receipt<'a>(
+        &'a self,
+        _room: &'a jid::BareJid,
+        _attempt: crate::muc::AdminMutationId,
+    ) -> crate::muc::MucDurableFuture<'a, Option<crate::muc::AdminMutationReceipt>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn commit_room_mutation<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -5135,6 +5154,7 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
         .ask(RestoreLiveRoster {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
+            live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
             departures: snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -5892,6 +5912,7 @@ async fn receipts_are_transferred_on_live_roster_restore() {
         .ask(RestoreLiveRoster {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
+            live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
             departures: snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -5939,6 +5960,7 @@ async fn transferred_older_generation_receipt_is_refused() {
         .ask(RestoreLiveRoster {
             room: newer_snapshot.room,
             occupancy_revision: newer_snapshot.occupancy_revision,
+            live_roster_restore_attempt: newer_snapshot.live_roster_restore_attempt,
             departures: newer_snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -5950,6 +5972,7 @@ async fn transferred_older_generation_receipt_is_refused() {
         .ask(RestoreLiveRoster {
             room: older_snapshot.room,
             occupancy_revision: older_snapshot.occupancy_revision,
+            live_roster_restore_attempt: older_snapshot.live_roster_restore_attempt,
             departures: older_snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -7359,6 +7382,7 @@ async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
         .ask(RestoreLiveRoster {
             room: roster,
             occupancy_revision: 2,
+            live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -7378,6 +7402,7 @@ async fn live_roster_transfer_preserves_actor_room_jid() {
         .ask(RestoreLiveRoster {
             room: foreign_room,
             occupancy_revision: 0,
+            live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -7631,6 +7656,14 @@ impl FlakyThenRecoveringStore {
 }
 
 impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
+    fn load_admin_mutation_receipt<'a>(
+        &'a self,
+        _room: &'a jid::BareJid,
+        _attempt: crate::muc::AdminMutationId,
+    ) -> crate::muc::MucDurableFuture<'a, Option<crate::muc::AdminMutationReceipt>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn commit_room_mutation<'a>(
         &'a self,
         room_jid: &'a BareJid,

@@ -3863,6 +3863,16 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
     }
 
     impl MucDurableStore for AmbiguousConfigCommitStore {
+        // This fixture only makes configuration commits ambiguous; it has
+        // no admin effect receipts for the live-roster recovery to replay.
+        fn load_admin_mutation_receipt<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _attempt: waddle_xmpp::muc::AdminMutationId,
+        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::AdminMutationReceipt>> {
+            Box::pin(async { Ok(None) })
+        }
+
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,

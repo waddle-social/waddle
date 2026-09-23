@@ -1,7 +1,9 @@
 //! Exact admin commit evidence that survives later owners and effect delivery.
 
 use jid::BareJid;
-use waddle_xmpp::muc::{AdminMutationId, RoomCommittedCoordinates, RoomLifecycleId, RoomRevision};
+use waddle_xmpp::muc::{
+    AdminMutationId, AdminMutationReceipt, RoomCommittedCoordinates, RoomLifecycleId, RoomRevision,
+};
 use waddle_xmpp::XmppError;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
@@ -12,7 +14,7 @@ pub(super) async fn ensure_schema(tx: &mut Transaction<'_>) -> Result<(), Databa
          attempt_id TEXT PRIMARY KEY, room_jid TEXT NOT NULL, \
          lifecycle_id TEXT NOT NULL REFERENCES clustering_muc_room_lifecycles(lifecycle_id) ON DELETE CASCADE, \
          revision BIGINT NOT NULL CHECK (revision >= 1), \
-         created_at_ms BIGINT NOT NULL)",
+         created_at_ms BIGINT NOT NULL, removed_sessions_json TEXT NOT NULL)",
         (),
     )
     .await?;
@@ -70,17 +72,20 @@ pub(super) async fn insert_in_tx(
     tx: &mut Transaction<'_>,
     room: &BareJid,
     attempt: AdminMutationId,
-    coordinates: RoomCommittedCoordinates,
+    receipt: &AdminMutationReceipt,
 ) -> Result<(), DatabaseError> {
+    let removed_sessions = serde_json::to_string(&receipt.removed_sessions)
+        .map_err(|error| DatabaseError::QueryFailed(error.to_string()))?;
     tx.execute(
         "INSERT INTO clustering_muc_admin_receipts \
-         (attempt_id, room_jid, lifecycle_id, revision, created_at_ms) VALUES (?, ?, ?, ?, ?)",
+         (attempt_id, room_jid, lifecycle_id, revision, created_at_ms, removed_sessions_json) VALUES (?, ?, ?, ?, ?, ?)",
         crate::db_params![
             attempt.as_uuid().to_string(),
             room.to_string(),
-            coordinates.lifecycle.to_string(),
-            coordinates.revision.as_i64(),
-            crate::time::now_ms()
+            receipt.coordinates.lifecycle.to_string(),
+            receipt.coordinates.revision.as_i64(),
+            crate::time::now_ms(),
+            removed_sessions
         ],
     )
     .await?;
@@ -91,11 +96,11 @@ pub(super) async fn load(
     db: &Database,
     room: &BareJid,
     attempt: AdminMutationId,
-) -> Result<Option<RoomCommittedCoordinates>, XmppError> {
+) -> Result<Option<AdminMutationReceipt>, XmppError> {
     let connection = db.guard().await.map_err(super::db_err)?;
     let mut rows = connection
         .query(
-            "SELECT lifecycle_id, revision FROM clustering_muc_admin_receipts \
+            "SELECT lifecycle_id, revision, removed_sessions_json FROM clustering_muc_admin_receipts \
              WHERE room_jid = ? AND attempt_id = ?",
             crate::db_params![room.to_string(), attempt.as_uuid().to_string()],
         )
@@ -110,9 +115,15 @@ pub(super) async fn load(
         .map_err(|_| XmppError::internal("invalid admin receipt lifecycle"))?;
     let revision = RoomRevision::from_stored(row.get(1).map_err(super::db_err)?)
         .ok_or_else(|| XmppError::internal("invalid admin receipt revision"))?;
-    Ok(Some(RoomCommittedCoordinates {
-        lifecycle,
-        revision,
+    let removed_sessions: String = row.get(2).map_err(super::db_err)?;
+    let removed_sessions = serde_json::from_str(&removed_sessions)
+        .map_err(|_| XmppError::internal("invalid admin receipt removed sessions"))?;
+    Ok(Some(AdminMutationReceipt {
+        coordinates: RoomCommittedCoordinates {
+            lifecycle,
+            revision,
+        },
+        removed_sessions,
     }))
 }
 
@@ -185,6 +196,10 @@ mod tests {
             lifecycle: RoomLifecycleId::generate(),
             revision: RoomRevision::initial(),
         };
+        let receipt = AdminMutationReceipt {
+            coordinates,
+            removed_sessions: vec!["alice@example.com/web".parse().expect("session")],
+        };
         let mut tx = db.begin().await.expect("schema transaction");
         tx.execute(
             "CREATE TABLE clustering_muc_room_lifecycles (lifecycle_id TEXT PRIMARY KEY)",
@@ -203,7 +218,7 @@ mod tests {
 
         let failed_attempt = AdminMutationId::generate();
         let mut tx = db.begin().await.expect("rolled-back transaction");
-        insert_in_tx(&mut tx, &room, failed_attempt, coordinates)
+        insert_in_tx(&mut tx, &room, failed_attempt, &receipt)
             .await
             .expect("stage failed receipt");
         tx.rollback().await.expect("rollback");
@@ -211,7 +226,7 @@ mod tests {
 
         let committed_attempt = AdminMutationId::generate();
         let mut tx = db.begin().await.expect("committed transaction");
-        insert_in_tx(&mut tx, &room, committed_attempt, coordinates)
+        insert_in_tx(&mut tx, &room, committed_attempt, &receipt)
             .await
             .expect("stage committed receipt");
         tx.commit().await.expect("commit");
@@ -221,9 +236,12 @@ mod tests {
             &mut tx,
             &room,
             later_attempt,
-            RoomCommittedCoordinates {
-                revision: coordinates.revision.next().expect("next revision"),
-                ..coordinates
+            &AdminMutationReceipt {
+                coordinates: RoomCommittedCoordinates {
+                    revision: coordinates.revision.next().expect("next revision"),
+                    ..coordinates
+                },
+                removed_sessions: Vec::new(),
             },
         )
         .await
@@ -232,7 +250,7 @@ mod tests {
         assert_eq!(load(&db, &room, failed_attempt).await.expect("read"), None);
         assert_eq!(
             load(&db, &room, committed_attempt).await.expect("read"),
-            Some(coordinates)
+            Some(receipt.clone())
         );
         let other_room: BareJid = "other@muc.example.com".parse().expect("other room");
         assert_eq!(
@@ -246,7 +264,7 @@ mod tests {
             .expect("wrong-room cleanup");
         assert_eq!(
             load(&db, &room, committed_attempt).await.expect("read"),
-            Some(coordinates)
+            Some(receipt.clone())
         );
         delete(&db, &room, committed_attempt)
             .await
@@ -276,6 +294,10 @@ mod tests {
             lifecycle: RoomLifecycleId::generate(),
             revision: RoomRevision::initial(),
         };
+        let receipt = AdminMutationReceipt {
+            coordinates,
+            removed_sessions: vec!["alice@example.com/web".parse().expect("session")],
+        };
         let mut tx = db.begin().await.expect("schema transaction");
         tx.execute(
             "CREATE TABLE clustering_muc_room_lifecycles (lifecycle_id TEXT PRIMARY KEY)",
@@ -296,7 +318,7 @@ mod tests {
         let fresh = AdminMutationId::generate();
         let mut tx = db.begin().await.expect("insert transaction");
         for attempt in stranded.iter().chain(std::iter::once(&fresh)) {
-            insert_in_tx(&mut tx, &room, *attempt, coordinates)
+            insert_in_tx(&mut tx, &room, *attempt, &receipt)
                 .await
                 .expect("insert receipt");
         }
@@ -323,7 +345,7 @@ mod tests {
         assert_eq!(load(&db, &room, stranded[1]).await.expect("read"), None);
         assert_eq!(
             load(&db, &room, stranded[2]).await.expect("read"),
-            Some(coordinates),
+            Some(receipt.clone()),
             "the page limit bounds one sweep"
         );
         assert_eq!(
@@ -333,7 +355,7 @@ mod tests {
         assert_eq!(load(&db, &room, stranded[2]).await.expect("read"), None);
         assert_eq!(
             load(&db, &room, fresh).await.expect("read"),
-            Some(coordinates),
+            Some(receipt.clone()),
             "a receipt inside the retention window is never pruned"
         );
         assert_eq!(prune_older_than(&db, cutoff, 2).await.expect("idle"), 0);

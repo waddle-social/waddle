@@ -120,6 +120,17 @@ impl SubjectMutationStore {
 }
 
 impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
+    fn load_admin_mutation_receipt<'a>(
+        &'a self,
+        _room_jid: &'a jid::BareJid,
+        _attempt: waddle_xmpp::muc::AdminMutationId,
+    ) -> waddle_xmpp::muc::MucDurableFuture<
+        'a,
+        Option<waddle_xmpp::muc::durable::AdminMutationReceipt>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
     fn check_fenced_fanout<'a>(
         &'a self,
         _room_jid: &'a jid::BareJid,
@@ -1345,7 +1356,8 @@ async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
         ))
     ));
     // A different durable mutation revokes Bob while this actor is sealed.
-    // Its outbox owns the status-321 presence; recovery must not restore Bob.
+    // Recovery must not restore Bob. The outbox restore_recovery tests cover
+    // delivery when the foreign actor has no local removal audience.
     {
         let mut state = store.stored_state.lock().expect("stored state");
         let state = state.as_mut().expect("durable room");

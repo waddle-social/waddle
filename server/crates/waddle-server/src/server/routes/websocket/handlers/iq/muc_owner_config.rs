@@ -1267,6 +1267,12 @@ mod tests {
 
     struct PausableConfigDurableStore {
         outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+        admin_receipts: Mutex<
+            HashMap<
+                (BareJid, waddle_xmpp::muc::AdminMutationId),
+                waddle_xmpp::muc::durable::AdminMutationReceipt,
+            >,
+        >,
         states: Mutex<HashMap<BareJid, DurableRoomState>>,
         fences: Mutex<HashMap<BareJid, waddle_xmpp::muc::RoomClaimFenceContext>>,
         coordinates: Mutex<HashMap<BareJid, (RoomLifecycleId, i64)>>,
@@ -1278,6 +1284,7 @@ mod tests {
         fn new(outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>) -> Arc<Self> {
             Arc::new(Self {
                 outbox,
+                admin_receipts: Mutex::new(HashMap::new()),
                 states: Mutex::new(HashMap::new()),
                 fences: Mutex::new(HashMap::new()),
                 coordinates: Mutex::new(HashMap::new()),
@@ -1378,6 +1385,32 @@ mod tests {
     }
 
     impl MucDurableStore for PausableConfigDurableStore {
+        fn load_admin_mutation_receipt<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            attempt: waddle_xmpp::muc::AdminMutationId,
+        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::AdminMutationReceipt>> {
+            let receipt = self
+                .admin_receipts
+                .lock()
+                .expect("admin receipts lock")
+                .get(&(room_jid.clone(), attempt))
+                .cloned();
+            Box::pin(async move { Ok(receipt) })
+        }
+
+        fn delete_admin_mutation_receipt<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            attempt: waddle_xmpp::muc::AdminMutationId,
+        ) -> MucDurableFuture<'a, ()> {
+            self.admin_receipts
+                .lock()
+                .expect("admin receipts lock")
+                .remove(&(room_jid.clone(), attempt));
+            Box::pin(async { Ok(()) })
+        }
+
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,
@@ -1453,6 +1486,18 @@ mod tests {
                 );
                 self.apply_mutation(room_jid, intent);
                 self.record_coordinates(room_jid, coordinates, is_config_commit);
+                if let Some(attempt) = effects.admin_mutation_id() {
+                    self.admin_receipts
+                        .lock()
+                        .expect("admin receipts lock")
+                        .insert(
+                            (room_jid.clone(), attempt),
+                            waddle_xmpp::muc::durable::AdminMutationReceipt::from_effects(
+                                coordinates,
+                                &effects,
+                            ),
+                        );
+                }
                 let pause = { self.commit_pause.lock().expect("commit pause lock").take() };
                 if let Some(pause) = pause {
                     // Each pause has exactly one producer and one test waiter. `notify_one`
