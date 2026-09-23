@@ -47,6 +47,7 @@
 		1CDADB92A74C5B1B09B0AEA4 /* MessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9183947CADB3940CB51F685C /* MessageRow.swift */; };
 		1DE417F94610EBD334160B70 /* PhoneShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69278ECB6FF1C13DB8049AB /* PhoneShell.swift */; };
 		1F366FF69DD8074B6316F8CA /* AccountSignOutButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3027197695AD04C246A4D2C3 /* AccountSignOutButton.swift */; };
+		1F9F2572E8FA76304F2E7682 /* EncryptedAttachmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B82914D2AA80BAD09040F2E /* EncryptedAttachmentView.swift */; };
 		223E5BD52B094E2947328B5B /* RoomMembersSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C70847E6FA7388FC6231A89 /* RoomMembersSections.swift */; };
 		22DF22290670D3C4B9BABDE1 /* QuickSwitcherRanking.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB699135F2699F62EE19308 /* QuickSwitcherRanking.swift */; };
 		237686D6632D2EF5CCC21266 /* FFIRFC3339.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */; };
@@ -95,11 +96,14 @@
 		4162DD68695079353C7A1BC0 /* FFIXmppPort+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C23BB845ABC3CBB05A9314 /* FFIXmppPort+Push.swift */; };
 		41924BAAF097F3AEDE675306 /* MemberPermissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92341C99BBB49D538EC5376C /* MemberPermissions.swift */; };
 		4230F4641D894E48468B1D19 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
+		43B378CF5644D2EC06825509 /* EncryptedAttachmentModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */; };
 		44C0023C47D7D8DFF8FA0326 /* RecipientResultsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA12FBAA4F2C84CE671184D8 /* RecipientResultsSection.swift */; };
+		451D45ED8617680D89ED95DB /* DecryptedAttachmentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E1F68278CF8DC651B6C201 /* DecryptedAttachmentViews.swift */; };
 		45236C8DF13EAE1862D4A3F2 /* HomeList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F9B6166199D282F6AAEDD0C /* HomeList.swift */; };
 		45F76FC22DA5EA91FF542C90 /* NavigationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 864B273BE4F9A184AE17B490 /* NavigationModel.swift */; };
 		46A8C1554BB25F7CD8870E6E /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E9CD80AD20FAD5CE647CDC3 /* ActivityView.swift */; };
 		4A5671201D93D19B3C4DFAA2 /* DirectNavigationRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */; };
+		4AF662331E49CBC20B2D9F4E /* DecryptedAttachmentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E1F68278CF8DC651B6C201 /* DecryptedAttachmentViews.swift */; };
 		4AFCBA04F03D802BFE8B3601 /* ComposerAttachmentStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E09CE720382EC54E3C6218 /* ComposerAttachmentStrip.swift */; };
 		4B7576880A7AB8C980404C7B /* AttachmentPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F675EC377CC84AAEBF1449BB /* AttachmentPolicy.swift */; };
 		4C2A848898D5C57370AF4EB9 /* FFIInbound.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9295908F61E540E4185F41C3 /* FFIInbound.swift */; };
@@ -137,6 +141,7 @@
 		678350FE32A744881E116A1D /* SignInProviderPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04AD95367192E794D6F0B2C6 /* SignInProviderPanel.swift */; };
 		6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
 		69956BB0E13E43081B5AFD38 /* TimelineUnreadAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CB67A91AC8DCFCEC017F34E /* TimelineUnreadAnchor.swift */; };
+		69CE8B51CC3606017715D808 /* EncryptedAttachmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B82914D2AA80BAD09040F2E /* EncryptedAttachmentView.swift */; };
 		6A268994E1F6D6F07B5B5FCC /* QuickSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E7CEBBBBBA6AAA1203EA414 /* QuickSwitcher.swift */; };
 		6BCEFD523B63E8EE4535F701 /* ComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17423AC98C25904805D06B23 /* ComposerModel.swift */; };
 		6D6B5FAA197C4D4F5721D640 /* FFIXmppPort+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C23BB845ABC3CBB05A9314 /* FFIXmppPort+Push.swift */; };
@@ -147,10 +152,12 @@
 		70D991124F3F8277BCD1AC55 /* RichTextLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38D6A2D53CA28F752EF4E16C /* RichTextLayout.swift */; };
 		710FDC51F6C376DAFE4EDCB3 /* ProfileMoodEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F0CFB8B8A9EF99839CFEE4 /* ProfileMoodEditor.swift */; };
 		714194D3372D25FBB008A2EA /* SignInServerRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 763C66AFC397A7466126D6EC /* SignInServerRow.swift */; };
+		7241ABD9213E1FA3C654FD2D /* DecryptedFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCD57FC833D7E2D91021DE12 /* DecryptedFileStore.swift */; };
 		732FD319DF2653317D2F49D3 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66FCE4A2E446F8397C801AC /* SignInView.swift */; };
 		73A9399307B217F8A33536E0 /* NewMessageSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2D65F17C5B0112B7B7FF405 /* NewMessageSheet.swift */; };
 		73CBB39A014131D76CD5A019 /* RoomMembersModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8BA962AEDF6220C0907C63 /* RoomMembersModel.swift */; };
 		75D23D1E2FCEFE3EAC005FAA /* AuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B16D87BBE11A6EE95142654E /* AuthModels.swift */; };
+		7600496F6FBAC6CB368C6220 /* EncryptedFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68718ABC269E7FE0832170C /* EncryptedFileDownloader.swift */; };
 		7869CA33877C16E2041AA076 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0F38B78980F7FA0414198A /* Theme.swift */; };
 		78922B2D1F7F4E27662D5E6A /* SignInCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC2B3686BB5095FCFF4D16F /* SignInCard.swift */; };
 		79EBA043FC1C5A46F5F8980D /* ProfileAvatarControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904925AEBAB6740443CAC7F3 /* ProfileAvatarControls.swift */; };
@@ -202,6 +209,7 @@
 		97EA83659EDC249D123EBA04 /* FFIXmppPort+Directory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */; };
 		983DA929CB7287464454FBF3 /* ConversationInspectorPlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05CDE3002C84AACE6E61513C /* ConversationInspectorPlacement.swift */; };
 		985578F2C1EDA16F80D1107A /* AuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B16D87BBE11A6EE95142654E /* AuthModels.swift */; };
+		993D6DB8E4D4854D6729F56D /* EncryptedAttachmentStatusCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79EA3909819BAAAA3BAC4042 /* EncryptedAttachmentStatusCards.swift */; };
 		9A82862AAAA8B383D29523FB /* DirectDetailsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAA209A6DBE12965CCB98D6 /* DirectDetailsForm.swift */; };
 		9B0F625734AD5ED4C676BCE3 /* MessageReplySummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9472731557D616B2F74FF441 /* MessageReplySummary.swift */; };
 		9BD799307A94ABE1139C9295 /* MentionCandidates.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CE4092CC362E23E8DD915E7 /* MentionCandidates.swift */; };
@@ -214,6 +222,7 @@
 		A0389EB12E71697A54A80C9E /* TimelineHistoryHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DADAA8D894F156291483A5 /* TimelineHistoryHeader.swift */; };
 		A11359C8F42776D8A130CD28 /* FFISessionSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA3FAC89DAB41E26A3E53397 /* FFISessionSignals.swift */; };
 		A2620853BF416FBBB95E4A34 /* SidebarAccountBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ACF126A87B69DBEE632B1E1 /* SidebarAccountBar.swift */; };
+		A2CBF5707721E3FC3B922289 /* EncryptedAttachmentModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */; };
 		A2E330E99263C2025436BD8D /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3BBDDB0DC99803D3EEC777E /* EmojiCatalog.swift */; };
 		A40A369E2EB4DE78F3AB3F80 /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C47CB426A26582C047EB9477 /* ConversationComposer.swift */; };
 		A4DC77BF3BFA5D27E6EF6783 /* MentionHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3FB80C78A0D56B621847DC /* MentionHighlight.swift */; };
@@ -255,6 +264,8 @@
 		C521691A686F452F8FE7A6EC /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 079CAAA4C12136A21EC6B831 /* Preferences.swift */; };
 		C567AD660ED4E217DBAD4D3A /* AttachmentLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27ACBD9D98C0C8D658496DCA /* AttachmentLoader.swift */; };
 		C66EABE79654CE25384DBFDA /* ThreadScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75D6A32C54D89A2B02F909 /* ThreadScreen.swift */; };
+		C7F79204165298E5179374B9 /* EncryptedAttachmentStatusCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79EA3909819BAAAA3BAC4042 /* EncryptedAttachmentStatusCards.swift */; };
+		C9833A182130F5B789C4EBA1 /* EncryptedFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68718ABC269E7FE0832170C /* EncryptedFileDownloader.swift */; };
 		CA5B7C430658157869D10090 /* BridgeLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745E4D7A386971E4AA451053 /* BridgeLog.swift */; };
 		CA6475DE01C10D51D4C11731 /* MessageAttachmentKind.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3BB6D526A2162EF2F947DF7 /* MessageAttachmentKind.swift */; };
 		CB7DD7B71113C29CA61E8671 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB28E8396182DE8CD3D32A87 /* Components.swift */; };
@@ -268,6 +279,7 @@
 		CF156B7714706ECEE251A5B3 /* PhoneShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69278ECB6FF1C13DB8049AB /* PhoneShell.swift */; };
 		CFB9C73CB8E6482259A077CA /* ProfileHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A859364D0F895078570C5D3 /* ProfileHeader.swift */; };
 		CFF1458E61632C5EDD53572A /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 079CAAA4C12136A21EC6B831 /* Preferences.swift */; };
+		D0C62F34FEE2ECBCA793CC60 /* DecryptedFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCD57FC833D7E2D91021DE12 /* DecryptedFileStore.swift */; };
 		D56262205062FBDB1F827792 /* ProfileMoodCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A857EFDE807DD88C1AEA1EF1 /* ProfileMoodCatalog.swift */; };
 		D5AF7EC41F43FB274E107D5B /* AttachmentImageInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14B65E512A4E0390FEC7C4E /* AttachmentImageInfo.swift */; };
 		D5B7118690B54736F98C480D /* FFIXmppPort+Notify.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74DC91F2EF32ECBD7BC25238 /* FFIXmppPort+Notify.swift */; };
@@ -330,6 +342,7 @@
 		19C3F3FC0B5C1F32B0609769 /* FFILocked.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFILocked.swift; sourceTree = "<group>"; };
 		19CE875138305109C7CCC4E1 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		1B0C820EA40536B55023B88C /* ConversationHeaderText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHeaderText.swift; sourceTree = "<group>"; };
+		1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedAttachmentModel.swift; sourceTree = "<group>"; };
 		23892C2B3A078BA52981F443 /* SplitShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitShell.swift; sourceTree = "<group>"; };
 		24FC01964BF3C9A444AC8C8C /* MemberRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberRows.swift; sourceTree = "<group>"; };
 		27ACBD9D98C0C8D658496DCA /* AttachmentLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentLoader.swift; sourceTree = "<group>"; };
@@ -368,6 +381,7 @@
 		5F260E9DAFF6D5B58D74915F /* ActivityFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityFeed.swift; sourceTree = "<group>"; };
 		62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIRFC3339.swift; sourceTree = "<group>"; };
 		64C1A66EF7C85EE90AD2B579 /* ConversationLabels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationLabels.swift; sourceTree = "<group>"; };
+		64E1F68278CF8DC651B6C201 /* DecryptedAttachmentViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecryptedAttachmentViews.swift; sourceTree = "<group>"; };
 		6E45EB2101AB889951F4F632 /* MessageContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageContextMenu.swift; sourceTree = "<group>"; };
 		6F31978C444F8E69FEE0AA7A /* NewMessageToolbarButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageToolbarButton.swift; sourceTree = "<group>"; };
 		6F3FAA96C326A287596EF89C /* FFIInbound+MessageParts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+MessageParts.swift"; sourceTree = "<group>"; };
@@ -379,7 +393,9 @@
 		763C66AFC397A7466126D6EC /* SignInServerRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInServerRow.swift; sourceTree = "<group>"; };
 		76ACA60CC9A88E920924472E /* MessageRowHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRowHeader.swift; sourceTree = "<group>"; };
 		79C0B6BD5F8A7D842A008370 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		79EA3909819BAAAA3BAC4042 /* EncryptedAttachmentStatusCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedAttachmentStatusCards.swift; sourceTree = "<group>"; };
 		7AAAA9D431C32EA59D349047 /* NavigationSections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationSections.swift; sourceTree = "<group>"; };
+		7B82914D2AA80BAD09040F2E /* EncryptedAttachmentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedAttachmentView.swift; sourceTree = "<group>"; };
 		7CAA209A6DBE12965CCB98D6 /* DirectDetailsForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectDetailsForm.swift; sourceTree = "<group>"; };
 		7EF52A43F2E37C83825989DB /* ConversationTypingIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTypingIndicator.swift; sourceTree = "<group>"; };
 		7F37048A8D96C01F7111FED0 /* Waddle-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Waddle-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -437,6 +453,7 @@
 		C6A084A6FE3A66B392B132BE /* FFIXmppPort+Upload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Upload.swift"; sourceTree = "<group>"; };
 		C8BDF2333452BD5C877BE946 /* RichTextModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTextModel.swift; sourceTree = "<group>"; };
 		C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CCD57FC833D7E2D91021DE12 /* DecryptedFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecryptedFileStore.swift; sourceTree = "<group>"; };
 		CF317440D44D33577F844A73 /* FFIEventListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIEventListener.swift; sourceTree = "<group>"; };
 		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Directory.swift"; sourceTree = "<group>"; };
@@ -463,6 +480,7 @@
 		F42745ADE0C39F2B85B36F6C /* ProfileAvatarSizing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileAvatarSizing.swift; sourceTree = "<group>"; };
 		F435E3C7C4A4FAB7F71FD870 /* DirectListSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectListSection.swift; sourceTree = "<group>"; };
 		F675EC377CC84AAEBF1449BB /* AttachmentPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentPolicy.swift; sourceTree = "<group>"; };
+		F68718ABC269E7FE0832170C /* EncryptedFileDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedFileDownloader.swift; sourceTree = "<group>"; };
 		F69278ECB6FF1C13DB8049AB /* PhoneShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneShell.swift; sourceTree = "<group>"; };
 		F6B71A96D2EEE905E68375A0 /* ActivityRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityRow.swift; sourceTree = "<group>"; };
 		F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -716,6 +734,12 @@
 		74BF8418993F8292EF97DE14 /* Attachments */ = {
 			isa = PBXGroup;
 			children = (
+				64E1F68278CF8DC651B6C201 /* DecryptedAttachmentViews.swift */,
+				CCD57FC833D7E2D91021DE12 /* DecryptedFileStore.swift */,
+				1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */,
+				79EA3909819BAAAA3BAC4042 /* EncryptedAttachmentStatusCards.swift */,
+				7B82914D2AA80BAD09040F2E /* EncryptedAttachmentView.swift */,
+				F68718ABC269E7FE0832170C /* EncryptedFileDownloader.swift */,
 				C3BB6D526A2162EF2F947DF7 /* MessageAttachmentKind.swift */,
 				E5EB80193A96E8F2BC698C32 /* MessageAttachmentsView.swift */,
 			);
@@ -1163,11 +1187,17 @@
 				645DE17F5C5CDC420FCE3059 /* ConversationToolbar.swift in Sources */,
 				BB5DD7EDB2DBC25ADC5C310A /* ConversationTypingIndicator.swift in Sources */,
 				CC22BF9FF672212EE348E689 /* CredentialStore.swift in Sources */,
+				4AF662331E49CBC20B2D9F4E /* DecryptedAttachmentViews.swift in Sources */,
+				7241ABD9213E1FA3C654FD2D /* DecryptedFileStore.swift in Sources */,
 				9A82862AAAA8B383D29523FB /* DirectDetailsForm.swift in Sources */,
 				4C6E9FD161D0A865A74C1C69 /* DirectListSection.swift in Sources */,
 				577C86886BADE3833BC6AA25 /* DirectMessagesList.swift in Sources */,
 				4A5671201D93D19B3C4DFAA2 /* DirectNavigationRow.swift in Sources */,
 				825574E41BFA9F02630667DD /* EmojiCatalog.swift in Sources */,
+				A2CBF5707721E3FC3B922289 /* EncryptedAttachmentModel.swift in Sources */,
+				C7F79204165298E5179374B9 /* EncryptedAttachmentStatusCards.swift in Sources */,
+				1F9F2572E8FA76304F2E7682 /* EncryptedAttachmentView.swift in Sources */,
+				7600496F6FBAC6CB368C6220 /* EncryptedFileDownloader.swift in Sources */,
 				2DDA5514F992810F06C5B939 /* FFIEventListener.swift in Sources */,
 				6D7FA77C3C6D0FCD91C0A013 /* FFIInbound+Directory.swift in Sources */,
 				054DE9608A108047AD3BDA3E /* FFIInbound+Message.swift in Sources */,
@@ -1317,11 +1347,17 @@
 				8E21B8BF6A5F09855BFC02C8 /* ConversationToolbar.swift in Sources */,
 				085881567F32CCC9DE039AA7 /* ConversationTypingIndicator.swift in Sources */,
 				D5C0D5831A61B3A0A233EF8C /* CredentialStore.swift in Sources */,
+				451D45ED8617680D89ED95DB /* DecryptedAttachmentViews.swift in Sources */,
+				D0C62F34FEE2ECBCA793CC60 /* DecryptedFileStore.swift in Sources */,
 				7AC5E0FDAB7C6748BC962CFA /* DirectDetailsForm.swift in Sources */,
 				2F547AA3F1C0F44270C9DC9B /* DirectListSection.swift in Sources */,
 				7C08C12899A9511A87F4DCD0 /* DirectMessagesList.swift in Sources */,
 				EF16198E05B173AE961CBB3A /* DirectNavigationRow.swift in Sources */,
 				A2E330E99263C2025436BD8D /* EmojiCatalog.swift in Sources */,
+				43B378CF5644D2EC06825509 /* EncryptedAttachmentModel.swift in Sources */,
+				993D6DB8E4D4854D6729F56D /* EncryptedAttachmentStatusCards.swift in Sources */,
+				69CE8B51CC3606017715D808 /* EncryptedAttachmentView.swift in Sources */,
+				C9833A182130F5B789C4EBA1 /* EncryptedFileDownloader.swift in Sources */,
 				54CD31F69B304A1D9F09D689 /* FFIEventListener.swift in Sources */,
 				9F394219DF8DEF1D0E961EB2 /* FFIInbound+Directory.swift in Sources */,
 				DCA858F1563FFA81F8BEF93A /* FFIInbound+Message.swift in Sources */,
