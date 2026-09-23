@@ -163,6 +163,7 @@ struct LiveRoomRestore {
     room: MucRoom,
     occupancy_revision: u64,
     departures: super::room_actor::DepartureLedger,
+    pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
 }
 
 enum DemandRoomPreparation {
@@ -1776,6 +1777,7 @@ impl RoomRegistryActor {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
                         departures: restore.departures,
+                        pending_admin_projection: restore.pending_admin_projection,
                     })
                     .await
                 {
@@ -2395,6 +2397,7 @@ impl RoomRegistryActor {
                             room: restore.room,
                             occupancy_revision: restore.occupancy_revision,
                             departures: restore.departures,
+                            pending_admin_projection: restore.pending_admin_projection,
                         })
                         .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
@@ -4148,6 +4151,7 @@ impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
                         departures: restore.departures,
+                        pending_admin_projection: restore.pending_admin_projection,
                     });
                     let entry = self
                         .rooms
@@ -5277,6 +5281,7 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
                 room: msg.live_room_restore,
                 occupancy_revision: msg.occupancy_revision,
                 departures: msg.departures,
+                pending_admin_projection: None,
             }),
         });
         let transition = self

@@ -250,6 +250,60 @@ pub struct RoomSnapshot {
     pub occupancy_revision: u64,
     /// Lost-reply departure state, transferred on live-roster recovery.
     pub departures: DepartureLedger,
+    /// Ephemeral admin changes awaiting proof of an ambiguous durable commit.
+    pub pending_admin_projection: Option<PendingAdminProjection>,
+}
+
+/// The exact live-roster delta of an admin batch whose COMMIT reply was lost.
+/// Final affiliations alone cannot recover intermediate bans in a batch.
+#[derive(Debug, Clone)]
+pub struct PendingAdminProjection {
+    previous_coordinates: super::durable::RoomCommittedCoordinates,
+    expected_affiliations: Vec<(BareJid, Affiliation)>,
+    removed_sessions: Vec<FullJid>,
+    changed_roles: Vec<(FullJid, Role)>,
+    moderated: bool,
+}
+
+impl PendingAdminProjection {
+    fn matches_committed_room(
+        &self,
+        room: &MucRoom,
+        coordinates: Option<super::durable::RoomCommittedCoordinates>,
+    ) -> bool {
+        coordinates.is_some_and(|coordinates| {
+            coordinates.lifecycle == self.previous_coordinates.lifecycle
+                && coordinates.revision > self.previous_coordinates.revision
+        }) && self
+            .expected_affiliations
+            .iter()
+            .all(|(jid, affiliation)| room.get_affiliation(jid) == *affiliation)
+    }
+
+    fn apply_to_roster(&self, room: &mut MucRoom) {
+        let occupants: Vec<_> = room
+            .occupants
+            .keys()
+            .map(|nick| (nick.clone(), room.get_occupant_sessions(nick)))
+            .collect();
+        for (nick, sessions) in occupants {
+            for session in sessions {
+                if self.removed_sessions.contains(&session) {
+                    room.remove_occupant_session(&nick, &session);
+                } else if self.moderated == room.config.moderated {
+                    if let Some((_, role)) = self
+                        .changed_roles
+                        .iter()
+                        .find(|(changed_session, _)| *changed_session == session)
+                    {
+                        if let Some(occupant) = room.occupants.get_mut(&nick) {
+                            occupant.role = *role;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl RoomSnapshot {
@@ -289,6 +343,7 @@ pub struct RestoreLiveRoster {
     /// The predecessor's lost-reply departure state, so a retry that lands on
     /// the successor replays (or refuses) exactly as the predecessor would.
     pub departures: DepartureLedger,
+    pub pending_admin_projection: Option<PendingAdminProjection>,
 }
 
 impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
@@ -304,6 +359,10 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         let subject = self.room.subject.clone();
         let affiliations = self.room.affiliation_list.clone();
         let mut restored = msg.room;
+        let pending_admin_projection = msg.pending_admin_projection.filter(|projection| {
+            projection.matches_committed_room(&self.room, self.durable_coordinates)
+        });
+        let moderation_changed = restored.config.moderated != config.moderated;
         // The transplant restores THIS room's live roster; its identity is
         // never the restored value's (durable commits key their claim fence
         // by the actor's room JID).
@@ -320,9 +379,17 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             let affiliation = restored.get_affiliation(&jid);
             let role = restored.derive_role_from_affiliation(affiliation);
             if let Some(occupant) = restored.occupants.get_mut(&nick) {
+                if moderation_changed || occupant.affiliation != affiliation {
+                    occupant.role = role;
+                }
                 occupant.affiliation = affiliation;
-                occupant.role = role;
             }
+        }
+        if let Some(projection) = pending_admin_projection {
+            // The durable outbox owns the removal presences and SFU effects.
+            // Only finish the exact in-memory delta before publication; a
+            // config transition still retains its separately owed removals.
+            projection.apply_to_roster(&mut restored);
         }
         self.room = restored;
         // The predecessor's `Drop` releases its occupants from the pod-wide
@@ -633,6 +700,7 @@ pub struct RoomActor {
     occupancy_revision: u64,
     /// The newest durable revision consumed by an ephemeral projection.
     projected_revision: Option<super::durable::RoomRevision>,
+    pending_admin_projection: Option<PendingAdminProjection>,
     /// Completed departures retained for attempt replay (see
     /// [`occupancy_handlers::LeaveAttemptId`]).
     departure_receipts: std::collections::VecDeque<DepartureReceipt>,
@@ -863,6 +931,7 @@ impl RoomActor {
             invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
             projected_revision: None,
+            pending_admin_projection: None,
             departure_receipts: std::collections::VecDeque::new(),
             latest_generations: std::collections::HashMap::new(),
             superseded_departure_attempts: std::collections::HashMap::new(),
@@ -2458,6 +2527,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 admission_revision: self.admission_revision,
                 occupancy_revision: self.occupancy_revision,
                 departures: self.departure_ledger(),
+                pending_admin_projection: self.pending_admin_projection.clone(),
             },
             notification,
             reservation,
@@ -3056,6 +3126,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             admission_revision: self.admission_revision,
             occupancy_revision: self.occupancy_revision,
             departures: self.departure_ledger(),
+            pending_admin_projection: self.pending_admin_projection.clone(),
         })
     }
 }

@@ -11775,6 +11775,7 @@ mod local_muc_departure_tests {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: Default::default(),
+                pending_admin_projection: source_snapshot.pending_admin_projection,
             })
             .await
             .expect("restore live roster into inactive actor");

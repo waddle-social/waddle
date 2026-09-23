@@ -929,7 +929,8 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 .map_err(super::RoomMutationError::from)?;
             None
         } else {
-            let (_, reservation) = self
+            let previous_coordinates = self.durable_coordinates;
+            let commit = self
                 .commit_durable(
                     RoomDurableMutation::AffiliationBatch(durable_delta),
                     admin_effects_for_applied(
@@ -939,7 +940,42 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                         &voice_changes,
                     ),
                 )
-                .await?;
+                .await;
+            let (_, reservation) = match commit {
+                Ok(committed) => committed,
+                Err(error) => {
+                    if matches!(error, super::DurablePersistError::CommitOutcomeUnknown) {
+                        self.pending_admin_projection = previous_coordinates.map(|coordinates| {
+                            let changed_roles = staged_room
+                                .occupants
+                                .iter()
+                                .filter(|(nick, occupant)| {
+                                    self.room
+                                        .get_occupant(nick)
+                                        .is_some_and(|previous| previous.role != occupant.role)
+                                })
+                                .flat_map(|(nick, occupant)| {
+                                    staged_room
+                                        .get_occupant_sessions(nick)
+                                        .into_iter()
+                                        .map(|session| (session, occupant.role))
+                                })
+                                .collect();
+                            super::PendingAdminProjection {
+                                previous_coordinates: coordinates,
+                                expected_affiliations: touched_jids
+                                    .iter()
+                                    .map(|jid| (jid.clone(), staged_room.get_affiliation(jid)))
+                                    .collect(),
+                                removed_sessions: removed_by_moderation.clone(),
+                                changed_roles,
+                                moderated: staged_room.config.moderated,
+                            }
+                        });
+                    }
+                    return Err(error.into());
+                }
+            };
             reservation
         };
 

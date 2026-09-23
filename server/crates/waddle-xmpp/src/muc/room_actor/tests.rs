@@ -89,6 +89,7 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
             room: stale_room,
             occupancy_revision: 0,
             departures: Default::default(),
+            pending_admin_projection: None,
         })
         .await
         .expect("restore live roster");
@@ -101,6 +102,250 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
         .expect("restored visitor");
     assert_eq!(visitor.affiliation, crate::Affiliation::None);
     assert_eq!(visitor.role, Role::Visitor);
+}
+
+#[tokio::test]
+async fn restoring_live_roster_removes_committed_affiliation_revocations() {
+    for (members_only, affiliation) in [
+        (false, Affiliation::Outcast),
+        (true, Affiliation::None),
+        // A batch can ban and then reinstate membership: its final
+        // affiliation does not describe the intermediate removal.
+        (false, Affiliation::Member),
+    ] {
+        let mut stale_room = test_room();
+        stale_room.config.members_only = members_only;
+        let occupant = test_full_jid("member");
+        stale_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
+        stale_room.add_occupant(crate::muc::Occupant {
+            real_jid: occupant.clone(),
+            nick: "member".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+        let mut authoritative_room = test_room();
+        authoritative_room.config.members_only = members_only;
+        authoritative_room.set_affiliation(occupant.to_bare(), affiliation);
+        let previous_coordinates = super::super::RoomCommittedCoordinates {
+            lifecycle: super::super::RoomLifecycleId::generate(),
+            revision: super::super::RoomRevision::initial(),
+        };
+        let mut actor = RoomActor::new(authoritative_room, test_secret());
+        actor.durable_coordinates = Some(super::super::RoomCommittedCoordinates {
+            revision: super::super::RoomRevision::from_stored(2).expect("revision"),
+            ..previous_coordinates
+        });
+        let actor = RoomActor::spawn(actor);
+
+        actor
+            .ask(RestoreLiveRoster {
+                room: stale_room,
+                occupancy_revision: 7,
+                departures: Default::default(),
+                pending_admin_projection: Some(PendingAdminProjection {
+                    previous_coordinates,
+                    expected_affiliations: vec![(occupant.to_bare(), affiliation)],
+                    removed_sessions: vec![occupant.clone()],
+                    changed_roles: Vec::new(),
+                    moderated: false,
+                }),
+            })
+            .await
+            .expect("restore after committed affiliation change");
+
+        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert_eq!(
+            snapshot.room.get_affiliation(&occupant.to_bare()),
+            affiliation
+        );
+        assert!(snapshot.room.get_occupant("member").is_none());
+        assert!(snapshot.room.get_occupant_sessions("member").is_empty());
+        assert_eq!(snapshot.occupancy_revision, 7);
+    }
+}
+
+#[tokio::test]
+async fn restoring_live_roster_requires_proof_before_applying_admin_projection() {
+    for (revision, same_lifecycle, affiliation) in [
+        (1, true, Affiliation::Outcast),
+        (2, false, Affiliation::Outcast),
+        (2, true, Affiliation::Member),
+    ] {
+        let occupant = test_full_jid("member");
+        let mut stale_room = test_room();
+        stale_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
+        stale_room.add_occupant(crate::muc::Occupant {
+            real_jid: occupant.clone(),
+            nick: "member".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+        let previous_coordinates = super::super::RoomCommittedCoordinates {
+            lifecycle: super::super::RoomLifecycleId::generate(),
+            revision: super::super::RoomRevision::initial(),
+        };
+        let mut authoritative_room = test_room();
+        authoritative_room.set_affiliation(occupant.to_bare(), affiliation);
+        let mut actor = RoomActor::new(authoritative_room, test_secret());
+        actor.durable_coordinates = Some(super::super::RoomCommittedCoordinates {
+            lifecycle: if same_lifecycle {
+                previous_coordinates.lifecycle
+            } else {
+                super::super::RoomLifecycleId::generate()
+            },
+            revision: super::super::RoomRevision::from_stored(revision).expect("revision"),
+        });
+        let actor = RoomActor::spawn(actor);
+
+        actor
+            .ask(RestoreLiveRoster {
+                room: stale_room,
+                occupancy_revision: 0,
+                departures: Default::default(),
+                pending_admin_projection: Some(PendingAdminProjection {
+                    previous_coordinates,
+                    expected_affiliations: vec![(occupant.to_bare(), Affiliation::Outcast)],
+                    removed_sessions: vec![occupant],
+                    changed_roles: Vec::new(),
+                    moderated: false,
+                }),
+            })
+            .await
+            .expect("restore unproven admin result");
+
+        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert!(snapshot.room.get_occupant("member").is_some());
+    }
+}
+
+#[tokio::test]
+async fn restoring_live_roster_applies_committed_admin_role_delta() {
+    let occupant = test_full_jid("member");
+    let mut stale_room = test_room();
+    stale_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
+    stale_room.add_occupant(crate::muc::Occupant {
+        real_jid: occupant.clone(),
+        nick: "member".to_string(),
+        role: Role::Moderator,
+        affiliation: Affiliation::Member,
+        is_remote: false,
+        home_server: None,
+    });
+    let previous_coordinates = super::super::RoomCommittedCoordinates {
+        lifecycle: super::super::RoomLifecycleId::generate(),
+        revision: super::super::RoomRevision::initial(),
+    };
+    let mut authoritative_room = test_room();
+    authoritative_room.set_affiliation(occupant.to_bare(), Affiliation::Member);
+    let mut actor = RoomActor::new(authoritative_room, test_secret());
+    actor.durable_coordinates = Some(super::super::RoomCommittedCoordinates {
+        revision: super::super::RoomRevision::from_stored(2).expect("revision"),
+        ..previous_coordinates
+    });
+    let actor = RoomActor::spawn(actor);
+
+    actor
+        .ask(RestoreLiveRoster {
+            room: stale_room,
+            occupancy_revision: 0,
+            departures: Default::default(),
+            pending_admin_projection: Some(PendingAdminProjection {
+                previous_coordinates,
+                expected_affiliations: vec![(occupant.to_bare(), Affiliation::Member)],
+                removed_sessions: Vec::new(),
+                // An intermediate affiliation change can reset an explicit
+                // role even when the batch restores the original affiliation.
+                changed_roles: vec![(occupant, Role::Participant)],
+                moderated: false,
+            }),
+        })
+        .await
+        .expect("restore committed role delta");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert_eq!(
+        snapshot
+            .room
+            .get_occupant("member")
+            .expect("member retained")
+            .role,
+        Role::Participant
+    );
+}
+
+#[tokio::test]
+async fn restoring_live_roster_preserves_pending_members_only_config_removals() {
+    let mut stale_room = test_room();
+    stale_room.add_occupant(crate::muc::Occupant {
+        real_jid: test_full_jid("visitor"),
+        nick: "visitor".to_string(),
+        role: Role::Participant,
+        affiliation: Affiliation::None,
+        is_remote: false,
+        home_server: None,
+    });
+    let mut authoritative_room = test_room();
+    authoritative_room.config.members_only = true;
+    let actor = RoomActor::spawn(RoomActor::new(authoritative_room, test_secret()));
+
+    actor
+        .ask(RestoreLiveRoster {
+            room: stale_room,
+            occupancy_revision: 0,
+            departures: Default::default(),
+            pending_admin_projection: None,
+        })
+        .await
+        .expect("restore before members-only enforcement");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert!(
+        snapshot.room.get_occupant("visitor").is_some(),
+        "config recovery must retain the occupant until it records owed status-322 effects"
+    );
+}
+
+#[tokio::test]
+async fn restoring_live_roster_preserves_explicit_roles_without_authorization_changes() {
+    for (moderated, role) in [(true, Role::Participant), (false, Role::Visitor)] {
+        let mut stale_room = test_room();
+        stale_room.config.moderated = moderated;
+        stale_room.add_occupant(crate::muc::Occupant {
+            real_jid: test_full_jid("visitor"),
+            nick: "visitor".to_string(),
+            role,
+            affiliation: Affiliation::None,
+            is_remote: false,
+            home_server: None,
+        });
+        let mut authoritative_room = test_room();
+        authoritative_room.config.moderated = moderated;
+        let actor = RoomActor::spawn(RoomActor::new(authoritative_room, test_secret()));
+
+        actor
+            .ask(RestoreLiveRoster {
+                room: stale_room,
+                occupancy_revision: 0,
+                departures: Default::default(),
+                pending_admin_projection: None,
+            })
+            .await
+            .expect("restore explicit role");
+
+        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert_eq!(
+            snapshot
+                .room
+                .get_occupant("visitor")
+                .expect("visitor retained")
+                .role,
+            role
+        );
+    }
 }
 
 async fn current_admission_revision(actor: &ActorRef<RoomActor>) -> u64 {
@@ -5040,6 +5285,7 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
             departures: snapshot.departures,
+            pending_admin_projection: None,
         })
         .await
         .expect("transfer");
@@ -5794,6 +6040,7 @@ async fn receipts_are_transferred_on_live_roster_restore() {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
             departures: snapshot.departures,
+            pending_admin_projection: None,
         })
         .await
         .expect("restore successor live roster");
@@ -5838,6 +6085,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             room: newer_snapshot.room,
             occupancy_revision: newer_snapshot.occupancy_revision,
             departures: newer_snapshot.departures,
+            pending_admin_projection: None,
         })
         .await
         .expect("restore newer receipt");
@@ -5846,6 +6094,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             room: older_snapshot.room,
             occupancy_revision: older_snapshot.occupancy_revision,
             departures: older_snapshot.departures,
+            pending_admin_projection: None,
         })
         .await
         .expect("restore older receipt");
@@ -7252,6 +7501,7 @@ async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
             room: roster,
             occupancy_revision: 2,
             departures: Default::default(),
+            pending_admin_projection: None,
         })
         .await
         .expect("transfer");
@@ -7268,6 +7518,7 @@ async fn live_roster_transfer_preserves_actor_room_jid() {
             room: foreign_room,
             occupancy_revision: 0,
             departures: Default::default(),
+            pending_admin_projection: None,
         })
         .await
         .expect("transfer");

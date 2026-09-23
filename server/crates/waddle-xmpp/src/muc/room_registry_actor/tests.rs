@@ -5067,6 +5067,7 @@ mod ownership_claims_tests {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: Default::default(),
+                pending_admin_projection: source_snapshot.pending_admin_projection,
             }),
         });
         registry

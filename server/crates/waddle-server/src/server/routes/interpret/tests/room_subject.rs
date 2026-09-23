@@ -197,12 +197,9 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
                     Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown)
                 }
                 _ => {
-                    persist_subject_store_intent(stored_state, intent);
+                    let coordinates = persist_subject_store_intent(stored_state, intent);
                     Ok(waddle_xmpp::muc::RoomCommitOutcome {
-                        coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
-                            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                            revision: waddle_xmpp::muc::RoomRevision::initial(),
-                        },
+                        coordinates,
                         reservation: None,
                     })
                 }
@@ -236,7 +233,19 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
 fn persist_subject_store_intent(
     stored_state: &std::sync::Mutex<Option<waddle_xmpp::muc::DurableRoomState>>,
     intent: waddle_xmpp::muc::RoomDurableMutation,
-) {
+) -> waddle_xmpp::muc::RoomCommittedCoordinates {
+    let mut stored_state = stored_state.lock().expect("stored state lock");
+    let coordinates = stored_state
+        .as_ref()
+        .and_then(|state| state.coordinates)
+        .map(|previous| waddle_xmpp::muc::RoomCommittedCoordinates {
+            lifecycle: previous.lifecycle,
+            revision: previous.revision.next().expect("test revision"),
+        })
+        .unwrap_or_else(|| waddle_xmpp::muc::RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial(),
+        });
     match intent {
         waddle_xmpp::muc::RoomDurableMutation::Create {
             waddle_id,
@@ -244,34 +253,37 @@ fn persist_subject_store_intent(
             config,
             initial_affiliations,
         } => {
-            *stored_state.lock().expect("stored state lock") =
-                Some(waddle_xmpp::muc::DurableRoomState {
-                    coordinates: None,
-                    config_coordinates: None,
-                    waddle_id: waddle_id.into_string(),
-                    channel_id: channel_id.into_string(),
-                    config,
-                    subject: None,
-                    affiliations: initial_affiliations
-                        .into_iter()
-                        .filter_map(|entry| {
-                            entry.affiliation.map(|affiliation| {
-                                waddle_xmpp::muc::affiliation::AffiliationEntry::new(
-                                    entry.jid,
-                                    affiliation,
-                                )
-                            })
+            *stored_state = Some(waddle_xmpp::muc::DurableRoomState {
+                coordinates: Some(coordinates),
+                config_coordinates: None,
+                waddle_id: waddle_id.into_string(),
+                channel_id: channel_id.into_string(),
+                config,
+                subject: None,
+                affiliations: initial_affiliations
+                    .into_iter()
+                    .filter_map(|entry| {
+                        entry.affiliation.map(|affiliation| {
+                            waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+                                entry.jid,
+                                affiliation,
+                            )
                         })
-                        .collect(),
-                });
+                    })
+                    .collect(),
+            });
         }
         waddle_xmpp::muc::RoomDurableMutation::Subject(subject) => {
-            if let Some(state) = stored_state.lock().expect("stored state lock").as_mut() {
+            if let Some(state) = stored_state.as_mut() {
                 state.subject = subject;
             }
         }
         _ => {}
     }
+    if let Some(state) = stored_state.as_mut() {
+        state.coordinates = Some(coordinates);
+    }
+    coordinates
 }
 
 pub(super) async fn spawn_subject_mutation_test_room() -> (
@@ -1098,10 +1110,44 @@ async fn xep_0045_subject_persist_failure_bounces_before_apply_and_halts_batch()
 
 #[tokio::test]
 async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast() {
-    use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::muc::room_actor::{
+        AckDepartureOutcome, AckDepartureReceipt, GetSnapshot, Join, LeaveAttemptId,
+        LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector,
+    };
 
     let (room_registry, room_actor, room_jid, _claim_store, claim_fence, store) =
         spawn_subject_mutation_test_room().await;
+    let leaver: jid::FullJid = "bob@example.com/web".parse().expect("leaver");
+    for (nick, real_jid) in [
+        ("alice", "alice@example.com/web".parse().expect("sender")),
+        ("bob", leaver.clone()),
+    ] {
+        room_actor
+            .ask(Join {
+                nick: nick.to_owned(),
+                real_jid,
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join before subject mutation");
+    }
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        room_actor
+            .ask(LeaveByRealJid {
+                sender_jid: leaver,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+                origin: LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave before subject mutation"),
+        LeaveDisposition::Left(_)
+    ));
+    // The leave reply has not been acknowledged when the subject write loses
+    // its commit result. Recovery must retain both occupancy and this debt.
     store.set_mode(SubjectMutationStoreMode::CommitOutcomeUnknown);
     let connection_registry = ConnectionRegistry::new();
     let mut deps = Deps::registry_only(&connection_registry);
@@ -1135,6 +1181,16 @@ async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast
         "the stale actor must be demoted before exact subject reconciliation"
     );
     let snapshot = current_actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(snapshot.room.get_occupant("bob").is_none());
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+    assert_eq!(
+        current_actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("acknowledge transferred departure"),
+        AckDepartureOutcome::Acknowledged,
+    );
     assert_eq!(
         snapshot
             .room

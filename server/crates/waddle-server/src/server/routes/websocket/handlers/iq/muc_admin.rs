@@ -1,5 +1,7 @@
 use super::*;
-use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
+use crate::admin::channels::{
+    acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
+};
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
 
 /// Upper bound on the mutating room-actor asks below. The room actor
@@ -435,10 +437,11 @@ async fn reconcile_ambiguous_admin_result(
     }
 }
 
-async fn recover_admin_result_after_actor_demote(
+async fn recover_admin_result_after_actor_failure(
     state: &WebSocketState,
     room_jid: &BareJid,
     pre_apply_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     items: &[AdminItem],
     sender_jid: &FullJid,
 ) -> (AdminReconciliationOutcome, bool) {
@@ -448,17 +451,18 @@ async fn recover_admin_result_after_actor_demote(
         if attempt > 0 {
             let _ = room_registry.retry_pending_room_releases(8).await;
         }
-        match room_registry
-            .get_or_create_room(
-                room_jid.clone(),
-                pre_apply_snapshot.room.waddle_id.clone(),
-                pre_apply_snapshot.room.channel_id.clone(),
-                pre_apply_snapshot.room.config.clone(),
-            )
-            .await
+        // The pre-ask snapshot identifies the lifecycle, not its roster.
+        // Recovery snapshots the sealed predecessor and installs that final
+        // roster and departure ledger before publishing an exact successor.
+        match reacquire_config_actor(
+            &state.deps.protocol.room_registry,
+            room_jid,
+            pre_apply_snapshot,
+            stale_actor,
+        )
+        .await
         {
-            Ok(acquisition) => match acquisition
-                .actor_ref
+            Ok(Some(actor)) => match actor
                 .ask(GetSnapshot)
                 .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                 .await
@@ -517,6 +521,7 @@ async fn recover_admin_result_after_actor_demote(
                     );
                 }
             },
+            Ok(None) => return (AdminReconciliationOutcome::Inconclusive, false),
             Err(
                 waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(
                     _,
@@ -1325,25 +1330,15 @@ pub(super) async fn handle_muc_admin_iq(
                 )
                 .await;
             suppress_direct_admin_effects = recovered_suppress_direct_admin_effects;
-            let _ = state
-                .deps
-                .protocol
-                .room_registry
-                .ask(
-                    waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
-                        room_jid: room_jid.clone(),
-                        actor_ref: room_actor.clone(),
-                    },
-                )
-                .await;
-            let (reconciliation, demoted_suppress_direct_admin_effects) =
-                if let Some(applied) = recovered_applied {
-                    (AdminReconciliationOutcome::Committed(applied), false)
-                } else if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
-                    recover_admin_result_after_actor_demote(
+            // Even an already-proven commit needs an authoritative successor;
+            // a standalone demotion would discard unrelated live occupants.
+            let (reconciliation, restored_suppress_direct_admin_effects) =
+                if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
+                    recover_admin_result_after_actor_failure(
                         state,
                         &room_jid,
                         snapshot_before_apply,
+                        &room_actor,
                         &query.items,
                         sender_jid,
                     )
@@ -1351,7 +1346,10 @@ pub(super) async fn handle_muc_admin_iq(
                 } else {
                     (AdminReconciliationOutcome::Inconclusive, false)
                 };
-            suppress_direct_admin_effects |= demoted_suppress_direct_admin_effects;
+            let reconciliation = recovered_applied
+                .map(AdminReconciliationOutcome::Committed)
+                .unwrap_or(reconciliation);
+            suppress_direct_admin_effects |= restored_suppress_direct_admin_effects;
             match reconciliation {
                 AdminReconciliationOutcome::Committed(applied) => {
                     warn!(room = %room_jid, "MUC admin commit outcome was ambiguous but the committed affiliation batch was reconciled");
@@ -1687,6 +1685,10 @@ pub(super) async fn handle_muc_admin_iq(
     frames.extend(moderator_frames);
     ResponseBatch::from_frames(frames)
 }
+
+#[cfg(test)]
+#[path = "muc_admin_recovery_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
