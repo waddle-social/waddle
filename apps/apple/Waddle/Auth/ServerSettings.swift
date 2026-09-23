@@ -16,19 +16,27 @@ enum ServerSettings {
     }
 
     /// `https://host[:port]` from user input, or nil when it isn't a URL.
+    /// Plain `http` is accepted only for a loopback development server:
+    /// sign-in and the session credential never cross the network in
+    /// cleartext.
     static func normalized(from input: String) -> URL? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let candidate = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
         guard var components = URLComponents(string: candidate),
               let scheme = components.scheme?.lowercased(),
-              scheme == "https" || scheme == "http",
-              components.host?.isEmpty == false
+              let host = components.host, !host.isEmpty,
+              scheme == "https" || (scheme == "http" && isLoopback(host))
         else { return nil }
         components.path = ""
         components.query = nil
         components.fragment = nil
         return components.url
+    }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        let bare = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return bare == "localhost" || bare == "::1" || bare.hasPrefix("127.")
     }
 
     /// A random resource per install. Full JIDs are visible to contacts and

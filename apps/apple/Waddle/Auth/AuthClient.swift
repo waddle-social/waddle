@@ -91,9 +91,9 @@ struct AuthClient {
     }
 
     /// The XMPP WebSocket the session id is presented to. It must be TLS
-    /// (`wss`), except a plain `ws` endpoint for a plain-http development
-    /// server, so the bearer credential never crosses an unencrypted link
-    /// the user did not already choose.
+    /// (`wss`), except a plain `ws` endpoint for a plain-http server, which
+    /// `ServerSettings` only allows on loopback, so the bearer credential
+    /// never crosses the network unencrypted.
     static func xmppWebSocketURL(_ raw: String, server: URL) -> URL? {
         guard let url = URL(string: raw), url.host?.isEmpty == false else { return nil }
         switch url.scheme?.lowercased() {
