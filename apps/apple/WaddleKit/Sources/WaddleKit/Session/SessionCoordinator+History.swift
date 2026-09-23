@@ -10,8 +10,9 @@ extension SessionCoordinator {
         visibleConversation = conversation
         unread.setActive(isAppActive ? conversation : nil)
         inbox.markRead(conversation.jid)
-        if conversation.kind == .direct {
-            _ = directConversation(with: conversation.jid)
+        switch conversation.kind {
+        case .direct: _ = directConversation(with: conversation.jid)
+        case .room: await ensureJoined(conversation.jid)
         }
         if !history.state(of: conversation).hasLoadedLatest {
             await loadLatest(conversation)
@@ -44,29 +45,44 @@ extension SessionCoordinator {
         }
     }
 
-    /// Fetches the newest page and merges it.
+    /// Fetches the newest page and merges it. A failed fetch leaves the
+    /// paging state untouched and marks the conversation for retry.
     public func loadLatest(_ conversation: ConversationID) async {
         guard history.begin(conversation) else { return }
-        let page = await port.fetchHistory(of: conversation, before: nil, max: Self.historyPageSize)
-        ingestArchive(page)
-        history.finish(conversation, page: page, wasLatest: true)
+        do {
+            let page = try await port.fetchHistory(of: conversation, before: nil, max: Self.historyPageSize)
+            ingestArchive(page)
+            history.finish(conversation, page: page, wasLatest: true)
+        } catch {
+            history.fail(conversation)
+        }
     }
 
-    /// Fetches the next older page, if any.
+    /// Fetches the next older page, if any. After a failed first load this
+    /// retries the newest page instead, since there is no cursor yet.
     public func loadOlder(_ conversation: ConversationID) async {
         let state = history.state(of: conversation)
+        if state.failed, !state.hasLoadedLatest {
+            await loadLatest(conversation)
+            return
+        }
         guard state.hasLoadedLatest, state.hasMoreOlder, let cursor = state.olderCursor else { return }
         guard history.begin(conversation) else { return }
-        let page = await port.fetchHistory(of: conversation, before: cursor, max: Self.historyPageSize)
-        ingestArchive(page)
-        history.finish(conversation, page: page, wasLatest: false)
+        do {
+            let page = try await port.fetchHistory(of: conversation, before: cursor, max: Self.historyPageSize)
+            ingestArchive(page)
+            history.finish(conversation, page: page, wasLatest: false)
+        } catch {
+            history.fail(conversation)
+        }
     }
 
-    /// Full-text search over the conversation's archive.
-    public func search(_ query: String, in conversation: ConversationID) async -> [TimelineItem] {
+    /// Full-text search over the conversation's archive. Throws when the
+    /// query failed, so the caller can tell failure from no matches.
+    public func search(_ query: String, in conversation: ConversationID) async throws -> [TimelineItem] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
-        let page = await port.searchHistory(of: conversation, query: trimmed, max: Self.historyPageSize)
+        let page = try await port.searchHistory(of: conversation, query: trimmed, max: Self.historyPageSize)
         let scratch = TimelineStore()
         scratch.account = account
         for message in page.messages {

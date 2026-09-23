@@ -22,6 +22,7 @@ final class FakePort: XmppPort {
     var cursors: [DisplayedCursor] = []
     var historyPages: [ArchivePage] = []
     var historyRequests: [(ConversationID, String?)] = []
+    var failingHistoryRequests = 0
     var connectCount = 0
 
     init() {
@@ -68,13 +69,17 @@ final class FakePort: XmppPort {
     func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool { true }
     func fetchPins(in room: BareJID) async throws -> [PinEntry] { [] }
 
-    func fetchHistory(of conversation: ConversationID, before cursor: String?, max: Int) async -> ArchivePage {
+    func fetchHistory(of conversation: ConversationID, before cursor: String?, max: Int) async throws -> ArchivePage {
         historyRequests.append((conversation, cursor))
+        if failingHistoryRequests > 0 {
+            failingHistoryRequests -= 1
+            throw PortError.failed
+        }
         guard !historyPages.isEmpty else { return ArchivePage(messages: [], first: nil, isComplete: true) }
         return historyPages.removeFirst()
     }
 
-    func searchHistory(of conversation: ConversationID, query: String, max: Int) async -> ArchivePage {
+    func searchHistory(of conversation: ConversationID, query: String, max: Int) async throws -> ArchivePage {
         ArchivePage(messages: [], first: nil, isComplete: true)
     }
 

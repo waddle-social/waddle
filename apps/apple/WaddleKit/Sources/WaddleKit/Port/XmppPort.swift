@@ -65,10 +65,11 @@ public protocol MessagingPort: AnyObject, Sendable {
     func fetchPins(in room: BareJID) async throws -> [PinEntry]
 }
 
-/// History (XEP-0313) and search.
+/// History (XEP-0313) and search. Both throw when the query failed, so a
+/// failure is never mistaken for an empty archive.
 public protocol ArchivePort: AnyObject, Sendable {
-    func fetchHistory(of conversation: ConversationID, before cursor: String?, max: Int) async -> ArchivePage
-    func searchHistory(of conversation: ConversationID, query: String, max: Int) async -> ArchivePage
+    func fetchHistory(of conversation: ConversationID, before cursor: String?, max: Int) async throws -> ArchivePage
+    func searchHistory(of conversation: ConversationID, query: String, max: Int) async throws -> ArchivePage
 }
 
 /// Read state: XEP-0333 markers, XEP-0490 sync, XEP-0430 inbox.

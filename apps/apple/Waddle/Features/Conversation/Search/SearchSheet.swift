@@ -13,6 +13,7 @@ struct SearchSheet: View {
     @State private var results: [TimelineItem] = []
     @State private var searchedQuery = ""
     @State private var isSearching = false
+    @State private var didFail = false
 
     init(conversation: ConversationID) {
         self.conversation = conversation
@@ -54,6 +55,12 @@ struct SearchSheet: View {
         } else if results.isEmpty, isSearching || searchedQuery != trimmedQuery {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if didFail {
+            ContentUnavailableView(
+                "Search Unavailable",
+                systemImage: "exclamationmark.magnifyingglass",
+                description: Text("The server could not run this search. Try again.")
+            )
         } else if results.isEmpty {
             ContentUnavailableView.search(text: searchedQuery)
         } else {
@@ -79,14 +86,21 @@ struct SearchSheet: View {
             results = []
             searchedQuery = ""
             isSearching = false
+            didFail = false
             return
         }
         try? await Task.sleep(nanoseconds: 300_000_000)
         guard !Task.isCancelled else { return }
         isSearching = true
-        let found = await session.search(trimmed, in: conversation)
+        let found: [TimelineItem]?
+        do {
+            found = try await session.search(trimmed, in: conversation)
+        } catch {
+            found = nil
+        }
         guard !Task.isCancelled else { return }
-        results = found
+        results = found ?? []
+        didFail = found == nil
         searchedQuery = trimmed
         isSearching = false
     }

@@ -62,6 +62,8 @@ public final class SessionCoordinator {
     @ObservationIgnored var visibleConversation: ConversationID?
     @ObservationIgnored var isAppActive = true
     @ObservationIgnored var mdsPublishSupported: Bool?
+    /// Rooms opened or created this session; rejoined after reconnects.
+    @ObservationIgnored var onDemandRooms: Set<BareJID> = []
 
     @ObservationIgnored private let connectBudget: TimeInterval
     @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
@@ -199,6 +201,7 @@ public final class SessionCoordinator {
         typingPauseTasks.values.forEach { $0.cancel() }
         typingPauseTasks.removeAll()
         pendingDisplayed.removeAll()
+        onDemandRooms.removeAll()
     }
 
     // MARK: - Events

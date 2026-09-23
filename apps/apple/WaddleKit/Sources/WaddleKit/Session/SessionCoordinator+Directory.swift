@@ -1,15 +1,31 @@
 import Foundation
 
 extension SessionCoordinator {
-    /// Rediscovers spaces and rooms, then joins every autojoin room. A
-    /// failed discovery keeps the last known directory.
+    /// Rediscovers spaces and rooms, then joins every autojoin room, group
+    /// DM, and room the user opened or created this session. A failed
+    /// discovery keeps the last known directory.
     func refreshDirectory() async {
         if case let .success(topology) = await port.discoverTopology() {
             directory.apply(topology)
         }
-        for channel in directory.channels + directory.groupDMs where channel.autojoin || channel.isGroupDM {
-            await port.joinRoom(channel.roomJID, nick: account.nick)
+        let listed = (directory.channels + directory.groupDMs)
+            .filter { $0.autojoin || $0.isGroupDM }
+            .map(\.roomJID)
+        var joined: Set<BareJID> = []
+        for room in listed + onDemandRooms.sorted(by: { $0.description < $1.description }) where joined.insert(room).inserted {
+            await port.joinRoom(room, nick: account.nick)
         }
+    }
+
+    /// Joins `room` if we are not an occupant, and keeps it joined across
+    /// reconnects. Rooms whose bookmark says `autojoin=false` (XEP-0402)
+    /// are otherwise never entered, so opening one would show a room we
+    /// cannot send to or receive from (XEP-0045 §7.4).
+    func ensureJoined(_ room: BareJID) async {
+        onDemandRooms.insert(room)
+        // Offline, the ready pipeline joins it on connect.
+        guard status.connection == .online, !presence.joinedRooms.contains(room) else { return }
+        await port.joinRoom(room, nick: account.nick)
     }
 
     func loadNotifyModes() async {
@@ -36,6 +52,8 @@ extension SessionCoordinator {
         guard let localpart = RoomLocalpart.make(from: trimmed) else { throw PortError.invalidRequest }
         let room = try await port.createRoom(localpart: localpart, name: trimmed, summary: summary, nick: account.nick)
         directory.upsert(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
+        // create_room leaves the room once it is configured.
+        await ensureJoined(room)
         return .room(room)
     }
 
@@ -43,7 +61,7 @@ extension SessionCoordinator {
     public func createGroupDM(name: String, members: [BareJID]) async throws -> ConversationID {
         let room = try await port.createGroupDM(name: name, members: members)
         directory.upsert(Channel(roomJID: room, name: name, isGroupDM: true))
-        await port.joinRoom(room, nick: account.nick)
+        await ensureJoined(room)
         return .room(room)
     }
 
