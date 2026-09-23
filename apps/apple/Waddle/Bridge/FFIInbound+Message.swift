@@ -115,8 +115,10 @@ extension FFIInbound {
         )
     }
 
+    /// XEP-0359 `by` is a bare JID. A full JID is rejected rather than
+    /// truncated, so `by='room@service/nick'` can never pass for the room.
     static func stanzaID(id: String?, by: String?) -> StanzaID? {
-        guard let id, let authority = jid(by)?.bare else { return nil }
+        guard let id, let authority = bareJID(by) else { return nil }
         return StanzaID(id: id, by: authority)
     }
 

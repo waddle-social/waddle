@@ -64,6 +64,16 @@ enum AttachmentImageInfo {
         #endif
     }
 
+    /// Whether ImageIO can decode the data as a raster image.
+    static func isRaster(_ data: Data) -> Bool {
+        #if canImport(ImageIO)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
+        return CGImageSourceGetCount(source) > 0 && CGImageSourceGetType(source) != nil
+        #else
+        return false
+        #endif
+    }
+
     /// Whether the image carries GPS metadata (EXIF, XMP-derived or PNG
     /// eXIf chunks all surface here through ImageIO).
     static func hasLocation(_ data: Data) -> Bool {

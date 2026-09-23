@@ -37,17 +37,26 @@ enum AttachmentLoader {
         let data = try Data(contentsOf: url)
         guard data.count <= AttachmentPolicy.maxBytes else { throw AttachmentUploadError.tooLarge }
         let mediaType = Self.mediaType(forExtension: url.pathExtension)
-        let dimensions = mediaType.hasPrefix("image/") ? AttachmentImageInfo.pixelSize(of: data) : nil
-        return AttachmentPayload(
-            data: data,
-            filename: url.lastPathComponent,
-            mediaType: mediaType,
-            width: dimensions?.width,
-            height: dimensions?.height
-        )
+        // A raster image file gets the same metadata stripping as a library
+        // photo; any other file (including vector images) is sent byte for
+        // byte.
+        if mediaType.hasPrefix("image/"), AttachmentImageInfo.isRaster(data) {
+            return try photoPayload(
+                data,
+                mediaType: mediaType,
+                fileExtension: url.pathExtension,
+                baseName: url.deletingPathExtension().lastPathComponent
+            )
+        }
+        return AttachmentPayload(data: data, filename: url.lastPathComponent, mediaType: mediaType, width: nil, height: nil)
     }
 
-    private static func photoPayload(_ data: Data, mediaType: String?, fileExtension: String?) throws -> AttachmentPayload {
+    private static func photoPayload(
+        _ data: Data,
+        mediaType: String?,
+        fileExtension: String?,
+        baseName: String? = nil
+    ) throws -> AttachmentPayload {
         let type = mediaType?.lowercased() ?? "application/octet-stream"
         let stamp = Int(Date().timeIntervalSince1970)
         let isImage = type.hasPrefix("image/")
@@ -57,16 +66,16 @@ enum AttachmentLoader {
             let size = AttachmentImageInfo.pixelSize(of: clean.data)
             return AttachmentPayload(
                 data: clean.data,
-                filename: "Photo-\(stamp).\(clean.fileExtension)",
+                filename: "\(baseName ?? "Photo-\(stamp)").\(clean.fileExtension)",
                 mediaType: clean.mediaType,
                 width: size?.width,
                 height: size?.height
             )
         }
         let size = type.hasPrefix("image/") ? AttachmentImageInfo.pixelSize(of: data) : nil
-        let name = type.hasPrefix("video/") ? "Video" : "Photo"
+        let name = baseName ?? (type.hasPrefix("video/") ? "Video-\(stamp)" : "Photo-\(stamp)")
         let suffix = fileExtension.map { ".\($0)" } ?? ""
-        return AttachmentPayload(data: data, filename: "\(name)-\(stamp)\(suffix)", mediaType: type, width: size?.width, height: size?.height)
+        return AttachmentPayload(data: data, filename: "\(name)\(suffix)", mediaType: type, width: size?.width, height: size?.height)
     }
 
     static func mediaType(forExtension fileExtension: String) -> String {
