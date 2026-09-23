@@ -42,6 +42,11 @@ public final class DeliveryStore {
         states[clientID] = .queued
     }
 
+    /// A failed send restored from the saved outbox.
+    public func restoredFailure(_ clientID: String) {
+        states[clientID] = .failed
+    }
+
     /// Settles a send. An ack or failure that arrived while the send was
     /// suspended (recorded in `states`, or early before `began`) is kept:
     /// the outcome never downgrades it. Early markers are consumed so a

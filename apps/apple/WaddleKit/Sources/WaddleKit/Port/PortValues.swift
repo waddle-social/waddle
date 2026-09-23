@@ -1,7 +1,7 @@
 import Foundation
 
 /// Structured options a send carries beside its body.
-public struct OutboundOptions: Hashable, Sendable {
+public struct OutboundOptions: Hashable, Sendable, Codable {
     public var reply: Reply?
     public var thread: String?
     public var markupSpans: [MarkupSpan]
@@ -10,7 +10,7 @@ public struct OutboundOptions: Hashable, Sendable {
     public var requestDisplayedMarker: Bool
 
     /// XEP-0461 reply with its XEP-0428 fallback range.
-    public struct Reply: Hashable, Sendable {
+    public struct Reply: Hashable, Sendable, Codable {
         public let targetID: String
         public let author: JID
         public let fallback: Range<Int>?
@@ -41,7 +41,7 @@ public struct OutboundOptions: Hashable, Sendable {
 
 /// A message about to be sent. `clientID` is stamped as both the stanza
 /// `@id` and the XEP-0359 `<origin-id/>`.
-public struct OutboundMessage: Hashable, Sendable {
+public struct OutboundMessage: Hashable, Sendable, Codable {
     public let clientID: String
     public let conversation: ConversationID
     public let body: String

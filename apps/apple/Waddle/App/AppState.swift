@@ -264,7 +264,7 @@ final class AppState {
                 PushRegistrationStore.forget(owner)
             }
         }
-        await endSession()
+        await endSession(signingOut: true)
         if let sessionID {
             try? await client.logout(sessionID)
         }
@@ -284,11 +284,17 @@ final class AppState {
         phase = .signedOut
     }
 
-    private func endSession() async {
+    /// Only a sign-out deletes the account's unsent messages; an expired
+    /// credential or a server change keeps them for the next sign-in.
+    private func endSession(signingOut: Bool = false) async {
         cancelSignIn()
         guard let active = session else { return }
         session = nil
-        await active.coordinator.stop()
+        if signingOut {
+            await active.coordinator.signOut()
+        } else {
+            await active.coordinator.stop()
+        }
         notifications.clearAll()
     }
 }
@@ -312,8 +318,14 @@ final class ActiveSession {
             accessToken: auth.sessionID,
             resource: ServerSettings.resource
         )
+        let outbox: any OutboxStore
+        if let file = FileOutboxStore.applicationSupport(for: jid) {
+            outbox = file
+        } else {
+            outbox = InMemoryOutboxStore()
+        }
         self.auth = auth
-        self.coordinator = SessionCoordinator(account: account, port: FFIXmppPort(config: config))
+        self.coordinator = SessionCoordinator(account: account, port: FFIXmppPort(config: config), outboxStore: outbox)
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts
     }
 }

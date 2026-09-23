@@ -38,6 +38,7 @@ extension SessionCoordinator {
         failedOutbound[clientID] = nil
         deliveries.forget(clientID)
         timelines.removeLocalEcho(id: clientID, in: conversation)
+        persistOutbox()
     }
 
     /// Sends queued messages in order. A transient failure stops the drain
@@ -65,6 +66,7 @@ extension SessionCoordinator {
             case (.notConnected, _), (.transportError, _):
                 return
             }
+            persistOutbox()
         }
     }
 
@@ -73,6 +75,8 @@ extension SessionCoordinator {
         if !outboundQueue.contains(where: { $0.clientID == message.clientID }) {
             outboundQueue.append(message)
         }
+        // Saved before the port sees it, so a kill mid-send loses nothing.
+        persistOutbox()
     }
 
     /// Keeps written messages (bounded) so a later XEP-0198 failure or an
@@ -96,6 +100,7 @@ extension SessionCoordinator {
         } else {
             deliveries.failed(clientID)
         }
+        persistOutbox()
     }
 
     /// The optimistic row: our occupant JID in a room (so the reflection

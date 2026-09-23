@@ -95,8 +95,8 @@ public enum ChatState: Hashable, Sendable {
 }
 
 /// XEP-0394 markup span. Offsets count Unicode scalars over the wire body.
-public struct MarkupSpan: Hashable, Sendable {
-    public enum Kind: Hashable, Sendable {
+public struct MarkupSpan: Hashable, Sendable, Codable {
+    public enum Kind: Hashable, Sendable, Codable {
         case bold
         case italic
         case strikethrough
@@ -118,8 +118,8 @@ public struct MarkupSpan: Hashable, Sendable {
 }
 
 /// XEP-0372 reference. Offsets count Unicode scalars over the wire body.
-public struct Reference: Hashable, Sendable {
-    public enum Kind: Hashable, Sendable {
+public struct Reference: Hashable, Sendable, Codable {
+    public enum Kind: Hashable, Sendable, Codable {
         case mention
         case data
         case other(String)
@@ -146,7 +146,7 @@ public struct Reference: Hashable, Sendable {
 }
 
 /// XEP-0448 encryption envelope of a shared file.
-public struct EncryptedFileSource: Hashable, Sendable {
+public struct EncryptedFileSource: Hashable, Sendable, Codable {
     public let cipher: String
     public let keyBase64: String
     public let ivBase64: String
@@ -164,8 +164,8 @@ public struct EncryptedFileSource: Hashable, Sendable {
 }
 
 /// XEP-0446/0447 file metadata.
-public struct SharedFile: Hashable, Sendable {
-    public enum Disposition: Hashable, Sendable {
+public struct SharedFile: Hashable, Sendable, Codable {
+    public enum Disposition: Hashable, Sendable, Codable {
         case inline
         case attachment
     }
