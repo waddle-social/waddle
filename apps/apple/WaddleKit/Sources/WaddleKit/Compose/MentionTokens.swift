@@ -44,12 +44,18 @@ public enum MentionTokens {
 
     /// Finds every recorded token still present as a whole word and returns
     /// one mention per occurrence. Longer tokens claim first so `@ann`
-    /// never matches inside `@anna`. Deleted or edited tokens drop out.
+    /// never matches inside `@anna`. Deleted or edited tokens drop out, and
+    /// so does a token recorded for more than one target (a nick reused by
+    /// someone else): its occurrences cannot be told apart, and plain text
+    /// is safer than mentioning the wrong person.
     public static func locate(_ recorded: [RecordedMention], in text: String) -> [MentionDraft] {
         let scalars = Array(text.unicodeScalars)
         var claimed: [Range<Int>] = []
         var mentions: [MentionDraft] = []
-        let ordered = Array(Set(recorded)).sorted {
+        let unambiguous = Dictionary(grouping: Set(recorded), by: \.token).values.compactMap { targets in
+            targets.count == 1 ? targets.first : nil
+        }
+        let ordered = unambiguous.sorted {
             ($0.token.unicodeScalars.count, $0.token) > ($1.token.unicodeScalars.count, $1.token)
         }
         for mention in ordered {

@@ -15,7 +15,11 @@ enum GCMFileDecryption {
         if expectsTag(blobByteCount: blob.count, declaredSize: declaredSize) {
             throw EncryptedFileError.authenticationFailed
         }
-        return DecryptedBytes(plaintext: try decryptTagless(blob, key: key), isAuthenticated: false)
+        return DecryptedBytes(
+            plaintext: try decryptTagless(blob, key: key),
+            isAuthenticated: false,
+            isLayoutAmbiguous: declaredSize == nil && blob.count >= tagByteCount
+        )
     }
 
     /// Ciphertext exactly one tag longer than the declared plaintext was

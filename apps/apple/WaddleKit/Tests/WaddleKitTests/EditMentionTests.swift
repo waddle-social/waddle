@@ -34,6 +34,20 @@ struct EditMentionTests {
         Reference(kind: .mention, uri: target.uri, begin: begin, end: end)
     }
 
+    /// A nick reused by someone else: one token, two targets. Neither
+    /// occurrence can be told apart, so both stay plain text rather than
+    /// both pointing at one person.
+    @Test func tokenRecordedForTwoTargetsIsNotMentioned() {
+        let dave = bare("dave@waddle.test")
+        let recorded = [
+            RecordedMention(token: "@sam", target: .user(carol)),
+            RecordedMention(token: "@sam", target: .user(dave)),
+            RecordedMention(token: "@everyone", target: .everyone),
+        ]
+        let mentions = MentionTokens.locate(recorded, in: "@sam then @sam, @everyone")
+        #expect(mentions.map(\.target) == [.everyone])
+    }
+
     @Test func unchangedTextKeepsMention() async {
         let (coordinator, port, item) = await sent(Draft(text: "hi @carol", mentions: [MentionDraft(target: .user(carol), range: 3..<9)]))
         let editable = EditableMessage(item: item)

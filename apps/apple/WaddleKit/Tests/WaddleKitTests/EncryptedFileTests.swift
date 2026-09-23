@@ -112,7 +112,25 @@ struct EncryptedFileTests {
     @Test func taglessGCMWithMatchingCiphertextDigestIsAccepted() throws {
         let fixture = try Fixture(cipher: .aes128GCM)
         let blob = try fixture.sealTagless(plaintext)
-        #expect(try fixture.decrypt(blob, encryptedDigests: sha256(blob)) == plaintext)
+        let decrypted = try fixture.decrypt(blob, encryptedDigests: sha256(blob), declaredSize: plaintext.count)
+        #expect(decrypted == plaintext)
+    }
+
+    /// Without `<size/>` a failed tag leaves the layout a guess: the
+    /// ciphertext digest cannot show the former tag was not decrypted as
+    /// data, so only a plaintext digest is accepted.
+    @Test func badTagWithoutSizeNeedsAPlaintextDigest() throws {
+        let fixture = try Fixture(cipher: .aes256GCM)
+        var blob = try fixture.sealTagged(plaintext)
+        blob[blob.endIndex - 1] ^= 0x01
+        #expect(throws: EncryptedFileError.unauthenticated) {
+            try fixture.decrypt(blob, encryptedDigests: sha256(blob))
+        }
+        let tagless = try fixture.sealTagless(plaintext)
+        #expect(throws: EncryptedFileError.unauthenticated) {
+            try fixture.decrypt(tagless, encryptedDigests: sha256(tagless))
+        }
+        #expect(try fixture.decrypt(tagless, plaintextDigests: sha256(plaintext)) == plaintext)
     }
 
     @Test func taglessGCMShorterThanATagIsAcceptedWithDigest() throws {

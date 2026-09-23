@@ -24,7 +24,11 @@ public enum EncryptedFileDecryptor {
         let plaintext = truncated(decrypted.plaintext, to: declaredSize)
         let plaintextCheck = DigestCheck(plaintext, against: plaintextDigests)
         guard plaintextCheck != .mismatched else { throw EncryptedFileError.plaintextDigestMismatch }
-        guard decrypted.isAuthenticated || ciphertextCheck == .matched || plaintextCheck == .matched else {
+        // A matching ciphertext digest vouches for the bytes, not for how
+        // they were read: with an ambiguous GCM layout the former tag may
+        // have been decrypted as data, so only the plaintext digest counts.
+        let ciphertextVouches = ciphertextCheck == .matched && !decrypted.isLayoutAmbiguous
+        guard decrypted.isAuthenticated || ciphertextVouches || plaintextCheck == .matched else {
             throw EncryptedFileError.unauthenticated
         }
         return plaintext
