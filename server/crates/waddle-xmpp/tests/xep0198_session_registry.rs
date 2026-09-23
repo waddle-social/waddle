@@ -1973,8 +1973,13 @@ fn drain_principal() -> AuthenticatedPrincipalRef {
 }
 
 fn drained_payload(sequence: u32) -> waddle_xmpp::Stanza {
-    let element: minidom::Element = drained_entry(sequence).stanza_xml.parse().unwrap();
-    waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::try_from(element).unwrap())
+    let element: minidom::Element = drained_entry(sequence)
+        .stanza_xml
+        .parse()
+        .expect("parse drained stanza XML");
+    waddle_xmpp::Stanza::Message(
+        xmpp_parsers::message::Message::try_from(element).expect("decode drained message stanza"),
+    )
 }
 
 fn drained_entry(sequence: u32) -> waddle_xmpp::stream_management::DetachedUnackedStanza {
@@ -2116,8 +2121,8 @@ async fn xep0198_drained_custody_survives_eviction_before_snapshot() {
     let ticket = registry
         .reserve_drained_ingress_append(key.clone())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("reserve drained ingress custody")
+        .expect("drained ingress obligation is unallocated");
     session.unacked_stanzas.clear();
     session.outbound_count = 13;
     session.replay_gap_through = Some(12);
@@ -2128,8 +2133,12 @@ async fn xep0198_drained_custody_survives_eviction_before_snapshot() {
             vec![ticket.at(12, payload.clone(), received_at)],
         )
         .await
-        .unwrap();
-    let proof = registry.get_ingress_append(&key).await.unwrap().unwrap();
+        .expect("store drained custody after replay eviction");
+    let proof = registry
+        .get_ingress_append(&key)
+        .await
+        .expect("read drained custody after replay eviction")
+        .expect("drained custody survives replay eviction");
     assert_eq!(proof.payload.to_element(), payload.to_element());
     assert_eq!(proof.original_receipt_at, received_at);
     assert_eq!(proof.sequence, 12);
@@ -2137,7 +2146,7 @@ async fn xep0198_drained_custody_survives_eviction_before_snapshot() {
         registry
             .list_pending_ingress_appends(10)
             .await
-            .unwrap()
+            .expect("list pending drained custody")
             .len(),
         1
     );

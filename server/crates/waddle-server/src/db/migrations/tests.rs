@@ -4321,25 +4321,45 @@ async fn assert_v1019_custody_cutover(db: &Database) {
         )
     };
     prior_catalog().run(db).await.expect("pre-custody catalog");
-    let conn = db.guard().await.unwrap();
+    let conn = db
+        .guard()
+        .await
+        .expect("acquire database connection before custody migration");
     conn.execute("INSERT INTO sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)", crate::db_params![
         "00000000-0000-0000-0000-000000000076", 3i64, vec![7u8; 32], "alice@example.com/web", "custody-cutover", 1i64, 1i64,
     ]).await.expect("old proof without durable payload");
-    conn.execute("INSERT INTO sm_sessions (stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, blocklist_interested, presence_available, presence_priority) VALUES ('custody-cutover', 'alice', 'alice@example.com/web', 1, 1, 0, 1, 60000, 0, 0, 0, 1, 0)", ()).await.unwrap();
+    conn.execute("INSERT INTO sm_sessions (stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, blocklist_interested, presence_available, presence_priority) VALUES ('custody-cutover', 'alice', 'alice@example.com/web', 1, 1, 0, 1, 60000, 0, 0, 0, 1, 0)", ()).await.expect("seed legacy SM session");
     let payload =
         waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None::<jid::Jid>));
     let mut payload_bytes = Vec::new();
-    payload.to_element().write_to(&mut payload_bytes).unwrap();
-    conn.execute("INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) VALUES (?, ?, ?, ?)", crate::db_params!["custody-cutover", 1i64, String::from_utf8(payload_bytes).unwrap(), 1i64]).await.unwrap();
+    payload
+        .to_element()
+        .write_to(&mut payload_bytes)
+        .expect("serialize retained SM stanza");
+    conn.execute("INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) VALUES (?, ?, ?, ?)", crate::db_params!["custody-cutover", 1i64, String::from_utf8(payload_bytes).expect("serialized SM stanza is UTF-8"), 1i64]).await.expect("seed legacy unacked stanza");
     drop(conn);
-    assert_eq!(MigrationRunner::single().run(db).await.unwrap(), vec![1019]);
-    let conn = db.guard().await.unwrap();
+    assert_eq!(
+        MigrationRunner::single()
+            .run(db)
+            .await
+            .expect("apply custody cutover migration"),
+        vec![1019]
+    );
+    let conn = db
+        .guard()
+        .await
+        .expect("acquire database connection after custody migration");
     let mut rows = conn
         .query("SELECT COUNT(*) FROM sm_ingress_appends", ())
         .await
-        .unwrap();
+        .expect("count legacy ingress append proofs");
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        rows.next()
+            .await
+            .expect("read legacy proof count row")
+            .expect("legacy proof count row exists")
+            .get::<i64>(0)
+            .expect("decode legacy proof count"),
         0
     );
     drop(rows);
@@ -4349,9 +4369,14 @@ async fn assert_v1019_custody_cutover(db: &Database) {
             (),
         )
         .await
-        .unwrap();
+        .expect("count preserved unacked stanzas");
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        rows.next()
+            .await
+            .expect("read preserved stanza count row")
+            .expect("preserved stanza count row exists")
+            .get::<i64>(0)
+            .expect("decode preserved stanza count"),
         1
     );
     drop(rows);
@@ -4360,17 +4385,22 @@ async fn assert_v1019_custody_cutover(db: &Database) {
         (),
     )
     .await
-    .unwrap();
+    .expect("query migrated custody columns");
     drop(conn);
     assert!(matches!(
-        prior_catalog().run(db).await.unwrap_err(),
+        prior_catalog()
+            .run(db)
+            .await
+            .expect_err("pre-custody catalog rejects migrated schema"),
         DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 1019, .. })
     ));
 }
 
 #[tokio::test]
 async fn sqlite_v1019_custody_cutover_drops_only_legacy_proofs() {
-    let db = Database::in_memory("v1019-custody-cutover").await.unwrap();
+    let db = Database::in_memory("v1019-custody-cutover")
+        .await
+        .expect("create custody cutover test database");
     assert_v1019_custody_cutover(&db).await;
 }
 

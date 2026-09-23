@@ -2831,7 +2831,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
     let persistence = Arc::new(
         crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
-            .unwrap(),
+            .expect("open custody persistence"),
     );
     let original = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
     let resource = full("alice@example.com/vanished");
@@ -2843,7 +2843,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
             vec![],
         ))
         .await
-        .unwrap();
+        .expect("store detached custody session");
     let mut message = xmpp_parsers::message::Message::new(Some(resource.clone().into()));
     message.from = Some(bare("bob@example.com").into());
     message.type_ = xmpp_parsers::message::MessageType::Chat;
@@ -2866,7 +2866,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
             key.clone(),
         )
         .await
-        .unwrap();
+        .expect("record detached stanza custody");
     let restarted =
         Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(
@@ -2875,7 +2875,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
             QuotaPolicy::CountCap { max_rows: 10 },
         )
         .await
-        .unwrap(),
+        .expect("open pending delivery storage"),
     );
     let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_pending_storage(restarted, pending).await;
     assert!(crate::server::session_janitors::run_ingress_custody_sweep(&state, &mut None).await);
@@ -2886,11 +2886,14 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
             .pending_delivery_storage
             .list(&bare("alice@example.com"))
             .await
-            .unwrap()
+            .expect("list pending deliveries before session deletion")
             .is_empty(),
         "persisted resumable session remains responsible"
     );
-    persistence.delete_session(&stream).await.unwrap();
+    persistence
+        .delete_session(&stream)
+        .await
+        .expect("delete original custody session");
     let (sender, _receiver) = tokio::sync::mpsc::channel(4);
     state
         .deps
@@ -2907,8 +2910,8 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
         persistence
             .get_ingress_append(&key)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("read active stream custody")
+            .expect("active stream custody exists")
             .disposition,
         IngressCustodyDisposition::Pending,
         "published active stream protects custody even without detached snapshot"
@@ -2919,7 +2922,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
         .pending_delivery_storage
         .list(&bare("alice@example.com"))
         .await
-        .unwrap()
+        .expect("list pending deliveries while stream is active")
         .is_empty());
     state
         .deps
@@ -2933,7 +2936,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
         .pending_delivery_storage
         .list(&bare("alice@example.com"))
         .await
-        .unwrap();
+        .expect("list promoted orphan custody");
     assert_eq!(
         rows.len(),
         1,
@@ -2947,8 +2950,8 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
         persistence
             .get_ingress_append(&key)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("read promoted orphan custody")
+            .expect("promoted orphan custody exists")
             .disposition,
         IngressCustodyDisposition::Promoted
     );
@@ -2960,7 +2963,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
             .pending_delivery_storage
             .list(&bare("alice@example.com"))
             .await
-            .unwrap()
+            .expect("list pending deliveries after repeated custody sweep")
             .len(),
         1,
         "completed custody must not replay twice"
@@ -3009,7 +3012,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
     let persistence = Arc::new(
         crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
-            .unwrap(),
+            .expect("open custody persistence"),
     );
     let sm_registry =
         Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
@@ -3021,7 +3024,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
             vec![],
         ))
         .await
-        .unwrap();
+        .expect("store detached promotion session");
     let key = SmIngressAppendKey {
         message_key: waddle_xmpp::ingress::MessageKey::new(),
         kind: SmIngressReceiptKind::from_storage(3),
@@ -3033,7 +3036,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         "alice@example.com",
         "only once",
     ))
-    .unwrap();
+    .expect("parse promotion test stanza");
     sm_registry
         .record_keyed_stanza_for_detached_bound_resource(
             &key.resource,
@@ -3042,20 +3045,20 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
             key.clone(),
         )
         .await
-        .unwrap();
+        .expect("record detached stanza custody");
     let session = sm_registry
         .drain_all_for_shutdown()
         .await
-        .unwrap()
+        .expect("drain detached session for promotion")
         .pop()
-        .unwrap();
+        .expect("detached promotion session exists");
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(
         crate::pending_delivery::DatabasePendingDeliveryStorage::open(
             Some(fixture.db.database_url()),
             QuotaPolicy::CountCap { max_rows: 10 },
         )
         .await
-        .unwrap(),
+        .expect("open pending delivery storage"),
     );
     let live_registry = ConnectionRegistry::new();
     let live_users = test_user_registry();
@@ -3083,11 +3086,15 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         pending
             .list(&bare("alice@example.com"))
             .await
-            .unwrap()
+            .expect("list promoted pending deliveries")
             .len(),
         1
     );
-    let custody = persistence.get_ingress_append(&key).await.unwrap().unwrap();
+    let custody = persistence
+        .get_ingress_append(&key)
+        .await
+        .expect("read promoted custody")
+        .expect("promoted custody exists");
     assert_eq!(custody.disposition, IngressCustodyDisposition::Promoted);
     drop(receiver); // A socket crash cannot remove the durable pending row.
     let retry = promote_session_with_custody(&session, deps).await;
@@ -3097,7 +3104,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         pending
             .list(&bare("alice@example.com"))
             .await
-            .unwrap()
+            .expect("list pending deliveries after promotion retry")
             .len(),
         1,
         "committed custody retry must not insert again"

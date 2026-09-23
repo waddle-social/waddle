@@ -848,11 +848,18 @@ async fn eviction_preserves_durable_custody_without_reallocation() {
         retry,
         SmKeyedAppendOutcome::AlreadyAppended { .. }
     ));
-    let proof = storage.get_ingress_append(&key).await.unwrap().unwrap();
+    let proof = storage
+        .get_ingress_append(&key)
+        .await
+        .expect("read custody after replay eviction")
+        .expect("custody survives replay eviction");
     assert_eq!(proof, allocated);
     assert_eq!(proof.payload.to_element(), stanza().to_element());
     assert_eq!(
-        storage.list_pending_ingress_appends(10).await.unwrap(),
+        storage
+            .list_pending_ingress_appends(10)
+            .await
+            .expect("list pending custody after replay eviction"),
         vec![proof]
     );
 }
@@ -917,7 +924,10 @@ async fn custody_is_independent_of_stale_or_displaced_session_memory() {
             outcome,
             SmKeyedAppendOutcome::AlreadyAppended { .. }
         ));
-        let pending = storage.list_pending_ingress_appends(10).await.unwrap();
+        let pending = storage
+            .list_pending_ingress_appends(10)
+            .await
+            .expect("list custody after memory displacement");
         assert_eq!(pending, vec![allocated]);
     }
 }
@@ -970,14 +980,23 @@ async fn deleting_a_session_retains_every_payload_with_its_proof() {
     storage.delete_session(&stream).await.unwrap();
 
     assert_eq!(
-        storage.get_ingress_append(&evicted_key).await.unwrap(),
+        storage
+            .get_ingress_append(&evicted_key)
+            .await
+            .expect("read custody for evicted replay entry"),
         Some(evicted)
     );
     assert_eq!(
-        storage.get_ingress_append(&retained_key).await.unwrap(),
+        storage
+            .get_ingress_append(&retained_key)
+            .await
+            .expect("read custody for retained replay entry"),
         Some(retained)
     );
-    let pending = storage.list_pending_ingress_appends(10).await.unwrap();
+    let pending = storage
+        .list_pending_ingress_appends(10)
+        .await
+        .expect("list custody after session deletion");
     assert_eq!(pending.len(), 2);
     assert!(pending
         .iter()
@@ -1015,11 +1034,11 @@ async fn acknowledged_custody_is_never_reopened_by_a_later_gap() {
     storage
         .complete_ingress_appends_through(&stream, 0, allocated.sequence)
         .await
-        .unwrap();
+        .expect("complete acknowledged custody");
     assert!(storage
         .list_pending_ingress_appends(10)
         .await
-        .unwrap()
+        .expect("list custody after acknowledgement")
         .is_empty());
     // The client acknowledged through this sequence, so its entry left the queue
     // because it was delivered. A later overflow then advances the gap past it.
