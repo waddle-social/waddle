@@ -66,9 +66,11 @@ final class NotificationController: NSObject {
 
     private func updateAuthorizationStatus() async {
         let settings = await center.notificationSettings()
-        let isGranted = settings.authorizationStatus == .authorized
+        var isGranted = settings.authorizationStatus == .authorized
             || settings.authorizationStatus == .provisional
-            || settings.authorizationStatus == .ephemeral
+        #if os(iOS)
+        isGranted = isGranted || settings.authorizationStatus == .ephemeral
+        #endif
         onAuthorizationResult?(isGranted)
     }
 
