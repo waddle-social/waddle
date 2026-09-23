@@ -405,6 +405,17 @@ pub trait MucDurableStore: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    /// Delete receipts older than `retention` whose post-projection cleanup
+    /// failed, at most `limit` per call. Returns how many were removed.
+    fn prune_admin_mutation_receipts(
+        &self,
+        retention: std::time::Duration,
+        limit: usize,
+    ) -> MucDurableFuture<'_, u64> {
+        let _ = (retention, limit);
+        Box::pin(async { Ok(0) })
+    }
+
     /// Commit with publication authority that is already held by the caller.
     /// Implementations that share that authority gate must reuse it rather
     /// than acquire a nested read guard while a writer may be queued.

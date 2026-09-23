@@ -87,6 +87,13 @@ const DESTROY_COMPLETION_JANITOR_INTERVAL: Duration = Duration::from_secs(1);
 /// harmless between sweeps (they route to `NotConnected`/detached), so a
 /// 5-minute reap keeps `UserRegistryActor.users` bounded without hot-looping.
 const USER_ACTOR_REAPER_INTERVAL: Duration = Duration::from_secs(300);
+
+/// A receipt is read only by the bounded recovery of the attempt that minted
+/// it. One day is far beyond that window, so older rows are stranded cleanup.
+#[cfg(feature = "clustering")]
+const ADMIN_RECEIPT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+#[cfg(feature = "clustering")]
+const ADMIN_RECEIPT_PRUNE_LIMIT: usize = 256;
 const LOCAL_MUC_DEPARTURE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Retry retained local MUC departures. These entries share the lifetime of
@@ -5767,6 +5774,27 @@ async fn run_orphan_reaper_sweep_with_workers(
         let me = identity_handle.current();
         if !orphan_reaper_self_lease_is_fresh(node_lease.as_ref(), &me, lease_ttl, "start").await {
             return false;
+        }
+
+        // Admin commit receipts are deleted after projection; a timed-out or
+        // cancelled detached delete strands one row per batch. Retry that
+        // cleanup here by age, bounded per sweep, without failing the sweep.
+        if let Some(store) = clustering.muc_durable_store.as_ref() {
+            match store
+                .prune_admin_mutation_receipts(
+                    ADMIN_RECEIPT_RETENTION,
+                    ADMIN_RECEIPT_PRUNE_LIMIT,
+                )
+                .await
+            {
+                Ok(0) => {}
+                Ok(pruned) => {
+                    info!(pruned, "orphan reaper: removed stranded MUC admin commit receipts");
+                }
+                Err(error) => {
+                    warn!(%error, "orphan reaper: MUC admin receipt cleanup failed; retrying next sweep");
+                }
+            }
         }
 
         match node_lease
@@ -11776,6 +11804,7 @@ mod local_muc_departure_tests {
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: Default::default(),
                 pending_admin_projection: source_snapshot.pending_admin_projection,
+                admin_mutation_resolutions: source_snapshot.admin_mutation_resolutions,
             })
             .await
             .expect("restore live roster into inactive actor");

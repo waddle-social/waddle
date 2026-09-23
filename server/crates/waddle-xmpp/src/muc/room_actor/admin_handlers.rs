@@ -997,12 +997,12 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         }
         self.room = staged_room;
         if let Some(attempt) = admin_mutation_id {
-            self.admin_mutation_resolution = self.durable_coordinates.map(|coordinates| {
-                super::AdminMutationResolution::Committed {
+            if let Some(coordinates) = self.durable_coordinates {
+                self.record_admin_mutation_resolution(super::AdminMutationResolution::Committed {
                     attempt,
                     coordinates,
-                }
-            });
+                });
+            }
             self.delete_admin_receipt_after_projection(attempt);
         }
         if needs_rehydration {

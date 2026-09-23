@@ -10,6 +10,9 @@ use std::sync::{
 struct AdminReceiptStore {
     receipts: Mutex<HashMap<AdminMutationId, RoomCommittedCoordinates>>,
     fail_reads: AtomicBool,
+    /// When set, the next durable commit succeeds at these coordinates and
+    /// records the batch's receipt; otherwise commits are refused.
+    commit_next: Mutex<Option<RoomCommittedCoordinates>>,
 }
 
 impl MucDurableStore for AdminReceiptStore {
@@ -34,9 +37,23 @@ impl MucDurableStore for AdminReceiptStore {
         _room: &'a BareJid,
         _fence: &'a crate::muc::RoomClaimFenceContext,
         _intent: crate::muc::RoomDurableMutation,
-        _effects: crate::muc::RoomMutationEffects,
+        effects: crate::muc::RoomMutationEffects,
     ) -> crate::muc::RoomCommitFuture<'a> {
-        Box::pin(async { Err(crate::muc::RoomCommitError::NotOwner) })
+        let Some(coordinates) = self.commit_next.lock().expect("commit").take() else {
+            return Box::pin(async { Err(crate::muc::RoomCommitError::NotOwner) });
+        };
+        if let Some(attempt) = effects.admin_mutation_id() {
+            self.receipts
+                .lock()
+                .expect("receipts")
+                .insert(attempt, coordinates);
+        }
+        Box::pin(async move {
+            Ok(crate::muc::RoomCommitOutcome {
+                coordinates,
+                reservation: None,
+            })
+        })
     }
 
     fn load_admin_mutation_receipt<'a>(
@@ -134,6 +151,7 @@ impl AdminRecoveryFixture {
         let mut actor = RoomActor::new(self.authoritative.clone(), test_secret());
         actor.durable_coordinates = Some(self.coordinates);
         actor.durable_store = Some(self.store.clone());
+        actor.durable_claim_fence = Some(test_claim_fence(&self.authoritative.room_jid));
         RoomActor::spawn(actor)
     }
 
@@ -143,6 +161,7 @@ impl AdminRecoveryFixture {
             occupancy_revision: 7,
             departures: Default::default(),
             pending_admin_projection: Some(self.projection.clone()),
+            admin_mutation_resolutions: Vec::new(),
         }
     }
 }
@@ -165,7 +184,7 @@ async fn restoring_live_roster_keeps_rolled_back_intermediate_ban_after_foreign_
     );
     assert_eq!(snapshot.occupancy_revision, 7);
     assert_eq!(
-        snapshot.admin_mutation_resolution,
+        snapshot.admin_mutation_resolution(fixture.projection.attempt),
         Some(AdminMutationResolution::NotCommitted {
             attempt: fixture.projection.attempt
         })
@@ -187,7 +206,7 @@ async fn restoring_live_roster_applies_exact_commit_after_later_affiliation_chan
         .expect("restore proven batch after foreign unban");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert_eq!(
-        snapshot.admin_mutation_resolution,
+        snapshot.admin_mutation_resolution(fixture.projection.attempt),
         Some(AdminMutationResolution::Committed {
             attempt: fixture.projection.attempt,
             coordinates: RoomCommittedCoordinates {
@@ -262,7 +281,7 @@ async fn restoring_live_roster_rejects_receipt_from_wrong_lifecycle_or_revision(
                 .ask(GetSnapshot)
                 .await
                 .expect("snapshot")
-                .admin_mutation_resolution,
+                .admin_mutation_resolution(fixture.projection.attempt),
             None
         );
         assert!(actor
@@ -318,7 +337,7 @@ async fn restoring_live_roster_fails_closed_until_receipt_read_recovers() {
             .ask(GetSnapshot)
             .await
             .expect("published snapshot")
-            .admin_mutation_resolution,
+            .admin_mutation_resolution(fixture.projection.attempt),
         Some(AdminMutationResolution::Committed {
             attempt: fixture.projection.attempt,
             coordinates: fixture.coordinates,
@@ -358,4 +377,158 @@ async fn restoring_live_roster_applies_roles_only_when_hydrated_authorization_ma
             }
         );
     }
+}
+
+fn restore_without_projection(fixture: &AdminRecoveryFixture) -> RestoreLiveRoster {
+    RestoreLiveRoster {
+        room: fixture.source.clone(),
+        occupancy_revision: 7,
+        departures: Default::default(),
+        pending_admin_projection: None,
+        admin_mutation_resolutions: Vec::new(),
+    }
+}
+
+fn add_unaffiliated_occupant(room: &mut MucRoom, nick: &str) {
+    room.add_occupant(crate::muc::Occupant {
+        real_jid: test_full_jid(nick),
+        nick: nick.to_owned(),
+        role: Role::Participant,
+        affiliation: Affiliation::None,
+        is_remote: false,
+        home_server: None,
+    });
+}
+
+/// Subject recovery restores without an admin projection. A ban another
+/// owner committed while this actor was sealed still applies to that restore.
+#[tokio::test]
+async fn restoring_live_roster_without_admin_projection_enforces_durable_ban() {
+    let fixture = AdminRecoveryFixture::new();
+    let actor = fixture.spawn();
+    actor
+        .ask(restore_without_projection(&fixture))
+        .await
+        .expect("restore subject-recovery roster");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(
+        snapshot.room.get_occupant("bob").is_none(),
+        "a foreign owner's durable ban applies to every restore, not only admin recovery"
+    );
+    assert!(snapshot.admin_mutation_resolutions.is_empty());
+}
+
+/// Membership revocations are left to the paths that owe their presences
+/// (group-DM leave reconciliation, members-only config enforcement), which
+/// need the session present; only a durable ban is enforced at restore.
+#[tokio::test]
+async fn restoring_live_roster_without_admin_projection_keeps_revoked_members_for_owning_paths() {
+    let mut fixture = AdminRecoveryFixture::new();
+    add_unaffiliated_occupant(&mut fixture.source, "carol");
+    fixture.source.config.members_only = true;
+    fixture.authoritative.config.members_only = true;
+    let actor = fixture.spawn();
+    actor
+        .ask(restore_without_projection(&fixture))
+        .await
+        .expect("restore members-only roster");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(
+        snapshot.room.get_occupant("bob").is_none(),
+        "a durable ban is enforced on every restore"
+    );
+    assert!(
+        snapshot.room.get_occupant("carol").is_some(),
+        "a non-member stays until the path owing its removal presence runs"
+    );
+}
+
+/// Verdicts are keyed by attempt: a restore carries the predecessor's
+/// retained verdicts and adds its own without displacing them.
+#[tokio::test]
+async fn restored_admin_verdicts_are_retained_per_attempt() {
+    let fixture = AdminRecoveryFixture::new();
+    let earlier_attempt = AdminMutationId::generate();
+    let earlier = AdminMutationResolution::Committed {
+        attempt: earlier_attempt,
+        coordinates: fixture.coordinates,
+    };
+    let actor = fixture.spawn();
+    let mut restore = fixture.restore();
+    restore.admin_mutation_resolutions = vec![earlier];
+    actor
+        .ask(restore)
+        .await
+        .expect("restore with transferred verdicts");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(
+        snapshot.admin_mutation_resolution(earlier_attempt),
+        Some(earlier)
+    );
+    assert_eq!(
+        snapshot.admin_mutation_resolution(fixture.projection.attempt),
+        Some(AdminMutationResolution::NotCommitted {
+            attempt: fixture.projection.attempt
+        }),
+        "the restore's own verdict is added alongside the transferred one"
+    );
+    assert_eq!(
+        snapshot.admin_mutation_resolution(AdminMutationId::generate()),
+        None
+    );
+}
+
+/// The reviewer's case: a later durable batch on the recovered actor must not
+/// overwrite an earlier attempt's verdict before that attempt's caller reads it.
+#[tokio::test]
+async fn later_durable_batch_does_not_displace_an_unconsumed_verdict() {
+    let mut fixture = AdminRecoveryFixture::new();
+    let alice = test_full_jid("alice");
+    fixture
+        .authoritative
+        .set_affiliation(alice.to_bare(), Affiliation::Owner);
+    let actor = fixture.spawn();
+    actor
+        .ask(fixture.restore())
+        .await
+        .expect("restore rolled-back batch");
+    let later_coordinates = RoomCommittedCoordinates {
+        revision: fixture.coordinates.revision.next().expect("later revision"),
+        ..fixture.coordinates
+    };
+    *fixture.store.commit_next.lock().expect("commit") = Some(later_coordinates);
+    let later_attempt = AdminMutationId::generate();
+    actor
+        .ask(ApplyAdminItems {
+            attempt: later_attempt,
+            sender_jid: alice,
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(test_full_jid("carol").to_bare()),
+                nick: None,
+                affiliation: Some(Affiliation::Outcast),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await
+        .expect("later batch commits");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(
+        snapshot.admin_mutation_resolution(fixture.projection.attempt),
+        Some(AdminMutationResolution::NotCommitted {
+            attempt: fixture.projection.attempt
+        }),
+        "the earlier verdict survives a later batch"
+    );
+    assert_eq!(
+        snapshot.admin_mutation_resolution(later_attempt),
+        Some(AdminMutationResolution::Committed {
+            attempt: later_attempt,
+            coordinates: later_coordinates,
+        })
+    );
 }

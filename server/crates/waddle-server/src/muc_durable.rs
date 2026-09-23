@@ -2265,6 +2265,15 @@ impl MucDurableStore for PostgresMucRoomStore {
         Box::pin(admin_receipts::delete(&self.db, room_jid, attempt))
     }
 
+    fn prune_admin_mutation_receipts(
+        &self,
+        retention: std::time::Duration,
+        limit: usize,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'_, u64> {
+        let cutoff_ms = crate::time::now_ms().saturating_sub(retention.as_millis() as i64);
+        Box::pin(admin_receipts::prune_older_than(&self.db, cutoff_ms, limit))
+    }
+
     fn commit_room_mutation<'a>(
         &'a self,
         room_jid: &'a BareJid,

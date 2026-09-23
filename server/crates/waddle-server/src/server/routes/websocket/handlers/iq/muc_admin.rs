@@ -112,18 +112,61 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
     }
 }
 
+fn affiliation_of(list: &[(BareJid, Affiliation)], jid: &BareJid) -> Option<Affiliation> {
+    list.iter()
+        .find(|(candidate, _)| candidate == jid)
+        .map(|(_, affiliation)| *affiliation)
+}
+
 /// Roll back optimistically-persisted channel tuples after the room actor
 /// rejected an admin set. The actor batch itself is durable-first and
 /// all-or-nothing now, so there is no room-memory compensation here.
+///
+/// A missing commit proves only that THIS attempt did not land. The room lock
+/// is process-local, so a later owner may already have committed a newer
+/// affiliation for the same JID. Each tuple is restored compare-and-set: only
+/// while it still holds the value this attempt wrote. A tuple that moved on
+/// keeps the later owner's value.
 async fn rollback_admin_affiliations(
     state: &WebSocketState,
     managed_channel_id: Option<&str>,
     durable_previous_affiliations: &[(BareJid, Affiliation)],
+    optimistic_affiliations: &[(BareJid, Affiliation)],
 ) {
     let Some(channel_id) = managed_channel_id else {
         return;
     };
+    let target_jids: Vec<BareJid> = durable_previous_affiliations
+        .iter()
+        .map(|(jid, _)| jid.clone())
+        .collect();
+    let current = match explicit_channel_affiliations_for_jids(
+        &state.deps.app_state,
+        channel_id,
+        target_jids,
+    )
+    .await
+    {
+        Ok(current) => current,
+        Err(error) => {
+            warn!(
+                channel = channel_id,
+                error = %error,
+                "Could not read current managed-channel affiliations; retaining optimistic tuples for later reconciliation"
+            );
+            return;
+        }
+    };
     for (previous_jid, previous_affiliation) in durable_previous_affiliations {
+        let optimistic = affiliation_of(optimistic_affiliations, previous_jid);
+        if optimistic.is_some() && affiliation_of(&current, previous_jid) != optimistic {
+            warn!(
+                channel = channel_id,
+                target = %previous_jid,
+                "Managed-channel affiliation changed after this attempt wrote it; keeping the later value instead of rolling back"
+            );
+            continue;
+        }
         let _ = persist_managed_channel_affiliation(
             state,
             channel_id,
@@ -444,7 +487,7 @@ async fn reconcile_ambiguous_admin_result(
                     items,
                     sender_jid,
                     mutation_attempt,
-                    snapshot.admin_mutation_resolution,
+                    snapshot.admin_mutation_resolution(mutation_attempt),
                 )
                 .await
                 {
@@ -537,7 +580,7 @@ async fn recover_admin_result_after_actor_failure(
             {
                 Ok(snapshot) => {
                     return recover_exact_admin_result(state, &pre_apply_snapshot.room, items, sender_jid,
-                        mutation_attempt, snapshot.admin_mutation_resolution).await;
+                        mutation_attempt, snapshot.admin_mutation_resolution(mutation_attempt)).await;
                 }
                 Err(error) => {
                     warn!(
@@ -1278,6 +1321,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1296,6 +1340,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             // XEP-0045 §9.2: the denial returns <not-allowed/> "along
@@ -1317,6 +1362,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             // XEP-0045 §8.4/§9.7: the denial returns <not-allowed/>
@@ -1340,6 +1386,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1381,6 +1428,7 @@ pub(super) async fn handle_muc_admin_iq(
                         state,
                         managed_channel_id.as_deref(),
                         &durable_previous_affiliations,
+                        &affiliation_updates,
                     )
                     .await;
                     warn!(room = %room_jid, "MUC admin commit outcome is ambiguous and the fresh actor could not prove the batch committed; restored previous managed-channel affiliations");
@@ -1416,6 +1464,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             let _ = state
@@ -1445,6 +1494,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1465,6 +1515,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1485,6 +1536,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1503,6 +1555,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1525,6 +1578,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             warn!(room = %room_jid, error = ?error, "MUC admin mutation was not delivered to the actor");
@@ -1565,6 +1619,7 @@ pub(super) async fn handle_muc_admin_iq(
                         state,
                         managed_channel_id.as_deref(),
                         &durable_previous_affiliations,
+                        &affiliation_updates,
                     )
                     .await;
                 }
@@ -3096,6 +3151,56 @@ mod tests {
         assert!(
             applied.outbox_reservation.is_none(),
             "earlier revision observations must not bind a recovered reservation"
+        );
+    }
+
+    /// A missing commit proves only that this attempt did not land. A tuple a
+    /// later owner moved on must not be overwritten with the pre-ask value.
+    #[tokio::test]
+    async fn rollback_keeps_affiliation_committed_by_a_later_owner() {
+        let state = create_test_websocket_state().await;
+        let channel_id = "cas-rollback-channel";
+        let target: BareJid = "target@example.com".parse().expect("target");
+        let moved: BareJid = "moved@example.com".parse().expect("moved");
+        for jid in [&target, &moved] {
+            persist_managed_channel_affiliation(&state, channel_id, jid, Affiliation::Member)
+                .await
+                .expect("pre-ask tuple");
+        }
+        let previous = vec![
+            (target.clone(), Affiliation::Member),
+            (moved.clone(), Affiliation::Member),
+        ];
+        let optimistic = vec![
+            (target.clone(), Affiliation::Outcast),
+            (moved.clone(), Affiliation::Outcast),
+        ];
+        for (jid, affiliation) in &optimistic {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("optimistic tuple");
+        }
+        // A foreign owner committed a newer affiliation before recovery ran.
+        persist_managed_channel_affiliation(&state, channel_id, &moved, Affiliation::Admin)
+            .await
+            .expect("later owner tuple");
+
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &optimistic).await;
+
+        let current = explicit_channel_affiliations_for_jids(
+            &state.deps.app_state,
+            channel_id,
+            [target, moved],
+        )
+        .await
+        .expect("current tuples");
+        assert_eq!(
+            current
+                .iter()
+                .map(|(_, affiliation)| *affiliation)
+                .collect::<Vec<_>>(),
+            vec![Affiliation::Member, Affiliation::Admin],
+            "only the tuple still holding this attempt's value is restored"
         );
     }
 }

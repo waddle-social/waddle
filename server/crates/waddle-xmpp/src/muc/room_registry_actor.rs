@@ -164,6 +164,7 @@ struct LiveRoomRestore {
     occupancy_revision: u64,
     departures: super::room_actor::DepartureLedger,
     pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
+    admin_mutation_resolutions: Vec<super::room_actor::AdminMutationResolution>,
 }
 
 enum DemandRoomPreparation {
@@ -1786,6 +1787,7 @@ impl RoomRegistryActor {
                         occupancy_revision: restore.occupancy_revision,
                         departures: restore.departures,
                         pending_admin_projection: restore.pending_admin_projection,
+                        admin_mutation_resolutions: restore.admin_mutation_resolutions,
                     })
                     .await
                 {
@@ -2406,6 +2408,7 @@ impl RoomRegistryActor {
                             occupancy_revision: restore.occupancy_revision,
                             departures: restore.departures,
                             pending_admin_projection: restore.pending_admin_projection,
+                            admin_mutation_resolutions: restore.admin_mutation_resolutions,
                         })
                         .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
@@ -4160,6 +4163,7 @@ impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
                         occupancy_revision: restore.occupancy_revision,
                         departures: restore.departures,
                         pending_admin_projection: restore.pending_admin_projection,
+                        admin_mutation_resolutions: restore.admin_mutation_resolutions,
                     });
                     let entry = self
                         .rooms
@@ -5290,6 +5294,7 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
                 occupancy_revision: msg.occupancy_revision,
                 departures: msg.departures,
                 pending_admin_projection: None,
+                admin_mutation_resolutions: Vec::new(),
             }),
         });
         let transition = self

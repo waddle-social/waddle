@@ -91,6 +91,7 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
             occupancy_revision: 0,
             departures: Default::default(),
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("restore live roster");
@@ -126,6 +127,7 @@ async fn restoring_live_roster_preserves_pending_members_only_config_removals() 
             occupancy_revision: 0,
             departures: Default::default(),
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("restore before members-only enforcement");
@@ -160,6 +162,7 @@ async fn restoring_live_roster_preserves_explicit_roles_without_authorization_ch
                 occupancy_revision: 0,
                 departures: Default::default(),
                 pending_admin_projection: None,
+                admin_mutation_resolutions: Vec::new(),
             })
             .await
             .expect("restore explicit role");
@@ -5131,6 +5134,7 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
             occupancy_revision: snapshot.occupancy_revision,
             departures: snapshot.departures,
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("transfer");
@@ -5886,6 +5890,7 @@ async fn receipts_are_transferred_on_live_roster_restore() {
             occupancy_revision: snapshot.occupancy_revision,
             departures: snapshot.departures,
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("restore successor live roster");
@@ -5931,6 +5936,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             occupancy_revision: newer_snapshot.occupancy_revision,
             departures: newer_snapshot.departures,
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("restore newer receipt");
@@ -5940,6 +5946,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             occupancy_revision: older_snapshot.occupancy_revision,
             departures: older_snapshot.departures,
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("restore older receipt");
@@ -7347,6 +7354,7 @@ async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
             occupancy_revision: 2,
             departures: Default::default(),
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("transfer");
@@ -7364,6 +7372,7 @@ async fn live_roster_transfer_preserves_actor_room_jid() {
             occupancy_revision: 0,
             departures: Default::default(),
             pending_admin_projection: None,
+            admin_mutation_resolutions: Vec::new(),
         })
         .await
         .expect("transfer");
