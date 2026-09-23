@@ -35,8 +35,17 @@ final class FakePort: XmppPort {
         continuation.yield(event)
     }
 
-    func connect() async { connectCount += 1 }
-    func disconnect() async {}
+    var connectDelay: UInt64 = 0
+    var disconnectCount = 0
+
+    func connect() async {
+        connectCount += 1
+        if connectDelay > 0 {
+            try? await Task.sleep(nanoseconds: connectDelay)
+        }
+    }
+
+    func disconnect() async { disconnectCount += 1 }
     func sendPresence(_ availability: Availability, status: String?) async {}
 
     func send(_ message: OutboundMessage) async -> SendOutcome {

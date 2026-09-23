@@ -150,7 +150,15 @@ public final class SessionCoordinator {
         attempt += 1
         let current = attempt
         let port = self.port
-        Task { await port.connect() }
+        Task { [weak self] in
+            await port.connect()
+            // A connect that completes after sign-out (or after the
+            // coordinator is gone) must not leave a live stream behind.
+            guard let self, !self.isStopped else {
+                await port.disconnect()
+                return
+            }
+        }
         connectWatchdog?.cancel()
         connectWatchdog = Task { [weak self, connectBudget] in
             try? await Task.sleep(nanoseconds: UInt64(connectBudget * 1_000_000_000))
@@ -209,8 +217,14 @@ public final class SessionCoordinator {
     func handle(_ event: XmppEvent) {
         switch event {
         case .connected:
+            // Signed out: a late connect is torn down by its own task.
+            guard !isStopped else { return }
             connectWatchdog?.cancel()
             connectWatchdog = nil
+            // A slow attempt that succeeds after the watchdog gave up wins;
+            // the scheduled retry would only reconnect a live stream.
+            reconnectTask?.cancel()
+            reconnectTask = nil
             status.connection = .online
             // Runs beside the event loop: the pipeline awaits server
             // round-trips whose answers arrive as events.

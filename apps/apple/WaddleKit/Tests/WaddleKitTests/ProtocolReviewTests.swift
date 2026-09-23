@@ -131,3 +131,39 @@ struct ProtocolReviewTests {
         #expect(port.historyRequests.map(\.1) == [nil, "s9", "s9"])
     }
 }
+
+/// A connect attempt the coordinator no longer wants (signed out, or
+/// superseded by a scheduled retry) must not leave a stream behind.
+@MainActor
+@Suite("Stale connection attempts")
+struct StaleConnectionTests {
+    @Test func connectFinishingAfterSignOutIsTornDown() async throws {
+        let port = FakePort()
+        port.connectDelay = 100_000_000
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.start()
+        await coordinator.stop()
+        let disconnectsAtStop = port.disconnectCount
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(port.disconnectCount == disconnectsAtStop + 1)
+        #expect(coordinator.connection == .signedOut)
+    }
+
+    @Test func lateConnectedCancelsTheScheduledRetry() async throws {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
+        coordinator.start()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        guard case .offline = coordinator.connection else {
+            Issue.record("expected the watchdog to schedule a retry, got \(coordinator.connection)")
+            await coordinator.stop()
+            return
+        }
+        let connects = port.connectCount
+        port.emit(.connected)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        #expect(coordinator.connection == .online)
+        #expect(port.connectCount == connects)
+        await coordinator.stop()
+    }
+}
