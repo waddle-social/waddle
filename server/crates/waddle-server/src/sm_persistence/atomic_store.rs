@@ -58,8 +58,14 @@ pub(super) async fn store_session_atomic_with_ingress_append(
     append: PersistedIngressAppend,
 ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
     Ok(
-        match store_session_atomic_inner(storage, None, session, unacked, Ledger::Exclusive(append))
-            .await?
+        match store_session_atomic_inner(
+            storage,
+            None,
+            session,
+            unacked,
+            Ledger::Exclusive(Box::new(append)),
+        )
+        .await?
         {
             StoreOutcome::Committed { .. } => KeyedSnapshotOutcome::Committed,
             StoreOutcome::ObligationAlreadyAllocated { accepting_stream } => {
@@ -73,7 +79,7 @@ pub(super) async fn store_session_atomic_with_ingress_append(
 enum Ledger {
     Untouched,
     /// One obligation gates the whole write: a conflict commits nothing.
-    Exclusive(PersistedIngressAppend),
+    Exclusive(Box<PersistedIngressAppend>),
     /// Drained entries already hold counted sequences: a conflict withholds only its proof.
     Drained(Vec<PersistedIngressAppend>),
 }
