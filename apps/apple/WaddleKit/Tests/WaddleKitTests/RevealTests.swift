@@ -243,4 +243,30 @@ struct RevealTrimTests {
         await settle { port.historyRequests.count == 2 }
         #expect(port.historyRequests.map(\.1) == [nil, nil])
     }
+
+    /// A reset while the newest page loads off screen: that page still sets
+    /// the cursor, so paging continues when the conversation reopens.
+    @Test func newestPageLandingAfterAResetKeepsPaging() async {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 3)
+        coordinator.status.connection = .online
+        port.historyPages = [page(9...10), page(20...21), page(18...19)]
+        await coordinator.loadLatest(roomConversation)
+        coordinator.history.markAllStale()
+        port.holdsHistory = true
+        let opening = Task { await coordinator.open(roomConversation) }
+        await settle { !port.heldHistory.isEmpty }
+        coordinator.close(roomConversation)
+        for index in 1...3 {
+            coordinator.route(roomMessage("live", from: "bob", stanzaID: "live-\(index)"))
+        }
+        port.holdsHistory = false
+        port.releaseHistory()
+        await opening.value
+
+        #expect(coordinator.history.state(of: roomConversation).olderCursor == "s20")
+        await coordinator.loadOlder(roomConversation)
+        #expect(port.historyRequests.map(\.1) == [nil, nil, "s20"])
+    }
 }
+

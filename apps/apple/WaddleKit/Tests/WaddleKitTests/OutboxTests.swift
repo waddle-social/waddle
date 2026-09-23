@@ -372,4 +372,20 @@ struct OutboxReplayTests {
         #expect(store.entries.map(\.state) == [.failed])
         await coordinator.stop()
     }
+
+    /// The room reflected the send before the stream failed and the core
+    /// reported it failed: it was delivered, so it is not saved as failed.
+    @Test func reflectedThenFailedIsNotSavedAsFailed() async throws {
+        let store = InMemoryOutboxStore()
+        let coordinator = SessionCoordinator(account: me, port: FakePort(), outboxStore: store)
+        coordinator.start()
+        coordinator.status.connection = .online
+        coordinator.isSendReady = true
+        let id = try #require(await coordinator.send(Draft(text: "hello"), in: roomConversation))
+        coordinator.route(roomMessage("hello", from: me.nick, stanzaID: "s-own", originID: id))
+        coordinator.handle(.deliveryFailed(stanzaID: id))
+        #expect(store.entries.isEmpty)
+        await coordinator.stop()
+    }
 }
+

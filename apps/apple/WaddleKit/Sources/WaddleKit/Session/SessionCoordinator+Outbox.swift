@@ -60,10 +60,11 @@ extension SessionCoordinator {
         let unconfirmed = sentOrder.compactMap { sentOutbound[$0] }.filter(isAwaitingConfirmation)
         let pending = (unconfirmed + outboundQueue).map { persisted($0, state: .pending) }
         // A failed send the core replayed on a fresh stream can still be
-        // acknowledged; only a send that stays failed is saved. (One the
-        // server echoed back left `failedOutbound` in `confirmOwnCopy`.)
+        // acknowledged, or its server copy may already have replaced the
+        // local echo (reflected before the stream failed): neither is saved.
+        // A failed send whose echo live traffic trimmed stays saved.
         let failed = failedOutbound.values
-            .filter { deliveries.state(of: $0.clientID) == .failed }
+            .filter { deliveries.state(of: $0.clientID) == .failed && echo(of: $0)?.isLocalEcho != false }
             .map { persisted($0, state: .failed) }
             .sorted { $0.createdAt < $1.createdAt }
         var seen = Set<String>()

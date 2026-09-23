@@ -9,8 +9,9 @@ public struct HistoryState: Hashable, Sendable {
     /// RSM `<first/>` of the oldest page loaded; the next `before` cursor.
     public var olderCursor: String?
     public var failed = false
-    /// A trim moved `olderCursor` back while a page was loading; that page
-    /// must not move it past the rows the rewind refetches.
+    /// A trim moved `olderCursor` back (or reset it) while a page was
+    /// loading; an older page landing then must not move it past the rows
+    /// the rewind refetches.
     var rewoundDuringLoad = false
 
     public init() {}
@@ -44,10 +45,12 @@ public final class HistoryStore {
     func finish(_ conversation: ConversationID, page: ArchivePage, wasLatest: Bool) {
         var state = self.state(of: conversation)
         state.isLoading = false
-        if state.rewoundDuringLoad {
-            state.rewoundDuringLoad = false
-            state.hasLoadedLatest = state.hasLoadedLatest || wasLatest
-        } else if wasLatest {
+        // After a rewind, an older page leaves the cursor where the rewind
+        // put it. A newest page is safe either way: every trimmed row is in
+        // it or older.
+        let olderPageAfterRewind = state.rewoundDuringLoad && !wasLatest
+        state.rewoundDuringLoad = false
+        if wasLatest {
             state.hasLoadedLatest = true
             // A refresh of the newest page only moves the older cursor on
             // the first load; later refreshes keep the deeper paging state.
@@ -55,7 +58,7 @@ public final class HistoryStore {
                 state.olderCursor = page.first
                 state.hasMoreOlder = !page.isComplete && page.first != nil
             }
-        } else {
+        } else if !olderPageAfterRewind {
             let advanced = page.first != nil && page.first != state.olderCursor
             state.olderCursor = page.first ?? state.olderCursor
             state.hasMoreOlder = !page.isComplete && advanced
