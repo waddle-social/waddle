@@ -83,11 +83,19 @@ private struct MessageRowContent: View {
             openThread: openThread,
             openImage: openImage
         ))
+        #if os(iOS)
         .fullScreenCover(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
             if let imagePreviewFile {
                 MessageImagePreviewView(file: imagePreviewFile)
             }
         }
+        #elseif os(macOS)
+        .sheet(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
+            if let imagePreviewFile {
+                MessageImagePreviewView(file: imagePreviewFile)
+            }
+        }
+        #endif
     }
 
     private var occupant: Occupant? {
