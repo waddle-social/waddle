@@ -67,6 +67,11 @@ public final class SessionCoordinator {
 
     @ObservationIgnored private let connectBudget: TimeInterval
     @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
+    /// One connect at a time: the FFI keeps a single stream handle and a
+    /// second attempt would overwrite, and orphan, the first one's stream.
+    @ObservationIgnored private var isConnectInFlight = false
+    /// A retry was due while a connect was still running.
+    @ObservationIgnored private var retryWhenConnectSettles = false
     @ObservationIgnored private var attempt = 0
 
     /// `connectBudget`: how long an attempt may take to reach the ready
@@ -145,19 +150,26 @@ public final class SessionCoordinator {
     }
 
     private func connectNow() {
-        guard !isStopped else { return }
+        guard !isStopped, status.connection != .online else { return }
+        guard !isConnectInFlight else {
+            retryWhenConnectSettles = true
+            return
+        }
         status.connection = .connecting
         attempt += 1
         let current = attempt
         let port = self.port
+        isConnectInFlight = true
         Task { [weak self] in
             await port.connect()
             // A connect that completes after sign-out (or after the
             // coordinator is gone) must not leave a live stream behind.
             guard let self, !self.isStopped else {
+                self?.isConnectInFlight = false
                 await port.disconnect()
                 return
             }
+            self.connectSettled()
         }
         connectWatchdog?.cancel()
         connectWatchdog = Task { [weak self, connectBudget] in
@@ -167,10 +179,28 @@ public final class SessionCoordinator {
         }
     }
 
+    /// The in-flight connect returned. Run a retry that came due while it
+    /// was running; a `.connected` event from it cancels that retry.
+    private func connectSettled() {
+        isConnectInFlight = false
+        guard retryWhenConnectSettles else { return }
+        retryWhenConnectSettles = false
+        if status.connection != .online {
+            scheduleReconnect()
+        }
+    }
+
     private func connectAttemptTimedOut(_ timedOut: Int) async {
         guard timedOut == attempt, status.connection == .connecting, !isStopped else { return }
         await port.disconnect()
         guard timedOut == attempt, status.connection == .connecting else { return }
+        guard !isConnectInFlight else {
+            // Still negotiating: show offline, but retry only once it settles
+            // so two attempts never race for the one stream handle.
+            status.connection = .offline(retryAt: nil)
+            retryWhenConnectSettles = true
+            return
+        }
         scheduleReconnect()
     }
 

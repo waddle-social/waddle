@@ -167,3 +167,42 @@ struct StaleConnectionTests {
         await coordinator.stop()
     }
 }
+
+@MainActor
+@Suite("Serialized connection attempts")
+struct SerializedConnectTests {
+    /// The watchdog gives up on a slow attempt, but no second connect starts
+    /// until the first returns; then the retry runs.
+    @Test func timedOutAttemptIsNotRacedBySecondConnect() async throws {
+        let port = FakePort()
+        // Slower than the watchdog (0.05 s) plus the first backoff (1 s).
+        port.connectDelay = 1_500_000_000
+        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
+        coordinator.start()
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+        #expect(port.connectCount == 1)
+        guard case .offline = coordinator.connection else {
+            Issue.record("expected offline after the watchdog, got \(coordinator.connection)")
+            await coordinator.stop()
+            return
+        }
+        // The slow attempt returns without connecting; the deferred retry
+        // (1 s backoff) then starts the second attempt.
+        try await Task.sleep(nanoseconds: 1_600_000_000)
+        #expect(port.connectCount == 2)
+        await coordinator.stop()
+    }
+
+    @Test func slowAttemptThatConnectsNeedsNoRetry() async throws {
+        let port = FakePort()
+        port.connectDelay = 300_000_000
+        let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
+        coordinator.start()
+        try await Task.sleep(nanoseconds: 350_000_000)
+        port.emit(.connected)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        #expect(coordinator.connection == .online)
+        #expect(port.connectCount == 1)
+        await coordinator.stop()
+    }
+}
