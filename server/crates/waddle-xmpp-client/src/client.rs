@@ -36,7 +36,10 @@ impl ClientHandle {
 
     /// Current session snapshot (reads from shared state without blocking).
     pub fn snapshot(&self) -> SessionSnapshot {
-        self.state.read().unwrap().clone()
+        match self.state.read() {
+            Ok(snapshot) => snapshot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     /// Current high-level client state.
@@ -222,6 +225,17 @@ enum DeferredXmppCommand {
 }
 
 impl DriverTask {
+    fn publish_snapshot(&self) {
+        let snapshot = self.runtime.snapshot().clone();
+        match self.state.write() {
+            Ok(mut current) => *current = snapshot,
+            Err(poisoned) => {
+                *poisoned.into_inner() = snapshot;
+                self.state.clear_poison();
+            }
+        }
+    }
+
     async fn run(mut self) {
         // Publish the config-seeded resume state (if any) before the
         // first transport event, mirroring the wasm driver's snapshot
@@ -402,7 +416,7 @@ impl DriverTask {
         let client_events = match self.runtime.apply_transport_event(event) {
             Ok(events) => events,
             Err(_) => {
-                *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                self.publish_snapshot();
                 return false;
             }
         };
@@ -413,11 +427,11 @@ impl DriverTask {
         }
 
         if !self.flush_deferred_commands().await {
-            *self.state.write().unwrap() = self.runtime.snapshot().clone();
+            self.publish_snapshot();
             return false;
         }
 
-        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+        self.publish_snapshot();
         !is_terminal
     }
 
@@ -432,7 +446,7 @@ impl DriverTask {
             return false;
         }
 
-        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+        self.publish_snapshot();
         true
     }
 
@@ -443,7 +457,7 @@ impl DriverTask {
                     if is_fatal_transport_error(&error) {
                         self.mark_transport_closed().await;
                     }
-                    *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                    self.publish_snapshot();
                     return false;
                 }
             }
@@ -458,7 +472,7 @@ impl DriverTask {
                 let _ = self.dispatch_client_event(event);
             }
         }
-        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+        self.publish_snapshot();
     }
 
     /// Dispatch one client event.

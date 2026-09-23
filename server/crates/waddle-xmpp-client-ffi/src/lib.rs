@@ -51,6 +51,8 @@ mod muji_tests;
 #[cfg(test)]
 mod notify_settings_tests;
 #[cfg(test)]
+mod ping_tests;
+#[cfg(test)]
 mod profile_verbs_tests;
 #[cfg(test)]
 mod room_admin_tests;
