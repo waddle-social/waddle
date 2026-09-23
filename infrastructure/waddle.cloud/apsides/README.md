@@ -34,10 +34,10 @@ Apsides has no released CLI yet. Build `aps` (`cuenv task build`) from
 also need Deno 2.9 and Python 3 with PyYAML. Then:
 
 ```sh
-export APS=/path/to/apsides/target/debug/aps
+export APSIDES=/path/to/apsides APS=/path/to/apsides/target/debug/aps
 ./generate.sh                                          # SDK, CRD types, source lock
 "$APS" compile --source program.tsx --output "$(mktemp -d)/out"
-./gaps/check.sh                                        # every gap probe must still fail
+./gaps/check.sh                                        # each probe still fails for its recorded reason
 ```
 
 Generated CRD types and the embedded SDK live in the ignored `.aps/`
@@ -48,8 +48,10 @@ bundle installs.
 
 `program.tsx` compiles only after the degradations marked `GAP-*` in the
 source. Each gap has a probe under [`gaps/`](gaps) that declares the Flux
-shape and must fail to compile; `gaps/check.sh` fails when a probe starts
-compiling, which is the signal to fold that capability back into the program.
+shape and must be rejected with the message on its `// Rejected with:` line.
+`gaps/check.sh` fails when a probe starts compiling, which is the signal to
+fold that capability back into the program, or when it is rejected for any
+other reason.
 
 The full assessment, including deployment and operations blockers that no
 compile probe can show, is in [ASSESSMENT.md](ASSESSMENT.md).
