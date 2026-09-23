@@ -84,82 +84,20 @@ async fn recover_exact_room_after_ambiguous_config_commit(
     ),
     String,
 > {
-    // Snapshot the stale actor NOW, not from the caller's pre-mutation copy:
-    // joins/leaves that projected through it after that copy would otherwise
-    // be rolled back by the transplant. The ambiguous commit sealed the actor
-    // (ownership lost), so this snapshot is its final state.
-    let recovery_snapshot = tokio::time::timeout(
-        crate::server::routes::websocket::LEAVE_ASK_TIMEOUT,
-        stale_actor.ask(waddle_xmpp::muc::room_actor::GetSnapshot),
+    let actor = crate::admin::channels::reacquire_config_actor(
+        &state.deps.protocol.room_registry,
+        room_jid,
+        previous_snapshot,
+        stale_actor,
     )
     .await
-    .map_err(|_| "config outcome recovery snapshot timed out".to_string())?;
-    let recovery_snapshot = match recovery_snapshot {
-        Ok(snapshot) => snapshot,
-        Err(_) => {
-            let actor = crate::admin::channels::reacquire_config_actor(
-                &state.deps.protocol.room_registry,
-                room_jid,
-                previous_snapshot,
-                stale_actor,
-            )
-            .await
-            .ok_or_else(|| "config successor recovery failed".to_string())?;
-            let snapshot = actor
-                .ask(GetSnapshot)
-                .await
-                .map_err(|error| format!("config successor snapshot failed: {error:?}"))?;
-            return Ok((actor, snapshot));
-        }
-    };
-    let recovery_snapshot = &recovery_snapshot;
-    // Demote the exact stale actor and publish the successor in ONE registry
-    // turn (no observable "room absent" gap); if the stale actor was already
-    // replaced, the live successor is authoritative and gets no transplant.
-    let handoff = state
-        .deps
-        .protocol
-        .room_registry
-        .ask(
-            waddle_xmpp::muc::room_registry_actor::GetOrCreateRoomWithLiveRoster {
-                room_jid: room_jid.clone(),
-                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
-                    recovery_snapshot.room.waddle_id.clone(),
-                ),
-                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
-                    recovery_snapshot.room.channel_id.clone(),
-                ),
-                config: recovery_snapshot.room.config.clone(),
-                live_room_restore: recovery_snapshot.room.clone(),
-                occupancy_revision: recovery_snapshot.occupancy_revision,
-                departures: recovery_snapshot.departures.clone(),
-                demote_first: Some(stale_actor.clone()),
-            },
-        )
-        .await;
-    let recovered_actor = match handoff {
-        Ok(acquisition) => acquisition.actor_ref,
-        Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
-        )) => {
-            waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-                .get_or_create_room(
-                    room_jid.clone(),
-                    recovery_snapshot.room.waddle_id.clone(),
-                    recovery_snapshot.room.channel_id.clone(),
-                    recovery_snapshot.room.config.clone(),
-                )
-                .await
-                .map_err(|error| format!("config outcome recovery failed: {error:?}"))?
-                .actor_ref
-        }
-        Err(error) => return Err(format!("config outcome recovery failed: {error:?}")),
-    };
-    let recovered_snapshot = recovered_actor
+    .map_err(|error| format!("config successor recovery failed: {error}"))?
+    .ok_or_else(|| "original room no longer exists".to_string())?;
+    let snapshot = actor
         .ask(GetSnapshot)
         .await
-        .map_err(|error| format!("recovered config snapshot failed: {error:?}"))?;
-    Ok((recovered_actor, recovered_snapshot))
+        .map_err(|error| format!("config successor snapshot failed: {error:?}"))?;
+    Ok((actor, snapshot))
 }
 
 fn request_config_reservation_arm(
@@ -324,67 +262,44 @@ impl CancelledOwnerConfigAskRecoveryGuard {
         let _config_guard = acquire_room_config_lock(&self.room_jid).await;
         let mut timeout_attempt = 0_i64;
         let snapshot = loop {
-            match self
+            if let Err(kameo::error::SendError::Timeout(_)) = self
                 .actor
                 .ask(GetSnapshot)
+                .mailbox_timeout(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT)
                 .reply_timeout(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT)
                 .await
             {
-                Ok(_) => {
-                    if let Some(actor) = crate::admin::channels::reacquire_config_actor(
-                        &self.registry,
-                        &self.room_jid,
-                        &self.previous_snapshot,
-                        &self.actor,
-                    )
-                    .await
+                timeout_attempt = timeout_attempt.saturating_add(1);
+                let backoff_ms = crate::room_effect_outbox::retry_delay_ms(timeout_attempt);
+                tracing::warn!(room = %self.room_jid, timeout_attempt, backoff_ms,
+                        "cancelled owner config recovery snapshot timed out; retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
+                    .await;
+                continue;
+            }
+            match crate::admin::channels::reacquire_config_actor(
+                &self.registry,
+                &self.room_jid,
+                &self.previous_snapshot,
+                &self.actor,
+            )
+            .await
+            {
+                Ok(None) => return,
+                Ok(Some(actor)) => {
+                    self.actor = actor;
+                    if let Ok(snapshot) = self
+                        .actor
+                        .ask(GetSnapshot)
+                        .mailbox_timeout(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT)
+                        .reply_timeout(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT)
+                        .await
                     {
-                        self.actor = actor;
-                        if let Ok(snapshot) = self
-                            .actor
-                            .ask(GetSnapshot)
-                            .reply_timeout(std::time::Duration::from_secs(5))
-                            .await
-                        {
-                            break snapshot;
-                        }
+                        break snapshot;
                     }
                 }
-                // Both Timeout variants mean the same thing here: the actor
-                // did not answer in time (kameo reports reply timeouts with
-                // and without the returned message). Retry either way — the
-                // give-up arm below is for closed/dead actors only.
-                Err(kameo::error::SendError::Timeout(_)) => {
-                    timeout_attempt = timeout_attempt.saturating_add(1);
-                    let backoff_ms = crate::room_effect_outbox::retry_delay_ms(timeout_attempt);
-                    tracing::warn!(
-                        room = %self.room_jid,
-                        timeout_attempt,
-                        backoff_ms,
-                        "cancelled owner config ask recovery snapshot timed out; retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
-                        .await;
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        room = %self.room_jid,
-                        ?error,
-                        "cancelled owner config ask recovery could not snapshot the room"
-                    );
-                    if let Some(actor) = crate::admin::channels::reacquire_config_actor(
-                        &self.registry,
-                        &self.room_jid,
-                        &self.previous_snapshot,
-                        &self.actor,
-                    )
-                    .await
-                    {
-                        self.actor = actor;
-                        continue;
-                    }
-                }
+                Err(error) => tracing::warn!(room = %self.room_jid, %error,
+                    "cancelled owner config recovery cannot restore the original lifecycle; retrying"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(
                 crate::room_effect_outbox::retry_delay_ms(1) as u64,
@@ -1224,7 +1139,10 @@ mod channel_type_projection_tests {
 mod tests {
     use std::collections::HashMap;
     use std::str::FromStr;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
     use std::time::Duration;
 
     use jid::{BareJid, FullJid};
@@ -1353,6 +1271,7 @@ mod tests {
         fences: Mutex<HashMap<BareJid, waddle_xmpp::muc::RoomClaimFenceContext>>,
         coordinates: Mutex<HashMap<BareJid, (RoomLifecycleId, i64)>>,
         commit_pause: Mutex<Option<CommitPause>>,
+        config_commit_unknown_once: AtomicBool,
     }
 
     impl PausableConfigDurableStore {
@@ -1363,6 +1282,7 @@ mod tests {
                 fences: Mutex::new(HashMap::new()),
                 coordinates: Mutex::new(HashMap::new()),
                 commit_pause: Mutex::new(None),
+                config_commit_unknown_once: AtomicBool::new(false),
             })
         }
 
@@ -1423,6 +1343,14 @@ mod tests {
                     {
                         state.config = config;
                     }
+                }
+                RoomDurableMutation::Destroy { .. }
+                | RoomDurableMutation::DestroyAndReleaseClaim { .. } => {
+                    self.states.lock().expect("states lock").remove(room_jid);
+                    self.coordinates
+                        .lock()
+                        .expect("coordinates lock")
+                        .remove(room_jid);
                 }
                 _ => {}
             }
@@ -1516,6 +1444,7 @@ mod tests {
                 tx.commit()
                     .await
                     .map_err(|_| RoomCommitError::Database(RoomCommitDatabaseError::sanitized()))?;
+                let is_config = matches!(&intent, RoomDurableMutation::Config { .. });
                 let is_config_commit = matches!(
                     &intent,
                     RoomDurableMutation::Create { .. }
@@ -1530,6 +1459,13 @@ mod tests {
                     // retains a permit if the waiter has not reached `.notified()` yet.
                     pause.reached.notify_one();
                     pause.wait_until_released().await;
+                }
+                if is_config
+                    && self
+                        .config_commit_unknown_once
+                        .swap(false, Ordering::SeqCst)
+                {
+                    return Err(RoomCommitError::CommitOutcomeUnknown);
                 }
                 Ok(waddle_xmpp::muc::RoomCommitOutcome {
                     coordinates,
@@ -1556,6 +1492,154 @@ mod tests {
         ) -> MucDurableFuture<'a, bool> {
             let exact = self.exact_fence_matches(room_jid, fence);
             Box::pin(async move { Ok(exact) })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_owner_config_guard_respects_destroyed_lifecycle() {
+        use waddle_xmpp::muc::room_registry_actor::{
+            DestroyRoom, DestroyRoomOutcome, DestroyRoomReason, GetRoom,
+        };
+        use waddle_xmpp::muc::RoomConfig;
+
+        for recreate in [false, true] {
+            let state = create_test_websocket_state().await;
+            let store = PausableConfigDurableStore::new(Arc::clone(
+                &state.deps.protocol.room_effect_outbox,
+            ));
+            let registry = &state.deps.protocol.room_registry;
+            registry
+                .ask(WireClusteringClaims {
+                    claim_store: Arc::new(InProcessClaimStore::new()),
+                    node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                        "owner-destroy-guard",
+                        "epoch",
+                    )),
+                    durable_store: Some(store.clone()),
+                    rollout_backoff: None,
+                })
+                .await
+                .expect("wire durable registry");
+            let room: BareJid = "cancelled-owner-destroy@muc.example.test"
+                .parse()
+                .expect("room JID");
+            let actor = get_or_create_room_actor(
+                state.as_ref(),
+                &room,
+                RoomConfig {
+                    name: "Original".to_owned(),
+                    ..RoomConfig::default()
+                },
+                "waddle".to_owned(),
+                "channel".to_owned(),
+            )
+            .await
+            .expect("create original room")
+            .actor_ref;
+            let previous = actor.ask(GetSnapshot).await.expect("original snapshot");
+            let intended = RoomConfig {
+                name: "Stale update".to_owned(),
+                ..RoomConfig::default()
+            };
+            let guard = super::CancelledOwnerConfigAskRecoveryGuard::arm_only(
+                state.as_ref(),
+                &actor,
+                &room,
+                &intended,
+                &previous,
+            );
+
+            assert_eq!(
+                registry
+                    .ask(DestroyRoom {
+                        room_jid: room.clone(),
+                        reason: DestroyRoomReason::Destroy
+                    })
+                    .await
+                    .expect("destroy room"),
+                DestroyRoomOutcome::Destroyed
+            );
+            crate::server::routes::websocket::drain_destroy_completions(state.as_ref(), None).await;
+            assert!(!store
+                .states
+                .lock()
+                .expect("durable states")
+                .contains_key(&room));
+            assert!(registry
+                .ask(GetRoom {
+                    room_jid: room.clone()
+                })
+                .await
+                .expect("destroyed registry lookup")
+                .is_none());
+            let successor = if recreate {
+                Some(
+                    get_or_create_room_actor(
+                        state.as_ref(),
+                        &room,
+                        RoomConfig {
+                            name: "New lifecycle".to_owned(),
+                            ..RoomConfig::default()
+                        },
+                        "waddle".to_owned(),
+                        "channel".to_owned(),
+                    )
+                    .await
+                    .expect("explicit new lifecycle")
+                    .actor_ref,
+                )
+            } else {
+                None
+            };
+            tokio::time::timeout(Duration::from_secs(2), guard.recover())
+                .await
+                .expect("stale guard must terminate after destroy");
+            let current = registry
+                .ask(GetRoom {
+                    room_jid: room.clone(),
+                })
+                .await
+                .expect("post-recovery registry lookup");
+            if let Some(successor) = successor {
+                assert_eq!(
+                    current.expect("new room remains registered").id(),
+                    successor.id()
+                );
+                let snapshot = successor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("new lifecycle snapshot");
+                assert_ne!(
+                    snapshot.durable_coordinates.map(|value| value.lifecycle),
+                    previous.durable_coordinates.map(|value| value.lifecycle)
+                );
+                assert_eq!(snapshot.room.config.name, "New lifecycle");
+                assert!(snapshot.room.occupants.is_empty());
+                assert_eq!(
+                    store
+                        .states
+                        .lock()
+                        .expect("durable states")
+                        .get(&room)
+                        .expect("new durable lifecycle")
+                        .config
+                        .name,
+                    "New lifecycle"
+                );
+            } else {
+                assert!(
+                    current.is_none(),
+                    "recovery must not recreate the destroyed actor"
+                );
+                assert!(
+                    !store
+                        .states
+                        .lock()
+                        .expect("durable states")
+                        .contains_key(&room),
+                    "recovery must not recreate durable room state"
+                );
+            }
         }
     }
 
@@ -1875,14 +1959,16 @@ mod tests {
                 2,
             );
 
+            durable_store
+                .config_commit_unknown_once
+                .store(true, Ordering::SeqCst);
             let repeated = room_actor
                 .ask(UpdateConfig {
                     config: intended_config.clone(),
                     effect_plan: ConfigEffectPlan::DirectAudience,
                 })
-                .await
-                .expect("later identical config commits");
-            assert!(repeated.reservation.is_none());
+                .await;
+            assert!(repeated.is_err(), "ambiguous config commit seals the actor");
             let (successor, restored) = super::recover_exact_room_after_ambiguous_config_commit(
                 state.as_ref(),
                 &room,
