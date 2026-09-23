@@ -290,7 +290,10 @@ async fn keyed_append_losing_transaction_preserves_every_snapshot_field_and_expi
                     accepting_stream: SmSessionId::new("earlier-winner"),
                     sequence: 41,
                     appended_at: Utc::now(),
-                    supersedes: None
+                    payload: stanza(),
+                    original_receipt_at: Utc::now(),
+                    disposition:
+                        crate::stream_management::persistence::IngressCustodyDisposition::Pending
                 },
             )
             .await
@@ -655,7 +658,10 @@ async fn keyed_append_confirmation_retries_unseen_durable_entry_before_deletion(
                 accepting_stream: stream.clone(),
                 sequence: 9,
                 appended_at: Utc::now(),
-                supersedes: None,
+                payload: stanza(),
+                original_receipt_at: Utc::now(),
+                disposition:
+                    crate::stream_management::persistence::IngressCustodyDisposition::Pending,
             },
         )
         .await
@@ -781,20 +787,9 @@ async fn cancelled_inflight_keyed_write_keeps_the_shard_until_it_resolves() {
     );
 }
 
-/// #1756: proof for a payload the bounded queue has since evicted must not
-/// suppress the retry.
-///
-/// The hazard: a keyed append commits, its route-progress transaction fails, and
-/// later appends push the stanza out of the queue. Eviction records a replay gap
-/// through that sequence, so the payload is provably gone — yet the ledger row
-/// still says allocated. Returning `AlreadyAppended` there would let the caller
-/// commit progress and a receipt, terminalizing a message neither resume nor
-/// promotion can ever deliver.
-///
-/// An acknowledged entry is deliberately treated differently: it also leaves the
-/// queue, but it left because it was delivered, so its proof still stands.
+/// #1760: replay eviction cannot invalidate custody or authorize a duplicate.
 #[tokio::test]
-async fn proof_for_an_evicted_payload_allows_a_replacement_allocation() {
+async fn eviction_preserves_durable_custody_without_reallocation() {
     let stream = SmSessionId::new("keyed-evicted");
     let storage = Arc::new(InMemorySmPersistence::new());
     let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
@@ -820,8 +815,7 @@ async fn proof_for_an_evicted_payload_allows_a_replacement_allocation() {
 
     // While the obligation is still unsettled, evict its payload the way queue
     // overflow does: drop the entry and record the replay gap through it. The
-    // eviction is applied to DURABLE state, which is what the void decision
-    // reads — memory can lie about deliverability in both directions.
+    // eviction affects durable replay state, but not the independent custody row.
     let mut durable = storage.get_session(&stream).await.unwrap().unwrap();
     durable.replay_gap_through = Some(allocated.sequence);
     let retained: Vec<_> = storage
@@ -844,54 +838,28 @@ async fn proof_for_an_evicted_payload_allows_a_replacement_allocation() {
         session.replay_gap_through = Some(allocated.sequence);
     }
 
-    // The retry must allocate again rather than report the lost payload as queued.
-    let replacement = registry
+    // The bounded replay cache lost the entry, but the immutable custody row
+    // retains its payload and receipt time for recovery; no second allocation.
+    let retry = registry
         .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key.clone())
         .await
         .unwrap();
-    let crate::stream_management::SmKeyedAppendOutcome::Appended { .. } = replacement else {
-        panic!("an evicted allocation is replaced, not suppressed: {replacement:?}");
-    };
-    let proof = storage
-        .get_ingress_append(&key)
-        .await
-        .unwrap()
-        .expect("replacement proof");
-    assert_ne!(
-        proof.sequence, allocated.sequence,
-        "the ledger now points at the entry that actually exists"
-    );
-    assert!(
-        snapshot(&registry, stream.as_str())
-            .unacked_stanzas
-            .iter()
-            .any(|entry| entry.sequence == proof.sequence),
-        "the replacement payload is queued"
-    );
-
-    // A retained allocation is still suppressed: only eviction voids proof.
-    let again = registry
-        .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
-        .await
-        .unwrap();
     assert!(matches!(
-        again,
-        crate::stream_management::SmKeyedAppendOutcome::AlreadyAppended { .. }
+        retry,
+        SmKeyedAppendOutcome::AlreadyAppended { .. }
     ));
+    let proof = storage.get_ingress_append(&key).await.unwrap().unwrap();
+    assert_eq!(proof, allocated);
+    assert_eq!(proof.payload.to_element(), stanza().to_element());
+    assert_eq!(
+        storage.list_pending_ingress_appends(10).await.unwrap(),
+        vec![proof]
+    );
 }
 
-/// #1756 review round 2: the void decision must come from durable state.
-///
-/// Two ways in-memory state lies about whether an allocation is still
-/// deliverable, both of which would have let a lost stanza be reported as queued:
-///
-/// 1. another append evicted the sequence, committed, and was cancelled before
-///    publishing — memory still shows the entry while storage records the gap;
-/// 2. a same-JID replacement moved the old stream off both maps into promotion
-///    ownership while its durable row still exists — a missing map entry is not
-///    evidence that delivery completed.
+/// #1760: stale, missing or displaced in-memory sessions cannot change custody.
 #[tokio::test]
-async fn void_allocation_reads_durable_state_not_memory() {
+async fn custody_is_independent_of_stale_or_displaced_session_memory() {
     for off_map in [false, true] {
         let stream = SmSessionId::new(if off_map {
             "keyed-void-offmap"
@@ -945,38 +913,18 @@ async fn void_allocation_reads_durable_state_not_memory() {
             .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
             .await
             .unwrap();
-        if off_map {
-            // Nothing local can accept the replacement, so the obligation stays
-            // unresolved for its recorded route rather than being reported queued.
-            assert!(
-                !outcome.is_allocated(),
-                "an evicted payload on a promotion-owned stream is not discharged: {outcome:?}"
-            );
-        } else {
-            assert!(
-                matches!(
-                    outcome,
-                    crate::stream_management::SmKeyedAppendOutcome::Appended { .. }
-                ),
-                "durable eviction voids the proof despite stale memory: {outcome:?}"
-            );
-        }
+        assert!(matches!(
+            outcome,
+            SmKeyedAppendOutcome::AlreadyAppended { .. }
+        ));
+        let pending = storage.list_pending_ingress_appends(10).await.unwrap();
+        assert_eq!(pending, vec![allocated]);
     }
 }
 
-/// #1756 review round 3: deleting a session must retire the proofs its replay
-/// gap covers.
-///
-/// The gap is the only evidence separating an evicted allocation from a
-/// delivered one. If the session is deleted — by expiry promotion, displacement
-/// or resume — while an evicted allocation's proof survives, a later retry reads
-/// "no durable session" as a discharged obligation and commits resource progress
-/// for a stanza that was never promoted or replayed.
-///
-/// A *retained* allocation's proof must survive the same deletion: that one was
-/// handed to promotion or replayed on resume, so it really was discharged.
+/// #1760: resume, retirement and quarantine may delete the replay cache only.
 #[tokio::test]
-async fn deleting_a_session_retires_only_gap_covered_proofs() {
+async fn deleting_a_session_retains_every_payload_with_its_proof() {
     let stream = SmSessionId::new("keyed-delete-voids");
     let storage = Arc::new(InMemorySmPersistence::new());
     let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
@@ -1021,22 +969,19 @@ async fn deleting_a_session_retires_only_gap_covered_proofs() {
     storage.store_session_atomic(durable, queue).await.unwrap();
     storage.delete_session(&stream).await.unwrap();
 
-    assert!(
-        storage
-            .get_ingress_append(&evicted_key)
-            .await
-            .unwrap()
-            .is_none(),
-        "the evicted allocation's proof is retired so a retry can allocate again"
+    assert_eq!(
+        storage.get_ingress_append(&evicted_key).await.unwrap(),
+        Some(evicted)
     );
-    assert!(
-        storage
-            .get_ingress_append(&retained_key)
-            .await
-            .unwrap()
-            .is_some(),
-        "a delivered allocation's proof must still suppress its retry"
+    assert_eq!(
+        storage.get_ingress_append(&retained_key).await.unwrap(),
+        Some(retained)
     );
+    let pending = storage.list_pending_ingress_appends(10).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(pending
+        .iter()
+        .all(|entry| entry.payload.to_element() == stanza().to_element()));
 }
 
 /// #1756: an acknowledged allocation must never be treated as evicted.
@@ -1047,7 +992,7 @@ async fn deleting_a_session_retires_only_gap_covered_proofs() {
 /// the old sequence, gap coverage alone would misread the acknowledged
 /// allocation as lost and append a duplicate of a delivered stanza.
 #[tokio::test]
-async fn acknowledged_allocation_is_never_voided_by_a_later_gap() {
+async fn acknowledged_custody_is_never_reopened_by_a_later_gap() {
     let stream = SmSessionId::new("keyed-acked-gap");
     let storage = Arc::new(InMemorySmPersistence::new());
     let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
@@ -1067,6 +1012,15 @@ async fn acknowledged_allocation_is_never_voided_by_a_later_gap() {
         .expect("ledger read")
         .expect("proof recorded");
 
+    storage
+        .complete_ingress_appends_through(&stream, 0, allocated.sequence)
+        .await
+        .unwrap();
+    assert!(storage
+        .list_pending_ingress_appends(10)
+        .await
+        .unwrap()
+        .is_empty());
     // The client acknowledged through this sequence, so its entry left the queue
     // because it was delivered. A later overflow then advances the gap past it.
     let mut durable = storage

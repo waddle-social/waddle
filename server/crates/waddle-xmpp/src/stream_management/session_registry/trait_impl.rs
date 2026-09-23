@@ -513,6 +513,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         let scrub_recorded_at = chrono::Utc::now();
         let scrub_horizon = scrub_recorded_at + super::TOMBSTONE_CLOCK_SKEW_SLACK;
         self.record_recent_tombstone(target)?;
+        if let Some(storage) = &self.persistence {
+            storage
+                .scrub_ingress_custody(target, scrub_horizon)
+                .await
+                .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+        }
         // Phase 1 (issue #1145 lock-scope fix): snapshot every queue
         // under READ locks only. XML parsing of every entry used to
         // run under the sessions write lock, stalling all detach /
@@ -620,7 +626,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 .await?;
             if let Some(storage) = &self.persistence {
                 if let Err(error) = storage
-                    .delete_unacked(
+                    .delete_tombstoned_unacked(
                         &crate::pending_delivery::SmSessionId::new(stream_id.clone()),
                         &sequences,
                     )
@@ -768,7 +774,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     continue;
                 }
                 match storage
-                    .delete_unacked(
+                    .delete_tombstoned_unacked(
                         &crate::pending_delivery::SmSessionId::new(stream_id.clone()),
                         &sequences,
                     )

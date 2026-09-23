@@ -14,7 +14,9 @@ fn append(stream: &SmSessionId) -> PersistedIngressAppend {
         },
         accepting_stream: stream.clone(),
         sequence: 12,
-        supersedes: None,
+        payload: *fixture_unacked(stream.as_str(), 12).stanza,
+        original_receipt_at: stale_caller_supplied_time(),
+        disposition: IngressCustodyDisposition::Pending,
         appended_at: stale_caller_supplied_time(),
     }
 }
@@ -305,5 +307,117 @@ async fn keyed_append_rejects_lost_ownership_without_writing_proof() {
             .await
             .expect("proof absent"),
         None
+    );
+}
+
+#[tokio::test]
+async fn custody_survives_gap_deletion_and_acknowledges_without_session() {
+    let Some(f) = fixture().await else { return };
+    let mut session = fixture_session("keyed-custody-gap");
+    let mut proof = append(&session.stream_id);
+    session.replay_gap_through = Some(proof.sequence);
+    f.fenced
+        .store_session_atomic_with_ingress_append(session.clone(), vec![], proof.clone())
+        .await
+        .expect("allocate custody");
+    f.fenced
+        .delete_session(&session.stream_id)
+        .await
+        .expect("delete gap snapshot");
+    assert_eq!(
+        f.fenced
+            .list_pending_ingress_appends(1)
+            .await
+            .expect("pending custody"),
+        vec![proof.clone()]
+    );
+    f.fenced
+        .complete_ingress_appends_through(&session.stream_id, proof.sequence - 1, proof.sequence)
+        .await
+        .expect("validated acknowledgement after resume");
+    proof.disposition = IngressCustodyDisposition::Acknowledged;
+    assert_eq!(
+        f.fenced
+            .get_ingress_append(&proof.key)
+            .await
+            .expect("custody"),
+        Some(proof)
+    );
+    assert!(f
+        .fenced
+        .list_pending_ingress_appends(1)
+        .await
+        .expect("pending scan")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn custody_completion_compares_allocation_and_rejects_stolen_ack_authority() {
+    let Some(f) = fixture().await else { return };
+    let session = fixture_session("keyed-custody-stolen");
+    let mut proof = append(&session.stream_id);
+    f.fenced
+        .store_session_atomic_with_ingress_append(session.clone(), vec![], proof.clone())
+        .await
+        .expect("allocate custody");
+    seed_node(&f.claims_db, &f.identity, true).await;
+    let entity = sm_session_entity(&session.stream_id);
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
+    let stealer = live_stealer(&f.claims_db).await;
+    f.claims
+        .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer)
+        .await
+        .expect("steal");
+    assert!(matches!(
+        f.fenced
+            .complete_ingress_appends_through(
+                &session.stream_id,
+                proof.sequence - 1,
+                proof.sequence
+            )
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert!(matches!(
+        f.fenced
+            .delete_tombstoned_unacked(&session.stream_id, &[proof.sequence])
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert_eq!(
+        f.fenced
+            .get_ingress_append(&proof.key)
+            .await
+            .expect("unchanged custody"),
+        Some(proof.clone())
+    );
+    assert!(!f
+        .fenced
+        .complete_ingress_append(
+            &proof.key,
+            &proof.accepting_stream,
+            proof.sequence + 1,
+            IngressCustodyDisposition::Promoted
+        )
+        .await
+        .expect("stale allocation cannot complete"));
+    // The durable pending-delivery handoff is independent of the expired stream claim.
+    assert!(f
+        .fenced
+        .complete_ingress_append(
+            &proof.key,
+            &proof.accepting_stream,
+            proof.sequence,
+            IngressCustodyDisposition::Promoted
+        )
+        .await
+        .expect("handoff"));
+    proof.disposition = IngressCustodyDisposition::Promoted;
+    assert_eq!(
+        f.fenced
+            .get_ingress_append(&proof.key)
+            .await
+            .expect("terminal custody"),
+        Some(proof)
     );
 }

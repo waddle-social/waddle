@@ -6953,6 +6953,69 @@ fn restore_installs_config_coordinates() {
     });
 
     assert_eq!(actor.config_durable_coordinates, Some(config_coordinates));
+    assert_eq!(actor.config_revision, 5);
+}
+
+#[tokio::test]
+async fn config_commit_predicate_survives_retirement_and_ignores_projection_revisions() {
+    let lifecycle = crate::muc::RoomLifecycleId::generate();
+    let coordinates = |revision| crate::muc::RoomCommittedCoordinates {
+        lifecycle,
+        revision: crate::muc::RoomRevision::from_stored(revision).expect("revision"),
+    };
+    let state = |head, config_revision, config| crate::muc::durable::DurableRoomState {
+        coordinates: Some(coordinates(head)),
+        config_coordinates: Some(coordinates(config_revision)),
+        waddle_id: "waddle-1".to_owned(),
+        channel_id: "channel-1".to_owned(),
+        config,
+        subject: None,
+        affiliations: Vec::new(),
+    };
+    let mut predecessor = RoomActor::new(test_room(), test_secret());
+    predecessor.install_durable_room_state(state(7, 5, RoomConfig::default()));
+    let predecessor = RoomActor::spawn(predecessor);
+    let previous = predecessor
+        .ask(GetSnapshot)
+        .await
+        .expect("previous snapshot");
+    predecessor.kill();
+    predecessor.wait_for_shutdown().await;
+
+    let intended = RoomConfig {
+        name: "After".to_owned(),
+        ..RoomConfig::default()
+    };
+    let mut successor = RoomActor::new(test_room(), test_secret());
+    successor.install_durable_room_state(state(10, 9, intended.clone()));
+    let successor = RoomActor::spawn(successor);
+    let snapshot = successor
+        .ask(GetSnapshot)
+        .await
+        .expect("successor snapshot");
+    assert_eq!(snapshot.config_revision, 9);
+    assert_ne!(snapshot.config_revision, previous.config_revision + 1);
+    assert!(snapshot.config_committed_since(&previous, &intended));
+    assert!(!snapshot.config_committed_since(&previous, &RoomConfig::default()));
+
+    let mut projection_only = snapshot.clone();
+    projection_only.config_durable_coordinates = previous.config_durable_coordinates;
+    assert!(!projection_only.config_committed_since(&previous, &intended));
+    let mut recreated = snapshot.clone();
+    recreated
+        .config_durable_coordinates
+        .as_mut()
+        .expect("config coordinates")
+        .lifecycle = crate::muc::RoomLifecycleId::generate();
+    assert!(!recreated.config_committed_since(&previous, &intended));
+
+    // Fused members-only enforcement is another config commit, even when
+    // its durable revision skips across intervening occupancy projections.
+    let mut fused = snapshot.clone();
+    fused.config_durable_coordinates = Some(coordinates(12));
+    fused.durable_coordinates = Some(coordinates(12));
+    fused.room.config.members_only = true;
+    assert!(fused.config_committed_since(&snapshot, &fused.room.config));
 }
 
 #[tokio::test]

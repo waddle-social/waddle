@@ -451,6 +451,33 @@ pub(super) async fn handle_sm_stanza(
     }
 }
 
+async fn complete_acknowledged_ingress_custody(
+    state: &WebSocketState,
+    sm_state: &StreamManagementState,
+    h: u32,
+) -> bool {
+    let Some(stream) = sm_state.stream_id.as_deref() else {
+        return true;
+    };
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .complete_ingress_appends_through(
+            &waddle_xmpp::pending_delivery::SmSessionId::new(stream),
+            sm_state.last_acked,
+            h,
+        )
+        .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(%error, stream, "cannot durably acknowledge ingress custody");
+            false
+        }
+    }
+}
+
 pub(super) async fn complete_acknowledged_ingress_receipts(
     state: &WebSocketState,
     sm_state: &StreamManagementState,
@@ -507,6 +534,22 @@ pub(super) async fn apply_sm_ack(
     h: u32,
 ) -> Vec<ResponseFrame> {
     if !sm_state.ack_regresses_last_acked(h) && !sm_state.ack_exceeds_outbound(h) {
+        // Keep the old acknowledgement window on a failed custody write so a
+        // resume can retry it. Acknowledging only in memory would leave the
+        // independent durable recovery queue replaying an already-handled stanza.
+        if !complete_acknowledged_ingress_custody(state, sm_state, h).await {
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            let error: Element = xmpp_parsers::stream_error::StreamError {
+                condition: xmpp_parsers::stream_error::DefinedCondition::InternalServerError,
+                texts: Default::default(),
+                application_specific: Vec::new(),
+            }
+            .into();
+            return vec![
+                ResponseFrame::from(error),
+                ResponseFrame::from(websocket_stream_close_element()),
+            ];
+        }
         // Move proofs to the authority's retry queue before releasing replay
         // carriers. Receipt storage must not veto a valid XEP-0198 ACK.
         complete_acknowledged_ingress_receipts(state, sm_state, h).await;
@@ -1190,7 +1233,9 @@ async fn handle_sm_resume_terminal(
     // untouched until the detached prefix's completion proof is durable.
     let mut staged_sm_state = StreamManagementState::new();
     staged_sm_state.restore_from_session(&detached);
-    if !complete_acknowledged_ingress_receipts(state, &staged_sm_state, resume.h).await {
+    if !complete_acknowledged_ingress_custody(state, &staged_sm_state, resume.h).await
+        || !complete_acknowledged_ingress_receipts(state, &staged_sm_state, resume.h).await
+    {
         claim_guard.release().await;
         return SmResumeTerminal::failed(
             waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),

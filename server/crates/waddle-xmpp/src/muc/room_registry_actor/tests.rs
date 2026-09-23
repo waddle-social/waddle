@@ -1828,8 +1828,8 @@ mod ownership_claims_tests {
                 })
                 .await
                 .expect("mutation after failed destroy"),
-            1,
-            "a failed durable destroy must leave the room serviceable"
+            2,
+            "a failed durable destroy must leave the room serviceable and advance its restored config revision"
         );
         assert_eq!(
             room.actor_ref.id(),

@@ -375,6 +375,83 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
     > {
         self.inner.get_ingress_append(key).await
     }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&waddle_xmpp::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_pending_ingress_appends_after(after, limit)
+            .await
+    }
+
+    async fn scrub_ingress_custody(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner.scrub_ingress_custody(target, through).await
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .delete_tombstoned_unacked(stream, sequences)
+            .await
+    }
+
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .get_ingress_appends_for_sequence(stream, sequence)
+            .await
+    }
+
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.list_pending_ingress_appends(limit).await
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        sequence: u32,
+        disposition: waddle_xmpp::stream_management::persistence::IngressCustodyDisposition,
+    ) -> Result<bool, waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_append(key, stream, sequence, disposition)
+            .await
+    }
+
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .complete_ingress_appends_through(stream, from_exclusive, h)
+            .await
+    }
 }
 
 /// Gate the first promotion insert so cleanup can be held mid-await while a

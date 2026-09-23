@@ -122,21 +122,7 @@ impl PostgresFencedSmPersistence {
                 })
             };
             match crate::sm_persistence::ingress_append::insert(&mut tx, &append).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    // A replacement whose prior row was already superseded: the
-                    // standing allocation wins and nothing here commits.
-                    tx.rollback()
-                        .await
-                        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-                    return standing(self.get_ingress_append(&append.key).await?.ok_or_else(
-                        || {
-                            SmPersistenceError::Other(
-                                "superseded ingress append vanished after rollback".into(),
-                            )
-                        },
-                    )?);
-                }
+                Ok(()) => {}
                 Err(error) => {
                     let ledger_conflict =
                         crate::sm_persistence::ingress_append::is_ledger_conflict(&error);

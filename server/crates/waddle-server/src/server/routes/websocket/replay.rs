@@ -443,6 +443,7 @@ async fn record_drained_xml(
     // already holds an allocation is dropped whole. Counting it and then
     // withholding the entry would leave a sequence the client can never
     // acknowledge (XEP-0198 §5).
+    let keyed_payload = ingress_append.as_ref().map(|frame| frame.stanza.clone());
     let keyed = match ingress_append {
         Some(KeyedFrame { key, stanza }) => {
             let next_sequence = sm_state.outbound_count.wrapping_add(1);
@@ -505,7 +506,13 @@ async fn record_drained_xml(
         // The keyed record already committed this entry with its proof.
         Some(super::drain_append::Claim::RecordedInDetachedStream) => return,
         Some(super::drain_append::Claim::Reserved(ticket)) => {
-            drained_appends.push(DrainedAppend(ticket.at(sequence)));
+            if let Some(payload) = keyed_payload {
+                drained_appends.push(DrainedAppend(ticket.at(
+                    sequence,
+                    payload,
+                    original_receipt_at,
+                )));
+            }
         }
         Some(
             super::drain_append::Claim::Unkeyed | super::drain_append::Claim::AlreadyAllocated,
@@ -661,6 +668,7 @@ async fn record_drained_terminal_xml(
         terminal.session,
         entry.clone(),
         crate::sm_promotion::TerminalOverflowPromotionDeps {
+            sm_registry: &state.deps.protocol.sm_session_registry,
             registry: &state.deps.protocol.connection_registry,
             user_registry: &state.deps.protocol.user_registry,
             pending_storage: &state.deps.protocol.pending_delivery_storage,

@@ -226,24 +226,7 @@ async fn store_session_atomic_inner(
     }
     if let Ledger::Exclusive(append) = ledger {
         match ingress_append::insert(&mut tx, &append).await {
-            Ok(true) => {}
-            Ok(false) => {
-                // A replacement whose prior row was already superseded: the
-                // standing allocation wins and nothing here commits.
-                tx.rollback()
-                    .await
-                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-                let winner = ingress_append::get(&storage.db, &append.key)
-                    .await?
-                    .ok_or_else(|| {
-                        SmPersistenceError::Other(
-                            "superseded ingress append vanished after rollback".into(),
-                        )
-                    })?;
-                return Ok(StoreOutcome::ObligationAlreadyAllocated {
-                    accepting_stream: winner.accepting_stream,
-                });
-            }
+            Ok(()) => {}
             Err(error) => {
                 let conflict = ingress_append::is_ledger_conflict(&error);
                 tx.rollback()

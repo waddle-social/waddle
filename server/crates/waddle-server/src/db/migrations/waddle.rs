@@ -1012,6 +1012,49 @@ CREATE UNIQUE INDEX extension_grants_active_room ON extension_grants (plugin_id,
 ///
 /// Versions are intentionally offset from global migrations so a single
 /// database can safely apply both sets without migration history collisions.
+/// Clean custody cutover: a legacy allocation has no durable payload and
+/// cannot be promoted into proof of custody. Preserve its existing SM queue,
+/// but discard the old suppression ledger instead of inventing evidence.
+/// Unsettled pre-cutover retries may allocate again; the new custody guarantee
+/// starts at this migration. Stop old writers before applying this version.
+pub const V1019_INGRESS_CUSTODY: &str = r#"
+DROP TABLE sm_ingress_appends;
+CREATE TABLE sm_ingress_appends (
+    message_key TEXT NOT NULL,
+    receipt_kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL,
+    resource TEXT NOT NULL,
+    accepting_stream_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    appended_at_ms BIGINT NOT NULL,
+    custody_payload TEXT NOT NULL,
+    original_receipt_at_ms BIGINT NOT NULL,
+    disposition INTEGER NOT NULL CHECK (disposition IN (0, 1, 2, 3)),
+    PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
+);
+CREATE INDEX idx_sm_ingress_appends_stream ON sm_ingress_appends (accepting_stream_id);
+CREATE INDEX idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms);
+"#;
+
+pub const V1019_INGRESS_CUSTODY_POSTGRES: &str = r#"
+DROP TABLE sm_ingress_appends;
+CREATE TABLE sm_ingress_appends (
+    message_key TEXT NOT NULL,
+    receipt_kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL,
+    resource TEXT NOT NULL,
+    accepting_stream_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    appended_at_ms BIGINT NOT NULL,
+    custody_payload TEXT NOT NULL,
+    original_receipt_at_ms BIGINT NOT NULL,
+    disposition INTEGER NOT NULL CHECK (disposition IN (0, 1, 2, 3)),
+    PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
+);
+CREATE INDEX idx_sm_ingress_appends_stream ON sm_ingress_appends (accepting_stream_id);
+CREATE INDEX idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms);
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1121,6 +1164,13 @@ pub fn all() -> Vec<Migration> {
             description: "Persist revocable extension send and provider-room grants".to_string(),
             sql_sqlite: V1018_EXTENSION_GRANTS,
             sql_postgres: V1018_EXTENSION_GRANTS_POSTGRES,
+        },
+        Migration {
+            version: 1019,
+            description: "Replace queue allocation proof with durable ingress payload custody"
+                .to_string(),
+            sql_sqlite: V1019_INGRESS_CUSTODY,
+            sql_postgres: V1019_INGRESS_CUSTODY_POSTGRES,
         },
     ]
 }

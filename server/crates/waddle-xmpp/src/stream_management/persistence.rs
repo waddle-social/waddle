@@ -207,35 +207,43 @@ pub struct PersistedUnackedStanza {
 
 /// Durable proof that one ingress obligation allocated a queue entry.
 ///
-/// Keyed by the obligation rather than the stream: see
-/// [`crate::stream_management::SmIngressAppendKey`] for why a stream-scoped key would let a
-/// rebind or a resume authorize a second allocation. `accepting_stream` is therefore
-/// recorded evidence, not part of the identity, and may name a stream that has since been
-/// displaced or resumed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An immutable ingress allocation and the payload whose custody it proves.
+///
+/// The replay queue is a bounded cache of this payload. Eviction, resume and
+/// quarantine cannot destroy custody because neither owns this row's lifetime.
+#[derive(Debug, Clone)]
 pub struct PersistedIngressAppend {
     pub key: crate::stream_management::SmIngressAppendKey,
     pub accepting_stream: SmSessionId,
-    /// Outbound sequence the allocation occupies, so a reader can tell whether the
-    /// payload is still deliverable: an acknowledged entry simply leaves the queue,
-    /// but an evicted one is covered by the session's replay gap.
     pub sequence: u32,
     pub appended_at: chrono::DateTime<chrono::Utc>,
-    /// The exact prior allocation this write replaces, when the previous payload was
-    /// evicted from the bounded queue and can no longer be delivered.
-    ///
-    /// `None` is a first allocation: any conflict means the obligation is already
-    /// allocated. `Some` supersedes only that exact row, so a racing writer that
-    /// already replaced it wins and this write reports the obligation as allocated
-    /// rather than issuing a second one.
-    pub supersedes: Option<PriorIngressAllocation>,
+    pub payload: Stanza,
+    pub original_receipt_at: chrono::DateTime<chrono::Utc>,
+    pub disposition: IngressCustodyDisposition,
 }
 
-/// The prior allocation a replacement is allowed to overwrite.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PriorIngressAllocation {
-    pub accepting_stream: SmSessionId,
-    pub sequence: u32,
+impl PartialEq for PersistedIngressAppend {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.accepting_stream == other.accepting_stream
+            && self.sequence == other.sequence
+            && self.appended_at == other.appended_at
+            && self.payload.to_element() == other.payload.to_element()
+            && self.original_receipt_at == other.original_receipt_at
+            && self.disposition == other.disposition
+    }
+}
+
+impl Eq for PersistedIngressAppend {}
+
+/// Only positive delivery evidence can discharge durable custody. A missing
+/// session or replay gap never constitutes acknowledgement or promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressCustodyDisposition {
+    Pending,
+    Acknowledged,
+    Promoted,
+    Tombstoned,
 }
 
 /// Result of a snapshot write that also claims an ingress obligation.
@@ -331,6 +339,14 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// Read every unacked stanza for a session in sequence order.
     /// Used by `<resumed/>` to replay and by the Q6 promotion path to
     /// drain on session expiry.
+    /// Delete replay entries selected by a tombstone and suppress their custody
+    /// in the same transaction, including appends committed after the initial scrub.
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError>;
+
     async fn list_unacked(
         &self,
         stream_id: &SmSessionId,
@@ -518,6 +534,56 @@ pub trait SmPersistenceStorage: Send + Sync {
         key: &crate::stream_management::SmIngressAppendKey,
     ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError>;
 
+    /// Read all immutable allocations at a replay slot, including terminal rows.
+    /// Callers also match payload and receipt time: wrapping counters alone do
+    /// not identify the same historic delivery on a long-lived stream.
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &SmSessionId,
+        sequence: u32,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError>;
+
+    /// Enumerate durable custody independently of detached sessions and ingress
+    /// settlement. The caller must establish current delivery ownership before
+    /// recovering a row; a resumed live stream has no detached session row.
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError>;
+
+    /// Keyset pagination lets bounded recovery advance beyond protected rows.
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError>;
+
+    /// Discharge exactly the allocation whose acknowledgement or durable handoff
+    /// the caller observed. The payload remains alongside the proof until GC.
+    async fn complete_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+        accepting_stream: &SmSessionId,
+        sequence: u32,
+        disposition: IngressCustodyDisposition,
+    ) -> Result<bool, SmPersistenceError>;
+
+    /// Record an authenticated, validated XEP-0198 acknowledgement interval.
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), SmPersistenceError>;
+
+    /// Suppress retained custody matching a retraction even after its replay
+    /// cache has been retired. The cutoff excludes later reused wire ids.
+    async fn scrub_ingress_custody(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), SmPersistenceError>;
+
     /// Atomically increment the persistent promotion-failure counter
     /// for `stream_id` and return the new value. Used by the SM-
     /// expiry janitor (issue #209 finding #14) to break runaway retry
@@ -615,19 +681,6 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .inner
             .lock()
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        // Retire proofs the session's replay gap covers before that gap is lost
-        // with the session row: they stand for evicted, never-delivered payloads,
-        // and a retry must be able to allocate a replacement (#1756).
-        if let Some(gap) = guard
-            .sessions
-            .get(stream_id)
-            .and_then(|session| session.replay_gap_through)
-        {
-            guard.ingress_appends.retain(|append| {
-                &append.accepting_stream != stream_id
-                    || !crate::stream_management::sequence::sequence_lte(append.sequence, gap)
-            });
-        }
         guard.sessions.remove(stream_id);
         guard.unacked.remove(stream_id);
         guard.principals.remove(stream_id);
@@ -684,6 +737,33 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         let before = queue.len();
         queue.retain(|s| !sequences.contains(&s.sequence));
         Ok((before - queue.len()) as u64)
+    }
+
+    async fn delete_tombstoned_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let removed = if let Some(queue) = guard.unacked.get_mut(stream_id) {
+            let before = queue.len();
+            queue.retain(|entry| !sequences.contains(&entry.sequence));
+            (before - queue.len()) as u64
+        } else {
+            0
+        };
+        for append in &mut guard.ingress_appends {
+            if &append.accepting_stream == stream_id
+                && sequences.contains(&append.sequence)
+                && append.disposition == IngressCustodyDisposition::Pending
+            {
+                append.disposition = IngressCustodyDisposition::Tombstoned;
+            }
+        }
+        Ok(removed)
     }
 
     async fn list_unacked(
@@ -771,6 +851,14 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
         appends: Vec<PersistedIngressAppend>,
     ) -> Result<Vec<crate::stream_management::SmIngressAppendKey>, SmPersistenceError> {
+        if appends
+            .iter()
+            .any(|append| append.disposition != IngressCustodyDisposition::Pending)
+        {
+            return Err(SmPersistenceError::Other(
+                "new ingress custody must be pending".into(),
+            ));
+        }
         let stream_id = session.stream_id.clone();
         let mut guard = self
             .inner
@@ -784,18 +872,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
                 .position(|existing| existing.key == append.key);
             match existing {
                 None => guard.ingress_appends.push(append),
-                Some(index) => {
-                    let standing = &guard.ingress_appends[index];
-                    let superseded = append.supersedes.as_ref().is_some_and(|prior| {
-                        prior.accepting_stream == standing.accepting_stream
-                            && prior.sequence == standing.sequence
-                    });
-                    if superseded {
-                        guard.ingress_appends[index] = append;
-                    } else {
-                        withheld.push(append.key);
-                    }
-                }
+                Some(_) => withheld.push(append.key),
             }
         }
         guard.sessions.insert(stream_id.clone(), session);
@@ -821,6 +898,11 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
         append: PersistedIngressAppend,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        if append.disposition != IngressCustodyDisposition::Pending {
+            return Err(SmPersistenceError::Other(
+                "new ingress custody must be pending".into(),
+            ));
+        }
         let stream_id = session.stream_id.clone();
         let mut guard = self
             .inner
@@ -834,20 +916,11 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .position(|existing| existing.key == append.key)
         {
             let existing = &guard.ingress_appends[index];
-            let superseded = append.supersedes.as_ref().is_some_and(|prior| {
-                prior.accepting_stream == existing.accepting_stream
-                    && prior.sequence == existing.sequence
+            return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                accepting_stream: existing.accepting_stream.clone(),
             });
-            if !superseded {
-                return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
-                    accepting_stream: existing.accepting_stream.clone(),
-                });
-            }
-            guard.ingress_appends[index] = append;
-        } else {
-            // No row to supersede: this is a first allocation either way.
-            guard.ingress_appends.push(append);
         }
+        guard.ingress_appends.push(append);
         guard.sessions.insert(stream_id.clone(), session);
         guard.unacked.insert(stream_id, unacked);
         Ok(KeyedSnapshotOutcome::Committed)
@@ -866,6 +939,139 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .iter()
             .find(|existing| &existing.key == key)
             .cloned())
+    }
+    async fn get_ingress_appends_for_sequence(
+        &self,
+        stream: &SmSessionId,
+        sequence: u32,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard
+            .ingress_appends
+            .iter()
+            .filter(|append| &append.accepting_stream == stream && append.sequence == sequence)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_pending_ingress_appends(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError> {
+        self.list_pending_ingress_appends_after(None, limit).await
+    }
+
+    async fn list_pending_ingress_appends_after(
+        &self,
+        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        limit: usize,
+    ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError> {
+        fn order(
+            key: &crate::stream_management::SmIngressAppendKey,
+        ) -> (String, i32, [u8; 32], String) {
+            (
+                key.message_key.to_storage().to_string(),
+                key.kind.to_storage(),
+                key.semantic_identity_hash,
+                key.resource.to_string(),
+            )
+        }
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let mut pending: Vec<_> = guard
+            .ingress_appends
+            .iter()
+            .filter(|append| {
+                append.disposition == IngressCustodyDisposition::Pending
+                    && after.is_none_or(|after| order(&append.key) > order(after))
+            })
+            .cloned()
+            .collect();
+        pending.sort_by_key(|append| order(&append.key));
+        pending.truncate(limit);
+        Ok(pending)
+    }
+
+    async fn complete_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+        accepting_stream: &SmSessionId,
+        sequence: u32,
+        disposition: IngressCustodyDisposition,
+    ) -> Result<bool, SmPersistenceError> {
+        if disposition == IngressCustodyDisposition::Pending {
+            return Err(SmPersistenceError::Other(
+                "pending custody is not completion evidence".into(),
+            ));
+        }
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let Some(append) = guard.ingress_appends.iter_mut().find(|append| {
+            &append.key == key
+                && &append.accepting_stream == accepting_stream
+                && append.sequence == sequence
+                && append.disposition == IngressCustodyDisposition::Pending
+        }) else {
+            return Ok(false);
+        };
+        append.disposition = disposition;
+        Ok(true)
+    }
+
+    async fn complete_ingress_appends_through(
+        &self,
+        stream: &SmSessionId,
+        from_exclusive: u32,
+        h: u32,
+    ) -> Result<(), SmPersistenceError> {
+        let distance = h.wrapping_sub(from_exclusive);
+        if distance >= 0x8000_0000 {
+            return Err(SmPersistenceError::Other(
+                "ambiguous acknowledgement interval".into(),
+            ));
+        }
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        for append in &mut guard.ingress_appends {
+            let offset = append.sequence.wrapping_sub(from_exclusive);
+            if &append.accepting_stream == stream
+                && offset > 0
+                && offset <= distance
+                && append.disposition == IngressCustodyDisposition::Pending
+            {
+                append.disposition = IngressCustodyDisposition::Acknowledged;
+            }
+        }
+        Ok(())
+    }
+
+    async fn scrub_ingress_custody(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        for append in &mut guard.ingress_appends {
+            if append.disposition == IngressCustodyDisposition::Pending
+                && append.original_receipt_at <= through
+                && target.matches_message_element(&append.payload.to_element())
+            {
+                append.disposition = IngressCustodyDisposition::Tombstoned;
+            }
+        }
+        Ok(())
     }
 }
 

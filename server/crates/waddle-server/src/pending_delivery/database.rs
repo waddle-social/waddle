@@ -1,6 +1,7 @@
 use super::*;
 
 mod ack_windows;
+mod custody;
 mod schema;
 
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
@@ -307,41 +308,7 @@ pub(crate) async fn insert_in_transaction(
     fence: Option<PendingInsertFence<'_>>,
 ) -> Result<InsertOutcome, PendingStorageError> {
     if let Some(fence) = fence {
-        let owner = fence.claim_fence.owner();
-        if !fence.node_identity.owns_guard(fence.identity_guard)
-            || fence.identity_guard.identity() != owner
-        {
-            return Err(PendingStorageError::NotOwner {
-                entity: fence.entity.clone(),
-            });
-        }
-        let entity_key = format!(
-            "{}:{}",
-            fence.entity.entity_type.as_db_str(),
-            fence.entity.id
-        );
-        let mut rows = tx
-            .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![
-                    entity_key,
-                    owner.node_id.clone(),
-                    owner.node_epoch.clone(),
-                    fence.claim_fence.epoch().0,
-                ],
-            )
-            .await
-            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
-        let held = rows
-            .next()
-            .await
-            .map_err(|error| PendingStorageError::Other(error.to_string()))?
-            .is_some();
-        if !held {
-            return Err(PendingStorageError::NotOwner {
-                entity: fence.entity.clone(),
-            });
-        }
+        assert_insert_fence(tx, fence).await?;
     }
 
     let recipient = row.recipient.to_string();
@@ -405,6 +372,48 @@ pub(crate) async fn insert_in_transaction(
     } else {
         InsertOutcome::Inserted
     })
+}
+
+async fn assert_insert_fence(
+    tx: &mut crate::db::Transaction<'_>,
+    fence: PendingInsertFence<'_>,
+) -> Result<(), PendingStorageError> {
+    let owner = fence.claim_fence.owner();
+    if !fence.node_identity.owns_guard(fence.identity_guard)
+        || fence.identity_guard.identity() != owner
+    {
+        return Err(PendingStorageError::NotOwner {
+            entity: fence.entity.clone(),
+        });
+    }
+    let entity_key = format!(
+        "{}:{}",
+        fence.entity.entity_type.as_db_str(),
+        fence.entity.id
+    );
+    let mut rows = tx
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    entity_key,
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    fence.claim_fence.epoch().0,
+                ],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    let held = rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        .is_some();
+    if !held {
+        return Err(PendingStorageError::NotOwner {
+            entity: fence.entity.clone(),
+        });
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -488,6 +497,15 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         drop(identity_guard);
 
         Ok(outcome)
+    }
+
+    async fn insert_ingress_custody(
+        &self,
+        row: PendingRow,
+        append: &waddle_xmpp::stream_management::persistence::PersistedIngressAppend,
+    ) -> Result<waddle_xmpp::pending_delivery::storage::CustodyInsertOutcome, PendingStorageError>
+    {
+        custody::insert(self, row, append).await
     }
 
     async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {

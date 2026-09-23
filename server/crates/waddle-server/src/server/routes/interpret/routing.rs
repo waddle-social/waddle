@@ -530,6 +530,26 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
 /// (`ActorStopped`, reply `Timeout(None)`, `HandlerError`) drop WITHOUT routing
 /// to detached, because kameo does not cancel an enqueued handler and a
 /// post-timeout run plus a detached replay would double-deliver.
+/// Durable custody is authoritative even when its accepting stream resumed.
+/// Read failures leave the obligation unresolved instead of risking a second send.
+pub(crate) async fn existing_ingress_delivery(
+    sm: Option<&Arc<InMemorySmSessionRegistry>>,
+    context: Option<&SmIngressAppendContext>,
+    target: &jid::FullJid,
+) -> Option<FullJidDeliveryOutcome> {
+    let (Some(sm), Some(context)) = (sm, context) else {
+        return None;
+    };
+    match sm.get_ingress_append(&context.for_resource(target)).await {
+        Ok(Some(_)) => Some(FullJidDeliveryOutcome::QueuedDetached),
+        Ok(None) => None,
+        Err(error) => {
+            warn!(%error, %target, "ingress custody lookup failed before delivery");
+            Some(FullJidDeliveryOutcome::Unavailable)
+        }
+    }
+}
+
 async fn deliver_one_via_actor(
     user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
@@ -538,6 +558,11 @@ async fn deliver_one_via_actor(
     kind: ActorSendKind,
     ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
+    if let Some(outcome) =
+        existing_ingress_delivery(sm_session_registry, ingress_append_context, target).await
+    {
+        return outcome;
+    }
     let message_id = stanza_message_id(stanza);
     // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
     // for a bare-JID DM this is the SECOND `GetUser` for the same bare JID —

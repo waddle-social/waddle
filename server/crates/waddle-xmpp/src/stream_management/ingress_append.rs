@@ -58,24 +58,33 @@ pub struct SmRelayedAppendObligation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmDrainedAppendTicket {
     pub(crate) key: SmIngressAppendKey,
-    pub(crate) supersedes: Option<super::persistence::PriorIngressAllocation>,
 }
 
 impl SmDrainedAppendTicket {
-    /// Bind the ticket to the sequence the drain counted the frame at.
-    pub fn at(self, sequence: u32) -> SmDrainedIngressAppend {
+    /// Capture the payload when the frame is counted, before a later drained
+    /// frame can evict it from the bounded replay queue.
+    pub fn at(
+        self,
+        sequence: u32,
+        payload: crate::Stanza,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+    ) -> SmDrainedIngressAppend {
         SmDrainedIngressAppend {
             ticket: self,
             sequence,
+            payload,
+            original_receipt_at,
         }
     }
 }
 
 /// A drained queue entry and the obligation it discharges.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SmDrainedIngressAppend {
     pub(crate) ticket: SmDrainedAppendTicket,
     pub(crate) sequence: u32,
+    pub(crate) payload: crate::Stanza,
+    pub(crate) original_receipt_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl SmDrainedIngressAppend {
@@ -86,9 +95,9 @@ impl SmDrainedIngressAppend {
 
 /// Result of a keyed append attempt.
 ///
-/// There is no "committed but this registry lost the session" success: a snapshot that
-/// commits while its session is displaced is reconciled into the promotion handoff, so
-/// durable proof always means the entry is allocated and will be delivered or promoted.
+/// Durable custody retains the payload even when its replay snapshot is displaced,
+/// resumed, evicted or quarantined. Recovery can therefore fulfill an allocation
+/// independently of those queue transitions.
 /// Storage and registry failures are typed errors, not variants here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmKeyedAppendOutcome {

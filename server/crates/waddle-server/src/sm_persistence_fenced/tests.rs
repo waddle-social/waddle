@@ -215,6 +215,7 @@ async fn fixture() -> Option<Fixture> {
         "DELETE FROM clustering_claims",
         "DELETE FROM clustering_nodes",
         "DELETE FROM clustering_steal_intents",
+        "DELETE FROM sm_ingress_appends",
         "DELETE FROM sm_unacked",
         "DELETE FROM sm_sessions",
     ] {
@@ -483,7 +484,9 @@ async fn drained_batch_withholds_only_conflicting_proofs_under_the_fence() {
         accepting_stream: session.stream_id.clone(),
         sequence,
         appended_at: Utc::now(),
-        supersedes: None,
+        payload: *fixture_unacked(session.stream_id.as_str(), sequence).stanza,
+        original_receipt_at: stale_caller_supplied_time(),
+        disposition: IngressCustodyDisposition::Pending,
     };
     let first = append(1);
     let racing_duplicate = PersistedIngressAppend {

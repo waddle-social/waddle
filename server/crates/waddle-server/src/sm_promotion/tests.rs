@@ -2760,8 +2760,11 @@ async fn keyed_append_committed_during_promotion_blocks_confirmation() {
                 },
                 accepting_stream: SmSessionId::new(STREAM),
                 sequence: 2,
-                supersedes: None,
                 appended_at: now,
+                payload: queued("appended during promotion"),
+                original_receipt_at: now,
+                disposition:
+                    waddle_xmpp::stream_management::persistence::IngressCustodyDisposition::Pending,
             },
         )
         .await
@@ -2810,5 +2813,293 @@ async fn keyed_append_committed_during_promotion_blocks_confirmation() {
             .collect::<Vec<_>>(),
         vec![1, 2],
         "the committed append is still queued for the promotion retry"
+    );
+}
+
+/// Custody recovery does not depend on the original ingress decision, stream
+/// enrollment, or even a surviving SM session. This is the resume-crash and
+/// quarantine recovery seam: the accepted payload outlives all replay caches.
+#[tokio::test]
+async fn ingress_custody_recovers_after_session_deletion_and_restart() {
+    use waddle_xmpp::stream_management::persistence::{
+        IngressCustodyDisposition, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{
+        InMemorySmSessionRegistry, SmIngressAppendKey, SmIngressReceiptKind, SmSessionRegistry,
+    };
+    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .unwrap(),
+    );
+    let original = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let resource = full("alice@example.com/vanished");
+    let stream = waddle_xmpp::pending_delivery::SmSessionId::new("custody-restart");
+    original
+        .store_session(detached_session_with_unacked(
+            stream.as_str(),
+            resource.clone(),
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let mut message = xmpp_parsers::message::Message::new(Some(resource.clone().into()));
+    message.from = Some(bare("bob@example.com").into());
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang(String::new()),
+        "durable custody".to_owned(),
+    );
+    let key = SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        kind: SmIngressReceiptKind::from_storage(3),
+        semantic_identity_hash: [42; 32],
+        resource,
+    };
+    let received_at = Utc::now() - chrono::Duration::minutes(5);
+    original
+        .record_keyed_stanza_for_detached_bound_resource(
+            &key.resource,
+            &Stanza::Message(message),
+            received_at,
+            key.clone(),
+        )
+        .await
+        .unwrap();
+    let restarted =
+        Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::CountCap { max_rows: 10 },
+        )
+        .await
+        .unwrap(),
+    );
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_pending_storage(restarted, pending).await;
+    assert!(crate::server::session_janitors::run_ingress_custody_sweep(&state, &mut None).await);
+    assert!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&bare("alice@example.com"))
+            .await
+            .unwrap()
+            .is_empty(),
+        "persisted resumable session remains responsible"
+    );
+    persistence.delete_session(&stream).await.unwrap();
+    let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(key.resource.clone(), sender);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id(&key.resource, Some(stream.clone()));
+    assert!(crate::server::session_janitors::run_ingress_custody_sweep(&state, &mut None).await);
+    assert_eq!(
+        persistence
+            .get_ingress_append(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .disposition,
+        IngressCustodyDisposition::Pending,
+        "published active stream protects custody even without detached snapshot"
+    );
+    assert!(state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&bare("alice@example.com"))
+        .await
+        .unwrap()
+        .is_empty());
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .unregister(&key.resource);
+    assert!(crate::server::session_janitors::run_ingress_custody_sweep(&state, &mut None).await);
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&bare("alice@example.com"))
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "orphan custody must reach durable offline storage"
+    );
+    assert_eq!(
+        rows[0].original_receipt_at.timestamp_millis(),
+        received_at.timestamp_millis()
+    );
+    assert_eq!(
+        persistence
+            .get_ingress_append(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .disposition,
+        IngressCustodyDisposition::Promoted
+    );
+    assert!(crate::server::session_janitors::run_ingress_custody_sweep(&state, &mut None).await);
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&bare("alice@example.com"))
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "completed custody must not replay twice"
+    );
+}
+
+#[tokio::test]
+async fn quota_bounce_without_accepted_sender_does_not_discharge_custody() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::new(QuotaPolicy::CountCap {
+            max_rows: 0,
+        }));
+    let session = detached_session_with_unacked(
+        "quota-custody",
+        full("alice@example.com/phone"),
+        vec![dm_xml(
+            "bob@example.com/offline",
+            "alice@example.com",
+            "retain me",
+        )],
+    );
+    let summary = promote_session_unacked(
+        &session,
+        &ConnectionRegistry::new(),
+        &test_user_registry(),
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+    assert!(summary.has_storage_failure());
+    assert_eq!(summary.bounced, 0);
+    assert!(summary.promoted_sequences.is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
+    use waddle_xmpp::stream_management::persistence::{
+        IngressCustodyDisposition, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{
+        InMemorySmSessionRegistry, SmIngressAppendKey, SmIngressReceiptKind, SmSessionRegistry,
+    };
+    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .unwrap(),
+    );
+    let sm_registry =
+        Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let resource = full("alice@example.com/phone");
+    sm_registry
+        .store_session(detached_session_with_unacked(
+            "ordinary-custody",
+            resource.clone(),
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let key = SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        kind: SmIngressReceiptKind::from_storage(3),
+        semantic_identity_hash: [43; 32],
+        resource,
+    };
+    let stanza = parse_stanza(&dm_xml(
+        "bob@example.com/offline",
+        "alice@example.com",
+        "only once",
+    ))
+    .unwrap();
+    sm_registry
+        .record_keyed_stanza_for_detached_bound_resource(
+            &key.resource,
+            &stanza,
+            Utc::now(),
+            key.clone(),
+        )
+        .await
+        .unwrap();
+    let session = sm_registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::CountCap { max_rows: 10 },
+        )
+        .await
+        .unwrap(),
+    );
+    let live_registry = ConnectionRegistry::new();
+    let live_users = test_user_registry();
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    dual_register(&live_registry, &live_users, key.resource.clone(), sender).await;
+    live_registry.update_presence(&key.resource, true, 1);
+    let deps = TerminalOverflowPromotionDeps {
+        sm_registry: &sm_registry,
+        registry: &live_registry,
+        user_registry: &live_users,
+        pending_storage: &pending,
+        blocklist: &Blocklist::empty(),
+        server_domain: "example.com",
+        recent_tombstones: &[],
+    };
+    let summary = promote_session_with_custody(&session, deps).await;
+    assert_eq!(summary.queued, 1);
+    assert!(!summary.has_storage_failure());
+    assert_eq!(
+        receiver.len(),
+        0,
+        "custody promotion commits durable storage before any socket enqueue"
+    );
+    assert_eq!(
+        pending
+            .list(&bare("alice@example.com"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let custody = persistence.get_ingress_append(&key).await.unwrap().unwrap();
+    assert_eq!(custody.disposition, IngressCustodyDisposition::Promoted);
+    drop(receiver); // A socket crash cannot remove the durable pending row.
+    let retry = promote_session_with_custody(&session, deps).await;
+    assert_eq!(retry.not_promotable, 1);
+    assert!(!retry.has_storage_failure());
+    assert_eq!(
+        pending
+            .list(&bare("alice@example.com"))
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "committed custody retry must not insert again"
     );
 }
