@@ -7,9 +7,6 @@ import PackageDescription
 // imports SwiftUI or the UniFFI bindings. Its one dependency, swift-crypto,
 // re-exports CryptoKit on Apple platforms and is BoringSSL-backed elsewhere,
 // so the package builds and tests on Linux as well as on Apple platforms.
-//
-// swift-crypto stays on 4.3.x: 4.4 and later need swift-tools-version 6.1,
-// which Xcode 16.0 through 16.2 cannot load.
 let package = Package(
     name: "WaddleKit",
     platforms: [.iOS(.v17), .macOS(.v14)],
@@ -17,7 +14,7 @@ let package = Package(
         .library(name: "WaddleKit", targets: ["WaddleKit"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-crypto.git", .upToNextMinor(from: "4.3.1")),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1"),
     ],
     targets: [
         .target(
