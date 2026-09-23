@@ -48,7 +48,9 @@ const config = {
   WADDLE_SERVER_OWNER_LOCALPARTS: "rawkode,icepuma,randax",
   RUST_LOG: "info",
   WADDLE_CORS_ORIGINS: "https://waddle.chat,http://localhost:4321",
-  WADDLE_SPICEDB_ENDPOINT: "http://spicedb:50051",
+  // Production talks plaintext gRPC to the in-cluster SpiceDB (the Flux values
+  // set the same endpoint with WADDLE_SPICEDB_INSECURE); TLS there is separate work.
+  WADDLE_SPICEDB_ENDPOINT: "http://spicedb:50051", // NOSONAR(typescript:S5332)
   WADDLE_SPICEDB_INSECURE: "true",
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://grafana-alloy.grafana-alloy.svc.cluster.local:4317",
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc",

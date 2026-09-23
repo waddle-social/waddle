@@ -63,7 +63,7 @@
     },
     {
       "path": "waddle-server.tsx",
-      "sha256": "7dc41552cd47c0efd76e6cec7d955e00dbb822eff878cf4935066559a8e52bfb"
+      "sha256": "cd5be1972c40bffa903beaad2bf2a03c6b7ed5c7c70ad050e235140395f16f54"
     }
   ],
   "schemaVersion": "apsides.dev/source-lock/v1"
