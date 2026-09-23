@@ -125,7 +125,8 @@ struct ConversationTimelineList: View {
 
     private func loadOlder() {
         let state = session.history.state(of: conversation)
-        guard state.hasLoadedLatest, state.hasMoreOlder, !state.isLoading else { return }
+        // A failed load retries through here too ("Try again").
+        guard !state.isLoading, state.failed || (state.hasLoadedLatest && state.hasMoreOlder) else { return }
         Task { await session.loadOlder(conversation) }
     }
 }

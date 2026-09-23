@@ -52,7 +52,11 @@ extension SessionCoordinator {
         guard let localpart = RoomLocalpart.make(from: trimmed) else { throw PortError.invalidRequest }
         let room = try await port.createRoom(localpart: localpart, name: trimmed, summary: summary, nick: account.nick)
         directory.upsert(Channel(roomJID: room, name: trimmed, summary: summary, position: directory.channels.count))
-        // create_room leaves the room once it is configured.
+        // create_room joined, configured and then left the room. Its
+        // self-presence may already have marked the room joined while the
+        // leave's echo is still in flight, so rejoin unconditionally: the
+        // server handles the leave first, then this join.
+        presence.markLeft(room)
         await ensureJoined(room)
         return .room(room)
     }

@@ -41,10 +41,26 @@ struct ProtocolReviewTests {
         #expect(port.joined.isEmpty)
     }
 
-    @Test func createdChannelIsJoined() async throws {
+    /// create_room's own join is answered while it configures the room,
+    /// and its leave is echoed only after it returns: the room looks
+    /// joined at that point but is about to be left.
+    @Test func createdChannelIsRejoinedAfterCreateRoomLeaves() async throws {
         let (coordinator, port) = online(channels: [])
+        let launch = BareJID(localpart: "launch", domain: "muc.waddle.test")!
+        coordinator.handle(.presence(selfJoin(launch)))
+
         let created = try await coordinator.createChannel(name: "launch", summary: nil)
-        #expect(port.joined == [created.jid])
+        #expect(created.jid == launch)
+        #expect(port.joined == [launch])
+
+        await coordinator.open(created)
+        coordinator.handle(.presence(WirePresence(
+            from: jid("\(launch)/alice"),
+            kind: .unavailable,
+            occupant: .init(affiliation: .owner, role: .none, realJID: nil, statusCodes: [110])
+        )))
+        coordinator.handle(.presence(selfJoin(launch)))
+        #expect(coordinator.presence.joinedRooms.contains(launch))
     }
 
     @Test func openedRoomIsRejoinedAfterReconnect() async throws {
