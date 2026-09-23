@@ -245,12 +245,11 @@ pub(super) async fn dispatch_apns_device(
     };
     let mut outcome = send(jwt.clone()).await;
     record_outcome(&outcome, recipient, parsed);
-    if matches!(outcome, ApnsOutcome::ProviderAuth { .. }) {
-        // Expired or rejected provider token: drop exactly the token
-        // Apple refused and retry this device once with a fresh one.
-        // A second refusal is a key/team/key-id misconfiguration and is
-        // recorded as permanent.
-        provider.tokens.invalidate(&jwt);
+    // Expired or rejected provider token: drop exactly the token Apple
+    // refused and retry this device once with a fresh one. A token too
+    // young to refresh, or a second refusal, is a key/team/key-id
+    // misconfiguration and is recorded as permanent.
+    if matches!(outcome, ApnsOutcome::ProviderAuth { .. }) && provider.tokens.invalidate(&jwt) {
         let fresh = match provider.tokens.current() {
             Ok(fresh) => fresh,
             Err(error) => {

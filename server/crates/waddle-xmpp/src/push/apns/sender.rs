@@ -216,7 +216,7 @@ impl ApnsSender for HttpApnsSender {
         Box::pin(async move {
             match builder.send().await {
                 Ok(response) => read_response(environment, response).await,
-                Err(error) => classify_transport_error(environment, &error),
+                Err(error) => classify_transport_error(environment, error),
             }
         })
     }
@@ -262,7 +262,7 @@ async fn read_body_bounded(mut response: reqwest::Response) -> Vec<u8> {
     body
 }
 
-fn classify_transport_error(environment: ApnsEnvironment, error: &reqwest::Error) -> ApnsOutcome {
+fn classify_transport_error(environment: ApnsEnvironment, error: reqwest::Error) -> ApnsOutcome {
     let failure = if error.is_timeout() {
         TransientFailure::Timeout
     } else {
@@ -270,14 +270,20 @@ fn classify_transport_error(environment: ApnsEnvironment, error: &reqwest::Error
     };
     warn!(
         environment = environment.host(),
-        error = %error,
-        timeout = error.is_timeout(),
+        error = %transport_error_detail(error),
+        timeout = matches!(failure, TransientFailure::Timeout),
         "APNs transport failure"
     );
     ApnsOutcome::Transient {
         cause: ApnsTransient::Failure(failure),
         retry_after: None,
     }
+}
+
+/// The error for logs, without its request URL: the URL's last path
+/// segment is the device token.
+fn transport_error_detail(error: reqwest::Error) -> String {
+    error.without_url().to_string()
 }
 
 #[cfg(test)]
@@ -554,6 +560,18 @@ mod tests {
                 retry_after: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn transport_error_detail_never_carries_the_device_token() {
+        let token = "ab".repeat(32);
+        let error = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:1/3/device/{token}"))
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+        assert!(error.to_string().contains(&token), "reqwest names the URL");
+        assert!(!transport_error_detail(error).contains(&token));
     }
 
     #[tokio::test]

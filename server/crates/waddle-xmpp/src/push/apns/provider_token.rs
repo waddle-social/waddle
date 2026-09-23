@@ -22,6 +22,11 @@ use super::identifiers::{ApnsKeyId, ApnsTeamId};
 /// signed.
 pub const APNS_PROVIDER_TOKEN_REUSE: Duration = Duration::from_secs(50 * 60);
 
+/// Apple refuses provider tokens refreshed more often than this
+/// (`429 TooManyProviderTokenUpdates`), so a `403` for a younger token
+/// keeps it: a fresh token would not fix whatever Apple rejected.
+pub const APNS_PROVIDER_TOKEN_MIN_REFRESH: Duration = Duration::from_secs(20 * 60);
+
 /// Wall-clock source for `iat` and cache age. Injected so tests can
 /// move time without sleeping.
 pub trait ApnsClock: Send + Sync + 'static {
@@ -81,10 +86,13 @@ pub trait ApnsProviderTokenSource: Send + Sync + 'static {
     /// older than [`APNS_PROVIDER_TOKEN_REUSE`].
     fn current(&self) -> Result<ApnsProviderJwt, ApnsSignError>;
 
-    /// Drop the cached token if it is still `rejected`. Keyed on the
-    /// rejected token so a burst of concurrent `403`s for the same
-    /// token causes exactly one refresh, not one per device.
-    fn invalidate(&self, rejected: &ApnsProviderJwt);
+    /// Drop the cached token if it is still `rejected` and at least
+    /// [`APNS_PROVIDER_TOKEN_MIN_REFRESH`] old. Keyed on the rejected
+    /// token so a burst of concurrent `403`s for the same token causes
+    /// exactly one refresh, not one per device. Returns whether the next
+    /// [`Self::current`] can differ from `rejected`, i.e. whether a
+    /// retry is worth sending.
+    fn invalidate(&self, rejected: &ApnsProviderJwt) -> bool;
 }
 
 #[derive(Serialize)]
@@ -177,11 +185,21 @@ impl ApnsProviderTokenSource for CachingApnsTokenSigner {
         Ok(jwt)
     }
 
-    fn invalidate(&self, rejected: &ApnsProviderJwt) {
+    fn invalidate(&self, rejected: &ApnsProviderJwt) -> bool {
+        let now = self.clock.now_unix_seconds();
         let mut cache = self.lock_cache();
-        if cache.as_ref().is_some_and(|cached| &cached.jwt == rejected) {
-            *cache = None;
+        let Some(cached) = cache.as_ref() else {
+            return true;
+        };
+        if &cached.jwt != rejected {
+            // Already replaced by a concurrent refresh.
+            return true;
         }
+        if now.saturating_sub(cached.issued_at) < APNS_PROVIDER_TOKEN_MIN_REFRESH.as_secs() {
+            return false;
+        }
+        *cache = None;
+        true
     }
 }
 
@@ -284,23 +302,37 @@ mod tests {
     fn invalidate_forces_a_fresh_token() {
         let (signer, clock, key) = signer();
         let first = signer.current().expect("first");
-        clock.advance(Duration::from_secs(60));
-        signer.invalidate(&first);
+        clock.advance(APNS_PROVIDER_TOKEN_MIN_REFRESH);
+        assert!(signer.invalidate(&first));
         let second = signer.current().expect("fresh");
         assert_ne!(second, first);
-        assert_eq!(decode(&second, &key).iat, START + 60);
+        assert_eq!(
+            decode(&second, &key).iat,
+            START + APNS_PROVIDER_TOKEN_MIN_REFRESH.as_secs()
+        );
+    }
+
+    #[test]
+    fn a_rejected_young_token_is_kept() {
+        let (signer, clock, _key) = signer();
+        let first = signer.current().expect("first");
+        clock.advance(Duration::from_secs(60));
+        // Apple throttles refreshes inside 20 minutes: re-minting would
+        // only earn TooManyProviderTokenUpdates.
+        assert!(!signer.invalidate(&first));
+        assert_eq!(signer.current().expect("same"), first);
     }
 
     #[test]
     fn invalidating_a_stale_token_keeps_the_newer_one() {
         let (signer, clock, _key) = signer();
         let first = signer.current().expect("first");
-        clock.advance(Duration::from_secs(60));
-        signer.invalidate(&first);
+        clock.advance(APNS_PROVIDER_TOKEN_MIN_REFRESH);
+        assert!(signer.invalidate(&first));
         let second = signer.current().expect("second");
         // A late 403 for the already-replaced token must not throw
         // away the fresh one (Apple throttles token refreshes).
-        signer.invalidate(&first);
+        assert!(signer.invalidate(&first));
         assert_eq!(signer.current().expect("still second"), second);
     }
 

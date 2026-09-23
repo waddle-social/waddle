@@ -284,7 +284,10 @@ async fn classify_response(resp: reqwest::Response) -> WebPushOutcome {
 fn classify_transport_error(endpoint: &Url, err: reqwest::Error) -> WebPushOutcome {
     let endpoint_hash = EndpointHash::of(endpoint.as_str());
     let origin = endpoint.origin().ascii_serialization();
-    if err.is_timeout() {
+    // The endpoint URL is a bearer capability: log the error without it.
+    let is_timeout = err.is_timeout();
+    let err = err.without_url();
+    if is_timeout {
         warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, "Web Push timeout");
         WebPushOutcome::Transient {
             kind: TransientFailure::Timeout,

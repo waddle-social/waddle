@@ -15,7 +15,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,9 +29,10 @@ use waddle_server::push_service::{
 };
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::push::apns::{
-    ApnsEnvironment, ApnsKeyId, ApnsOutcome, ApnsPriority, ApnsProviderJwt,
+    ApnsClock, ApnsEnvironment, ApnsKeyId, ApnsOutcome, ApnsPriority, ApnsProviderJwt,
     ApnsProviderTokenSource, ApnsReason, ApnsRequest, ApnsSender, ApnsSignError, ApnsTeamId,
     ApnsTopic, ApnsTransient, CachingApnsTokenSigner, SystemApnsClock,
+    APNS_PROVIDER_TOKEN_MIN_REFRESH,
 };
 use waddle_xmpp::push::types::TransientFailure;
 use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
@@ -127,10 +128,36 @@ impl ApnsSender for FakeApnsSender {
     }
 }
 
+/// Wall clock the test can move forward, so a cached provider token
+/// can be aged past Apple's minimum refresh interval.
+struct TestClock(AtomicU64);
+
+impl TestClock {
+    fn advance(&self, by: Duration) {
+        self.0.fetch_add(by.as_secs(), Ordering::SeqCst);
+    }
+}
+
+impl ApnsClock for TestClock {
+    fn now_unix_seconds(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// Real ES256 signer wrapped to count invalidations.
 struct CountingTokens {
     inner: CachingApnsTokenSigner,
+    clock: Arc<TestClock>,
     invalidations: AtomicUsize,
+}
+
+impl CountingTokens {
+    /// Mints the cached token now and ages it past the refresh floor, as
+    /// a long-running server's token would be when Apple expires it.
+    fn age_cached_token(&self) {
+        self.inner.current().expect("prime token");
+        self.clock.advance(APNS_PROVIDER_TOKEN_MIN_REFRESH);
+    }
 }
 
 impl ApnsProviderTokenSource for CountingTokens {
@@ -138,9 +165,9 @@ impl ApnsProviderTokenSource for CountingTokens {
         self.inner.current()
     }
 
-    fn invalidate(&self, rejected: &ApnsProviderJwt) {
+    fn invalidate(&self, rejected: &ApnsProviderJwt) -> bool {
         self.invalidations.fetch_add(1, Ordering::SeqCst);
-        self.inner.invalidate(rejected);
+        self.inner.invalidate(rejected)
     }
 }
 
@@ -148,14 +175,18 @@ fn counting_tokens() -> Arc<CountingTokens> {
     let pem = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng)
         .to_pkcs8_pem(Default::default())
         .expect("p8 key");
+    let clock = Arc::new(TestClock(AtomicU64::new(
+        SystemApnsClock.now_unix_seconds(),
+    )));
     Arc::new(CountingTokens {
         inner: CachingApnsTokenSigner::from_pkcs8_pem(
             ApnsTeamId::parse("TEAM123456").expect("team id"),
             ApnsKeyId::parse("KEY1234567").expect("key id"),
             &pem,
-            Arc::new(SystemApnsClock),
+            Arc::clone(&clock) as Arc<dyn ApnsClock>,
         )
         .expect("signer"),
+        clock,
         invalidations: AtomicUsize::new(0),
     })
 }
@@ -615,6 +646,7 @@ async fn apns_expired_provider_token_is_refreshed_and_retried_once() {
         ],
     )]);
     let tokens = counting_tokens();
+    tokens.age_cached_token();
     let store = store_with_apns(sender.clone(), Arc::clone(&tokens)).await;
     let owner = owner();
     let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
@@ -651,7 +683,9 @@ async fn apns_provider_token_rejected_twice_keeps_the_device_and_fails_the_job()
             reason: ApnsReason::InvalidProviderToken,
         }],
     )]);
-    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let tokens = counting_tokens();
+    tokens.age_cached_token();
+    let store = store_with_apns(sender.clone(), tokens).await;
     let owner = owner();
     let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
     register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
@@ -678,6 +712,41 @@ async fn apns_provider_token_rejected_twice_keeps_the_device_and_fails_the_job()
         "a provider key problem is not the device's fault"
     );
     assert_eq!(job_status(&store, "auth-1").await, "failed");
+}
+
+#[tokio::test]
+async fn apns_rejection_of_a_young_provider_token_is_not_retried() {
+    let sender = FakeApnsSender::with_outcomes(vec![(
+        TOKEN_A,
+        vec![ApnsOutcome::ProviderAuth {
+            reason: ApnsReason::InvalidProviderToken,
+        }],
+    )]);
+    let tokens = counting_tokens();
+    let store = store_with_apns(sender.clone(), Arc::clone(&tokens)).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
+    register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
+
+    publish(
+        &store,
+        &owner,
+        node.node(),
+        notification_item("young-1", 1, false),
+    )
+    .await;
+
+    // A fresh token would not fix a key problem, and refreshing inside
+    // 20 minutes earns TooManyProviderTokenUpdates.
+    assert_eq!(sender.calls_for(TOKEN_A).len(), 1, "no retry");
+    assert_eq!(
+        attempt_statuses(&store, node.node()).await,
+        vec![(
+            "iphone".to_string(),
+            ATTEMPT_STATUS_APNS_PROVIDER_AUTH.to_string()
+        )]
+    );
+    assert_eq!(job_status(&store, "young-1").await, "failed");
 }
 
 #[tokio::test]

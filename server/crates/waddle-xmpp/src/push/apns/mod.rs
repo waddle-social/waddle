@@ -35,7 +35,8 @@ pub use payload::{
 };
 pub use provider_token::{
     ApnsClock, ApnsKeyError, ApnsProviderJwt, ApnsProviderTokenSource, ApnsSignError,
-    CachingApnsTokenSigner, SystemApnsClock, APNS_PROVIDER_TOKEN_REUSE,
+    CachingApnsTokenSigner, SystemApnsClock, APNS_PROVIDER_TOKEN_MIN_REFRESH,
+    APNS_PROVIDER_TOKEN_REUSE,
 };
 pub use sender::{
     ApnsExpiration, ApnsPriority, ApnsRequest, ApnsSender, ApnsSenderBuildError, HttpApnsSender,
