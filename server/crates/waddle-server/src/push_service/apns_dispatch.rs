@@ -30,8 +30,9 @@ pub(crate) const ATTEMPT_STATUS_APNS_DELIVERED: &str = "apns-delivered";
 pub(crate) const ATTEMPT_STATUS_APNS_GONE: &str = "apns-gone";
 pub(crate) const ATTEMPT_STATUS_APNS_RATE_LIMITED: &str = "apns-rate-limited";
 pub(crate) const ATTEMPT_STATUS_APNS_TRANSIENT: &str = "apns-transient";
-/// Provider token rejected twice in a row (the second time with a
-/// freshly minted token): the `.p8` key, key id or team id is wrong.
+/// Provider token rejected again after a refresh, or rejected while too
+/// young to refresh (Apple's 20-minute floor): the `.p8` key, key id, team
+/// id or server clock is wrong.
 pub(crate) const ATTEMPT_STATUS_APNS_PROVIDER_AUTH: &str = "apns-provider-auth";
 pub(crate) const ATTEMPT_STATUS_APNS_REJECTED: &str = "apns-rejected";
 pub(crate) const ATTEMPT_STATUS_APNS_PAYLOAD_TOO_LARGE: &str = "apns-payload-too-large";
@@ -312,7 +313,7 @@ fn outcome_diagnostic(outcome: &ApnsOutcome) -> Option<String> {
             format!("device gone HTTP {status} {}", reason.as_str())
         }
         ApnsOutcome::ProviderAuth { reason } => {
-            format!("provider token rejected twice: {}", reason.as_str())
+            format!("provider token rejected: {}", reason.as_str())
         }
         ApnsOutcome::Transient { cause, retry_after } => {
             let cause = match cause {
