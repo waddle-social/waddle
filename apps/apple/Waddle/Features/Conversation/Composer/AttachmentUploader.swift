@@ -10,6 +10,8 @@ enum AttachmentUploadError: Error, Equatable {
     /// No XEP-0363 slot: offline, or the service refused the request.
     case slotUnavailable
     case rejected(status: Int)
+    /// A photo's location data could not be removed, so it was not sent.
+    case unsanitizable
 
     var message: String {
         switch self {
@@ -17,6 +19,7 @@ enum AttachmentUploadError: Error, Equatable {
         case .tooLarge: return "Files can be up to 25 MB."
         case .slotUnavailable: return "Couldn't start the upload. Check your connection."
         case let .rejected(status): return "The upload was rejected (\(status))."
+        case .unsanitizable: return "Couldn't remove location data from this photo, so it wasn't attached."
         }
     }
 

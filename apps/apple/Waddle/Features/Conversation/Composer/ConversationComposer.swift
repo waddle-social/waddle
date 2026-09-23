@@ -175,11 +175,17 @@ struct ConversationComposer: View {
                     model.errorMessage = "Couldn't read that photo."
                     return
                 }
-                let payload = await AttachmentLoader.payload(
-                    fromPhoto: data,
-                    mediaType: contentType?.preferredMIMEType,
-                    fileExtension: contentType?.preferredFilenameExtension
-                )
+                let payload: AttachmentPayload
+                do {
+                    payload = try await AttachmentLoader.payload(
+                        fromPhoto: data,
+                        mediaType: contentType?.preferredMIMEType,
+                        fileExtension: contentType?.preferredFilenameExtension
+                    )
+                } catch {
+                    model.errorMessage = AttachmentUploadError.message(for: error)
+                    return
+                }
                 let thumbnail = payload.mediaType.hasPrefix("image/") ? AttachmentImageInfo.thumbnail(from: payload.data) : nil
                 model.addAttachment(payload, thumbnail: thumbnail, uploader: uploader)
             }

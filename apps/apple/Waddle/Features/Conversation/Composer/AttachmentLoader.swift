@@ -15,10 +15,11 @@ enum AttachmentLoader {
 
     /// Photos arrive as raw library bytes. HEIC and JPEG are re-encoded as
     /// JPEG without location metadata, and any other image that carries a
-    /// location is too, so no picked photo leaks where it was taken.
-    static func payload(fromPhoto data: Data, mediaType: String?, fileExtension: String?) async -> AttachmentPayload {
-        await Task.detached(priority: .userInitiated) {
-            Self.photoPayload(data, mediaType: mediaType, fileExtension: fileExtension)
+    /// location is too, so no picked photo leaks where it was taken. A
+    /// photo that cannot be re-encoded is refused, never sent as is.
+    static func payload(fromPhoto data: Data, mediaType: String?, fileExtension: String?) async throws -> AttachmentPayload {
+        try await Task.detached(priority: .userInitiated) {
+            try Self.photoPayload(data, mediaType: mediaType, fileExtension: fileExtension)
         }.value
     }
 
@@ -45,12 +46,13 @@ enum AttachmentLoader {
         )
     }
 
-    private static func photoPayload(_ data: Data, mediaType: String?, fileExtension: String?) -> AttachmentPayload {
+    private static func photoPayload(_ data: Data, mediaType: String?, fileExtension: String?) throws -> AttachmentPayload {
         let type = mediaType?.lowercased() ?? "application/octet-stream"
         let stamp = Int(Date().timeIntervalSince1970)
         let mustReencode = ["image/heic", "image/heif", "image/jpeg"].contains(type)
             || (type.hasPrefix("image/") && AttachmentImageInfo.hasLocation(data))
-        if mustReencode, let jpeg = AttachmentImageInfo.sanitizedJPEG(from: data) {
+        if mustReencode {
+            guard let jpeg = AttachmentImageInfo.sanitizedJPEG(from: data) else { throw AttachmentUploadError.unsanitizable }
             let size = AttachmentImageInfo.pixelSize(of: jpeg)
             return AttachmentPayload(data: jpeg, filename: "Photo-\(stamp).jpg", mediaType: "image/jpeg", width: size?.width, height: size?.height)
         }

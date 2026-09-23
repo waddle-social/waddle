@@ -27,37 +27,39 @@ final class AppState {
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var isBootstrapping = false
-    @ObservationIgnored private var pendingNotificationActions: [NotificationAction] = []
+    @ObservationIgnored private var pendingNotificationActions: [(account: BareJID, action: NotificationAction)] = []
     @ObservationIgnored private var client: AuthClient
 
     init() {
         let server = ServerSettings.current
         self.server = server
         self.client = AuthClient(baseURL: server)
-        notifications.onOpenConversation = { [weak self] conversation in
-            self?.session?.navigation.open(conversation)
+        notifications.onOpenConversation = { [weak self] account, conversation in
+            guard let session = self?.session, session.coordinator.account.jid == account else { return }
+            session.navigation.open(conversation)
         }
-        notifications.onReply = { [weak self] conversation, text in
-            await self?.perform(.reply(conversation, text))
+        notifications.onReply = { [weak self] account, conversation, text in
+            await self?.perform(.reply(conversation, text), for: account)
         }
-        notifications.onMarkRead = { [weak self] conversation in
-            await self?.perform(.markRead(conversation))
+        notifications.onMarkRead = { [weak self] account, conversation in
+            await self?.perform(.markRead(conversation), for: account)
         }
     }
 
     /// A notification action. One that arrives before the session exists
     /// (the app was launched by the action) waits for it instead of being
-    /// dropped.
+    /// dropped. Actions only ever run as the account they were posted for.
     enum NotificationAction {
         case reply(ConversationID, String)
         case markRead(ConversationID)
     }
 
-    func perform(_ action: NotificationAction) async {
+    func perform(_ action: NotificationAction, for account: BareJID) async {
         guard let coordinator = session?.coordinator else {
-            pendingNotificationActions.append(action)
+            pendingNotificationActions.append((account, action))
             return
         }
+        guard coordinator.account.jid == account else { return }
         switch action {
         case let .reply(conversation, text):
             await coordinator.send(Draft(text: text), in: conversation)
@@ -178,10 +180,16 @@ final class AppState {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(authorization.interval) * 1_000_000_000)
-                guard !Task.isCancelled, let self else { return }
+                guard let self, self.isCurrent(authorization) else { return }
                 do {
-                    guard case let .complete(sessionID) = try await self.client.poll(authorization) else { continue }
-                    guard let loaded = try await self.client.session(sessionID) else {
+                    let result = try await self.client.poll(authorization)
+                    // Cancel, another provider or a server change may have
+                    // happened during the request; commit nothing if so.
+                    guard self.isCurrent(authorization) else { return }
+                    guard case let .complete(sessionID) = result else { continue }
+                    let restored = try await self.client.session(sessionID)
+                    guard self.isCurrent(authorization) else { return }
+                    guard let loaded = restored else {
                         self.errorMessage = "The server did not return a session. Try again."
                         self.phase = .signedOut
                         return
@@ -192,12 +200,18 @@ final class AppState {
                 } catch let error as URLError where error.code == .networkConnectionLost || error.code == .timedOut {
                     continue
                 } catch {
+                    guard self.isCurrent(authorization) else { return }
                     self.errorMessage = error.localizedDescription
                     self.phase = .signedOut
                     return
                 }
             }
         }
+    }
+
+    /// Whether `authorization` is still the sign-in in progress.
+    private func isCurrent(_ authorization: DeviceAuthorization) -> Bool {
+        !Task.isCancelled && phase == .authorizing(authorization)
     }
 
     // MARK: - Session
@@ -208,9 +222,10 @@ final class AppState {
             phase = .signedOut
             return
         }
+        let account = active.coordinator.account.jid
         active.coordinator.onAlert = { [weak self] alert in
             guard let self else { return }
-            self.notifications.post(alert, isVisible: self.isOnScreen(alert.conversation))
+            self.notifications.post(alert, for: account, isVisible: self.isOnScreen(alert.conversation))
         }
         active.coordinator.onAuthenticationFailed = { [weak self] in
             Task { await self?.expireSession() }
@@ -219,11 +234,13 @@ final class AppState {
         phase = .signedIn
         active.coordinator.start()
         notifications.requestAuthorizationIfNeeded()
-        let pending = pendingNotificationActions
+        // Actions queued for another account (a failed restore followed by
+        // a different sign-in) are dropped, never replayed as this one.
+        let pending = pendingNotificationActions.filter { $0.account == account }
         pendingNotificationActions.removeAll()
         Task {
-            for action in pending {
-                await perform(action)
+            for entry in pending {
+                await perform(entry.action, for: account)
             }
         }
     }
