@@ -61,6 +61,24 @@ struct ComposerSendButton: View {
     let action: () -> Void
 
     var body: some View {
+        #if os(iOS)
+        Button(action: action) {
+            Image(systemName: isEditing ? "checkmark" : "arrow.up")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(isEnabled ? Color.white : Color.secondary)
+                .frame(width: 44, height: 44)
+                .background(
+                    isEnabled ? Color.accentColor : Color.secondary.opacity(0.12),
+                    in: Circle()
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .keyboardShortcut(.return, modifiers: .command)
+        .help(isEditing ? "Save edit" : "Send")
+        .accessibilityLabel(Text(isEditing ? "Save edit" : "Send"))
+        #else
         Button(action: action) {
             Image(systemName: isEditing ? "checkmark.circle.fill" : "arrow.up.circle.fill")
                 .font(.system(size: 26))
@@ -72,6 +90,7 @@ struct ComposerSendButton: View {
         .keyboardShortcut(.return, modifiers: .command)
         .help(isEditing ? "Save edit" : "Send")
         .accessibilityLabel(Text(isEditing ? "Save edit" : "Send"))
+        #endif
     }
 }
 
@@ -84,16 +103,25 @@ struct ComposerAttachmentMenu: View {
     var body: some View {
         Menu {
             Button(action: onPhoto) {
-                Label("Photo or video", systemImage: "photo.on.rectangle")
+                Label("Photo", systemImage: "photo.on.rectangle")
             }
             Button(action: onFile) {
                 Label("File", systemImage: "doc")
             }
         } label: {
+            #if os(iOS)
+            Image(systemName: "plus")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(Color.secondary)
+                .frame(width: 44, height: 44)
+                .background(Color.secondary.opacity(0.12), in: Circle())
+                .contentShape(Circle())
+            #else
             Image(systemName: "plus.circle.fill")
                 .font(.system(size: 26))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Color.secondary)
+            #endif
         }
         .menuStyle(.button)
         .buttonStyle(.plain)

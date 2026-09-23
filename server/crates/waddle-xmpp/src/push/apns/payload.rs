@@ -112,8 +112,10 @@ pub struct ApnsPayloadFields<'a> {
     pub item: &'a str,
     /// XEP-0357 push node id.
     pub node: &'a str,
-    /// XEP-0357 summary `message-count`, if the publisher sent one.
-    pub message_count: Option<u64>,
+    /// Waddle account-wide unread snapshot for `aps.badge`, if present.
+    /// This is deliberately independent of XEP-0357's per-conversation
+    /// summary `message-count`.
+    pub badge_count: Option<u64>,
 }
 
 impl<'a> ApnsPayload<'a> {
@@ -123,7 +125,7 @@ impl<'a> ApnsPayload<'a> {
                 alert: Alert {
                     loc_key: ApnsAlertLocKey::for_class(fields.class).as_str(),
                 },
-                badge: fields.message_count,
+                badge: fields.badge_count,
                 sound: DEFAULT_SOUND,
                 thread_id: fields.conversation,
             },
@@ -172,14 +174,14 @@ impl EncodedApnsPayload {
 mod tests {
     use super::*;
 
-    fn fields(class: NotificationClass, message_count: Option<u64>) -> ApnsPayloadFields<'static> {
+    fn fields(class: NotificationClass, badge_count: Option<u64>) -> ApnsPayloadFields<'static> {
         ApnsPayloadFields {
             class,
             conversation: "alice@example.com",
             thread: None,
             item: "stanza-1",
             node: "node-1",
-            message_count,
+            badge_count,
         }
     }
 

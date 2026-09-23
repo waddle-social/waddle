@@ -142,6 +142,34 @@ package cuenv
 	...
 }
 
+#ApnsExternalSecret: {
+	apiVersion: "external-secrets.io/v1beta1"
+	kind:       "ExternalSecret"
+	metadata: {
+		name:      "waddle-apns-production"
+		namespace: "waddle"
+		...
+	}
+	spec: {
+		secretStoreRef: {kind: "ClusterSecretStore", name: "onepassword", ...}
+		target: {
+			name:           "waddle-apns-production"
+			creationPolicy: "Owner"
+			template: {
+				data: WADDLE_APNS_SECRETS_CHECKSUM: string
+				metadata: labels: "reconcile.fluxcd.io/watch": "Enabled"
+				...
+			}
+			...
+		}
+		data: [
+			{secretKey: "WADDLE_APNS_KEY_PEM", remoteRef: {key: "app-apple", property: "file/notifications.p8"}},
+		]
+		...
+	}
+	...
+}
+
 #OpenRouterExternalSecret: {
 	apiVersion: "external-secrets.io/v1beta1"
 	kind:       "ExternalSecret"

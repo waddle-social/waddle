@@ -44,6 +44,15 @@ final class FFIXmppPort: XmppPort {
         await client.disconnect()
     }
 
+    func probeConnection() async -> Bool {
+        do {
+            try await client.pingServer()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func sendPresence(_ availability: Availability, status: String?) async {
         await client.sendPresence(status: status, show: availability.showValue, idleSince: nil)
     }

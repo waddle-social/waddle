@@ -32,7 +32,11 @@ private struct SettingsTabs: View {
             .tabItem { Label("General", systemImage: "gearshape") }
 
             SettingsTabForm {
-                SettingsNotificationsSection(preferences: app.preferences)
+                SettingsNotificationsSection(
+                    preferences: app.preferences,
+                    pushRegistrationStatus: app.pushRegistrationStatus,
+                    notificationPermissionGranted: app.notificationPermissionGranted
+                )
             }
             .tabItem { Label("Notifications", systemImage: "bell.badge") }
 
@@ -64,7 +68,11 @@ private struct SettingsForm: View {
     var body: some View {
         Form {
             SettingsAppearanceSection(preferences: app.preferences)
-            SettingsNotificationsSection(preferences: app.preferences)
+            SettingsNotificationsSection(
+                preferences: app.preferences,
+                pushRegistrationStatus: app.pushRegistrationStatus,
+                notificationPermissionGranted: app.notificationPermissionGranted
+            )
             SettingsPrivacySection(preferences: app.preferences)
             SettingsAccountSection(app: app)
             SettingsAboutSection()

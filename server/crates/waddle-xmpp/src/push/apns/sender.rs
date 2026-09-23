@@ -338,7 +338,7 @@ mod tests {
                 thread: None,
                 item: "stanza-1",
                 node: "node-1",
-                message_count: Some(2),
+                badge_count: Some(2),
             })
             .encode()
             .expect("payload");

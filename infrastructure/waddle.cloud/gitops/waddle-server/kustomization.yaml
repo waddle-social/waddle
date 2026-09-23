@@ -9,6 +9,7 @@ resources:
   - spicedb-cluster.yaml
   - xmpp-certificate.yaml
   - runtime-external-secret.yaml
+  - apns-external-secret.yaml
   - openrouter-external-secret.yaml
   - livekit-external-secret.yaml
   - helmrepository.yaml

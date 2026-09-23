@@ -14,6 +14,10 @@ final class NotificationController: NSObject {
 
     /// Whether the app is frontmost. Set by the scene phase.
     var isAppActive = true
+    /// Only a live session for the push's account can replace its alert with
+    /// the richer local XMPP notification.
+    var hasLiveSession: ((BareJID) -> Bool)?
+    var onAuthorizationResult: ((Bool) -> Void)?
 
     private let center = UNUserNotificationCenter.current()
     private var hasRequestedAuthorization = false
@@ -52,7 +56,22 @@ final class NotificationController: NSObject {
         hasRequestedAuthorization = true
         Task {
             _ = try? await center.requestAuthorization(options: [.alert, .badge, .sound])
+            await updateAuthorizationStatus()
         }
+    }
+
+    func refreshAuthorizationStatus() {
+        Task { await updateAuthorizationStatus() }
+    }
+
+    private func updateAuthorizationStatus() async {
+        let settings = await center.notificationSettings()
+        var isGranted = settings.authorizationStatus == .authorized
+            || settings.authorizationStatus == .provisional
+        #if os(iOS)
+        isGranted = isGranted || settings.authorizationStatus == .ephemeral
+        #endif
+        onAuthorizationResult?(isGranted)
     }
 
     /// Posts `alert` for `account` unless the user is already looking at it.
@@ -143,10 +162,15 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        // In the foreground the live session posts its own alert, with the
-        // sender and preview; the push would only repeat it without them.
         if notification.request.trigger is UNPushNotificationTrigger {
-            return []
+            let account = Self.target(from: notification.request.content.userInfo)?.0
+            let hasLiveSession = await MainActor.run {
+                self.isAppActive && account.map { self.hasLiveSession?($0) == true } == true
+            }
+            // The matching live XMPP session posts a richer local alert for
+            // messages it receives. When that session is absent, keep the
+            // APNs banner visible instead of suppressing the only alert.
+            return hasLiveSession ? [] : [.banner, .sound, .list]
         }
         return [.banner, .sound, .list]
     }

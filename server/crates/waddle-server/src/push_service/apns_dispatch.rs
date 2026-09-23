@@ -154,6 +154,7 @@ pub(super) async fn dispatch_apns_device(
     device: &SealedActiveDevice,
     recipient: &BareJid,
     parsed: &ParsedPushPayload,
+    badge_count: Option<u64>,
     job: ApnsJobContext<'_>,
     provider: &ApnsProvider,
     secrets: &PushSecretCipher,
@@ -198,7 +199,7 @@ pub(super) async fn dispatch_apns_device(
         thread: parsed.thread.as_deref(),
         item,
         node: job.node,
-        message_count: parsed.message_count,
+        badge_count,
     })
     .encode()
     {

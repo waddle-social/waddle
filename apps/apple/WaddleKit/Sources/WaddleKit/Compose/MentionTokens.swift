@@ -23,6 +23,19 @@ public struct RecordedMention: Hashable, Sendable {
 /// Mention token handling over the raw draft, in Unicode scalar offsets
 /// (the unit XEP-0372 references count in).
 public enum MentionTokens {
+    /// Finds exact own-nick tokens for presentation fallback. Punctuation
+    /// only ends a nick when it is not immediately followed by more nick
+    /// text, so `@alice.bob` cannot highlight `@alice`. Ranges use Unicode
+    /// scalar offsets.
+    public static func ownNickRanges(_ nick: String, in text: String) -> [Range<Int>] {
+        let tokenScalars = Array(("@" + nick).unicodeScalars)
+        guard tokenScalars.count > 1 else { return [] }
+        let scalars = Array(text.unicodeScalars)
+        return occurrences(of: tokenScalars, in: scalars).filter {
+            ownNickBoundary(after: $0.upperBound, in: scalars)
+        }
+    }
+
     /// The trailing `@word` when the draft ends inside one. The composer
     /// has no caret position on every OS it supports, so completion works
     /// on the word being typed at the end.
@@ -105,5 +118,18 @@ public enum MentionTokens {
 
     private static func closesWord(_ scalar: Unicode.Scalar) -> Bool {
         isSpace(scalar) || ",.:;!?)]}\"'*~".unicodeScalars.contains(scalar)
+    }
+
+    private static func ownNickBoundary(after index: Int, in scalars: [Unicode.Scalar]) -> Bool {
+        guard index < scalars.count else { return true }
+        if isSpace(scalars[index]) { return true }
+        var boundaryEnd = index
+        while boundaryEnd < scalars.count,
+              closesWord(scalars[boundaryEnd]),
+              !isSpace(scalars[boundaryEnd]) {
+            boundaryEnd += 1
+        }
+        guard boundaryEnd < scalars.count else { return true }
+        return isSpace(scalars[boundaryEnd])
     }
 }

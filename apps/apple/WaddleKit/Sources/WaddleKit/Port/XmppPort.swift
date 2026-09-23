@@ -48,6 +48,8 @@ public protocol ConnectionPort: AnyObject, Sendable {
     var events: AsyncStream<XmppEvent> { get }
     func connect() async
     func disconnect() async
+    /// Confirms that an online XMPP stream still answers requests.
+    func probeConnection() async -> Bool
     func sendPresence(_ availability: Availability, status: String?) async
 }
 
@@ -118,7 +120,12 @@ public protocol PushPort: AnyObject, Sendable {
     /// Registers an APNs token with `push.<domain>` and enables XEP-0357 on
     /// the account. Returns the registration to keep for disabling.
     func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration?
+    func enablePush(_ registration: PushRegistration) async -> Bool
     func disablePush(_ registration: PushRegistration) async -> Bool
+}
+
+public extension PushPort {
+    func enablePush(_ registration: PushRegistration) async -> Bool { false }
 }
 
 /// The full surface the session coordinator drives.

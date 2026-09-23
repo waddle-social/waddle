@@ -24,6 +24,8 @@ final class FakePort: XmppPort {
     var historyRequests: [(ConversationID, String?)] = []
     var failingHistoryRequests = 0
     var connectCount = 0
+    var probeConnectionResult = true
+    var probeConnectionCount = 0
 
     init() {
         var captured: AsyncStream<XmppEvent>.Continuation!
@@ -45,7 +47,14 @@ final class FakePort: XmppPort {
         }
     }
 
-    func disconnect() async { disconnectCount += 1 }
+    func disconnect() async {
+        disconnectCount += 1
+        emit(.disconnected)
+    }
+    func probeConnection() async -> Bool {
+        probeConnectionCount += 1
+        return probeConnectionResult
+    }
     func sendPresence(_ availability: Availability, status: String?) async {}
 
     func send(_ message: OutboundMessage) async -> SendOutcome {

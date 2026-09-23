@@ -36,4 +36,8 @@ extension FFIXmppPort {
             deviceId: registration.deviceID
         )
     }
+
+    func enablePush(_ registration: PushRegistration) async -> Bool {
+        await client.enablePushNotifications(pushServiceJid: registration.serviceJID, node: registration.node)
+    }
 }

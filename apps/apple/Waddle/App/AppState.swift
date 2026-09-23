@@ -7,6 +7,22 @@ import WaddleKit
 @MainActor
 @Observable
 final class AppState {
+    enum PushRegistrationStatus: Equatable {
+        case waiting
+        case registering
+        case registered
+        case failed(String)
+
+        var title: String {
+            switch self {
+            case .waiting: return "Waiting for device token"
+            case .registering: return "Registering device"
+            case .registered: return "Device registered"
+            case .failed: return "Needs attention"
+            }
+        }
+    }
+
     enum Phase: Equatable {
         case launching
         case signedOut
@@ -20,7 +36,10 @@ final class AppState {
     private(set) var providers: [AuthProvider] = []
     private(set) var isLoadingProviders = false
     var errorMessage: String?
+    var pushRegistrationStatus: PushRegistrationStatus = .waiting
+    private(set) var notificationPermissionGranted: Bool?
     private(set) var session: ActiveSession?
+    @ObservationIgnored var finishPendingPushRegistration: (@MainActor (SessionCoordinator) async -> Void)?
 
     let notifications = NotificationController()
     let preferences = Preferences()
@@ -34,6 +53,13 @@ final class AppState {
         let server = ServerSettings.current
         self.server = server
         self.client = AuthClient(baseURL: server)
+        notifications.onAuthorizationResult = { [weak self] isGranted in
+            self?.notificationPermissionGranted = isGranted
+        }
+        notifications.hasLiveSession = { [weak self] account in
+            guard let coordinator = self?.session?.coordinator else { return false }
+            return coordinator.account.jid == account && coordinator.connection == .online
+        }
         notifications.onOpenConversation = { [weak self] account, conversation in
             Task { await self?.perform(.open(conversation), for: account) }
         }
@@ -108,6 +134,7 @@ final class AppState {
 
     func sceneActivityChanged(isActive: Bool) {
         notifications.isAppActive = isActive
+        if isActive { notifications.refreshAuthorizationStatus() }
         guard let coordinator = session?.coordinator else { return }
         if isActive {
             coordinator.resume()
@@ -259,7 +286,13 @@ final class AppState {
     func signOut() async {
         let sessionID = session?.auth.sessionID
         if let coordinator = session?.coordinator {
+            await finishPendingPushRegistration?(coordinator)
             let owner = PushRegistrationStore.Owner(server: server, account: coordinator.account.jid)
+            for registration in PushRegistrationStore.pendingRetirements(for: owner) {
+                if await coordinator.disablePush(registration) {
+                    PushRegistrationStore.removePendingRetirement(registration, for: owner)
+                }
+            }
             if let registration = PushRegistrationStore.registration(for: owner),
                await coordinator.disablePush(registration) {
                 PushRegistrationStore.forget(owner)
@@ -290,7 +323,9 @@ final class AppState {
     private func endSession(signingOut: Bool = false) async {
         cancelSignIn()
         guard let active = session else { return }
+        await finishPendingPushRegistration?(active.coordinator)
         session = nil
+        pushRegistrationStatus = .waiting
         DecryptedFileStore.purge()
         if signingOut {
             await active.coordinator.signOut()

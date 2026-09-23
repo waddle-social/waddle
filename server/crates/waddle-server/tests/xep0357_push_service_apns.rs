@@ -27,6 +27,8 @@ use waddle_server::db_params;
 use waddle_server::push_service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
+use waddle_xmpp::inbox::storage::InboxStorage as _;
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::push::apns::{
     ApnsClock, ApnsEnvironment, ApnsKeyId, ApnsOutcome, ApnsPriority, ApnsProviderJwt,
@@ -202,8 +204,13 @@ async fn store_with_apns(
         b"waddle-push-service-test-secret-key",
     )
     .await
-    .expect("push service store")
-    .with_apns_provider(
+    .expect("push service store");
+    let inbox_storage = Arc::new(
+        waddle_server::inbox::DatabaseInboxStorage::from_database(store.database())
+            .await
+            .expect("inbox storage"),
+    );
+    let store = store.with_inbox_storage(inbox_storage).with_apns_provider(
         tokens,
         Arc::new(sender),
         ApnsTopic::parse(BUNDLE_ID).expect("topic"),
@@ -214,6 +221,33 @@ async fn store_with_apns(
         .await
         .expect("registration store");
     store
+}
+
+async fn seed_unread_entries(
+    store: &DatabasePushServiceStore,
+    owner: &BareJid,
+    conversation: &str,
+    count: u32,
+) {
+    let inbox = waddle_server::inbox::DatabaseInboxStorage::from_database(store.database())
+        .await
+        .expect("inbox storage");
+    let partner: BareJid = conversation.parse().expect("conversation JID");
+    for sequence in 0..count {
+        inbox
+            .upsert(
+                owner,
+                InboxEntry::new(
+                    partner.clone(),
+                    ConversationKind::Direct,
+                    format!("archive-{conversation}-{sequence}"),
+                    i64::from(sequence),
+                ),
+                true,
+            )
+            .await
+            .expect("upsert unread entry");
+    }
 }
 
 fn owner() -> BareJid {
@@ -389,6 +423,7 @@ async fn xep0357_node_fans_out_to_every_apple_device_on_its_own_environment() {
     register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
     register_apple_device(&store, &owner, node.node(), "ipad", "prod", TOKEN_B).await;
     register_apple_device(&store, &owner, node.node(), "dev-mac", "sandbox", TOKEN_C).await;
+    seed_unread_entries(&store, &owner, "bob@example.com", 4).await;
 
     publish(
         &store,
@@ -557,6 +592,7 @@ async fn xep0357_apns_payload_is_minimal_even_when_the_summary_has_sender_and_bo
     let owner = owner();
     let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
     register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
+    seed_unread_entries(&store, &owner, "bob@example.com", 7).await;
 
     publish(
         &store,
@@ -766,6 +802,7 @@ async fn apns_transient_failure_requeues_without_resending_to_delivered_siblings
     let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
     register_apple_device(&store, &owner, node.node(), "flaky-phone", "prod", TOKEN_A).await;
     register_apple_device(&store, &owner, node.node(), "good-phone", "prod", TOKEN_B).await;
+    seed_unread_entries(&store, &owner, "bob@example.com", 1).await;
 
     publish(
         &store,
@@ -776,6 +813,8 @@ async fn apns_transient_failure_requeues_without_resending_to_delivered_siblings
     .await;
 
     assert_eq!(job_status(&store, "retry-1").await, "queued");
+    assert_eq!(sender.calls_for(TOKEN_A)[0].payload["aps"]["badge"], 1);
+    assert_eq!(sender.calls_for(TOKEN_B)[0].payload["aps"]["badge"], 1);
     assert_eq!(
         device_status(&store, node.node(), "flaky-phone").await,
         DEVICE_STATUS_ACTIVE
@@ -785,6 +824,10 @@ async fn apns_transient_failure_requeues_without_resending_to_delivered_siblings
         "flaky-phone".to_string(),
         ATTEMPT_STATUS_APNS_TRANSIENT.to_string()
     )));
+
+    // The queued job retains its XEP-0357 payload, but the APNs app-icon
+    // count is refreshed from the shared inbox at each provider dispatch.
+    seed_unread_entries(&store, &owner, "carol@example.com", 1).await;
 
     {
         let db = store.database();
@@ -799,7 +842,9 @@ async fn apns_transient_failure_requeues_without_resending_to_delivered_siblings
         .expect("retry drain");
 
     assert_eq!(job_status(&store, "retry-1").await, "published");
-    assert_eq!(sender.calls_for(TOKEN_A).len(), 2);
+    let flaky_calls = sender.calls_for(TOKEN_A);
+    assert_eq!(flaky_calls.len(), 2);
+    assert_eq!(flaky_calls[1].payload["aps"]["badge"], 2);
     assert_eq!(
         sender.calls_for(TOKEN_B).len(),
         1,

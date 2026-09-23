@@ -1023,7 +1023,8 @@ async fn create_websocket_state(
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
-        .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub);
+        .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub)
+        .with_inbox_storage(Arc::clone(&state.inbox_storage));
     // APNs (#529): the `.p8` provider key is read once here. A
     // configured-but-unusable key fails boot rather than leaving Apple
     // devices silently undeliverable; no `WADDLE_APNS_*` at all leaves

@@ -58,4 +58,9 @@ extension SessionCoordinator {
     public func disablePush(_ registration: PushRegistration) async -> Bool {
         await port.disablePush(registration)
     }
+
+    public func enablePush(_ registration: PushRegistration) async -> Bool {
+        guard connection == .online else { return false }
+        return await port.enablePush(registration)
+    }
 }

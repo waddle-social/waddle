@@ -27,15 +27,29 @@ extension SessionCoordinator {
 
     /// Re-sends a failed own message under its original id.
     public func retry(clientID: String) async {
-        guard let failed = failedOutbound.removeValue(forKey: clientID) else { return }
+        guard let failed = failedOutbound[clientID] else { return }
+        let bouncedRetry = deliveries.wasBounced(clientID)
+        failedOutbound[clientID] = nil
+        retryingOutboundIDs.insert(clientID)
         enqueue(failed)
+        if bouncedRetry, status.connection == .online {
+            // The reused id can receive a delayed ack from the bounced
+            // attempt. Retire that stream before sending the retry so the
+            // old ack cannot settle the new attempt.
+            await resetStaleConnection()
+            return
+        }
         await flushOutboundQueue()
     }
 
     /// Drops a failed or queued own message.
     public func discard(clientID: String, in conversation: ConversationID) {
         outboundQueue.removeAll { $0.clientID == clientID }
+        retryingOutboundIDs.remove(clientID)
+        resetBeforeRetryIDs.remove(clientID)
         failedOutbound[clientID] = nil
+        sentOutbound[clientID] = nil
+        sentOrder.removeAll { $0 == clientID }
         deliveries.forget(clientID)
         timelines.removeLocalEcho(id: clientID, in: conversation)
         persistOutbox()
@@ -44,30 +58,97 @@ extension SessionCoordinator {
     /// Sends queued messages in order. A transient failure stops the drain
     /// and keeps the message at the head for the next ready session.
     func flushOutboundQueue() async {
-        guard isSendReady, !isFlushing else { return }
+        guard canFlushOutboundQueue, !isFlushing else { return }
         isFlushing = true
-        defer { isFlushing = false }
-        while isSendReady, let next = outboundQueue.first {
+        defer {
+            isFlushing = false
+            if canFlushOutboundQueue, !outboundQueue.isEmpty {
+                Task { [weak self] in await self?.flushOutboundQueue() }
+            }
+        }
+        while canFlushOutboundQueue, let next = outboundQueue.first {
+            if resetBeforeRetryIDs.remove(next.clientID) != nil {
+                await resetStaleConnection()
+                return
+            }
+            retryingOutboundIDs.remove(next.clientID)
             deliveries.began(next.clientID)
+            let sendEpoch = connectionEpoch
             let outcome = await port.send(next)
+            let remainsTracked = outboundQueue.contains { $0.clientID == next.clientID }
+                || failedOutbound[next.clientID] != nil
+                || sentOutbound[next.clientID] != nil
+                || deliveries.state(of: next.clientID) != nil
+            // The user may discard a failed item while the port call is
+            // suspended. Do not let its late result recreate that message.
+            guard remainsTracked else { continue }
+            // A retry may have been queued while this attempt was suspended.
+            // Ignore the earlier continuation; the queued retry owns the id.
+            guard !retryingOutboundIDs.contains(next.clientID) else {
+                persistOutbox()
+                return
+            }
             deliveries.outcome(outcome, for: next.clientID)
             // Act on the settled state: an ack or failure that arrived while
             // the send was suspended outranks the call's own result.
-            switch (outcome, deliveries.state(of: next.clientID)) {
-            case (_, .acknowledged?):
-                outboundQueue.removeAll { $0.clientID == next.clientID }
-                rememberSent(next)
-            case (.rejected, _), (_, .failed?):
+            let state = deliveries.state(of: next.clientID)
+            if state == .acknowledged {
+                sentMessageAcknowledged(next.clientID)
+                persistOutbox()
+                continue
+            }
+            if outcome == .rejected || state == .failed {
                 outboundQueue.removeAll { $0.clientID == next.clientID }
                 failedOutbound[next.clientID] = next
-            case (.sent, _):
-                outboundQueue.removeAll { $0.clientID == next.clientID }
-                rememberSent(next)
-            case (.notConnected, _), (.transportError, _):
+                persistOutbox()
+                continue
+            }
+            if case .notConnected = outcome {
+                deliveries.queued(next.clientID)
+                if !isConnectResetting,
+                   status.connection == .online,
+                   sendEpoch == connectionEpoch
+                {
+                    await resetStaleConnection()
+                }
+                persistOutbox()
                 return
             }
-            persistOutbox()
+            if case .transportError = outcome {
+                deliveries.queued(next.clientID)
+                if !isConnectResetting,
+                   status.connection == .online,
+                   sendEpoch == connectionEpoch
+                {
+                    await resetStaleConnection()
+                }
+                persistOutbox()
+                return
+            }
+            // A send can finish after its stream was retired. Its result is
+            // uncertain even if it reports that the old driver accepted it;
+            // leave it queued for a fresh stream under the same client id.
+            guard !isConnectResetting,
+                  status.connection == .online,
+                  sendEpoch == connectionEpoch
+            else {
+                deliveries.queued(next.clientID)
+                persistOutbox()
+                return
+            }
+            if case .sent = outcome {
+                outboundQueue.removeAll { $0.clientID == next.clientID }
+                rememberSent(next)
+                persistOutbox()
+            }
         }
+    }
+
+    private var canFlushOutboundQueue: Bool {
+        isSendReady
+            && foregroundProbeTask == nil
+            && !isConnectResetting
+            && status.connection == .online
     }
 
     private func enqueue(_ message: OutboundMessage) {
@@ -79,28 +160,88 @@ extension SessionCoordinator {
         persistOutbox()
     }
 
-    /// Keeps written messages (bounded) so a later XEP-0198 failure or an
-    /// error bounce can still be retried.
+    /// Keeps every unconfirmed written message so disconnect replay and
+    /// outbox persistence cannot drop one before an ack or server echo.
     private func rememberSent(_ message: OutboundMessage) {
+        removeRecentlyAcknowledged(message.clientID)
         sentOutbound[message.clientID] = message
+        sentOrder.removeAll { $0 == message.clientID }
         sentOrder.append(message.clientID)
-        if sentOrder.count > 200 {
-            sentOutbound[sentOrder.removeFirst()] = nil
+    }
+
+    /// Moves a confirmed stanza out of the retry set but retains a bounded
+    /// window for recipient bounces that follow stream acknowledgement.
+    func sentMessageAcknowledged(_ clientID: String) {
+        let message = sentOutbound.removeValue(forKey: clientID)
+            ?? failedOutbound.removeValue(forKey: clientID)
+            ?? outboundQueue.first { $0.clientID == clientID }
+            ?? recentlyAcknowledgedOutbound[clientID]
+        sentOrder.removeAll { $0 == clientID }
+        failedOutbound[clientID] = nil
+        outboundQueue.removeAll { $0.clientID == clientID }
+        retryingOutboundIDs.remove(clientID)
+        resetBeforeRetryIDs.remove(clientID)
+        if let message {
+            rememberRecentlyAcknowledged(message)
         }
     }
 
     /// The written message failed after all (XEP-0198 or an error bounce):
     /// make it retryable.
     func sentMessageFailed(_ clientID: String, bounced: Bool) {
-        if let message = sentOutbound.removeValue(forKey: clientID) {
-            failedOutbound[clientID] = message
+        let awaitingRetry = retryingOutboundIDs.contains(clientID)
+            && outboundQueue.contains { $0.clientID == clientID }
+        if awaitingRetry {
+            if bounced {
+                deliveries.bounced(clientID)
+                if status.connection == .online, !isConnectResetting {
+                    resetBeforeRetryIDs.insert(clientID)
+                }
+            }
+            // A failure event from the previous attempt must not cancel an
+            // explicit retry before that retry gets its own send attempt.
+            persistOutbox()
+            return
+        }
+        let message = sentOutbound.removeValue(forKey: clientID)
+            ?? outboundQueue.first { $0.clientID == clientID }
+            ?? recentlyAcknowledgedOutbound.removeValue(forKey: clientID)
+            ?? failedOutbound[clientID]
+        sentOrder.removeAll { $0 == clientID }
+        if message != nil {
+            outboundQueue.removeAll { $0.clientID == clientID }
         }
         if bounced {
             deliveries.bounced(clientID)
         } else {
             deliveries.failed(clientID)
         }
+        if deliveries.state(of: clientID) == .failed, let message {
+            failedOutbound[clientID] = message
+        } else if deliveries.state(of: clientID) == .acknowledged, let message {
+            failedOutbound[clientID] = nil
+            rememberRecentlyAcknowledged(message)
+        }
         persistOutbox()
+    }
+
+    private func rememberRecentlyAcknowledged(_ message: OutboundMessage) {
+        let clientID = message.clientID
+        recentlyAcknowledgedOutbound[clientID] = message
+        recentlyAcknowledgedOrder.removeAll { $0 == clientID }
+        recentlyAcknowledgedOrder.append(clientID)
+        if recentlyAcknowledgedOrder.count > 200 {
+            let expired = recentlyAcknowledgedOrder.removeFirst()
+            recentlyAcknowledgedOutbound[expired] = nil
+            if deliveries.state(of: expired) == .acknowledged {
+                deliveries.forget(expired)
+            }
+        }
+    }
+
+    private func removeRecentlyAcknowledged(_ clientID: String) {
+        recentlyAcknowledgedOutbound[clientID] = nil
+        recentlyAcknowledgedOrder.removeAll { $0 == clientID }
     }
 
     /// The optimistic row: our occupant JID in a room (so the reflection

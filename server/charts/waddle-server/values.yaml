@@ -212,6 +212,9 @@ extraSecretRefs: []
 # extraSecretRefs. Use HelmRelease valuesFrom to wire this from a Secret key so
 # secret rotation changes the pod template and rolls the Deployment.
 extraSecretChecksum: ""
+# Optional checksum/version for an externally managed, file-mounted APNs key.
+# Keep it separate from extraSecretRefs so the PEM is never injected with envFrom.
+apnsSecretChecksum: ""
 
 telemetry:
   otlpEndpoint: ""

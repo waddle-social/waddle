@@ -16,6 +16,7 @@ struct RichTextInput {
     let isEdited: Bool
     let spans: [MarkupSpan]
     let references: [Reference]
+    let ownNick: String
     /// Classifies a reference as a mention; nil for non-mentions.
     let mentionKind: (Reference) -> RichMentionKind?
 }
@@ -28,7 +29,7 @@ enum RichTextLayout {
         detectLinks: (String) -> [RichDetectedLink]
     ) -> [RichBlock] {
         let scalars = Array(input.displayedBody.unicodeScalars)
-        let styled = styledRanges(for: input)
+        let styled = styledRanges(for: input, detectLinks: detectLinks)
         var blocks: [RichBlock] = []
         var cursor = 0
         for block in nonOverlapping(styled.blocks) {
@@ -58,29 +59,54 @@ enum RichTextLayout {
 
     /// Spans and references rebased onto the displayed body. Offsets that
     /// cannot be rebased are dropped rather than styling the wrong text.
-    private static func styledRanges(for input: RichTextInput) -> (inline: [RichStyledRange], blocks: [BlockRange]) {
-        guard let mapping = mapping(for: input) else { return ([], []) }
+    private static func styledRanges(for input: RichTextInput, detectLinks: (String) -> [RichDetectedLink]) -> (inline: [RichStyledRange], blocks: [BlockRange]) {
         var inline: [RichStyledRange] = []
         var blocks: [BlockRange] = []
-        for span in input.spans {
-            guard let range = mapping.displayedRange(ofWire: span.start, span.end) else { continue }
-            switch span.kind {
-            case .bold: inline.append(RichStyledRange(style: .bold, range: range))
-            case .italic: inline.append(RichStyledRange(style: .italic, range: range))
-            case .strikethrough: inline.append(RichStyledRange(style: .strikethrough, range: range))
-            case .code: inline.append(RichStyledRange(style: .code, range: range))
-            case let .link(url): inline.append(RichStyledRange(style: .link(url), range: range))
-            case .codeBlock: blocks.append(BlockRange(kind: .code, range: range))
-            case .blockquote: blocks.append(BlockRange(kind: .quote, range: range))
+        if let mapping = mapping(for: input) {
+            for span in input.spans {
+                guard let range = mapping.displayedRange(ofWire: span.start, span.end) else { continue }
+                switch span.kind {
+                case .bold: inline.append(RichStyledRange(style: .bold, range: range))
+                case .italic: inline.append(RichStyledRange(style: .italic, range: range))
+                case .strikethrough: inline.append(RichStyledRange(style: .strikethrough, range: range))
+                case .code: inline.append(RichStyledRange(style: .code, range: range))
+                case let .link(url): inline.append(RichStyledRange(style: .link(url), range: range))
+                case .codeBlock: blocks.append(BlockRange(kind: .code, range: range))
+                case .blockquote: blocks.append(BlockRange(kind: .quote, range: range))
+                }
+            }
+            for reference in input.references {
+                guard let range = mapping.displayedRange(ofWire: reference.begin, reference.end) else { continue }
+                if let kind = input.mentionKind(reference) {
+                    inline.append(RichStyledRange(style: .mention(kind), range: range))
+                } else if let url = webURL(reference) {
+                    inline.append(RichStyledRange(style: .link(url), range: range))
+                }
             }
         }
-        for reference in input.references {
-            guard let range = mapping.displayedRange(ofWire: reference.begin, reference.end) else { continue }
-            if let kind = input.mentionKind(reference) {
-                inline.append(RichStyledRange(style: .mention(kind), range: range))
-            } else if let url = webURL(reference) {
-                inline.append(RichStyledRange(style: .link(url), range: range))
-            }
+        // XEP-0372 references remain authoritative. This fallback only adds
+        // presentation emphasis to an exact own-nick token in visible text.
+        // It never changes mention notifications or unread state.
+        let visibleScalars = Array(input.displayedBody.unicodeScalars)
+        let visibleText = RichTextSegmenter.string(visibleScalars[...])
+        let links = inline.compactMap { styled -> Range<Int>? in
+            if case .link = styled.style { return styled.range }
+            return nil
+        } + detectLinks(visibleText).map(\.range)
+        let referencedMentions = inline.compactMap { styled -> Range<Int>? in
+            if case .mention = styled.style { return styled.range }
+            return nil
+        }
+        let codeBlockRanges = blocks.compactMap { block -> Range<Int>? in
+            if case .code = block.kind { return block.range }
+            return nil
+        }
+        let codeRanges = inline.filter { $0.style == .code }.map(\.range) + codeBlockRanges
+        for range in MentionTokens.ownNickRanges(input.ownNick, in: visibleText) {
+            guard !codeRanges.contains(where: { $0.overlaps(range) }),
+                  !links.contains(where: { $0.overlaps(range) }),
+                  !referencedMentions.contains(where: { $0.overlaps(range) }) else { continue }
+            inline.append(RichStyledRange(style: .mention(.me), range: range))
         }
         return (inline, blocks)
     }

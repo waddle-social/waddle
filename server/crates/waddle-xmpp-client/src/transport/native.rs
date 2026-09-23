@@ -3,6 +3,7 @@ use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -19,6 +20,8 @@ use super::{
     decode_message, encode_message, StreamClose, TransportCapabilities, TransportEvent,
     TransportKind, TransportMessage, TransportState,
 };
+
+const WEBSOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime-owned factory for a WebSocket transport implementation.
 pub trait WebSocketTransportFactory: Send + Sync {
@@ -132,7 +135,14 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             }
 
             let frame = encode_message(&message)?;
-            self.sink.send(Message::Text(frame.into())).await?;
+            timeout(
+                WEBSOCKET_WRITE_TIMEOUT,
+                self.sink.send(Message::Text(frame.into())),
+            )
+            .await
+            .map_err(|_| ClientError::WebSocketWriteTimeout {
+                timeout: WEBSOCKET_WRITE_TIMEOUT,
+            })??;
 
             if matches!(message, TransportMessage::Close(_)) {
                 self.queue_state_change(TransportState::Closing);
@@ -163,7 +173,16 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
                         return Ok(self.pending_events.pop_front());
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        self.sink.send(Message::Pong(payload)).await?;
+                        timeout(
+                            WEBSOCKET_WRITE_TIMEOUT,
+                            self.sink.send(Message::Pong(payload)),
+                        )
+                        .await
+                        .map_err(|_| {
+                            ClientError::WebSocketWriteTimeout {
+                                timeout: WEBSOCKET_WRITE_TIMEOUT,
+                            }
+                        })??;
                     }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) => {
@@ -197,13 +216,24 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             if self.state != TransportState::Closing {
                 self.queue_state_change(TransportState::Closing);
                 let frame = encode_message(&TransportMessage::Close(StreamClose))?;
-                self.sink.send(Message::Text(frame.into())).await?;
+                timeout(
+                    WEBSOCKET_WRITE_TIMEOUT,
+                    self.sink.send(Message::Text(frame.into())),
+                )
+                .await
+                .map_err(|_| ClientError::WebSocketWriteTimeout {
+                    timeout: WEBSOCKET_WRITE_TIMEOUT,
+                })??;
                 self.pending_events.push_back(TransportEvent::MessageSent(
                     TransportMessage::Close(StreamClose),
                 ));
             }
 
-            self.sink.close().await?;
+            timeout(WEBSOCKET_WRITE_TIMEOUT, self.sink.close())
+                .await
+                .map_err(|_| ClientError::WebSocketWriteTimeout {
+                    timeout: WEBSOCKET_WRITE_TIMEOUT,
+                })??;
             self.queue_closed();
             Ok(())
         })

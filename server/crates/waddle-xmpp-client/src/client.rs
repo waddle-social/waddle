@@ -36,7 +36,10 @@ impl ClientHandle {
 
     /// Current session snapshot (reads from shared state without blocking).
     pub fn snapshot(&self) -> SessionSnapshot {
-        self.state.read().unwrap().clone()
+        match self.state.read() {
+            Ok(snapshot) => snapshot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     /// Current high-level client state.
@@ -222,6 +225,17 @@ enum DeferredXmppCommand {
 }
 
 impl DriverTask {
+    fn publish_snapshot(&self) {
+        let snapshot = self.runtime.snapshot().clone();
+        match self.state.write() {
+            Ok(mut current) => *current = snapshot,
+            Err(poisoned) => {
+                *poisoned.into_inner() = snapshot;
+                self.state.clear_poison();
+            }
+        }
+    }
+
     async fn run(mut self) {
         // Publish the config-seeded resume state (if any) before the
         // first transport event, mirroring the wasm driver's snapshot
@@ -295,8 +309,7 @@ impl DriverTask {
                     return true;
                 }
 
-                self.send_stanza_command(stanza).await;
-                true
+                self.send_stanza_command(stanza).await
             }
             XmppCommand::SendIq { stanza, responder } => {
                 if !self.runtime.can_send_app_stanza() {
@@ -305,8 +318,7 @@ impl DriverTask {
                     return true;
                 }
 
-                self.send_iq_command(stanza, responder).await;
-                true
+                self.send_iq_command(stanza, responder).await
             }
             XmppCommand::Disconnect => {
                 // Pin the resume snapshot to `None` BEFORE closing:
@@ -314,7 +326,10 @@ impl DriverTask {
                 // explicit `</stream>` close (wasm driver parity).
                 self.explicit_disconnect = true;
                 self.publish_resume_state_snapshot();
-                let _ = self.transport.close().await;
+                if self.transport.close().await.is_err() {
+                    self.mark_transport_closed().await;
+                    return false;
+                }
                 // Drain close events so state reaches Disconnected before we exit.
                 for event in self.transport.drain_events() {
                     self.apply_transport_event(event).await;
@@ -324,58 +339,74 @@ impl DriverTask {
         }
     }
 
-    async fn send_stanza_command(&mut self, stanza: Element) {
+    async fn send_stanza_command(&mut self, stanza: Element) -> bool {
         let maybe_message_id = message_delivery_stanza_id(&stanza);
-        if self
+        if let Err(error) = self
             .send_transport_message(TransportMessage::Element(stanza))
             .await
-            .is_err()
         {
             if let Some(stanza_id) = maybe_message_id {
                 self.emit_message_delivery_failed(stanza_id);
             }
+            if is_fatal_transport_error(&error) {
+                self.mark_transport_closed().await;
+                return false;
+            }
         }
+        true
     }
 
     async fn send_iq_command(
         &mut self,
         stanza: Element,
         responder: oneshot::Sender<ClientResult<Element>>,
-    ) {
+    ) -> bool {
         let id = stanza.attr("id").map(|s| s.to_string());
         match self
             .send_transport_message(TransportMessage::Element(stanza))
             .await
         {
-            Err(_) => {
+            Err(error) => {
                 let _ = responder.send(Err(ClientError::Disconnected));
+                if is_fatal_transport_error(&error) {
+                    self.mark_transport_closed().await;
+                    return false;
+                }
+                true
             }
             Ok(()) => match id {
                 Some(id) => {
                     self.pending_iqs.insert(id, responder);
+                    true
                 }
                 None => {
                     let _ = responder.send(Err(ClientError::Disconnected));
+                    true
                 }
             },
         }
     }
 
-    async fn flush_deferred_commands(&mut self) {
+    async fn flush_deferred_commands(&mut self) -> bool {
         while self.runtime.can_send_app_stanza() {
             let Some(command) = self.deferred_commands.pop_front() else {
-                return;
+                return true;
             };
 
             match command {
                 DeferredXmppCommand::SendStanza(stanza) => {
-                    self.send_stanza_command(stanza).await;
+                    if !self.send_stanza_command(stanza).await {
+                        return false;
+                    }
                 }
                 DeferredXmppCommand::SendIq { stanza, responder } => {
-                    self.send_iq_command(stanza, responder).await;
+                    if !self.send_iq_command(stanza, responder).await {
+                        return false;
+                    }
                 }
             }
         }
+        true
     }
 
     /// Apply one transport event; returns `false` when the session is fully closed.
@@ -385,7 +416,7 @@ impl DriverTask {
         let client_events = match self.runtime.apply_transport_event(event) {
             Ok(events) => events,
             Err(_) => {
-                *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                self.publish_snapshot();
                 return false;
             }
         };
@@ -395,9 +426,12 @@ impl DriverTask {
             return false;
         }
 
-        self.flush_deferred_commands().await;
+        if !self.flush_deferred_commands().await {
+            self.publish_snapshot();
+            return false;
+        }
 
-        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+        self.publish_snapshot();
         !is_terminal
     }
 
@@ -412,20 +446,33 @@ impl DriverTask {
             return false;
         }
 
-        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+        self.publish_snapshot();
         true
     }
 
     async fn apply_client_events(&mut self, client_events: Vec<ClientEvent>) -> bool {
         for evt in client_events {
             if let Some(msg) = self.dispatch_client_event(evt) {
-                if self.send_transport_message(msg).await.is_err() {
-                    *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                if let Err(error) = self.send_transport_message(msg).await {
+                    if is_fatal_transport_error(&error) {
+                        self.mark_transport_closed().await;
+                    }
+                    self.publish_snapshot();
                     return false;
                 }
             }
         }
         true
+    }
+
+    async fn mark_transport_closed(&mut self) {
+        if let Ok(client_events) = self.runtime.apply_transport_event(TransportEvent::Closed) {
+            self.publish_resume_state_snapshot();
+            for event in client_events {
+                let _ = self.dispatch_client_event(event);
+            }
+        }
+        self.publish_snapshot();
     }
 
     /// Dispatch one client event.
@@ -567,6 +614,22 @@ fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
     }
 
     element.attr("id").and_then(|id| StanzaId::new(id).ok())
+}
+
+fn is_fatal_transport_error(error: &ClientError) -> bool {
+    if matches!(error, ClientError::TransportClosed) {
+        return true;
+    }
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    if matches!(
+        error,
+        ClientError::WebSocketWriteTimeout { .. } | ClientError::WebSocket(_)
+    ) {
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]

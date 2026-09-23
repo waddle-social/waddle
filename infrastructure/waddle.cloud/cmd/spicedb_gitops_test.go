@@ -28,9 +28,36 @@ type externalSecretManifest struct {
 
 type helmReleaseManifest struct {
 	Spec struct {
+		ValuesFrom []struct {
+			Kind       string `yaml:"kind"`
+			Name       string `yaml:"name"`
+			ValuesKey  string `yaml:"valuesKey"`
+			TargetPath string `yaml:"targetPath"`
+			Optional   bool   `yaml:"optional"`
+		} `yaml:"valuesFrom"`
 		Values struct {
 			ExtraSecretRefs []string `yaml:"extraSecretRefs"`
-			Secret          struct {
+			ExtraVolumes    []struct {
+				Name   string `yaml:"name"`
+				Secret struct {
+					SecretName  string `yaml:"secretName"`
+					DefaultMode int    `yaml:"defaultMode"`
+					Items       []struct {
+						Key  string `yaml:"key"`
+						Path string `yaml:"path"`
+					} `yaml:"items"`
+				} `yaml:"secret"`
+			} `yaml:"extraVolumes"`
+			ExtraVolumeMounts []struct {
+				Name      string `yaml:"name"`
+				MountPath string `yaml:"mountPath"`
+				ReadOnly  bool   `yaml:"readOnly"`
+			} `yaml:"extraVolumeMounts"`
+			ContainerExtraEnv []struct {
+				Name  string `yaml:"name"`
+				Value string `yaml:"value"`
+			} `yaml:"containerExtraEnv"`
+			Secret struct {
 				RuntimeSecretName string `yaml:"runtimeSecretName"`
 			} `yaml:"secret"`
 			SpiceDB struct {
@@ -40,6 +67,74 @@ type helmReleaseManifest struct {
 			} `yaml:"spicedb"`
 		} `yaml:"values"`
 	} `yaml:"spec"`
+}
+
+func TestWaddleApnsSecretIsMountedAndWatchedForRotations(t *testing.T) {
+	serverResources := readYAML[resourceKustomization](t, gitOpsPath("waddle-server", "kustomization.yaml"))
+	if !slices.Contains(serverResources.Resources, "apns-external-secret.yaml") {
+		t.Fatal("waddle-server kustomization does not include the APNs ExternalSecret")
+	}
+
+	apnsSecret := readYAML[externalSecretManifest](t, gitOpsPath("waddle-server", "apns-external-secret.yaml"))
+	if got, want := len(apnsSecret.Spec.Data), 1; got != want {
+		t.Fatalf("APNs ExternalSecret mapping count = %d, want %d", got, want)
+	}
+	if entry := apnsSecret.Spec.Data[0]; entry.SecretKey != "WADDLE_APNS_KEY_PEM" ||
+		entry.RemoteRef.Key != "app-apple" || entry.RemoteRef.Property != "file/notifications.p8" {
+		t.Fatalf("APNs private key remote ref = %#v, want app-apple/file/notifications.p8", entry)
+	}
+
+	helmRelease := readYAML[helmReleaseManifest](t, gitOpsPath("waddle-server", "helmrelease.yaml"))
+	foundChecksumSource := false
+	for _, source := range helmRelease.Spec.ValuesFrom {
+		if source.Kind == "Secret" && source.Name == "waddle-apns-production" {
+			foundChecksumSource = source.ValuesKey == "WADDLE_APNS_SECRETS_CHECKSUM" &&
+				source.TargetPath == "apnsSecretChecksum" && !source.Optional
+		}
+	}
+	if !foundChecksumSource {
+		t.Fatal("HelmRelease must require the APNs key checksum from waddle-apns-production")
+	}
+	if slices.Contains(helmRelease.Spec.Values.ExtraSecretRefs, "waddle-apns-production") {
+		t.Fatal("APNs PEM must stay out of envFrom extraSecretRefs")
+	}
+
+	foundVolume := false
+	for _, volume := range helmRelease.Spec.Values.ExtraVolumes {
+		if volume.Name == "apns-auth-key" && volume.Secret.SecretName == "waddle-apns-production" &&
+			volume.Secret.DefaultMode == 0o440 && len(volume.Secret.Items) == 1 &&
+			volume.Secret.Items[0].Key == "WADDLE_APNS_KEY_PEM" && volume.Secret.Items[0].Path == "AuthKey.p8" {
+			foundVolume = true
+		}
+	}
+	if !foundVolume {
+		t.Fatal("HelmRelease must mount only the read-only APNs PEM at AuthKey.p8 with mode 0440")
+	}
+
+	foundMount := false
+	for _, mount := range helmRelease.Spec.Values.ExtraVolumeMounts {
+		if mount.Name == "apns-auth-key" && mount.MountPath == "/var/run/secrets/waddle-apns" && mount.ReadOnly {
+			foundMount = true
+		}
+	}
+	if !foundMount {
+		t.Fatal("HelmRelease must mount the APNs secret read-only at the configured path")
+	}
+
+	env := map[string]string{}
+	for _, variable := range helmRelease.Spec.Values.ContainerExtraEnv {
+		env[variable.Name] = variable.Value
+	}
+	for name, want := range map[string]string{
+		"WADDLE_APNS_KEY_PATH":  "/var/run/secrets/waddle-apns/AuthKey.p8",
+		"WADDLE_APNS_TEAM_ID":   "6KXCJGJ45W",
+		"WADDLE_APNS_KEY_ID":    "CJR7U5CXHP",
+		"WADDLE_APNS_BUNDLE_ID": "p4x.waddle.social",
+	} {
+		if got := env[name]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
 }
 
 func gitOpsPath(parts ...string) string {
