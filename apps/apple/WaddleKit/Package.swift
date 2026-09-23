@@ -1,19 +1,39 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// WaddleKit is the Foundation-only core of the Apple apps: typed XMPP
-// identities, the conversation timeline reducer, session stores, and the
-// coordinator that routes `XmppPort` events into them. It never imports
-// SwiftUI or the UniFFI bindings, so it builds and tests on Linux as well
-// as on Apple platforms.
+// WaddleKit is the UI-free core of the Apple apps: typed XMPP identities,
+// the conversation timeline reducer, session stores, the coordinator that
+// routes `XmppPort` events into them, and XEP-0448 file decryption. It never
+// imports SwiftUI or the UniFFI bindings. Its one dependency, swift-crypto,
+// re-exports CryptoKit on Apple platforms and is BoringSSL-backed elsewhere,
+// so the package builds and tests on Linux as well as on Apple platforms.
+//
+// swift-crypto stays on 4.3.x: 4.4 and later need swift-tools-version 6.1,
+// which Xcode 16.0 through 16.2 cannot load.
 let package = Package(
     name: "WaddleKit",
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
         .library(name: "WaddleKit", targets: ["WaddleKit"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-crypto.git", .upToNextMinor(from: "4.3.1")),
+    ],
     targets: [
-        .target(name: "WaddleKit"),
-        .testTarget(name: "WaddleKitTests", dependencies: ["WaddleKit"]),
+        .target(
+            name: "WaddleKit",
+            dependencies: [
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "CryptoExtras", package: "swift-crypto"),
+            ]
+        ),
+        .testTarget(
+            name: "WaddleKitTests",
+            dependencies: [
+                "WaddleKit",
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "CryptoExtras", package: "swift-crypto"),
+            ]
+        ),
     ]
 )

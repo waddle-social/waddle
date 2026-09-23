@@ -147,18 +147,18 @@ public struct Reference: Hashable, Sendable, Codable {
 
 /// XEP-0448 encryption envelope of a shared file.
 public struct EncryptedFileSource: Hashable, Sendable, Codable {
-    public let cipher: String
+    public let cipher: FileCipher
     public let keyBase64: String
     public let ivBase64: String
-    /// `algo` → base64 digest of the ciphertext (XEP-0448 `<encrypted>` hashes).
-    public let hashes: [String: String]
+    /// Digests of the ciphertext (XEP-0448 `<encrypted>` hashes).
+    public let digests: FileDigests
     public let sources: [URL]
 
-    public init(cipher: String, keyBase64: String, ivBase64: String, hashes: [String: String], sources: [URL]) {
+    public init(cipher: FileCipher, keyBase64: String, ivBase64: String, digests: FileDigests, sources: [URL]) {
         self.cipher = cipher
         self.keyBase64 = keyBase64
         self.ivBase64 = ivBase64
-        self.hashes = hashes
+        self.digests = digests
         self.sources = sources
     }
 }
@@ -178,6 +178,8 @@ public struct SharedFile: Hashable, Sendable, Codable {
     public let height: Int?
     public let description: String?
     public let disposition: Disposition
+    /// Digests of the plaintext file (XEP-0446 `<file>` hashes).
+    public let digests: FileDigests
     public let encrypted: EncryptedFileSource?
 
     public init(
@@ -189,6 +191,7 @@ public struct SharedFile: Hashable, Sendable, Codable {
         height: Int? = nil,
         description: String? = nil,
         disposition: Disposition = .attachment,
+        digests: FileDigests = FileDigests(),
         encrypted: EncryptedFileSource? = nil
     ) {
         self.url = url
@@ -199,6 +202,7 @@ public struct SharedFile: Hashable, Sendable, Codable {
         self.height = height
         self.description = description
         self.disposition = disposition
+        self.digests = digests
         self.encrypted = encrypted
     }
 

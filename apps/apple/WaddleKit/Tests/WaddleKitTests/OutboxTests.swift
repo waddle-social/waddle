@@ -5,10 +5,10 @@ import Testing
 /// A message with every outbound option populated.
 private func fullMessage() -> OutboundMessage {
     let encrypted = EncryptedFileSource(
-        cipher: "urn:xmpp:ciphers:aes-256-gcm-nopadding:0",
+        cipher: .aes256GCM,
         keyBase64: "a2V5",
         ivBase64: "aXY=",
-        hashes: ["sha-256": "aGFzaA=="],
+        digests: FileDigests([.sha256: Data("hash".utf8)]),
         sources: [URL(string: "https://upload.waddle.test/enc")!]
     )
     let file = SharedFile(
@@ -20,6 +20,7 @@ private func fullMessage() -> OutboundMessage {
         height: 480,
         description: "a cat",
         disposition: .inline,
+        digests: FileDigests([.sha512: Data("plain".utf8)]),
         encrypted: encrypted
     )
     let options = OutboundOptions(

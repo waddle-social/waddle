@@ -92,12 +92,10 @@ enum FFIOutbound {
 
     static func encryptedFile(_ source: EncryptedFileSource) -> WaddleEncryptedFile {
         WaddleEncryptedFile(
-            cipher: source.cipher,
+            cipher: source.cipher.rawValue,
             keyB64: source.keyBase64,
             ivB64: source.ivBase64,
-            hashes: source.hashes
-                .sorted { $0.key < $1.key }
-                .map { WaddleEncryptedFileHash(algo: $0.key, valueB64: $0.value) },
+            hashes: source.digests.xep0300.map { WaddleEncryptedFileHash(algo: $0.algorithm, valueB64: $0.base64) },
             sources: source.sources.map(\.absoluteString)
         )
     }
