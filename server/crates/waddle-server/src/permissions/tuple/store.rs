@@ -5,8 +5,8 @@ use tracing::{debug, instrument};
 
 use super::super::PermissionError;
 use super::types::{Object, ObjectType, Relation, Subject, SubjectType, Tuple};
-use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
-use crate::db::{row_value, Value, ValueExt};
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase, RowValues};
+use crate::db::{row_value, DatabaseDriver, DatabaseError, Value, ValueExt};
 
 /// Storage layer for permission tuples.
 pub struct TupleStore {
@@ -208,11 +208,36 @@ impl TupleStore {
                 return Ok(!held);
             }
         };
-        let rows = self
+        // Serialize every swap on this (object, subject) family across pods:
+        // a snapshot predicate alone lets two writers that both observe an
+        // empty family insert two different relations. SQLite has a single
+        // writer, so BEGIN IMMEDIATE is that serialization; PostgreSQL takes
+        // a transaction-scoped advisory lock keyed by the family's scope.
+        let db = self
             .actor
-            .ask(DbExecute { sql, params })
+            .ask(GetDatabase)
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+        let db_error = |e: DatabaseError| PermissionError::DatabaseError(e.to_string());
+        let mut tx = match db.driver() {
+            DatabaseDriver::Sqlite => db.begin_immediate().await.map_err(db_error)?,
+            DatabaseDriver::Postgres => {
+                let mut tx = db.begin().await.map_err(db_error)?;
+                let scope_key = format!(
+                    "permission_tuples|{}|{}|{}|{}",
+                    object.object_type, object.id, subject.subject_type, subject.id
+                );
+                tx.query(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    crate::db_params![scope_key],
+                )
+                .await
+                .map_err(db_error)?;
+                tx
+            }
+        };
+        let rows = tx.execute(&sql, params).await.map_err(db_error)?;
+        tx.commit().await.map_err(db_error)?;
         Ok(rows > 0)
     }
 
