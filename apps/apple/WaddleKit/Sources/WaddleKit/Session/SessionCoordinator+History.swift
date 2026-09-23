@@ -59,7 +59,7 @@ extension SessionCoordinator {
     }
 
     /// Fetches the next older page, if any. Without a loaded newest page
-    /// (a failed first load, or a trim that left no archive id to page
+    /// (a failed first load, or a trim that left no archived row to page
     /// from) this loads the newest page instead.
     public func loadOlder(_ conversation: ConversationID) async {
         let state = history.state(of: conversation)
@@ -78,13 +78,18 @@ extension SessionCoordinator {
         }
     }
 
-    /// A live insert trimmed archived rows: page older from the oldest row
-    /// left, or, when no row has an archive id, reload the newest page of a
-    /// conversation on screen so paging works again.
+    /// A live insert trimmed archived rows: page older from the oldest one
+    /// left, or, when none is left, reload the newest page of a
+    /// conversation on screen (after any load in flight) so paging works
+    /// again.
     func archiveTrimmed(_ conversation: ConversationID, cursor: String?) {
         history.rewind(conversation, toOlderCursor: cursor)
         guard cursor == nil, visibleConversation == conversation else { return }
-        Task { [weak self] in await self?.loadLatest(conversation) }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.history.waitUntilIdle(conversation)
+            await self.loadLatest(conversation)
+        }
     }
 
     /// Full-text search over the conversation's archive. Throws when the

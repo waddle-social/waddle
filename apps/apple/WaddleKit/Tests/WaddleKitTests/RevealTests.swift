@@ -204,9 +204,10 @@ struct RevealTrimTests {
         #expect(port.historyRequests.last?.1 == "s902")
     }
 
-    /// A live row carries the room's XEP-0359 stanza-id, which is its
-    /// archive id: paging continues from it once no archived row is left.
-    @Test func liveRowsKeepPagingWhenNoArchivedRowIsLeft() async {
+    /// Live rows sort after every archived row, so one can be older than
+    /// archived rows a trim dropped: once no archived row is left the
+    /// history reloads its newest page rather than paging from a live row.
+    @Test func noArchivedRowLeftReloadsInsteadOfPagingFromALiveRow() async {
         let port = FakePort()
         let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 3)
         coordinator.status.connection = .online
@@ -216,12 +217,12 @@ struct RevealTrimTests {
             coordinator.route(roomMessage("live", from: "bob", stanzaID: "live-\(index)"))
         }
         let state = coordinator.history.state(of: roomConversation)
-        #expect(state.hasLoadedLatest)
-        #expect(state.olderCursor == "live-1")
+        #expect(!state.hasLoadedLatest)
+        #expect(state.olderCursor == nil)
     }
 
-    /// With no archive id left at all, the conversation on screen reloads
-    /// its newest page instead of losing paging.
+    /// With no archived row left, the conversation on screen reloads its
+    /// newest page instead of losing paging.
     @Test func noPagingIDLeftReloadsTheVisibleConversation() async {
         let port = FakePort()
         let coordinator = SessionCoordinator(account: me, port: port, timelineCapacity: 2)

@@ -60,14 +60,24 @@ extension SessionCoordinator {
         let unconfirmed = sentOrder.compactMap { sentOutbound[$0] }.filter(isAwaitingConfirmation)
         let pending = (unconfirmed + outboundQueue).map { persisted($0, state: .pending) }
         // A failed send the core replayed on a fresh stream can still be
-        // acknowledged, or reflected (its local echo replaced by the
-        // server's copy); only a send that stays failed is saved.
+        // acknowledged; only a send that stays failed is saved. (One the
+        // server echoed back left `failedOutbound` in `confirmOwnCopy`.)
         let failed = failedOutbound.values
-            .filter { deliveries.state(of: $0.clientID) == .failed && echo(of: $0)?.isLocalEcho == true }
+            .filter { deliveries.state(of: $0.clientID) == .failed }
             .map { persisted($0, state: .failed) }
             .sorted { $0.createdAt < $1.createdAt }
         var seen = Set<String>()
         return (pending + failed).filter { seen.insert($0.message.clientID).inserted }
+    }
+
+    /// The server's copy of a send the core reported failed: it was
+    /// delivered after all (replayed on a fresh stream), so it is no
+    /// longer failed or retryable.
+    func confirmOwnCopy(_ message: WireMessage) {
+        guard let clientID = message.identity.originID ?? message.identity.messageID,
+              failedOutbound.removeValue(forKey: clientID) != nil
+        else { return }
+        deliveries.acknowledged(clientID)
     }
 
     private func restore(_ entries: [PersistedOutbound]) {

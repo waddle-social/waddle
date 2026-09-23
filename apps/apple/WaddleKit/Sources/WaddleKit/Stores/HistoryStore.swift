@@ -99,9 +99,9 @@ public final class HistoryStore {
         waiters.values.forEach { $0.resume() }
     }
 
-    /// The timeline dropped archived rows: page older from the oldest row
-    /// still loaded, or reload the newest page when no loaded row has an
-    /// archive id. A page already in flight keeps the rewound cursor.
+    /// The timeline dropped archived rows: page older from the oldest one
+    /// still loaded, or reload the newest page when none is left. A page
+    /// already in flight leaves the rewound state alone.
     func rewind(_ conversation: ConversationID, toOlderCursor cursor: String?) {
         guard var state = states[conversation] else { return }
         if let cursor {
@@ -112,6 +112,7 @@ public final class HistoryStore {
             let isLoading = state.isLoading
             state = HistoryState()
             state.isLoading = isLoading
+            state.rewoundDuringLoad = isLoading
         }
         states[conversation] = state
     }

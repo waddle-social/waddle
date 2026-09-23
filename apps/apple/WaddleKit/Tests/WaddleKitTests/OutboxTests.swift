@@ -354,4 +354,22 @@ struct OutboxReplayTests {
         #expect(store.entries.isEmpty)
         await coordinator.stop()
     }
+
+    /// Live traffic can trim a failed send's local echo; the send is still
+    /// failed and must survive a relaunch.
+    @Test func failedSendSurvivesItsEchoBeingTrimmed() async throws {
+        let store = InMemoryOutboxStore()
+        let coordinator = SessionCoordinator(account: me, port: FakePort(), outboxStore: store, timelineCapacity: 3)
+        coordinator.start()
+        coordinator.status.connection = .online
+        coordinator.isSendReady = true
+        let id = try #require(await coordinator.send(Draft(text: "hello"), in: roomConversation))
+        coordinator.handle(.deliveryFailed(stanzaID: id))
+        for index in 1...3 {
+            coordinator.route(roomMessage("busy", from: "bob", stanzaID: "b\(index)"))
+        }
+        coordinator.persistOutbox()
+        #expect(store.entries.map(\.state) == [.failed])
+        await coordinator.stop()
+    }
 }

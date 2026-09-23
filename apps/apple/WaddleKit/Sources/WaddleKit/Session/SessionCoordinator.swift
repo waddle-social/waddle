@@ -367,7 +367,9 @@ public final class SessionCoordinator {
         trackChatState(message, route: route)
         let result = timelines.ingest(message, route: route)
         if route.isMine {
-            // Our own copy back from the server confirms an unacked send.
+            // Our own copy back from the server confirms an unacked send,
+            // and delivers one the core had reported failed and replayed.
+            confirmOwnCopy(message)
             persistOutbox()
         }
         guard case let .inserted(item) = result else { return }

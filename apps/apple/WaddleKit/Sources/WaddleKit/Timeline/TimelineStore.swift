@@ -32,9 +32,10 @@ public enum TimelineIngestResult: Equatable, Sendable {
 @MainActor
 public final class TimelineStore {
     public var account: AccountIdentity?
-    /// Called after a live insert trimmed archived rows, with the id paging
-    /// continues from: the archive id of the oldest row still loaded that
-    /// has one, or nil when none has.
+    /// Called after a live insert trimmed archived rows, with the MAM id of
+    /// the oldest archived row still loaded, or nil when none is. (A live
+    /// row's stanza-id is no cursor: live rows sort after all archived
+    /// ones, so one can be older than archived rows that were trimmed.)
     var onArchiveTrimmed: (@MainActor (ConversationID, String?) -> Void)?
 
     private let maxItemsPerConversation: Int
@@ -227,20 +228,9 @@ public final class TimelineStore {
         entries[conversation] = list
         publish(conversation)
         if trimmedArchive {
-            onArchiveTrimmed?(conversation, list.lazy.compactMap { self.pagingID(of: $0, in: conversation) }.first)
+            onArchiveTrimmed?(conversation, list.lazy.compactMap(\.archiveID).first)
         }
         return .inserted(enriched(entry))
-    }
-
-    /// The id XEP-0313 paging continues from at this row: its MAM id, or
-    /// the XEP-0359 stanza-id the conversation's archive (the room, or the
-    /// account for 1:1) stamped on a live copy.
-    private func pagingID(of entry: Entry, in conversation: ConversationID) -> String? {
-        if let archiveID = entry.archiveID {
-            return archiveID
-        }
-        let archive = conversation.isRoom ? conversation.jid : account?.jid
-        return archive.flatMap { entry.item.message.identity.stanzaID(assignedBy: $0) }
     }
 
     /// Decides whether a duplicate replaces the stored row. Returns nil to
