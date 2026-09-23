@@ -80,6 +80,7 @@ final class AppState {
         guard phase == .launching, !isBootstrapping else { return }
         isBootstrapping = true
         defer { isBootstrapping = false }
+        DecryptedFileStore.purge()
         await loadProviders()
         await restoreStoredSession()
     }
@@ -290,6 +291,7 @@ final class AppState {
         cancelSignIn()
         guard let active = session else { return }
         session = nil
+        DecryptedFileStore.purge()
         if signingOut {
             await active.coordinator.signOut()
         } else {

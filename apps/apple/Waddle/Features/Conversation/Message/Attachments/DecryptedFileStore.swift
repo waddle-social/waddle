@@ -4,14 +4,15 @@ import WaddleKit
 
 /// Decrypted attachments on disk, only while Quick Look shows one: Quick
 /// Look opens files, not bytes. Each file is removed when its preview
-/// closes, and a new launch removes whatever an earlier one left behind.
+/// closes; `purge()` at launch and sign-out removes any a crash or quit
+/// left behind.
 enum DecryptedFileStore {
-    private static let directory: URL = {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("DecryptedAttachments", isDirectory: true)
+    private static let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("DecryptedAttachments", isDirectory: true)
+
+    static func purge() {
         try? FileManager.default.removeItem(at: root)
-        return root.appendingPathComponent(UUID().uuidString, isDirectory: true)
-    }()
+    }
 
     #if os(iOS)
     private static let writingOptions: Data.WritingOptions = [.atomic, .completeFileProtection]
@@ -22,7 +23,7 @@ enum DecryptedFileStore {
     /// Writes `data` under the file's own name, in a folder of its own so
     /// equal names never collide.
     static func write(_ data: Data, for file: SharedFile) throws -> URL {
-        let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let url = folder.appendingPathComponent(fileName(for: file))
         try data.write(to: url, options: writingOptions)
