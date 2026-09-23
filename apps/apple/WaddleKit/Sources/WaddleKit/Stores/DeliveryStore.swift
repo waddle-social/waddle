@@ -51,20 +51,20 @@ public final class DeliveryStore {
         let ackedEarly = consume(clientID, from: &earlyAcks)
         let failedEarly = consume(clientID, from: &earlyFailures)
         let acknowledged = current == .acknowledged || ackedEarly
-        switch outcome {
-        case .sent:
-            if acknowledged {
-                states[clientID] = .acknowledged
-            } else if current == .failed || failedEarly {
-                states[clientID] = .failed
-            } else {
-                states[clientID] = .sent
-            }
-        case .notConnected, .transportError:
-            // The server acknowledged it, so it is not re-sent.
-            states[clientID] = acknowledged ? .acknowledged : .queued
-        case .rejected:
+        let failed = current == .failed || failedEarly
+        if outcome == .rejected {
             states[clientID] = .failed
+        } else if acknowledged {
+            // The server has the stanza; it is never re-sent.
+            states[clientID] = .acknowledged
+        } else if failed {
+            // Reported failed mid-send: it goes to retry/discard, not back
+            // to the queue.
+            states[clientID] = .failed
+        } else if case .sent = outcome {
+            states[clientID] = .sent
+        } else {
+            states[clientID] = .queued
         }
     }
 

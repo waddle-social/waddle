@@ -233,8 +233,8 @@ final class AppState {
         active.coordinator.onAuthenticationFailed = { [weak self, weak active] in
             // Only the live session may expire it; a late callback from a
             // session already ended must not sign the next one out.
-            guard let self, let active, self.session === active else { return }
-            Task { await self.expireSession() }
+            guard let self, let active else { return }
+            Task { await self.expireSession(active) }
         }
         session = active
         phase = .signedIn
@@ -273,7 +273,11 @@ final class AppState {
     }
 
     /// The server rejected the credential: forget it and ask again.
-    private func expireSession() async {
+    /// Expires `expired` only if it is still the live session; checked
+    /// here, not at the callback, so a session installed in between
+    /// survives.
+    private func expireSession(_ expired: ActiveSession) async {
+        guard session === expired else { return }
         await endSession()
         CredentialStore.remove(for: server)
         errorMessage = "Your session expired. Sign in again."

@@ -56,7 +56,7 @@ extension SessionCoordinator {
             case (_, .acknowledged?):
                 outboundQueue.removeAll { $0.clientID == next.clientID }
                 rememberSent(next)
-            case (.rejected, _), (.sent, .failed?):
+            case (.rejected, _), (_, .failed?):
                 outboundQueue.removeAll { $0.clientID == next.clientID }
                 failedOutbound[next.clientID] = next
             case (.sent, _):

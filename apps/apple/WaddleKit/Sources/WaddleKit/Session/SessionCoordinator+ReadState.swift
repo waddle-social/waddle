@@ -30,6 +30,12 @@ extension SessionCoordinator {
         _ = await port.subscribeDisplayedCursors()
     }
 
+    /// Who assigns the XEP-0359 ids of our 1:1 archive: the account, or a
+    /// server that stamps its domain. Publish and apply share this list.
+    var directArchiveAuthorities: [BareJID] {
+        [account.jid] + [BareJID(localpart: nil, domain: account.jid.domain)].compactMap { $0 }
+    }
+
     /// A cursor from another device: advance ours and recompute the badge
     /// from the loaded timeline. A cursor whose target is not loaded is
     /// ignored; the next open recomputes anyway.
@@ -38,9 +44,10 @@ extension SessionCoordinator {
             ? .room(cursor.conversation)
             : .direct(cursor.conversation)
         // XEP-0490: a room cursor names the room's own stanza id, a 1:1
-        // cursor our archive's. Any other authority is not trusted.
-        let authority = conversation.isRoom ? conversation.jid : account.jid
-        guard cursor.stanzaIDBy == authority else { return }
+        // cursor our archive's (the same authorities we publish with). Any
+        // other authority is not trusted.
+        let trusted = conversation.isRoom ? [conversation.jid] : directArchiveAuthorities
+        guard trusted.contains(cursor.stanzaIDBy) else { return }
         let items = timelines.timeline(for: conversation).items
         // Match only on the id the cursor's authority assigned: the room's
         // stanza id in a room, our own archive's id in 1:1.
@@ -120,8 +127,7 @@ extension SessionCoordinator {
         }
         // XEP-0333: the marker copies the message's `@id`.
         guard let markerID = identity.messageID ?? identity.originID else { return nil }
-        let authorities = [account.jid] + [BareJID(localpart: nil, domain: account.jid.domain)].compactMap { $0 }
-        let cursor = authorities.lazy.compactMap { authority in
+        let cursor = directArchiveAuthorities.lazy.compactMap { authority in
             identity.stanzaID(assignedBy: authority).map {
                 DisplayedCursor(conversation: conversation.jid, stanzaID: $0, stanzaIDBy: authority)
             }

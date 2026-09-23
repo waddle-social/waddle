@@ -72,3 +72,46 @@ struct DeliveryAndTrustTests {
         #expect(coordinator.readCursors.cursor(roomConversation) == "s2")
     }
 }
+
+@MainActor
+@Suite("Delivery and trust, round two")
+struct DeliveryAndTrustRoundTwoTests {
+    @Test func failureDuringSendSurvivesTransportError() {
+        let store = DeliveryStore()
+        store.began("c1")
+        store.failed("c1")
+        store.outcome(.transportError, for: "c1")
+        #expect(store.state(of: "c1") == .failed)
+    }
+
+    @Test func failedMidSendLeavesTheQueueForRetry() async {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        coordinator.isSendReady = true
+        let bob = bare("bob@waddle.test")
+        port.sendOutcome = { [weak coordinator] message in
+            coordinator?.deliveries.failed(message.clientID)
+            return .transportError
+        }
+        await coordinator.send(Draft(text: "hi"), in: .direct(bob))
+        let id = port.sent.first?.clientID
+        #expect(id != nil)
+        #expect(coordinator.outboundQueue.isEmpty)
+        #expect(coordinator.failedOutbound[id ?? ""] != nil)
+        #expect(coordinator.deliveries.state(of: id ?? "") == .failed)
+    }
+
+    /// A 1:1 cursor our own devices publish with the domain as authority.
+    @Test func directCursorWithDomainAuthorityIsApplied() {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        let bob = bare("bob@waddle.test")
+        let domain = BareJID(localpart: nil, domain: me.jid.domain)!
+        var message = directMessage("hi", from: jid("bob@waddle.test/a"), to: jid("alice@waddle.test/phone"), id: "m1")
+        message.identity = MessageIdentity(messageID: "m1", stanzaID: StanzaID(id: "a1", by: domain), stanzaIDs: [StanzaID(id: "a1", by: domain)])
+        coordinator.route(message)
+        coordinator.applyDisplayedCursor(DisplayedCursor(conversation: bob, stanzaID: "a1", stanzaIDBy: domain))
+        #expect(coordinator.readCursors.cursor(.direct(bob)) == "a1")
+    }
+}
