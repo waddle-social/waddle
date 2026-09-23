@@ -279,6 +279,7 @@ public final class SessionCoordinator {
             // allowing the reconnect loop to start another driver.
             isConnectResetting = true
             retryWhenConnectSettles = true
+            status.connection = .offline(retryAt: nil)
             return
         }
         isConnectResetting = true
