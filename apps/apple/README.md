@@ -78,3 +78,8 @@ currently relies on local notifications while the app is running.
 
 `ci_scripts/ci_post_clone.sh` installs the pinned Rust toolchain and builds the
 XCFramework before Xcode builds the app targets.
+
+Xcode Cloud does not resolve packages itself, so the project carries its own
+`Waddle.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
+When WaddleKit's dependencies change, update it to the same pins as
+`WaddleKit/Package.resolved`.
