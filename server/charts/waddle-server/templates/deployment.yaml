@@ -38,6 +38,9 @@ spec:
         {{- if .Values.extraSecretChecksum }}
         checksum/extra-secret-value: {{ .Values.extraSecretChecksum | quote }}
         {{- end }}
+        {{- if .Values.apnsSecretChecksum }}
+        checksum/apns-secret-value: {{ .Values.apnsSecretChecksum | quote }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

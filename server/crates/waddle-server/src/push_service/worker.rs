@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use jid::BareJid;
+use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
@@ -766,9 +767,33 @@ impl DatabasePushServiceStore {
         })))
     }
 
-    /// Phase 2 helper: drive each sealed device row through the typed
-    /// Web Push dispatcher and collect typed [`DispatchedAttempt`]
-    /// outcomes. Pure compute + network — never touches the DB.
+    async fn current_apns_badge_count(&self, recipient: &BareJid) -> Option<u64> {
+        let Some(inbox_storage) = self.inbox_storage.as_ref() else {
+            tracing::warn!(
+                recipient = %recipient,
+                "APNs app badge omitted because inbox storage is unavailable"
+            );
+            return None;
+        };
+
+        match inbox_storage.total_unread(recipient).await {
+            Ok(total) => Some(total),
+            Err(error) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    %error,
+                    "APNs app badge omitted because account unread total could not be read"
+                );
+                None
+            }
+        }
+    }
+
+    /// Phase 2 helper: read the current account unread total once for
+    /// APNs badge delivery, then drive each sealed device row through the
+    /// typed provider dispatchers and collect [`DispatchedAttempt`]s. The
+    /// shared inbox read completes before the network fan-out; no push-store
+    /// transaction is held across provider requests.
     ///
     /// Devices are dispatched concurrently via `buffer_unordered` so a
     /// large fan-out does not serialize on the per-device HTTPS
@@ -807,8 +832,16 @@ impl DatabasePushServiceStore {
         };
         // APNs needs the parsed payload too; a parse failure with any
         // provider wired already failed the job in phase 2.
+        let has_apns_device = sealed_devices
+            .iter()
+            .any(|device| device.platform == PushDevicePlatform::Apns);
+        let badge_count = if self.apns.is_some() && parsed.is_some() && has_apns_device {
+            self.current_apns_badge_count(recipient).await
+        } else {
+            None
+        };
         let apns_provider = match (self.apns.as_ref(), parsed) {
-            (Some(provider), Some(parsed)) => Some((provider.clone(), parsed.clone())),
+            (Some(provider), Some(parsed)) => Some((provider.clone(), parsed.clone(), badge_count)),
             _ => None,
         };
         let item_id_arc: Arc<str> = Arc::from(job.item_id);
@@ -872,11 +905,12 @@ impl DatabasePushServiceStore {
                             }
                         }
                         (_, PushDevicePlatform::Apns) => match &apns_provider {
-                            Some((provider, parsed)) => {
+                            Some((provider, parsed, badge_count)) => {
                                 let attempt = apns_dispatch::dispatch_apns_device(
                                     &device,
                                     &recipient,
                                     parsed,
+                                    *badge_count,
                                     apns_dispatch::ApnsJobContext {
                                         item_id: &item_id,
                                         node: &node,
@@ -1314,6 +1348,45 @@ mod tests {
 
     use crate::push_service::test_support::{notification_item, owner, store};
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
+
+    #[tokio::test]
+    async fn apns_badge_uses_live_account_unread_total() {
+        use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+
+        let recipient = owner();
+        let inbox = Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        for (partner, kind, thread_id, count) in [
+            ("bob@example.com", ConversationKind::Direct, None, 2),
+            ("carol@example.com", ConversationKind::Direct, None, 3),
+            (
+                "room@conference.example.com",
+                ConversationKind::MucRoom,
+                Some("thread-1"),
+                5,
+            ),
+        ] {
+            let partner: BareJid = partner.parse().expect("partner JID");
+            for sequence in 0..count {
+                let mut entry = InboxEntry::new(
+                    partner.clone(),
+                    kind,
+                    format!("archive-{partner}-{sequence}"),
+                    i64::from(sequence),
+                );
+                if let Some(thread_id) = thread_id {
+                    entry = entry.with_thread(thread_id);
+                }
+                inbox
+                    .upsert(&recipient, entry, true)
+                    .await
+                    .expect("upsert inbox entry");
+            }
+        }
+
+        let store = store().await.with_inbox_storage(inbox);
+
+        assert_eq!(store.current_apns_badge_count(&recipient).await, Some(5));
+    }
 
     #[tokio::test]
     async fn attempt_status_is_transient_matches_retry_intent() {

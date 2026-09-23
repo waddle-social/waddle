@@ -390,6 +390,9 @@ impl NotificationOutboxStore {
             });
         }
         let message_count = unread.unwrap_or(0);
+        // XEP-0357 `message-count` stays scoped to this conversation and
+        // thread. APNs reads the account-wide total immediately before send
+        // so a delayed retry cannot replay an old absolute app-icon badge.
         let item = job.to_xep0357_pubsub_item_with_count(message_count);
         let push_service_jid = job.push_service_jid.to_string();
         match push_service
@@ -753,7 +756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xep0357_publish_count_is_derived_from_current_inbox_unread() {
+    async fn xep0357_summary_count_is_scoped_to_the_current_conversation() {
         let store = store().await;
         let recipient = bare("alice@example.com");
         let conversation = bare("bob@example.com");
@@ -786,6 +789,12 @@ mod tests {
                     .children()
                     .any(|value| value.is("value", NS_DATA_FORMS) && value.text() == "3")
         }));
+
+        let context = payload
+            .children()
+            .find(|child| child.is("context", super::super::payload::WADDLE_PUSH_CONTEXT_NS))
+            .expect("Waddle context");
+        assert_eq!(context.attr("badge-count"), None);
     }
 
     #[tokio::test]

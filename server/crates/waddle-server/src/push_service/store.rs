@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use jid::BareJid;
+use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::pubsub::PubSubStorage;
 use waddle_xmpp::push::apns::{ApnsProviderTokenSource, ApnsSender, ApnsTopic};
 use waddle_xmpp::push::types::VapidSub;
@@ -20,6 +21,9 @@ use super::secrets::PushSecretCipher;
 #[derive(Clone)]
 pub struct DatabasePushServiceStore {
     pub(super) db: Database,
+    /// Shared unread projection used to refresh the APNs app badge at send
+    /// time, so queued retries do not replay a stale absolute count.
+    pub(super) inbox_storage: Option<Arc<dyn InboxStorage>>,
     pub(super) secrets: Arc<PushSecretCipher>,
     pub(super) pubsub_boundary: Option<PushServicePubSubBoundary>,
     /// VAPID signer for outbound Web Push delivery. `None` when the
@@ -91,6 +95,7 @@ impl DatabasePushServiceStore {
     pub async fn new_with_secret_key(db: Database, secret_key: &[u8]) -> Result<Self, XmppError> {
         let store = Self {
             db,
+            inbox_storage: None,
             secrets: Arc::new(PushSecretCipher::new(secret_key)),
             pubsub_boundary: None,
             vapid_signer: None,
@@ -110,6 +115,7 @@ impl DatabasePushServiceStore {
     ) -> Result<Self, XmppError> {
         let store = Self {
             db,
+            inbox_storage: None,
             secrets: Arc::new(PushSecretCipher::new(secret_key)),
             pubsub_boundary: Some(PushServicePubSubBoundary {
                 service_jid,
@@ -122,6 +128,13 @@ impl DatabasePushServiceStore {
         };
         store.initialize().await?;
         Ok(store)
+    }
+
+    /// Install the shared XMPP inbox projection used to calculate the
+    /// account-wide APNs badge immediately before provider dispatch.
+    pub fn with_inbox_storage(mut self, inbox_storage: Arc<dyn InboxStorage>) -> Self {
+        self.inbox_storage = Some(inbox_storage);
+        self
     }
 
     /// Install the VAPID signer + Web Push transport + VAPID `sub` claim

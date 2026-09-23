@@ -571,6 +571,7 @@ schema.#Project & {
 
 					cue vet .
 					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml -d '#RuntimeExternalSecret'
+					cue vet deployment.cue ../infrastructure/waddle.cloud/gitops/waddle-server/apns-external-secret.yaml -d '#ApnsExternalSecret'
 					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml -d '#OpenRouterExternalSecret'
 					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/spicedb-config-external-secret.yaml -d '#SpiceDbExternalSecret'
 					for manifest in ../infrastructure/waddle.cloud/gitops/waddle-server/*external-secret.yaml; do
@@ -790,6 +791,7 @@ schema.#Project & {
 					fi
 
 					yq -o=yaml '.spec.values' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > "${gitops_values}"
+					yq -e '.spec.valuesFrom[] | select(.kind == "Secret" and .name == "waddle-apns-production" and .valuesKey == "WADDLE_APNS_SECRETS_CHECKSUM" and .targetPath == "apnsSecretChecksum" and .optional == false)' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					if grep -R "${placeholder_digest}" ../infrastructure/waddle.cloud/gitops/waddle-server; then
 					  echo "checked-in GitOps must not contain all-zero digest placeholders" >&2
 					  exit 1
@@ -820,10 +822,19 @@ schema.#Project & {
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
+					  --set-string apnsSecretChecksum=ci-apns-secret-checksum \
 					  -f "${gitops_values}" > "${gitops_render}"
 					for env_name in WADDLE_SESSION_KEY WADDLE_OCCUPANT_ID_SECRET; do
 					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .valueFrom.secretKeyRef.name == \"waddle-runtime-secrets\" and .valueFrom.secretKeyRef.optional == false)" "${gitops_render}" > /dev/null
 					done
+					for apns_env in 'WADDLE_APNS_KEY_PATH|/var/run/secrets/waddle-apns/AuthKey.p8' 'WADDLE_APNS_TEAM_ID|6KXCJGJ45W' 'WADDLE_APNS_KEY_ID|CJR7U5CXHP' 'WADDLE_APNS_BUNDLE_ID|p4x.waddle.social'; do
+					  env_name="${apns_env%%|*}"
+					  env_value="${apns_env#*|}"
+					  yq -e "select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"waddle-server\") | (.env // [])[] | select(.name == \"${env_name}\" and .value == \"${env_value}\")" "${gitops_render}" > /dev/null
+					done
+					yq -e 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "apns-auth-key" and .secret.secretName == "waddle-apns-production" and .secret.defaultMode == 288 and .secret.items[0].key == "WADDLE_APNS_KEY_PEM" and .secret.items[0].path == "AuthKey.p8")' "${gitops_render}" > /dev/null
+					yq -e 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | .volumeMounts[] | select(.name == "apns-auth-key" and .mountPath == "/var/run/secrets/waddle-apns" and .readOnly == true)' "${gitops_render}" > /dev/null
+					yq -e 'select(.kind == "Deployment") | .spec.template.metadata.annotations."checksum/apns-secret-value" == "ci-apns-secret-checksum"' "${gitops_render}" > /dev/null
 					kubectl kustomize ../infrastructure/waddle.cloud/gitops/waddle-server > "${gitops_kustomize}"
 					if grep -q "${placeholder_digest}" "${gitops_kustomize}"; then
 					  echo "rendered GitOps must not contain all-zero digest placeholders" >&2
