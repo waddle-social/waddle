@@ -27,13 +27,17 @@ manages itself, and that reaction replaces the Flux-era
 
 ## Generate and compile
 
-Apsides has no released CLI yet. Build it from a checkout that carries the
-HTTPRoute CRD import fix (G1 below), then:
+Apsides has no released CLI yet. Build `aps` (`cuenv task build`) from
+`rawkode/apsides` branch `claude/apsides-waddles-gitops-0896zl`; `main` at
+`288fcc5` cannot import the HTTPRoute CRD (G1 in
+[ASSESSMENT.md](ASSESSMENT.md#fixes-made-to-apsides-in-this-trial)). The tools
+also need Deno 2.9 and Python 3 with PyYAML. Then:
 
 ```sh
-APS=/path/to/apsides/target/debug/aps ./generate.sh   # CRD types + source lock
-$APS compile --source program.tsx --output "$(mktemp -d)/out"
-APS=/path/to/apsides/target/debug/aps ./gaps/check.sh  # every gap probe must still fail
+export APS=/path/to/apsides/target/debug/aps
+./generate.sh                                          # SDK, CRD types, source lock
+"$APS" compile --source program.tsx --output "$(mktemp -d)/out"
+./gaps/check.sh                                        # every gap probe must still fail
 ```
 
 Generated CRD types and the embedded SDK live in the ignored `.aps/`
