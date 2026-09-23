@@ -2397,3 +2397,6 @@ async fn drain_replays_persisted_config_voice_changes_to_sfu() {
     assert_eq!(updates[0].1.as_livekit_identity(), recipient.to_string());
     assert_eq!(updates[0].2, waddle_sfu::MediaCapabilities::listen_only());
 }
+
+#[path = "restore_recovery.rs"]
+mod restore_recovery;

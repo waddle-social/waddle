@@ -1,5 +1,8 @@
 use super::*;
-use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
+use crate::admin::channels::{
+    acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
+};
+use crate::permissions::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
 
 /// Upper bound on the mutating room-actor asks below. The room actor
@@ -75,60 +78,107 @@ pub(in crate::server::routes::websocket::handlers) async fn persist_managed_chan
     jid: &BareJid,
     affiliation: Affiliation,
 ) -> Result<(), String> {
-    let object = Object::new(ObjectType::Channel, channel_id);
-    let subject = Subject::user(jid.to_string());
-
-    for relation in ["owner", "admin", "member", "outcast"] {
-        let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
-        match state
-            .deps
-            .app_state
-            .permission_actor
-            .ask(DeleteTuple { tuple })
-            .await
-        {
-            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {
-            }
-            Err(error) => return Err(format!("delete affiliation tuple failed: {error}")),
-        }
-    }
-
-    let Some(relation) = channel_affiliation_relation(affiliation) else {
-        return Ok(());
-    };
-    let tuple = Tuple::new(object, Relation::new(relation), subject);
-    match state
+    state
         .deps
         .app_state
         .permission_actor
-        .ask(WriteTuple { tuple })
+        .ask(ReplaceExclusiveRelation {
+            object: Object::new(ObjectType::Channel, channel_id),
+            subject: Subject::user(jid.to_string()),
+            family: CHANNEL_AFFILIATION_RELATIONS
+                .into_iter()
+                .map(Relation::new)
+                .collect(),
+            replacement: channel_affiliation_relation(affiliation).map(Relation::new),
+        })
         .await
-    {
-        Ok(())
-        | Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
-        Err(error) => Err(format!("write affiliation tuple failed: {error}")),
+        .map_err(|error| format!("replace affiliation tuple failed: {error}"))
+}
+
+/// The mutually exclusive channel relations one managed affiliation occupies.
+const CHANNEL_AFFILIATION_RELATIONS: [&str; 4] = ["owner", "admin", "member", "outcast"];
+
+/// The affiliation an admin batch leaves on `jid` once every item has been
+/// persisted in order: the last write wins, so `[Outcast, Member]` on one JID
+/// leaves `Member`.
+fn final_affiliation_of(list: &[(BareJid, Affiliation)], jid: &BareJid) -> Option<Affiliation> {
+    list.iter()
+        .rev()
+        .find(|(candidate, _)| candidate == jid)
+        .map(|(_, affiliation)| *affiliation)
+}
+
+/// Persist each target once, at its final batch value. Keep no-op final
+/// values too: the authorization projection can need repair independently of
+/// room memory. Original admin items still drive validation and room effects.
+fn final_affiliation_writes(updates: &[(BareJid, Affiliation)]) -> Vec<(BareJid, Affiliation)> {
+    let mut writes: Vec<(BareJid, Affiliation)> = Vec::new();
+    for (jid, affiliation) in updates {
+        if let Some((_, current)) = writes.iter_mut().find(|(target, _)| target == jid) {
+            *current = *affiliation;
+        } else {
+            writes.push((jid.clone(), *affiliation));
+        }
     }
+    writes
 }
 
 /// Roll back optimistically-persisted channel tuples after the room actor
 /// rejected an admin set. The actor batch itself is durable-first and
 /// all-or-nothing now, so there is no room-memory compensation here.
+///
+/// A missing commit proves only that THIS attempt did not land. The room lock
+/// is process-local, so a later owner may already have committed a newer
+/// affiliation for the same JID. Each tuple is therefore restored with an
+/// atomic compare-and-set in the authorization store: the pre-ask value is
+/// written only while the family still holds the value this batch finally
+/// wrote. A tuple that moved on keeps the later owner's value.
 async fn rollback_admin_affiliations(
     state: &WebSocketState,
     managed_channel_id: Option<&str>,
     durable_previous_affiliations: &[(BareJid, Affiliation)],
+    optimistic_affiliations: &[(BareJid, Affiliation)],
 ) {
     let Some(channel_id) = managed_channel_id else {
         return;
     };
+    let object = Object::new(ObjectType::Channel, channel_id);
     for (previous_jid, previous_affiliation) in durable_previous_affiliations {
-        let _ = persist_managed_channel_affiliation(
-            state,
-            channel_id,
-            previous_jid,
-            *previous_affiliation,
-        )
-        .await;
+        let Some(optimistic) = final_affiliation_of(optimistic_affiliations, previous_jid) else {
+            // A snapshot alone does not mean this attempt wrote the target.
+            continue;
+        };
+        if optimistic == *previous_affiliation {
+            continue;
+        }
+        let swap = SwapExclusiveRelation {
+            object: object.clone(),
+            subject: Subject::user(previous_jid.to_string()),
+            family: CHANNEL_AFFILIATION_RELATIONS
+                .iter()
+                .map(|relation| Relation::new(*relation))
+                .collect(),
+            expected: channel_affiliation_relation(optimistic).map(Relation::new),
+            replacement: channel_affiliation_relation(*previous_affiliation).map(Relation::new),
+        };
+        match state.deps.app_state.permission_actor.ask(swap).await {
+            Ok(ExclusiveRelationSwap::Swapped) => {}
+            Ok(ExclusiveRelationSwap::Mismatch) => {
+                warn!(
+                    channel = channel_id,
+                    target = %previous_jid,
+                    "Managed-channel affiliation changed after this attempt wrote it; keeping the later value instead of rolling back"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    channel = channel_id,
+                    target = %previous_jid,
+                    error = %error,
+                    "Could not roll back managed-channel affiliation; retaining the optimistic tuple for later reconciliation"
+                );
+            }
+        }
     }
 }
 
@@ -367,6 +417,51 @@ async fn recover_committed_admin_effects_after_ambiguity(
     Ok((applied, suppress_direct_admin_effects))
 }
 
+async fn recover_exact_admin_result(
+    state: &WebSocketState,
+    before: &waddle_xmpp::muc::MucRoom,
+    items: &[AdminItem],
+    sender_jid: &FullJid,
+    mutation_attempt: waddle_xmpp::muc::AdminMutationId,
+    resolution: Option<waddle_xmpp::muc::room_actor::AdminMutationResolution>,
+) -> (AdminReconciliationOutcome, bool) {
+    use waddle_xmpp::muc::room_actor::AdminMutationResolution;
+    let coordinates = match resolution {
+        Some(AdminMutationResolution::Committed {
+            attempt,
+            coordinates,
+        }) if attempt == mutation_attempt => coordinates,
+        Some(AdminMutationResolution::NotCommitted { attempt }) if attempt == mutation_attempt => {
+            return (AdminReconciliationOutcome::NotCommitted, false);
+        }
+        _ => return (AdminReconciliationOutcome::Inconclusive, false),
+    };
+    match state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .reservation_for_revision(coordinates.lifecycle, coordinates.revision)
+        .await
+    {
+        Ok(reservation) => {
+            let mut applied = recover_committed_admin_effects(
+                before,
+                items,
+                sender_jid,
+                &state.deps.occupant_id_secret,
+            );
+            applied.outbox_reservation = reservation;
+            // Only this exact durable batch's rows own delivery, even if
+            // drained already or followed by another affiliation mutation.
+            (AdminReconciliationOutcome::Committed(applied), true)
+        }
+        Err(error) => {
+            warn!(room = %before.room_jid, %error, "Could not recover exact committed admin outbox reservation");
+            (AdminReconciliationOutcome::Inconclusive, false)
+        }
+    }
+}
+
 async fn reconcile_ambiguous_admin_result(
     state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -374,7 +469,7 @@ async fn reconcile_ambiguous_admin_result(
     pre_apply_snapshot: Option<&waddle_xmpp::muc::room_actor::RoomSnapshot>,
     items: &[AdminItem],
     sender_jid: &FullJid,
-    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    mutation_attempt: waddle_xmpp::muc::AdminMutationId,
 ) -> (
     Option<waddle_xmpp::muc::room_actor::AdminItemsApplied>,
     bool,
@@ -386,13 +481,35 @@ async fn reconcile_ambiguous_admin_result(
         .await
     {
         Ok(snapshot) => match pre_apply_snapshot {
+            Some(before)
+                if !is_role_change_query(items)
+                    && (before.durable_coordinates.is_some()
+                        || snapshot.durable_coordinates.is_some()) =>
+            {
+                match recover_exact_admin_result(
+                    state,
+                    &before.room,
+                    items,
+                    sender_jid,
+                    mutation_attempt,
+                    snapshot.admin_mutation_resolution(mutation_attempt),
+                )
+                .await
+                {
+                    (AdminReconciliationOutcome::Committed(applied), suppress) => {
+                        (Some(applied), false, suppress)
+                    }
+                    (AdminReconciliationOutcome::NotCommitted, _) => (None, true, false),
+                    (AdminReconciliationOutcome::Inconclusive, _) => (None, false, false),
+                }
+            }
             Some(snapshot_before_apply) => match reconcile_admin_result_from_rooms(
                 &snapshot_before_apply.room,
                 Some(&snapshot.room),
                 None,
                 items,
                 sender_jid,
-                occupant_id_secret,
+                &state.deps.occupant_id_secret,
             ) {
                 AdminReconciliationOutcome::Committed(_) => {
                     match recover_committed_admin_effects_after_ambiguity(
@@ -400,7 +517,7 @@ async fn reconcile_ambiguous_admin_result(
                         &snapshot_before_apply.room,
                         items,
                         sender_jid,
-                        occupant_id_secret,
+                        &state.deps.occupant_id_secret,
                         snapshot_before_apply.durable_coordinates,
                         snapshot.durable_coordinates,
                     )
@@ -435,10 +552,12 @@ async fn reconcile_ambiguous_admin_result(
     }
 }
 
-async fn recover_admin_result_after_actor_demote(
+async fn recover_admin_result_after_actor_failure(
     state: &WebSocketState,
     room_jid: &BareJid,
     pre_apply_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    mutation_attempt: waddle_xmpp::muc::AdminMutationId,
     items: &[AdminItem],
     sender_jid: &FullJid,
 ) -> (AdminReconciliationOutcome, bool) {
@@ -448,66 +567,25 @@ async fn recover_admin_result_after_actor_demote(
         if attempt > 0 {
             let _ = room_registry.retry_pending_room_releases(8).await;
         }
-        match room_registry
-            .get_or_create_room(
-                room_jid.clone(),
-                pre_apply_snapshot.room.waddle_id.clone(),
-                pre_apply_snapshot.room.channel_id.clone(),
-                pre_apply_snapshot.room.config.clone(),
-            )
-            .await
+        // The pre-ask snapshot identifies the lifecycle, not its roster.
+        // Recovery snapshots the sealed predecessor and installs that final
+        // roster and departure ledger before publishing an exact successor.
+        match reacquire_config_actor(
+            &state.deps.protocol.room_registry,
+            room_jid,
+            pre_apply_snapshot,
+            stale_actor,
+        )
+        .await
         {
-            Ok(acquisition) => match acquisition
-                .actor_ref
+            Ok(Some(actor)) => match actor
                 .ask(GetSnapshot)
                 .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                 .await
             {
                 Ok(snapshot) => {
-                    let outcome = reconcile_admin_result_from_rooms(
-                        &pre_apply_snapshot.room,
-                        None,
-                        Some(&snapshot.room),
-                        items,
-                        sender_jid,
-                        &state.deps.occupant_id_secret,
-                    );
-                    if matches!(outcome, AdminReconciliationOutcome::Committed(_)) {
-                        match recover_committed_admin_effects_after_ambiguity(
-                            state,
-                            &pre_apply_snapshot.room,
-                            items,
-                            sender_jid,
-                            &state.deps.occupant_id_secret,
-                            pre_apply_snapshot.durable_coordinates,
-                            snapshot.durable_coordinates,
-                        )
-                        .await
-                        {
-                            Ok((applied, suppress_direct_admin_effects)) => {
-                                return (
-                                    AdminReconciliationOutcome::Committed(applied),
-                                    suppress_direct_admin_effects,
-                                );
-                            }
-                            Err(error) => {
-                                // A commit was proven but its outbox rows could
-                                // not be looked up. Returning Committed here
-                                // would re-enter the direct-send path while the
-                                // durable rows may still drain — a duplicate
-                                // delivery. Stay inconclusive: no success reply
-                                // and no direct replay; the janitor finishes the
-                                // broadcast.
-                                warn!(
-                                    room = %room_jid,
-                                    error = %error,
-                                    "Could not recover committed MUC admin outbox reservation after actor demotion; staying inconclusive"
-                                );
-                                return (AdminReconciliationOutcome::Inconclusive, false);
-                            }
-                        }
-                    }
-                    return (outcome, false);
+                    return recover_exact_admin_result(state, &pre_apply_snapshot.room, items, sender_jid,
+                        mutation_attempt, snapshot.admin_mutation_resolution(mutation_attempt)).await;
                 }
                 Err(error) => {
                     warn!(
@@ -517,12 +595,20 @@ async fn recover_admin_result_after_actor_demote(
                     );
                 }
             },
+            Ok(None) => return (AdminReconciliationOutcome::Inconclusive, false),
             Err(
                 waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(
                     _,
                 ),
             ) => {}
             Err(error) => {
+                if matches!(error, waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Timeout) {
+                    let _ = state.deps.protocol.room_registry.ask(
+                        waddle_xmpp::muc::room_registry_actor::RetireUnresponsiveRoomIfExactActor {
+                            room_jid: room_jid.clone(), actor_ref: stale_actor.clone(),
+                        },
+                    ).mailbox_timeout(ADMIN_ROOM_ASK_TIMEOUT).reply_timeout(ADMIN_ROOM_ASK_TIMEOUT).await;
+                }
                 warn!(
                     room = %room_jid,
                     error = ?error,
@@ -1158,6 +1244,9 @@ pub(super) async fn handle_muc_admin_iq(
     } else {
         None
     };
+    // Collapse only the external projection, after validating all original
+    // items. A failed duplicate write must not leave an intermediate ban.
+    let affiliation_updates = final_affiliation_writes(&affiliation_updates);
     let managed_channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid);
     let durable_previous_affiliations = if affiliation_updates.is_empty() {
         Vec::new()
@@ -1189,7 +1278,7 @@ pub(super) async fn handle_muc_admin_iq(
         Vec::new()
     };
     if let Some(channel_id) = managed_channel_id.as_deref() {
-        for (jid, affiliation) in &affiliation_updates {
+        for (index, (jid, affiliation)) in affiliation_updates.iter().enumerate() {
             if let Err(error) =
                 persist_managed_channel_affiliation(state, channel_id, jid, *affiliation).await
             {
@@ -1199,15 +1288,15 @@ pub(super) async fn handle_muc_admin_iq(
                     error = %error,
                     "Failed to persist MUC admin affiliation change before actor update"
                 );
-                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
-                    let _ = persist_managed_channel_affiliation(
-                        state,
-                        channel_id,
-                        previous_jid,
-                        *previous_affiliation,
-                    )
-                    .await;
-                }
+                // Include the failed write: its reply can be lost after the
+                // backend commits. Later batch items were never attempted.
+                rollback_admin_affiliations(
+                    state,
+                    Some(channel_id),
+                    &durable_previous_affiliations,
+                    &affiliation_updates[..=index],
+                )
+                .await;
                 return vec![build_iq_error_xml_typed(
                     iq.id(),
                     response_from,
@@ -1219,8 +1308,10 @@ pub(super) async fn handle_muc_admin_iq(
         }
     }
     let mut suppress_direct_admin_effects = false;
+    let mutation_attempt = waddle_xmpp::muc::AdminMutationId::generate();
     let applied = match room_actor
         .ask(ApplyAdminItems {
+            attempt: mutation_attempt,
             sender_jid: sender_jid.clone(),
             sender_affiliation: context.affiliation,
             sender_role: context.role,
@@ -1238,6 +1329,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1256,6 +1348,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             // XEP-0045 §9.2: the denial returns <not-allowed/> "along
@@ -1277,6 +1370,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             // XEP-0045 §8.4/§9.7: the denial returns <not-allowed/>
@@ -1300,6 +1394,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1313,37 +1408,16 @@ pub(super) async fn handle_muc_admin_iq(
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CommitOutcomeUnknown,
         )) => {
-            let (recovered_applied, _, recovered_suppress_direct_admin_effects) =
-                reconcile_ambiguous_admin_result(
-                    state,
-                    &room_actor,
-                    &room_jid,
-                    pre_apply_snapshot.as_ref(),
-                    &query.items,
-                    sender_jid,
-                    &state.deps.occupant_id_secret,
-                )
-                .await;
-            suppress_direct_admin_effects = recovered_suppress_direct_admin_effects;
-            let _ = state
-                .deps
-                .protocol
-                .room_registry
-                .ask(
-                    waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
-                        room_jid: room_jid.clone(),
-                        actor_ref: room_actor.clone(),
-                    },
-                )
-                .await;
-            let (reconciliation, demoted_suppress_direct_admin_effects) =
-                if let Some(applied) = recovered_applied {
-                    (AdminReconciliationOutcome::Committed(applied), false)
-                } else if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
-                    recover_admin_result_after_actor_demote(
+            // Restore the exact attempt's verdict before deciding whether to
+            // acknowledge the batch or roll back optimistic affiliations.
+            let (reconciliation, restored_suppress_direct_admin_effects) =
+                if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
+                    recover_admin_result_after_actor_failure(
                         state,
                         &room_jid,
                         snapshot_before_apply,
+                        &room_actor,
+                        mutation_attempt,
                         &query.items,
                         sender_jid,
                     )
@@ -1351,7 +1425,7 @@ pub(super) async fn handle_muc_admin_iq(
                 } else {
                     (AdminReconciliationOutcome::Inconclusive, false)
                 };
-            suppress_direct_admin_effects |= demoted_suppress_direct_admin_effects;
+            suppress_direct_admin_effects |= restored_suppress_direct_admin_effects;
             match reconciliation {
                 AdminReconciliationOutcome::Committed(applied) => {
                     warn!(room = %room_jid, "MUC admin commit outcome was ambiguous but the committed affiliation batch was reconciled");
@@ -1362,6 +1436,7 @@ pub(super) async fn handle_muc_admin_iq(
                         state,
                         managed_channel_id.as_deref(),
                         &durable_previous_affiliations,
+                        &affiliation_updates,
                     )
                     .await;
                     warn!(room = %room_jid, "MUC admin commit outcome is ambiguous and the fresh actor could not prove the batch committed; restored previous managed-channel affiliations");
@@ -1397,6 +1472,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             let _ = state
@@ -1426,6 +1502,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1446,6 +1523,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1466,6 +1544,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1484,6 +1563,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             return vec![build_iq_error_xml_typed(
@@ -1506,6 +1586,7 @@ pub(super) async fn handle_muc_admin_iq(
                 state,
                 managed_channel_id.as_deref(),
                 &durable_previous_affiliations,
+                &affiliation_updates,
             )
             .await;
             warn!(room = %room_jid, error = ?error, "MUC admin mutation was not delivered to the actor");
@@ -1533,7 +1614,7 @@ pub(super) async fn handle_muc_admin_iq(
                     pre_apply_snapshot.as_ref(),
                     &query.items,
                     sender_jid,
-                    &state.deps.occupant_id_secret,
+                    mutation_attempt,
                 )
                 .await;
             if let Some(applied) = recovered_applied {
@@ -1546,6 +1627,7 @@ pub(super) async fn handle_muc_admin_iq(
                         state,
                         managed_channel_id.as_deref(),
                         &durable_previous_affiliations,
+                        &affiliation_updates,
                     )
                     .await;
                 }
@@ -1689,6 +1771,10 @@ pub(super) async fn handle_muc_admin_iq(
 }
 
 #[cfg(test)]
+#[path = "muc_admin_recovery_tests.rs"]
+mod recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
@@ -1738,7 +1824,7 @@ mod tests {
         });
     }
 
-    async fn enqueue_recovered_admin_reservation(
+    pub(super) async fn enqueue_recovered_admin_reservation(
         state: &WebSocketState,
         room_jid: &BareJid,
         coordinates: RoomCommittedCoordinates,
@@ -3073,6 +3159,215 @@ mod tests {
         assert!(
             applied.outbox_reservation.is_none(),
             "earlier revision observations must not bind a recovered reservation"
+        );
+    }
+
+    /// A missing commit proves only that this attempt did not land. A tuple a
+    /// later owner moved on must not be overwritten with the pre-ask value.
+    #[tokio::test]
+    async fn rollback_keeps_affiliation_committed_by_a_later_owner() {
+        let state = create_test_websocket_state().await;
+        let channel_id = "cas-rollback-channel";
+        let target: BareJid = "target@example.com".parse().expect("target");
+        let moved: BareJid = "moved@example.com".parse().expect("moved");
+        for jid in [&target, &moved] {
+            persist_managed_channel_affiliation(&state, channel_id, jid, Affiliation::Member)
+                .await
+                .expect("pre-ask tuple");
+        }
+        let previous = vec![
+            (target.clone(), Affiliation::Member),
+            (moved.clone(), Affiliation::Member),
+        ];
+        let optimistic = vec![
+            (target.clone(), Affiliation::Outcast),
+            (moved.clone(), Affiliation::Outcast),
+        ];
+        for (jid, affiliation) in &optimistic {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("optimistic tuple");
+        }
+        // A foreign owner committed a newer affiliation before recovery ran.
+        persist_managed_channel_affiliation(&state, channel_id, &moved, Affiliation::Admin)
+            .await
+            .expect("later owner tuple");
+
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &optimistic).await;
+
+        let current = explicit_channel_affiliations_for_jids(
+            &state.deps.app_state,
+            channel_id,
+            [target, moved],
+        )
+        .await
+        .expect("current tuples");
+        assert_eq!(
+            current
+                .iter()
+                .map(|(_, affiliation)| *affiliation)
+                .collect::<Vec<_>>(),
+            vec![Affiliation::Member, Affiliation::Admin],
+            "only the tuple still holding this attempt's value is restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_rolls_back_only_attempted_targets_still_holding_our_values() {
+        let state = create_test_websocket_state().await;
+        let channel_id = "cas-partial-persistence-channel";
+        let applied: BareJid = "applied@example.com".parse().expect("applied");
+        let moved: BareJid = "moved@example.com".parse().expect("moved");
+        let failed: BareJid = "failed@example.com".parse().expect("failed");
+        let untouched: BareJid = "untouched@example.com".parse().expect("untouched");
+        let targets = [
+            applied.clone(),
+            moved.clone(),
+            failed.clone(),
+            untouched.clone(),
+        ];
+        let previous: Vec<_> = targets
+            .iter()
+            .cloned()
+            .map(|jid| (jid, Affiliation::Member))
+            .collect();
+        let updates: Vec<_> = targets
+            .iter()
+            .cloned()
+            .map(|jid| (jid, Affiliation::Outcast))
+            .collect();
+        for (jid, affiliation) in &previous {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("pre-ask affiliation");
+        }
+        // The third write committed but its reply was lost. The fourth was
+        // never attempted, although its old value was already snapshotted.
+        for (jid, affiliation) in &updates[..=2] {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("attempted write");
+        }
+        for jid in [&moved, &untouched] {
+            persist_managed_channel_affiliation(&state, channel_id, jid, Affiliation::Admin)
+                .await
+                .expect("foreign newer affiliation");
+        }
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &updates[..=2]).await;
+        let current =
+            explicit_channel_affiliations_for_jids(&state.deps.app_state, channel_id, targets)
+                .await
+                .expect("current tuples");
+        assert_eq!(current.into_iter().map(|(_, affiliation)| affiliation).collect::<Vec<_>>(),
+            vec![Affiliation::Member, Affiliation::Admin, Affiliation::Member, Affiliation::Admin],
+            "restore our applied prefix, including the ambiguous failed write, without touching newer values or unattempted targets");
+    }
+
+    async fn duplicate_projection_failure_preserves_original_affiliation(
+        commit_failed_write: bool,
+    ) {
+        let state = create_test_websocket_state().await;
+        let channel_id = "duplicate-projection-failure";
+        let jid: BareJid = "target@example.com".parse().expect("jid");
+        persist_managed_channel_affiliation(&state, channel_id, &jid, Affiliation::Member)
+            .await
+            .expect("initial member");
+        let previous = vec![(jid.clone(), Affiliation::Member)];
+        let requested = vec![
+            (jid.clone(), Affiliation::Outcast),
+            (jid.clone(), Affiliation::Admin),
+        ];
+        let writes = final_affiliation_writes(&requested);
+        assert_eq!(
+            writes,
+            vec![(jid.clone(), Affiliation::Admin)],
+            "the intermediate ban must never be published to the projection"
+        );
+        if !commit_failed_write {
+            state
+                .deps
+                .app_state
+                .db_pool
+                .global()
+                .execute(
+                    "CREATE TRIGGER reject_duplicate_admin BEFORE INSERT ON permission_tuples \
+                 WHEN NEW.relation = 'admin' BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+                )
+                .await
+                .expect("inject definitive failure");
+        }
+        let result =
+            persist_managed_channel_affiliation(&state, channel_id, &jid, writes[0].1).await;
+        assert_eq!(result.is_ok(), commit_failed_write);
+        // Treat a successful commit as a lost reply in the ambiguous case.
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &writes).await;
+        let current =
+            explicit_channel_affiliations_for_jids(&state.deps.app_state, channel_id, [jid])
+                .await
+                .expect("current affiliation");
+        assert_eq!(
+            current[0].1,
+            Affiliation::Member,
+            "definite failure and committed-but-lost reply both preserve the original membership"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_projection_definite_failure_does_not_leave_an_intermediate_ban() {
+        duplicate_projection_failure_preserves_original_affiliation(false).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_projection_ambiguous_commit_rolls_back_the_final_write() {
+        duplicate_projection_failure_preserves_original_affiliation(true).await;
+    }
+
+    #[test]
+    fn final_projection_writes_keep_noop_values_and_target_order() {
+        let first: BareJid = "first@example.com".parse().expect("first");
+        let second: BareJid = "second@example.com".parse().expect("second");
+        assert_eq!(
+            final_affiliation_writes(&[
+                (first.clone(), Affiliation::Outcast),
+                (second.clone(), Affiliation::None),
+                (first.clone(), Affiliation::Member),
+            ]),
+            vec![(first, Affiliation::Member), (second, Affiliation::None)]
+        );
+    }
+
+    /// A batch may touch one JID several times; persistence applies them in
+    /// order, so the rollback must compare against the final value.
+    #[tokio::test]
+    async fn rollback_compares_against_the_batch_final_affiliation_per_jid() {
+        let state = create_test_websocket_state().await;
+        let channel_id = "cas-final-value-channel";
+        let target: BareJid = "target@example.com".parse().expect("target");
+        // Pre-ask: no explicit affiliation. The batch wrote Outcast, then Admin.
+        let previous = vec![(target.clone(), Affiliation::None)];
+        let optimistic = vec![
+            (target.clone(), Affiliation::Outcast),
+            (target.clone(), Affiliation::Admin),
+        ];
+        for (jid, affiliation) in &optimistic {
+            persist_managed_channel_affiliation(&state, channel_id, jid, *affiliation)
+                .await
+                .expect("optimistic tuple");
+        }
+
+        rollback_admin_affiliations(&state, Some(channel_id), &previous, &optimistic).await;
+
+        let current =
+            explicit_channel_affiliations_for_jids(&state.deps.app_state, channel_id, [target])
+                .await
+                .expect("current tuples");
+        assert_eq!(
+            current
+                .iter()
+                .map(|(_, affiliation)| *affiliation)
+                .collect::<Vec<_>>(),
+            vec![Affiliation::None],
+            "the batch's own final write must be recognised and rolled back"
         );
     }
 }

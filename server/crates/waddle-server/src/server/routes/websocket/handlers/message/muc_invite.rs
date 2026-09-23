@@ -186,6 +186,10 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
                 live_room_restore: snapshot.room.clone(),
                 occupancy_revision: snapshot.occupancy_revision,
                 departures: snapshot.departures.clone(),
+                live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
+                pending_affiliation_departures: snapshot.pending_affiliation_departures.clone(),
+                pending_admin_projection: snapshot.pending_admin_projection.clone(),
+                admin_mutation_resolutions: snapshot.admin_mutation_resolutions.clone(),
                 demote_first: Some(stale_actor.clone()),
             },
         )
@@ -1536,7 +1540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_invite_recovery_transplants_roster_when_stale_actor_is_demoted() {
+    async fn ambiguous_invite_recovery_preserves_roster_and_admin_verdicts() {
         let state = create_test_websocket_state().await;
         let room_jid: jid::BareJid = "ambiguous-demotion@muc.example.com"
             .parse()
@@ -1545,6 +1549,29 @@ mod tests {
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
 
         join_member(&stale_actor, &alice, "alice").await;
+
+        // A prior admin recovery can establish that an attempt did not commit
+        // before a later mediated-invite recovery replaces this incarnation.
+        // Its still-waiting caller must retain that exact verdict after handoff.
+        let attempt = waddle_xmpp::muc::durable::AdminMutationId::generate();
+        let verdict =
+            waddle_xmpp::muc::room_actor::AdminMutationResolution::NotCommitted { attempt };
+        let snapshot = stale_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("predecessor snapshot");
+        stale_actor
+            .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
+                room: snapshot.room,
+                occupancy_revision: snapshot.occupancy_revision,
+                departures: snapshot.departures,
+                live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
+                pending_affiliation_departures: Default::default(),
+                pending_admin_projection: None,
+                admin_mutation_resolutions: vec![verdict],
+            })
+            .await
+            .expect("retain previous admin recovery verdict");
 
         let recovered =
             recover_actor_after_ambiguous_invite_grant(state.as_ref(), &room_jid, &stale_actor)
@@ -1561,6 +1588,11 @@ mod tests {
             .find_occupant_by_real_jid(&alice)
             .expect("demoted stale roster should be transplanted to the replacement");
         assert_eq!(restored.nick, "alice");
+        assert_eq!(
+            recovered_snapshot.admin_mutation_resolution(attempt),
+            Some(verdict),
+            "mediated-invite recovery must preserve the earlier admin caller's verdict"
+        );
     }
 }
 

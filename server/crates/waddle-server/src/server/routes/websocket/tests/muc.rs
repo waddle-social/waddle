@@ -2710,6 +2710,7 @@ async fn native_muc_admin_get_role_list_accepts_role_without_nick() {
         .expect("room actor");
     actor
         .ask(ApplyAdminItems {
+            attempt: waddle_xmpp::muc::AdminMutationId::generate(),
             sender_jid: alice_jid.clone(),
             sender_affiliation: Affiliation::Owner,
             sender_role: waddle_xmpp::Role::Moderator,
@@ -2802,6 +2803,7 @@ async fn native_muc_admin_moderator_cannot_retrieve_affiliation_list() {
         .expect("room actor");
     actor
         .ask(ApplyAdminItems {
+            attempt: waddle_xmpp::muc::AdminMutationId::generate(),
             sender_jid: alice_jid.clone(),
             sender_affiliation: Affiliation::Owner,
             sender_role: waddle_xmpp::Role::Moderator,
@@ -2935,6 +2937,7 @@ async fn native_muc_admin_affiliation_can_retrieve_affiliation_list() {
         .expect("room actor");
     actor
         .ask(ApplyAdminItems {
+            attempt: waddle_xmpp::muc::AdminMutationId::generate(),
             sender_jid: alice_jid.clone(),
             sender_affiliation: Affiliation::Owner,
             sender_role: waddle_xmpp::Role::Moderator,
@@ -3132,6 +3135,7 @@ async fn native_muc_admin_role_moderator_cannot_grant_moderator_role() {
         .expect("room actor");
     actor
         .ask(ApplyAdminItems {
+            attempt: waddle_xmpp::muc::AdminMutationId::generate(),
             sender_jid: alice_jid.clone(),
             sender_affiliation: Affiliation::Owner,
             sender_role: waddle_xmpp::Role::Moderator,
@@ -3228,6 +3232,7 @@ async fn native_muc_admin_role_moderator_cannot_write_affiliations_durably() {
         .expect("room actor");
     actor
         .ask(ApplyAdminItems {
+            attempt: waddle_xmpp::muc::AdminMutationId::generate(),
             sender_jid: alice_jid.clone(),
             sender_affiliation: Affiliation::Owner,
             sender_role: waddle_xmpp::Role::Moderator,
@@ -3858,6 +3863,16 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
     }
 
     impl MucDurableStore for AmbiguousConfigCommitStore {
+        // This fixture only makes configuration commits ambiguous; it has
+        // no admin effect receipts for the live-roster recovery to replay.
+        fn load_admin_mutation_receipt<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _attempt: waddle_xmpp::muc::AdminMutationId,
+        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::AdminMutationReceipt>> {
+            Box::pin(async { Ok(None) })
+        }
+
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,

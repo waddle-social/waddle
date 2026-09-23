@@ -162,7 +162,11 @@ struct RoomPreparationSpec {
 struct LiveRoomRestore {
     room: MucRoom,
     occupancy_revision: u64,
+    live_roster_restore_attempt: super::durable::AdminMutationId,
     departures: super::room_actor::DepartureLedger,
+    pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
+    admin_mutation_resolutions: Vec<super::room_actor::AdminMutationResolution>,
 }
 
 enum DemandRoomPreparation {
@@ -1683,6 +1687,14 @@ impl RoomRegistryActor {
         if !self.publish_room(room_jid.clone(), actor_ref.clone(), claim_fence) {
             return Err(RoomPublicationError::ReconciliationPending);
         }
+        // Never consume exact admin evidence before publication: a failed
+        // preparation retries its original roster from the stashed spec.
+        let published_actor = actor_ref.clone();
+        tokio::spawn(async move {
+            let _ = published_actor
+                .tell(super::room_actor::AcknowledgeAdminProjection)
+                .await;
+        });
         Ok(actor_guard.disarm())
     }
 
@@ -1775,7 +1787,11 @@ impl RoomRegistryActor {
                     .ask(RestoreLiveRoster {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
+                        live_roster_restore_attempt: restore.live_roster_restore_attempt,
                         departures: restore.departures,
+                        pending_affiliation_departures: restore.pending_affiliation_departures,
+                        pending_admin_projection: restore.pending_admin_projection,
+                        admin_mutation_resolutions: restore.admin_mutation_resolutions,
                     })
                     .await
                 {
@@ -2394,7 +2410,11 @@ impl RoomRegistryActor {
                         .ask(RestoreLiveRoster {
                             room: restore.room,
                             occupancy_revision: restore.occupancy_revision,
+                            live_roster_restore_attempt: restore.live_roster_restore_attempt,
                             departures: restore.departures,
+                            pending_affiliation_departures: restore.pending_affiliation_departures,
+                            pending_admin_projection: restore.pending_admin_projection,
+                            admin_mutation_resolutions: restore.admin_mutation_resolutions,
                         })
                         .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
@@ -4147,7 +4167,11 @@ impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
                     live_restore = Some(LiveRoomRestore {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
+                        live_roster_restore_attempt: restore.live_roster_restore_attempt,
                         departures: restore.departures,
+                        pending_affiliation_departures: restore.pending_affiliation_departures,
+                        pending_admin_projection: restore.pending_admin_projection,
+                        admin_mutation_resolutions: restore.admin_mutation_resolutions,
                     });
                     let entry = self
                         .rooms
@@ -5160,9 +5184,16 @@ pub struct GetOrCreateRoomWithLiveRoster {
     pub config: RoomConfig,
     pub live_room_restore: MucRoom,
     pub occupancy_revision: u64,
+    pub live_roster_restore_attempt: super::durable::AdminMutationId,
     /// The predecessor's unacknowledged departure receipts (see
     /// [`super::room_actor::RestoreLiveRoster`]).
     pub departures: super::room_actor::DepartureLedger,
+    /// Affiliation revocations whose callers still own the departure effects.
+    pub pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    /// Preserve unresolved admin effects and exact attempt verdicts across
+    /// every live-roster handoff, including mediated-invite recovery.
+    pub pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
+    pub admin_mutation_resolutions: Vec<super::room_actor::AdminMutationResolution>,
     /// Demote this exact stale actor in the SAME registry turn as the
     /// successor's publication, so no `GetRoom` can observe a gap in which
     /// the room appears absent (cleanup and the departure janitor treat a
@@ -5276,7 +5307,11 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             live_room_restore: Some(LiveRoomRestore {
                 room: msg.live_room_restore,
                 occupancy_revision: msg.occupancy_revision,
+                live_roster_restore_attempt: msg.live_roster_restore_attempt,
                 departures: msg.departures,
+                pending_affiliation_departures: msg.pending_affiliation_departures,
+                pending_admin_projection: msg.pending_admin_projection,
+                admin_mutation_resolutions: msg.admin_mutation_resolutions,
             }),
         });
         let transition = self
@@ -6769,6 +6804,49 @@ pub struct DemoteRoomIfOwner {
 pub struct DemoteRoomIfExactActor {
     pub room_jid: BareJid,
     pub actor_ref: ActorRef<RoomActor>,
+}
+
+/// Retire an unresponsive actor after a known ambiguous commit sealed it.
+/// Unlike ordinary demotion, lost live state remains explicit: lookups fail
+/// with `RoomActorStateLost` rather than reporting that the room is absent.
+/// Callers must already know the exact actor's mutation outcome was ambiguous;
+/// a timeout alone does not prove a healthy actor should be retired.
+pub struct RetireUnresponsiveRoomIfExactActor {
+    pub room_jid: BareJid,
+    pub actor_ref: ActorRef<RoomActor>,
+}
+
+impl kameo::message::Message<RetireUnresponsiveRoomIfExactActor> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: RetireUnresponsiveRoomIfExactActor,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self
+            .rooms
+            .get(&msg.room_jid)
+            .is_some_and(|entry| entry.actor_ref.id() == msg.actor_ref.id())
+        {
+            return false;
+        }
+        let entry = self
+            .rooms
+            .remove(&msg.room_jid)
+            .expect("exact actor checked in the same registry turn");
+        entry.actor_ref.kill();
+        self.poisoned_rooms.insert(msg.room_jid.clone());
+        self.publish_room_count();
+        // Transfer existing responsibility before I/O, even when admitting
+        // a new release would exceed the ordinary pending-release bound.
+        self.transfer_exact_responsibility_to_pending_release(
+            msg.room_jid.clone(),
+            entry.claim_fence.clone(),
+        );
+        self.start_detached_room_release(msg.room_jid, entry.claim_fence, ctx.actor_ref().clone());
+        true
+    }
 }
 
 impl kameo::message::Message<DemoteRoomIfExactActor> for RoomRegistryActor {

@@ -5,8 +5,8 @@ use tracing::{debug, instrument};
 
 use super::super::PermissionError;
 use super::types::{Object, ObjectType, Relation, Subject, SubjectType, Tuple};
-use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
-use crate::db::{row_value, ValueExt};
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase, RowValues};
+use crate::db::{row_value, Database, DatabaseDriver, DatabaseError, Transaction, Value, ValueExt};
 
 /// Storage layer for permission tuples.
 pub struct TupleStore {
@@ -95,6 +95,214 @@ impl TupleStore {
         }
 
         Ok(())
+    }
+
+    /// Replace the relation `subject` holds on `object` within the mutually
+    /// exclusive `family`, only while the family holds exactly `expected`.
+    /// Every case is ONE conditional statement, so the comparison and the
+    /// mutation commit together; a crash or a concurrent writer can never
+    /// leave the family emptied without its replacement.
+    #[instrument(skip(self, family))]
+    pub async fn swap_exclusive_relation(
+        &self,
+        object: &Object,
+        subject: &Subject,
+        family: &[Relation],
+        expected: Option<&Relation>,
+        replacement: Option<&Relation>,
+    ) -> Result<bool, PermissionError> {
+        let subject_relation = subject.relation.as_deref();
+        let scope_params = || -> Vec<Value> {
+            vec![
+                object.object_type.to_string().into(),
+                object.id.as_str().into(),
+                subject.subject_type.to_string().into(),
+                subject.id.as_str().into(),
+                subject_relation.into(),
+                subject_relation.into(),
+            ]
+        };
+        const SCOPE: &str = "object_type = ? AND object_id = ? AND subject_type = ? \
+             AND subject_id = ? AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))";
+        let family_placeholders = family.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let family_params = || -> Vec<Value> {
+            family
+                .iter()
+                .map(|relation| relation.name.as_str().into())
+                .collect()
+        };
+        // "No family relation other than `expected` is held" (or none at all).
+        let others_absent = match expected {
+            Some(_) => format!(
+                "NOT EXISTS (SELECT 1 FROM permission_tuples other WHERE {SCOPE} \
+                 AND other.relation IN ({family_placeholders}) AND other.relation <> ?)"
+            ),
+            None => format!(
+                "NOT EXISTS (SELECT 1 FROM permission_tuples other WHERE {SCOPE} \
+                 AND other.relation IN ({family_placeholders}))"
+            ),
+        };
+        let mut others_absent_params = scope_params();
+        others_absent_params.extend(family_params());
+        if let Some(expected) = expected {
+            others_absent_params.push(expected.name.as_str().into());
+        }
+
+        let (sql, params) = match (expected, replacement) {
+            (Some(expected), Some(replacement)) => {
+                let mut params: Vec<Value> = vec![replacement.name.as_str().into()];
+                params.extend(scope_params());
+                params.push(expected.name.as_str().into());
+                params.extend(others_absent_params);
+                (
+                    format!(
+                        "UPDATE permission_tuples SET relation = ? WHERE {SCOPE} \
+                         AND relation = ? AND {others_absent}"
+                    ),
+                    params,
+                )
+            }
+            (Some(expected), None) => {
+                let mut params = scope_params();
+                params.push(expected.name.as_str().into());
+                params.extend(others_absent_params);
+                (
+                    format!(
+                        "DELETE FROM permission_tuples WHERE {SCOPE} AND relation = ? \
+                         AND {others_absent}"
+                    ),
+                    params,
+                )
+            }
+            (None, Some(replacement)) => {
+                let tuple = Tuple::new(
+                    object.clone(),
+                    Relation::new(replacement.name.clone()),
+                    subject.clone(),
+                );
+                let mut params: Vec<Value> = vec![
+                    tuple.id.as_str().into(),
+                    object.object_type.to_string().into(),
+                    object.id.as_str().into(),
+                    replacement.name.as_str().into(),
+                    subject.subject_type.to_string().into(),
+                    subject.id.as_str().into(),
+                    subject_relation.into(),
+                ];
+                params.extend(others_absent_params);
+                (
+                    format!(
+                        "INSERT INTO permission_tuples (id, object_type, object_id, relation, \
+                         subject_type, subject_id, subject_relation) \
+                         SELECT ?, ?, ?, ?, ?, ?, ? WHERE {others_absent}"
+                    ),
+                    params,
+                )
+            }
+            (None, None) => {
+                let held = self
+                    .list_relations(subject, object)
+                    .await?
+                    .into_iter()
+                    .any(|held| family.iter().any(|member| member.name == held));
+                return Ok(!held);
+            }
+        };
+        // Serialize every swap on this (object, subject) family across pods:
+        // a snapshot predicate alone lets two writers that both observe an
+        // empty family insert two different relations. SQLite has a single
+        // writer, so BEGIN IMMEDIATE is that serialization; PostgreSQL takes
+        // a transaction-scoped advisory lock keyed by the family's scope.
+        let db = self
+            .actor
+            .ask(GetDatabase)
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+        let db_error = |e: DatabaseError| PermissionError::DatabaseError(e.to_string());
+        let mut tx = Self::begin_exclusive_relation(&db, object, subject).await?;
+        let rows = tx.execute(&sql, params).await.map_err(db_error)?;
+        tx.commit().await.map_err(db_error)?;
+        Ok(rows > 0)
+    }
+
+    /// Replace the complete family atomically, sharing the serialization lock
+    /// with conditional rollback swaps on every database connection.
+    #[instrument(skip(self, family))]
+    pub async fn replace_exclusive_relation(
+        &self,
+        object: &Object,
+        subject: &Subject,
+        family: &[Relation],
+        replacement: Option<&Relation>,
+    ) -> Result<(), PermissionError> {
+        let db = self
+            .actor
+            .ask(GetDatabase)
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+        let mut tx = Self::begin_exclusive_relation(&db, object, subject).await?;
+        // Delete each member inside the same transaction; readers can observe
+        // only the old complete family or its committed replacement.
+        for relation in family {
+            tx.execute(
+                "DELETE FROM permission_tuples WHERE object_type = ? AND object_id = ? \
+                 AND subject_type = ? AND subject_id = ? AND relation = ? \
+                 AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))",
+                crate::db_params![
+                    object.object_type.to_string(),
+                    object.id.as_str(),
+                    subject.subject_type.to_string(),
+                    subject.id.as_str(),
+                    relation.name.as_str(),
+                    subject.relation.as_deref(),
+                    subject.relation.as_deref(),
+                ],
+            )
+            .await?;
+        }
+        if let Some(replacement) = replacement {
+            let tuple = Tuple::new(object.clone(), replacement.clone(), subject.clone());
+            tx.execute(
+                "INSERT INTO permission_tuples (id, object_type, object_id, relation, \
+                 subject_type, subject_id, subject_relation) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                crate::db_params![
+                    tuple.id,
+                    object.object_type.to_string(),
+                    object.id.as_str(),
+                    replacement.name.as_str(),
+                    subject.subject_type.to_string(),
+                    subject.id.as_str(),
+                    subject.relation.as_deref(),
+                ],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn begin_exclusive_relation<'a>(
+        db: &'a Database,
+        object: &Object,
+        subject: &Subject,
+    ) -> Result<Transaction<'a>, PermissionError> {
+        let tx = match db.driver() {
+            DatabaseDriver::Sqlite => db.begin_immediate().await?,
+            DatabaseDriver::Postgres => {
+                let mut tx = db.begin().await?;
+                let scope_key = format!(
+                    "permission_tuples|{}|{}|{}|{}",
+                    object.object_type, object.id, subject.subject_type, subject.id
+                );
+                tx.query(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    crate::db_params![scope_key],
+                )
+                .await?;
+                tx
+            }
+        };
+        Ok(tx)
     }
 
     /// Check if a specific tuple exists.

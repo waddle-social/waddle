@@ -32,7 +32,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 
 use super::affiliation::AffiliationEntry as StoredAffiliationEntry;
 use super::{RoomConfig, SubjectState};
@@ -84,6 +84,67 @@ pub type RoomCommitFuture<'a> =
 pub struct RoomCommitOutcome {
     pub coordinates: RoomCommittedCoordinates,
     pub reservation: Option<RoomEffectReservation>,
+}
+
+/// Identifies one admin batch, including its intermediate live-roster effects.
+/// Mint once before committing and never reuse for another batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdminMutationId(uuid::Uuid);
+
+impl AdminMutationId {
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    pub const fn as_uuid(self) -> uuid::Uuid {
+        self.0
+    }
+
+    /// A stable next batch for removals discovered during a retried handoff.
+    /// Follow this only after proving the preceding batch's exact receipt.
+    pub(crate) fn next_restore_attempt(self) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(b"waddle-muc-restored-departures-v1");
+        digest.update(self.0.as_bytes());
+        let hash = digest.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        // RFC 9562 UUIDv8: application-defined, domain-separated hash data.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(uuid::Uuid::from_bytes(bytes))
+    }
+}
+
+/// Exact committed effect custody, retained even after outbox delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminMutationReceipt {
+    pub coordinates: RoomCommittedCoordinates,
+    pub removed_sessions: Vec<FullJid>,
+}
+
+impl AdminMutationReceipt {
+    pub fn from_effects(
+        coordinates: RoomCommittedCoordinates,
+        effects: &RoomMutationEffects,
+    ) -> Self {
+        let removed_sessions = effects
+            .effects()
+            .iter()
+            .flat_map(|effect| match effect {
+                RoomEffect::AdminRemainingBroadcast {
+                    removed_sessions, ..
+                } => removed_sessions.as_slice(),
+                _ => &[],
+            })
+            .cloned()
+            .collect();
+        Self {
+            coordinates,
+            removed_sessions,
+        }
+    }
 }
 
 /// One durable affiliation delta carried by [`RoomDurableMutation`].
@@ -361,6 +422,45 @@ pub trait MucDurableStore: Send + Sync {
         intent: RoomDurableMutation,
         effects: RoomMutationEffects,
     ) -> RoomCommitFuture<'a>;
+
+    /// Read the exact admin attempt's receipt, retained independently of
+    /// later mutations and drained effect rows. Missing means this attempt
+    /// has no remaining proof; implementations must never infer it from the
+    /// current affiliation snapshot. Unsupported stores fail closed.
+    fn load_admin_mutation_receipt<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        attempt: AdminMutationId,
+    ) -> MucDurableFuture<'a, Option<AdminMutationReceipt>> {
+        let _ = (room_jid, attempt);
+        Box::pin(async {
+            Err(XmppError::internal(
+                "admin mutation receipts are unavailable",
+            ))
+        })
+    }
+
+    /// Delete only after the in-memory mutation applied, or the recovered
+    /// successor was published. Failed preparations must retain their proof.
+    fn delete_admin_mutation_receipt<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        attempt: AdminMutationId,
+    ) -> MucDurableFuture<'a, ()> {
+        let _ = (room_jid, attempt);
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Delete receipts older than `retention` whose post-projection cleanup
+    /// failed, at most `limit` per call. Returns how many were removed.
+    fn prune_admin_mutation_receipts(
+        &self,
+        retention: std::time::Duration,
+        limit: usize,
+    ) -> MucDurableFuture<'_, u64> {
+        let _ = (retention, limit);
+        Box::pin(async { Ok(0) })
+    }
 
     /// Commit with publication authority that is already held by the caller.
     /// Implementations that share that authority gate must reuse it rather

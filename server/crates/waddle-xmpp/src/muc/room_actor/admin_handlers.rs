@@ -161,6 +161,74 @@ fn admin_effects_for_applied(
     )
 }
 
+/// Reconcile removals that a foreign owner could not address because its
+/// actor did not have the transferred live sessions. Keep the complete
+/// pre-removal audience and the exact SFU sessions in the durable outbox.
+pub(super) fn restored_roster_removal_effects(
+    room: &MucRoom,
+    removed_sessions: &[FullJid],
+    already_removed: &[FullJid],
+) -> crate::muc::RoomMutationEffects {
+    if removed_sessions.is_empty() {
+        return crate::muc::RoomMutationEffects::none();
+    }
+    let recipients: Vec<_> = all_room_sessions(room)
+        .into_iter()
+        .filter(|session| !already_removed.contains(session))
+        .collect();
+    let mut self_updates = Vec::new();
+    let mut remaining_updates = Vec::new();
+    for occupant in room.occupants.values() {
+        let sessions = room.get_occupant_sessions(&occupant.nick);
+        if !sessions
+            .iter()
+            .any(|session| removed_sessions.contains(session))
+        {
+            continue;
+        }
+        let mut occupant = occupant.clone();
+        occupant.affiliation = room.get_affiliation(&occupant.real_jid.to_bare());
+        let occupant_jid = room
+            .room_jid
+            .with_resource_str(&occupant.nick)
+            .expect("nick was previously accepted as resource");
+        let kind = if occupant.affiliation == Affiliation::Outcast {
+            AdminPresenceKind::Banned
+        } else {
+            AdminPresenceKind::AffiliationRemoved
+        };
+        for recipient in &recipients {
+            let update = durable_admin_update(
+                room,
+                &occupant,
+                DurableAdminUpdateInput {
+                    occupant_jid: &occupant_jid,
+                    recipient,
+                    is_self: sessions.contains(recipient),
+                    kind,
+                    actor: None,
+                    reason: None,
+                },
+            );
+            // Each recipient belongs to exactly one ordinal even when a
+            // restore removes multiple occupants at once. The status-110
+            // flag still describes only that recipient's own nickname.
+            if removed_sessions.contains(recipient) {
+                self_updates.push(update);
+            } else {
+                remaining_updates.push(update);
+            }
+        }
+    }
+    crate::muc::RoomMutationEffects::admin(
+        room.room_jid.clone(),
+        self_updates,
+        remaining_updates,
+        removed_sessions.to_vec(),
+        Vec::new(),
+    )
+}
+
 fn removal_presence_updates(
     room: &MucRoom,
     occupant_id_secret: &OccupantIdSecret,
@@ -612,6 +680,9 @@ impl kameo::message::Message<GetAdminContext> for RoomActor {
 }
 
 pub struct ApplyAdminItems {
+    /// Minted by the caller so recovery can identify this ask even if the
+    /// predecessor disappears before returning its snapshot.
+    pub attempt: super::super::durable::AdminMutationId,
     pub sender_jid: FullJid,
     pub sender_affiliation: Affiliation,
     pub sender_role: Role,
@@ -923,13 +994,15 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             durable_updates.extend(applied_durable_updates);
         }
 
+        let admin_mutation_id = (!durable_delta.is_empty()).then_some(msg.attempt);
         let outbox_reservation = if durable_delta.is_empty() {
             self.gate_pre_mutation_ownership()
                 .await
                 .map_err(super::RoomMutationError::from)?;
             None
         } else {
-            let (_, reservation) = self
+            let previous_coordinates = self.durable_coordinates;
+            let commit = self
                 .commit_durable(
                     RoomDurableMutation::AffiliationBatch(durable_delta),
                     admin_effects_for_applied(
@@ -937,9 +1010,54 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                         durable_updates,
                         removed_by_moderation.clone(),
                         &voice_changes,
-                    ),
+                    )
+                    .with_admin_mutation_id(admin_mutation_id.expect("non-empty durable delta")),
                 )
-                .await?;
+                .await;
+            let (_, reservation) = match commit {
+                Ok(committed) => committed,
+                Err(error) => {
+                    if matches!(error, super::DurablePersistError::CommitOutcomeUnknown) {
+                        self.pending_admin_projection = previous_coordinates.map(|coordinates| {
+                            let changed_roles = staged_room
+                                .occupants
+                                .iter()
+                                .filter(|(nick, occupant)| {
+                                    self.room
+                                        .get_occupant(nick)
+                                        .is_some_and(|previous| previous.role != occupant.role)
+                                })
+                                .flat_map(|(nick, occupant)| {
+                                    staged_room
+                                        .get_occupant_sessions(nick)
+                                        .into_iter()
+                                        .map(|session| (session, occupant.role))
+                                })
+                                .collect();
+                            super::PendingAdminProjection {
+                                attempt: admin_mutation_id.expect("non-empty durable delta"),
+                                previous_coordinates: coordinates,
+                                expected_affiliations: touched_jids
+                                    .iter()
+                                    // A no-op request owns no removal presence.
+                                    // Retain its session for the pending leave
+                                    // that revoked its membership earlier.
+                                    .filter(|jid| {
+                                        changed_affiliations
+                                            .iter()
+                                            .any(|(changed, _)| changed == *jid)
+                                    })
+                                    .map(|jid| (jid.clone(), staged_room.get_affiliation(jid)))
+                                    .collect(),
+                                removed_sessions: removed_by_moderation.clone(),
+                                changed_roles,
+                                moderated: staged_room.config.moderated,
+                            }
+                        });
+                    }
+                    return Err(error.into());
+                }
+            };
             reservation
         };
 
@@ -954,6 +1072,15 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             self.advance_member_admission_revision(&jid);
         }
         self.room = staged_room;
+        if let Some(attempt) = admin_mutation_id {
+            if let Some(coordinates) = self.durable_coordinates {
+                self.record_admin_mutation_resolution(super::AdminMutationResolution::Committed {
+                    attempt,
+                    coordinates,
+                });
+            }
+            self.delete_admin_receipt_after_projection(attempt);
+        }
         if needs_rehydration {
             // R1: converge the durable-recipient mirror to the durable
             // channel∪space truth after any removal to `None` — a

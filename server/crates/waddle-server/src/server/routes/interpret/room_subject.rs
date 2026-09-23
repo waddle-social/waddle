@@ -3,7 +3,6 @@ use kameo::error::SendError;
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::muc::room_actor::SetSubjectError;
 use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
-use waddle_xmpp::muc::room_registry_actor::GetOrCreateRoom;
 use waddle_xmpp::muc::{RoomClaimFenceContext, RoomSubjectTexts};
 use waddle_xmpp::ownership::{Entity, EntityType};
 
@@ -276,7 +275,7 @@ pub(super) async fn persist_room_subject_event(
     }
 }
 
-async fn reconcile_ambiguous_subject_commit(
+pub(super) async fn reconcile_ambiguous_subject_commit(
     room_registry: &ActorRef<RoomRegistryActor>,
     room: &BareJid,
     stale_actor: &ActorRef<RoomActor>,
@@ -286,29 +285,41 @@ async fn reconcile_ambiguous_subject_commit(
     let Some(recovery_snapshot) = durable_recovery_snapshot else {
         return false;
     };
-    let _ = room_registry
-        .ask(DemoteRoomIfExactActor {
-            room_jid: room.clone(),
-            actor_ref: stale_actor.clone(),
-        })
-        .await;
-    let recovered_room = match room_registry
-        .ask(GetOrCreateRoom {
-            room_jid: room.clone(),
-            waddle_id: recovery_snapshot.room.waddle_id.clone(),
-            channel_id: recovery_snapshot.room.channel_id.clone(),
-            config: recovery_snapshot.room.config.clone(),
-        })
-        .await
+    // The earlier snapshot identifies the lifecycle only. The shared recovery
+    // path takes the sealed actor's final roster and departure ledger and
+    // installs them before exposing a successor, without recreating a room
+    // whose lifecycle has since been destroyed.
+    let recovered_room = match crate::admin::channels::reacquire_config_actor(
+        room_registry,
+        room,
+        recovery_snapshot,
+        stale_actor,
+    )
+    .await
     {
-        Ok(room) => room,
+        Ok(Some(actor)) => actor,
+        Ok(None) => return false,
         Err(error) => {
+            if matches!(
+                error,
+                waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Timeout
+            ) {
+                let _ = room_registry
+                    .ask(
+                        waddle_xmpp::muc::room_registry_actor::RetireUnresponsiveRoomIfExactActor {
+                            room_jid: room.clone(),
+                            actor_ref: stale_actor.clone(),
+                        },
+                    )
+                    .mailbox_timeout(std::time::Duration::from_secs(5))
+                    .reply_timeout(std::time::Duration::from_secs(5))
+                    .await;
+            }
             warn!(room = %room, %error, "ambiguous subject reconciliation could not restore the room");
             return false;
         }
     };
     recovered_room
-        .actor_ref
         .ask(GetSnapshot)
         .reply_timeout(std::time::Duration::from_secs(5))
         .await

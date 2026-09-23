@@ -3,13 +3,16 @@ use std::str::FromStr;
 
 use futures::StreamExt;
 use prescience::{
-    Client, Consistency, ObjectReference, PermissionResult, Relationship, RelationshipFilter,
-    RelationshipUpdate, SubjectFilter, SubjectReference,
+    Client, Consistency, ObjectReference, PermissionResult, Precondition, Relationship,
+    RelationshipFilter, RelationshipUpdate, SubjectFilter, SubjectReference,
 };
 
 use crate::config::SpiceDbConfig;
 
-use super::{CheckResponse, Object, ObjectType, PermissionError, Subject, SubjectType, Tuple};
+use super::actor::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
+use super::{
+    CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
+};
 
 #[derive(Clone)]
 pub struct SpiceDbPermissionBackend {
@@ -69,6 +72,94 @@ impl SpiceDbPermissionBackend {
             .await
             .map_err(map_spicedb_error)?;
         Ok(())
+    }
+
+    /// The complete family is written in one SpiceDB transaction, which
+    /// serializes with the preconditions of conditional rollback swaps.
+    pub async fn replace_exclusive_relation(
+        &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        let updates = msg
+            .family
+            .iter()
+            .map(|relation| {
+                let tuple = Tuple::new(msg.object.clone(), relation.clone(), msg.subject.clone());
+                let relationship = relationship_from_tuple(&tuple)?;
+                Ok(if msg.replacement.as_ref() == Some(relation) {
+                    RelationshipUpdate::touch(relationship)
+                } else {
+                    RelationshipUpdate::delete(relationship)
+                })
+            })
+            .collect::<Result<Vec<_>, PermissionError>>()?;
+        self.client
+            .write_relationships(updates)
+            .await
+            .map_err(map_spicedb_error)?;
+        Ok(())
+    }
+
+    /// One `WriteRelationships` request: SpiceDB checks that the family holds
+    /// exactly `expected` and applies the delete/touch atomically, so no
+    /// concurrent writer can slip between the comparison and the mutation.
+    pub async fn swap_exclusive_relation(
+        &self,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError> {
+        let tuple_for = |relation: &Relation| {
+            Tuple::new(
+                msg.object.clone(),
+                Relation::new(relation.name.clone()),
+                msg.subject.clone(),
+            )
+        };
+        if msg.expected.as_ref().map(|relation| &relation.name)
+            == msg.replacement.as_ref().map(|relation| &relation.name)
+        {
+            return Ok(ExclusiveRelationSwap::Swapped);
+        }
+        let preconditions = msg
+            .family
+            .iter()
+            .map(|relation| {
+                let filter = exact_relationship_filter(&tuple_for(relation));
+                let is_expected = msg
+                    .expected
+                    .as_ref()
+                    .is_some_and(|expected| expected.name == relation.name);
+                if is_expected {
+                    Precondition::must_exist(filter)
+                } else {
+                    Precondition::must_not_exist(filter)
+                }
+            })
+            .collect();
+        let mut updates = Vec::new();
+        if let Some(expected) = &msg.expected {
+            updates.push(RelationshipUpdate::delete(relationship_from_tuple(
+                &tuple_for(expected),
+            )?));
+        }
+        if let Some(replacement) = &msg.replacement {
+            updates.push(RelationshipUpdate::touch(relationship_from_tuple(
+                &tuple_for(replacement),
+            )?));
+        }
+        match self
+            .client
+            .write_relationships(updates)
+            .preconditions(preconditions)
+            .await
+        {
+            Ok(_) => Ok(ExclusiveRelationSwap::Swapped),
+            Err(prescience::Error::Status { code, .. })
+                if format!("{code:?}") == "FailedPrecondition" =>
+            {
+                Ok(ExclusiveRelationSwap::Mismatch)
+            }
+            Err(error) => Err(map_spicedb_error(error)),
+        }
     }
 
     pub async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {

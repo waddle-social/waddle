@@ -7,8 +7,9 @@ mod spicedb;
 mod tuple;
 
 pub use actor::{
-    CheckPermission, DeleteTuple, EnsureSchema, ListRelations, ListSubjects, LookupResources,
-    LookupSubjects, Permission, PermissionActor, WriteTuple,
+    CheckPermission, DeleteTuple, EnsureSchema, ExclusiveRelationSwap, ListRelations, ListSubjects,
+    LookupResources, LookupSubjects, Permission, PermissionActor, ReplaceExclusiveRelation,
+    SwapExclusiveRelation, WriteTuple,
 };
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
 pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
