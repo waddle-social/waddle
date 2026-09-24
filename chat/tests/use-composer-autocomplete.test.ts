@@ -425,6 +425,36 @@ describe("useComposerAutocomplete keyboard navigation", () => {
     stop();
   });
 
+  test("keys typed outside the editor (e.g. the + menu) are left alone", () => {
+    const { editor, chains } = makeEditor(["@"], { para: 0, offset: 1 });
+    const editorDom = { contains: (node: unknown) => node === editorDom };
+    const menuItem = {};
+    (editor as { view?: unknown }).view = { dom: editorDom };
+    const { api, stop } = makeHarness({
+      editor,
+      mentions: [candidate("alice"), candidate("bob")],
+    });
+    api.checkAutocompleteFromEditor();
+    let prevented = false;
+    const fromMenu = (key: string) => ({
+      ...keyEvent(key),
+      target: menuItem,
+      preventDefault() {
+        prevented = true;
+      },
+    }) as unknown as KeyboardEvent;
+
+    api.onKeydown(fromMenu("ArrowDown"));
+    api.onKeydown(fromMenu("Enter"));
+    expect(api.selectedIndex.value).toBe(0);
+    expect(chains).toHaveLength(0);
+    expect(prevented).toBe(false);
+
+    api.onKeydown({ ...keyEvent("ArrowDown"), target: editorDom } as unknown as KeyboardEvent);
+    expect(api.selectedIndex.value).toBe(1);
+    stop();
+  });
+
   test("Tab selects the highlighted candidate", () => {
     const { editor, chains } = makeEditor(["@"], { para: 0, offset: 1 });
     const { api, stop } = makeHarness({

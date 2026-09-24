@@ -311,7 +311,17 @@ export function useComposerAutocomplete(input: {
     return false;
   }
 
+  /** Keys only drive the popover when typed in the editor itself; the
+   * composer also hosts menus and inputs (the + menu, the link field,
+   * GIF search) whose own keyboard handling must not be hijacked. */
+  function isEditorKeyEvent(e: KeyboardEvent): boolean {
+    const dom: HTMLElement | undefined = input.getTiptapEditor()?.view?.dom;
+    if (!dom || !e.target) return true;
+    return dom.contains(e.target as Node);
+  }
+
   function onKeydown(e: KeyboardEvent) {
+    if (!isEditorKeyEvent(e)) return;
     if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value || showSlash.value)) {
       if (e.key === "ArrowDown") {
         e.preventDefault();

@@ -48,7 +48,6 @@ const props = defineProps<{
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   replyingTo?: { id: string; author: string; preview?: string } | null;
   isTopPinned?: boolean;
-  extensionsOpen?: boolean;
   slashCommands?: DiscoveredExtensionCommand[];
   inMuc?: boolean;
   dispatchSlashCommand?: (invocation: SlashInvocation) => Promise<boolean>;
@@ -583,6 +582,7 @@ watch(isPreparingSend, (preparing) => {
 
     <GifPicker
       v-if="showGifPicker"
+      :key="gifPickerQuery"
       :is-top-pinned="isTopPinned"
       :initial-query="gifPickerQuery"
       @select="onGifSelected"
