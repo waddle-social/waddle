@@ -138,10 +138,12 @@ pub async fn fetch_due_batch(
     Ok(out)
 }
 
-/// Mark a row done — permanently removing it from the due set. Used both
-/// for a successful judgment and for dead-lettering a row that exceeded the
-/// retry budget (see `drain::MAX_ATTEMPTS`); rows are never deleted, only
-/// marked done, so the queue table also serves as a durable audit trail.
+/// Mark a row done after a successful judgment — permanently removing it
+/// from the due set without touching `last_error` (there is none to record).
+/// A row that instead exhausted its retry budget is dead-lettered via
+/// [`dead_letter`], not this function, so its terminal failure reason is
+/// captured too. Rows are never deleted, only marked done, so the queue
+/// table also serves as a durable audit trail.
 pub async fn mark_done(
     db: &Database,
     id: &MessageJudgmentOutboxId,
@@ -156,10 +158,35 @@ pub async fn mark_done(
     Ok(())
 }
 
+/// Dead-letter a row that exceeded the retry budget: increments
+/// `attempt_count` and stores the terminal `error` (unlike [`mark_done`],
+/// which leaves `last_error` untouched), then marks the row done in the same
+/// statement. Without this, the row's final failure reason would never be
+/// persisted — only earlier attempts' errors (recorded by
+/// [`record_failure`]) would appear in the durable audit trail, silently
+/// dropping the one error that actually caused the row to stop being
+/// retried.
+pub async fn dead_letter(
+    db: &Database,
+    id: &MessageJudgmentOutboxId,
+    error: &str,
+) -> Result<(), MessageJudgmentOutboxError> {
+    let connection = db.guard().await?;
+    connection
+        .execute(
+            "UPDATE message_judgment_outbox \
+             SET attempt_count = attempt_count + 1, last_error = ?, done = TRUE \
+             WHERE id = ?",
+            crate::db_params![error, id.as_str()],
+        )
+        .await?;
+    Ok(())
+}
+
 /// Record one failed judgment attempt: increments `attempt_count`, stores
 /// `error`, and reschedules `available_at_ms` to `next_attempt_at_ms`. Does
 /// not itself decide whether the row should be dead-lettered instead — that
-/// policy lives in `drain::drain_once`, which calls [`mark_done`] directly
+/// policy lives in `drain::drain_once`, which calls [`dead_letter`] directly
 /// once `drain::MAX_ATTEMPTS` is reached rather than calling this function.
 pub async fn record_failure(
     db: &Database,

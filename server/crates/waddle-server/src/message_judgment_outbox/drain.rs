@@ -14,6 +14,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::{self, StreamExt};
+
 use crate::db::Database;
 
 use super::judge::MessageJudge;
@@ -27,6 +29,15 @@ pub const MAX_RETRY_DELAY_MS: i64 = 600_000;
 
 /// Default batch size for [`run_drain_loop`]'s poll ticks.
 const DEFAULT_BATCH_LIMIT: i64 = 100;
+
+/// Bound on judge calls processed concurrently within one [`drain_once`]
+/// batch. Rows are otherwise fully independent, so without this, one slow
+/// judge round-trip would serialize the rest of the batch behind it —
+/// worst case, `batch_limit` sequential calls at the judge's own timeout
+/// each. Bounded (rather than unbounded) so a large batch doesn't open an
+/// unbounded number of concurrent outbound requests or DB connections at
+/// once.
+const MAX_CONCURRENT_JUDGE_CALLS: usize = 8;
 
 pub fn retry_delay_ms(attempt: i64) -> i64 {
     let shift = if attempt <= 1 {
@@ -73,10 +84,46 @@ pub async fn drain_once(
         }
     };
     outcome.fetched = batch.len();
-    for row in batch {
-        process_row(db, judge, row, now_ms, &mut outcome).await;
+    // Rows are fully independent (each is its own DB row, its own judge
+    // call), so they're processed with bounded concurrency rather than one
+    // at a time — otherwise one slow judge call would serialize the rest of
+    // the batch behind it. `db`/`judge` are shared immutable references;
+    // each row's own outcome is folded into `outcome` afterward rather than
+    // mutated concurrently.
+    let deltas: Vec<RowOutcome> = stream::iter(batch)
+        .map(|row| process_row(db, judge, row, now_ms))
+        .buffer_unordered(MAX_CONCURRENT_JUDGE_CALLS)
+        .collect()
+        .await;
+    for delta in deltas {
+        match delta {
+            RowOutcome::Judged => outcome.judged += 1,
+            RowOutcome::Failed { dead_lettered } => {
+                outcome.failed += 1;
+                if dead_lettered {
+                    outcome.dead_lettered += 1;
+                }
+            }
+            RowOutcome::StoreErrorIgnored => {}
+        }
     }
     outcome
+}
+
+/// Per-row result of [`process_row`], folded into a shared [`DrainOutcome`]
+/// by [`drain_once`] once every concurrently-processed row has finished —
+/// never mutated concurrently from multiple in-flight rows.
+enum RowOutcome {
+    Judged,
+    Failed {
+        dead_lettered: bool,
+    },
+    /// A judge call resolved, but the *store* write that should have
+    /// followed it failed (already logged at the call site). Not counted
+    /// as judged, failed, or dead-lettered: the row's true state is
+    /// whatever is durably persisted, and none of those counters would be
+    /// accurate here.
+    StoreErrorIgnored,
 }
 
 async fn process_row(
@@ -84,8 +131,7 @@ async fn process_row(
     judge: &dyn MessageJudge,
     row: PendingJudgmentRow,
     now_ms: i64,
-    outcome: &mut DrainOutcome,
-) {
+) -> RowOutcome {
     match judge.is_question(&row.body_snapshot).await {
         Ok(judgment) => {
             let record = JudgmentRecord {
@@ -101,30 +147,34 @@ async fn process_row(
             };
             if let Err(error) = store::insert_judgment(db, record).await {
                 tracing::warn!(%error, "message_judgment_outbox: insert_judgment failed");
-                return;
+                return RowOutcome::StoreErrorIgnored;
             }
             if let Err(error) = store::mark_done(db, &row.id).await {
                 tracing::warn!(%error, "message_judgment_outbox: mark_done after success failed");
-                return;
+                return RowOutcome::StoreErrorIgnored;
             }
-            outcome.judged += 1;
+            RowOutcome::Judged
         }
         Err(judge_error) => {
-            outcome.failed += 1;
             let next_attempt = row.attempt_count.saturating_add(1);
             if next_attempt >= MAX_ATTEMPTS {
-                // Give up silently: mark done (not deleted) so this
-                // permanently-failing row stops being retried forever and
-                // never blocks other rows or grows the queue unboundedly.
-                if let Err(error) = store::mark_done(db, &row.id).await {
-                    tracing::warn!(
-                        %error,
-                        "message_judgment_outbox: dead-letter mark_done failed"
-                    );
-                    return;
-                }
-                outcome.dead_lettered += 1;
-                return;
+                // Give up: mark done (not deleted) so this permanently-
+                // failing row stops being retried forever and never blocks
+                // other rows or grows the queue unboundedly. Persists the
+                // terminal error too (`dead_letter`, unlike `mark_done`),
+                // so the audit trail doesn't silently drop the one failure
+                // that actually ended the row's retries.
+                return match store::dead_letter(db, &row.id, &judge_error.to_string()).await {
+                    Ok(()) => RowOutcome::Failed {
+                        dead_lettered: true,
+                    },
+                    Err(error) => {
+                        tracing::warn!(%error, "message_judgment_outbox: dead_letter failed");
+                        RowOutcome::Failed {
+                            dead_lettered: false,
+                        }
+                    }
+                };
             }
             let delay = retry_delay_ms(next_attempt);
             if let Err(error) = store::record_failure(
@@ -136,6 +186,9 @@ async fn process_row(
             .await
             {
                 tracing::warn!(%error, "message_judgment_outbox: record_failure failed");
+            }
+            RowOutcome::Failed {
+                dead_lettered: false,
             }
         }
     }
@@ -411,17 +464,24 @@ mod tests {
             .expect("fetch")
             .is_empty());
 
-        // But it still exists, marked done, not deleted.
+        // But it still exists, marked done, not deleted -- and its terminal
+        // failure reason is persisted (`dead_letter`, not a bare
+        // `mark_done`), not silently dropped in favor of an earlier
+        // attempt's error.
         let connection = db.guard().await.expect("guard");
         let mut rows = connection
             .query(
-                "SELECT done FROM message_judgment_outbox WHERE stanza_id = ?",
+                "SELECT done, last_error FROM message_judgment_outbox WHERE stanza_id = ?",
                 crate::db_params!["stanza-dead-letter"],
             )
             .await
             .expect("query");
         let row = rows.next().await.expect("row").expect("row present");
         assert!(row.get::<bool>(0).expect("done"));
+        assert_eq!(
+            row.get::<Option<String>>(1).expect("last_error"),
+            Some("judge transport failure: connection reset".to_string())
+        );
 
         // The healthy row was judged successfully on the very first pass,
         // was never dead-lettered, and never blocked (or was blocked by)
