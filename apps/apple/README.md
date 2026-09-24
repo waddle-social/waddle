@@ -120,6 +120,10 @@ access and read access to files the user picks.
      *TestFlight and App Store*.
    - Action *Archive – macOS*, scheme `Waddle-macOS`, deployment preparation
      *TestFlight and App Store*.
+   - Each archive must use its own app's scheme. There is deliberately no
+     combined scheme: archiving both apps in one action builds the macOS app
+     against the iOS-only XCFramework and fails with "no library for this
+     platform was found".
    - Post-action *TestFlight Internal Testing* for both archives, with the
      tester group that should receive every build.
 4. **Build number.** In App Store Connect, *Xcode Cloud → Settings → Build
