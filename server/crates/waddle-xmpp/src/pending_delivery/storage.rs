@@ -49,6 +49,14 @@ impl std::fmt::Display for PendingClaimToken {
     }
 }
 
+/// Expected offer phase when the original producer retires its exact claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingClaimPhase {
+    Unoffered,
+    /// A committed offer reservation; this alone is not delivery proof.
+    Offered,
+}
+
 /// Errors returned by [`PendingDeliveryStorage`] implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum PendingStorageError {
@@ -72,6 +80,9 @@ pub enum PendingStorageError {
 
     #[error("pending delivery store does not support durable offer reservations")]
     OfferReservationUnsupported,
+
+    #[error("pending delivery store does not support exact-claim deletion")]
+    ClaimDeletionUnsupported,
 
     #[error("invalid pending-delivery claim token: {0}")]
     InvalidClaimToken(#[from] uuid::Error),
@@ -350,6 +361,19 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// flush paths so a delivered row is removed without affecting
     /// rows that failed to push.
     async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError>;
+
+    /// Retire only the original producer's exact, still-unsequenced claim.
+    /// Preoffer poison/block decisions require Unoffered; accepted non-SM
+    /// delivery requires Offered. A stale completion must not delete a new
+    /// claim on the same stream or a row already bound to an SM sequence.
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &PendingClaim,
+        phase: PendingClaimPhase,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = (claim, phase);
+        Err(PendingStorageError::ClaimDeletionUnsupported)
+    }
 
     /// Release every row claimed by `session` back to the unclaimed
     /// pool. Used on SM-session expiry pre-ack so a subsequent
@@ -1128,6 +1152,47 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
             self.clear_claimed_at(std::slice::from_ref(id))?;
         }
+        Ok(removed)
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &PendingClaim,
+        phase: PendingClaimPhase,
+    ) -> Result<u64, PendingStorageError> {
+        let mut rows = self
+            .inner
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let token_matches = self
+            .claim_tokens
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .get(&claim.row_id)
+            == Some(&claim.token);
+        let offered = self
+            .offered_claims
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .contains(&claim.row_id);
+        if !token_matches || offered != matches!(phase, PendingClaimPhase::Offered) {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for queue in rows.values_mut() {
+            let before = queue.len();
+            queue.retain(|row| {
+                !(row.id == claim.row_id
+                    && row.flushed_in_session.as_ref() == Some(&claim.session)
+                    && row.outbound_sequence.is_none())
+            });
+            removed += (before - queue.len()) as u64;
+        }
+        if removed > 0 {
+            self.clear_notification_outboxed_markers(std::slice::from_ref(&claim.row_id))?;
+            self.clear_claimed_at(std::slice::from_ref(&claim.row_id))?;
+        }
+        rows.retain(|_, queue| !queue.is_empty());
         Ok(removed)
     }
 

@@ -1908,7 +1908,7 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             .entry_if_owner(&target.resource, &target.owner)
             .is_some();
         let ordering_deferred = outcome.deferred_ordering > 0;
-        let retry_handoff = ordering_deferred;
+        let retry_handoff = ordering_deferred || outcome.has_retry_work();
         if !target_still_current && (outcome.claimed > 0 || outcome.pushed > 0) {
             if retry_handoff {
                 spawn_terminal_pending_ordering_retry(state, target, outcome, retry_lease);

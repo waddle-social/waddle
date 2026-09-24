@@ -182,6 +182,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirs
             .await
     }
 
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
+    }
+
     async fn delete_claimed(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -680,6 +688,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             .await
     }
 
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
+    }
+
     async fn delete_claimed(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -897,6 +913,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         self.inner
             .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
     }
 
     async fn delete_claimed(
@@ -2825,6 +2849,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             .await
     }
 
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
+    }
+
     async fn delete_claimed(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -3084,6 +3116,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         self.inner
             .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
     }
 
     async fn delete_claimed(
@@ -3431,6 +3471,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         self.inner
             .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
     }
 
     async fn delete_claimed(
@@ -3995,6 +4043,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         self.inner
             .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
     }
 
     async fn delete_claimed(
@@ -4612,6 +4668,14 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         self.inner
             .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.delete_unsequenced_claim(claim, phase).await
     }
 
     async fn delete_claimed(
@@ -10962,6 +11026,14 @@ mod terminal_ordering_release_tests {
             self.inner()
                 .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
                 .await
+        }
+
+        async fn delete_unsequenced_claim(
+            &self,
+            claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+            phase: waddle_xmpp::pending_delivery::storage::PendingClaimPhase,
+        ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+            self.inner().delete_unsequenced_claim(claim, phase).await
         }
 
         async fn delete_claimed(

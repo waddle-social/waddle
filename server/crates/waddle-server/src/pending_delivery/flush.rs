@@ -1,5 +1,5 @@
 use super::*;
-use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimToken};
+use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, PendingClaimToken};
 use waddle_xmpp::registry::{OutboundStanza, PendingFlushReservation};
 
 /// Bound on rows claimed and pushed per `claim_batch_for_session` iteration
@@ -67,6 +67,7 @@ pub struct FlushOutcome {
     failed_releases: Vec<DeferredClaimRelease>,
     pending_offers: Vec<PendingOffer>,
     unqueued_offers: Vec<PendingClaim>,
+    pending_deletes: Vec<PendingClaim>,
 }
 
 impl FlushOutcome {
@@ -74,6 +75,7 @@ impl FlushOutcome {
         !self.failed_releases.is_empty()
             || !self.pending_offers.is_empty()
             || !self.unqueued_offers.is_empty()
+            || !self.pending_deletes.is_empty()
     }
 
     fn absorb(&mut self, mut next: Self) {
@@ -87,6 +89,7 @@ impl FlushOutcome {
         self.failed_releases.append(&mut next.failed_releases);
         self.pending_offers.append(&mut next.pending_offers);
         self.unqueued_offers.append(&mut next.unqueued_offers);
+        self.pending_deletes.append(&mut next.pending_deletes);
     }
 }
 
@@ -170,11 +173,15 @@ where
 {
     let mut delay = std::time::Duration::from_millis(100);
     loop {
+        let cleanup_only = total.deferred_ordering == 0 && total.has_retry_work();
         settle_retry_work(storage, registry, &mut total).await;
         if total.has_retry_work() {
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(std::time::Duration::from_secs(5));
             continue;
+        }
+        if cleanup_only {
+            return total;
         }
         if let Some(owner) = ctx.owner {
             let Some(entry) = registry.entry_if_owner(resource, owner) else {
@@ -205,7 +212,7 @@ where
         .await;
         let progressed = outcome.pushed > 0;
         total.absorb(outcome);
-        if total.deferred_ordering == 0 {
+        if total.deferred_ordering == 0 && !total.has_retry_work() {
             return total;
         }
         if progressed {
@@ -376,9 +383,33 @@ where
 
         let mut rows = batch.into_iter();
         while let Some(row) = rows.next() {
+            let exact_claim = dispatch_gate.map(|_| PendingClaim {
+                row_id: row.id.clone(),
+                session: session_id_for_claim.clone(),
+                token: claim_token,
+            });
             let payload = match materialize(&row, archive_resolver).await {
                 Ok(Some(payload)) => payload,
                 Ok(None) => {
+                    if let Some(claim) = &exact_claim {
+                        if discard_unoffered_claim(storage, claim, &mut outcome, failed_releases)
+                            .await
+                        {
+                            outcome.unresolved += 1;
+                            waddle_xmpp::telemetry::reliability::increment_pending_delivery_unresolved_poison_pill();
+                            continue;
+                        }
+                        release_ordered_suffix(
+                            storage,
+                            &mut rows,
+                            session_id_for_claim,
+                            &claim_token,
+                            failed_releases,
+                            &mut outcome,
+                        )
+                        .await;
+                        break 'batches;
+                    }
                     // Archived row whose MAM lookup definitively found
                     // nothing usable (row missing, tombstoned, or its
                     // preserved XML is unparseable) — the original stanza
@@ -425,15 +456,35 @@ where
                          aborting flush batch and releasing this row and all \
                          remaining claimed rows for retry"
                     );
-                    release_row_or_warn(storage, &row.id, "transient archive failure").await;
-                    for deferred in rows.by_ref() {
-                        outcome.deferred_transient += 1;
-                        release_row_or_warn(
+                    if exact_claim.is_some() {
+                        release_ordering_claim(
                             storage,
-                            &deferred.id,
-                            "transient archive failure (batch abort)",
+                            &row.id,
+                            session_id_for_claim,
+                            &claim_token,
+                            failed_releases,
                         )
                         .await;
+                        release_ordered_suffix(
+                            storage,
+                            &mut rows,
+                            session_id_for_claim,
+                            &claim_token,
+                            failed_releases,
+                            &mut outcome,
+                        )
+                        .await;
+                    } else {
+                        release_row_or_warn(storage, &row.id, "transient archive failure").await;
+                        for deferred in rows.by_ref() {
+                            outcome.deferred_transient += 1;
+                            release_row_or_warn(
+                                storage,
+                                &deferred.id,
+                                "transient archive failure (batch abort)",
+                            )
+                            .await;
+                        }
                     }
                     // Batch-fatal AND flush-fatal: claim no further batches.
                     break 'batches;
@@ -453,6 +504,29 @@ where
                             sender = %sender,
                             "pending_delivery flush dropping row: recipient blocked sender post-intake (XEP-0191 §2 step 4)"
                         );
+                        if let Some(claim) = &exact_claim {
+                            if discard_unoffered_claim(
+                                storage,
+                                claim,
+                                &mut outcome,
+                                failed_releases,
+                            )
+                            .await
+                            {
+                                outcome.dropped_blocked += 1;
+                                continue;
+                            }
+                            release_ordered_suffix(
+                                storage,
+                                &mut rows,
+                                session_id_for_claim,
+                                &claim_token,
+                                failed_releases,
+                                &mut outcome,
+                            )
+                            .await;
+                            break 'batches;
+                        }
                         outcome.dropped_blocked += 1;
                         if let Err(error) = storage.delete_row(&row.id).await {
                             // Copilot review on PR #360: without a release
@@ -714,8 +788,12 @@ pub(crate) async fn flush_recovery_pass<R>(
 where
     R: ArchiveResolver + ?Sized,
 {
+    let cleanup_only = outcome.deferred_ordering == 0 && outcome.has_retry_work();
     settle_retry_work(storage, registry, &mut outcome).await;
     if outcome.has_retry_work() {
+        return outcome;
+    }
+    if cleanup_only {
         return outcome;
     }
     if let Some(owner) = ctx.owner {
@@ -773,8 +851,12 @@ async fn attempt_offer(
     {
         outcome.pushed += 1;
         if !sm_enabled {
-            if let Err(error) = storage.delete_row(&claim.row_id).await {
-                warn!(row_id = %claim.row_id, %error, "non-SM offered pending row delete failed");
+            if let Err(error) = storage
+                .delete_unsequenced_claim(&claim, PendingClaimPhase::Offered)
+                .await
+            {
+                warn!(row_id = %claim.row_id, %error, "non-SM offered pending row delete failed; retaining exact cleanup");
+                outcome.pending_deletes.push(claim);
             }
         }
         true
@@ -803,7 +885,60 @@ async fn settle_retry_work(
             outcome.unqueued_offers.push(claim);
         }
     }
+    for claim in std::mem::take(&mut outcome.pending_deletes) {
+        if let Err(error) = storage
+            .delete_unsequenced_claim(&claim, PendingClaimPhase::Offered)
+            .await
+        {
+            warn!(row_id = %claim.row_id, %error, "offered pending row deletion still pending");
+            outcome.pending_deletes.push(claim);
+        }
+    }
     retry_ordering_releases(storage, &mut outcome.failed_releases).await;
+}
+
+async fn discard_unoffered_claim(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    claim: &PendingClaim,
+    outcome: &mut FlushOutcome,
+    failed_releases: &mut Vec<DeferredClaimRelease>,
+) -> bool {
+    match storage
+        .delete_unsequenced_claim(claim, PendingClaimPhase::Unoffered)
+        .await
+    {
+        Ok(deleted) if deleted > 0 => return true,
+        Ok(_) => outcome.deferred_ordering += 1,
+        Err(error) => {
+            warn!(row_id = %claim.row_id, %error, "unoffered pending row deletion failed; releasing exact claim");
+            release_ordering_claim(
+                storage,
+                &claim.row_id,
+                &claim.session,
+                &claim.token,
+                failed_releases,
+            )
+            .await;
+        }
+    }
+    outcome.deferred_transient += 1;
+    false
+}
+
+async fn release_ordered_suffix(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    rows: &mut std::vec::IntoIter<PendingRow>,
+    session: &SmSessionId,
+    token: &PendingClaimToken,
+    failed_releases: &mut Vec<DeferredClaimRelease>,
+    outcome: &mut FlushOutcome,
+) {
+    let ordering = outcome.deferred_ordering > 0;
+    for row in rows.by_ref() {
+        outcome.deferred_transient += 1;
+        outcome.deferred_ordering += u32::from(ordering);
+        release_ordering_claim(storage, &row.id, session, token, failed_releases).await;
+    }
 }
 
 async fn release_ordering_claim(

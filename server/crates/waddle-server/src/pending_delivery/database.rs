@@ -1,5 +1,5 @@
 use super::*;
-use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimToken};
+use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, PendingClaimToken};
 
 mod ack_windows;
 mod custody;
@@ -929,6 +929,17 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             crate::db_params![id.as_str().to_string()],
         )
         .await
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &PendingClaim,
+        phase: PendingClaimPhase,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE row_id = ? AND flushed_in_session = ? AND claim_token = ? AND outbound_sequence IS NULL AND claim_offered = ?",
+            crate::db_params![claim.row_id.as_str().to_string(), claim.session.as_str().to_string(), claim.token.to_string(), i64::from(matches!(phase, PendingClaimPhase::Offered))],
+        ).await
     }
 
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
