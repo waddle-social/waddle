@@ -37,15 +37,14 @@ spec:
     # it must never change across upgrades or rollbacks.
     deployment:
       uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
-    # #1770 stage 2 adds durable archive dispatch gates (V1020), processed
-    # delivery (deliver_ordered.v12 / remote_resource_route.v8), and authenticated
-    # archive positions on remote_resource_frame.v3. Old writers bypass the gate
-    # and the route/frame endpoints cannot negotiate a mixed-version window.
-    # Use one Recreate cutover. Restore RollingUpdate only AFTER an image carrying
-    # this change is verified on every replica; an early flip can cancel its build
-    # and expose the first new image to old peers (the #1791 failure mode).
+    # #1834's V1020 / relay wire cutover completed on every replica at 215ed6ff.
+    # Resume steady-state rolling updates; incompatible wire changes still need
+    # a verified Recreate cutover until #1804 is implemented.
     updateStrategy:
-      type: Recreate
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
