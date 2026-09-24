@@ -268,3 +268,114 @@ async fn postgres_xep0045_full_reflection_queue_retains_recoverable_receipt() {
         queued_copy_before_relayed_reflection(fixture, true).await;
     }
 }
+
+#[tokio::test]
+async fn sqlite_xep0045_progress_contention_retries_without_repeating_live_delivery() {
+    use crate::ingress::execute_uow::CONTEND_DELIVERY_PROGRESS_ONCE;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    let fixture = IngressFixture::sqlite().await;
+    let state = socket_tests::create_test_websocket_state().await;
+    let room: jid::BareJid = "progress-contention@muc.example.com".parse().expect("room");
+    let sender = fixture.submission(None, "").sender;
+    let other: jid::FullJid = "juliet@example.com/phone".parse().expect("other occupant");
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "progress-contention".into(),
+            channel_id: "progress-contention".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    let mut receivers = Vec::new();
+    for (resource, nick) in [(&sender, "sender"), (&other, "other")] {
+        let (tx, receiver) = tokio::sync::mpsc::channel(4);
+        socket_tests::register_test_connection(&state, resource, tx).await;
+        receivers.push(receiver);
+        actor
+            .ask(Join {
+                nick: nick.into(),
+                real_jid: resource.clone(),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+    let mut deps = build_interpret_deps(&state, None);
+    deps.inbox_storage = None;
+    let contention = Arc::new(AtomicBool::new(true));
+    for (index, (author, text)) in [(&sender, "A"), (&other, "B")].into_iter().enumerate() {
+        let mut submission = groupchat_submission(&fixture, &room, author, text, text);
+        let message = submission.plan.sanitized_message.clone();
+        plan_broadcast(&mut submission, &room, &message, &deps).await;
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("commit archived room message");
+        assert!(
+            !decision.archive_ids.is_empty(),
+            "exercise archive ordering"
+        );
+        let execute = execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        );
+        // Fail after inserting progress, so the retry must reopen a rolled-back
+        // transaction without repeating the preceding live socket enqueue.
+        let report = if index == 0 {
+            CONTEND_DELIVERY_PROGRESS_ONCE
+                .scope(Arc::clone(&contention), execute)
+                .await
+        } else {
+            execute.await
+        };
+        assert!(!contention.load(Ordering::SeqCst), "fault was exercised");
+        assert!(report.receipt_failures.is_empty(), "{report:?}");
+        assert!(report.frame_obligations.is_empty(), "{report:?}");
+        assert!(
+            report
+                .outcomes
+                .iter()
+                .all(|(_, outcome)| *outcome == ExternalOutcome::Done),
+            "contention must settle before the next archived message: {report:?}"
+        );
+        let key = decision.message_key.expect("message key");
+        let mut tx = fixture.uow.begin().await.expect("inspect progress");
+        for progress in &decision.route_progress {
+            assert_eq!(
+                DeliveryProgressRepository::load(&mut tx, key, &progress.receipt)
+                    .await
+                    .expect("completed resources")
+                    .len(),
+                progress.fanout.len(),
+                "all accepted resources must retain durable progress"
+            );
+        }
+        assert!(EffectReceiptRepository::receipts_complete(&mut tx, key)
+            .await
+            .expect("complete receipts"));
+        tx.commit().await.expect("inspection commit");
+        for receiver in &mut receivers {
+            assert_eq!(
+                body(receiver.try_recv().expect("prompt room delivery")),
+                text
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "persistence retry must not resend"
+            );
+        }
+    }
+    fixture.close().await;
+}
