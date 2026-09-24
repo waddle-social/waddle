@@ -21,7 +21,7 @@ import {
   orderTimelineForScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
-import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
+import { extractDroppedFiles } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { CallMedia } from "@/lib/calls/types";
@@ -610,7 +610,7 @@ function onDragLeave() {
 function onDrop(e: DragEvent) {
   e.preventDefault();
   isDragging.value = false;
-  const files = extractFilesFromEvent(e);
+  const files = extractDroppedFiles(e);
   if (files.length > 0) composerRef.value?.addAttachments(files);
 }
 

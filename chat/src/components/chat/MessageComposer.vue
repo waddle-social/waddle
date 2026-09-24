@@ -14,7 +14,8 @@ import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import SlashCommandPopover from "@/components/chat/SlashCommandPopover.vue";
 import { getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
-import { extractImagesFromClipboardEvent } from "@/lib/xmpp/file-upload";
+import { planComposerPaste } from "@/lib/composer-paste/plan-composer-paste";
+import { resolveComposerPaste } from "@/lib/composer-paste/resolve-composer-paste";
 import type { MentionCandidate } from "@/lib/mentions";
 import { jidLocalpart } from "@/lib/xmpp/jid";
 import type { SlashInvocation } from "@/lib/slash-dispatch";
@@ -395,12 +396,28 @@ function onGifSelected(url: string) {
   refocusAfterSend();
 }
 
-function onEditorPaste(e: ClipboardEvent) {
-  const files = extractImagesFromClipboardEvent(e);
-  if (files.length > 0) {
-    e.preventDefault();
-    addAttachments(files);
-  }
+/** Aborts in-flight pasted-GIF fetches when the composer unmounts. */
+const pasteAbort = new AbortController();
+onBeforeUnmount(() => pasteAbort.abort());
+
+/**
+ * Claim pastes that carry files or an animated GIF so ProseMirror does not
+ * also insert the clipboard's HTML/text; plain text pastes fall through.
+ * Pasted files join the pending attachments and are shared via XEP-0363
+ * upload like any picked file.
+ */
+function onEditorPaste(event: ClipboardEvent): boolean {
+  const plan = planComposerPaste(event.clipboardData);
+  if (plan.kind === "none") return false;
+  if (isPreparingSend.value) return true;
+  void resolveComposerPaste(plan, { signal: pasteAbort.signal }).then((result) => {
+    if (result.kind === "files") {
+      if (result.files.length > 0) addAttachments(result.files);
+      return;
+    }
+    getTiptapEditor()?.chain().focus().insertContent({ type: "text", text: result.text }).run();
+  });
+  return true;
 }
 
 // Clear editor content when draft is reset externally (e.g. after successful send)
@@ -591,7 +608,7 @@ watch(isPreparingSend, (preparing) => {
           @update="onEditorUpdate"
           @selection-update="checkAutocompleteFromEditor"
           @cancel="onEditorCancel"
-          @paste="onEditorPaste"
+          :paste-handler="onEditorPaste"
         />
       </div>
       <div v-if="pendingAttachments.length > 0" class="chat-composer-card-attachments">
