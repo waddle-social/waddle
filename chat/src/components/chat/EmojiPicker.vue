@@ -14,13 +14,16 @@ const props = withDefaults(
      * controls positioning — used inside the mobile action sheet.
      */
     variant?: "popover" | "sheet";
+    /** "react" labels picks as reactions; "insert" as composer insertions. */
+    purpose?: "react" | "insert";
   }>(),
-  { variant: "popover" },
+  { variant: "popover", purpose: "react" },
 );
 
 const emit = defineEmits<{
   select: [emoji: string];
-  close: [];
+  /** `outside` = dismissed by a pointer elsewhere, which already moves focus. */
+  close: [reason: "escape" | "outside" | "button"];
 }>();
 
 const RECENT_KEY = "waddle:recent-emojis";
@@ -41,6 +44,12 @@ const COMMON_EMOJIS = [
   "🌸", "🌺", "🌻", "🌷", "🍀", "🎂", "🍰", "🍕",
   "🍔", "🍟", "🍜", "🍣", "🍺", "🍷", "🍾", "☕",
 ];
+
+const panelLabel = computed(() => (props.purpose === "insert" ? "Insert an emoji" : "Choose a reaction"));
+
+function emojiLabel(emoji: string): string {
+  return props.purpose === "insert" ? `Insert ${emoji}` : `React with ${emoji}`;
+}
 
 const query = ref("");
 const recents = ref<string[]>([]);
@@ -123,11 +132,11 @@ function onWindowPointer(event: PointerEvent | MouseEvent) {
   if (!target) return;
   if (panelEl.value.contains(target)) return;
   if (props.anchorEl?.contains(target)) return;
-  emit("close");
+  emit("close", "outside");
 }
 
 function onKey(event: KeyboardEvent) {
-  if (event.key === "Escape") emit("close");
+  if (event.key === "Escape") emit("close", "escape");
 }
 
 function attachWindowListeners() {
@@ -184,7 +193,7 @@ onBeforeUnmount(detachWindowListeners);
       v-if="open"
       ref="panelEl"
       :role="variant === 'popover' ? 'dialog' : 'group'"
-      aria-label="Choose a reaction"
+      :aria-label="panelLabel"
       :class="[
         'flex flex-col overflow-hidden',
         variant === 'popover'
@@ -212,7 +221,7 @@ onBeforeUnmount(detachWindowListeners);
             type="button"
             class="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             aria-label="Close emoji picker"
-            @click="emit('close')"
+            @click="emit('close', 'button')"
           >
             <X class="w-3.5 h-3.5" aria-hidden="true" />
           </button>
@@ -231,7 +240,7 @@ onBeforeUnmount(detachWindowListeners);
                 'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
                 variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
               ]"
-              :aria-label="`React with ${e}`"
+              :aria-label="emojiLabel(e)"
               @click="onSelect(e)"
             >{{ e }}</button>
           </div>
@@ -258,7 +267,7 @@ onBeforeUnmount(detachWindowListeners);
                   'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
                   variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
                 ]"
-                :aria-label="`React with ${e}`"
+                :aria-label="emojiLabel(e)"
                 @click="onSelect(e)"
               >{{ e }}</button>
             </div>
@@ -273,7 +282,7 @@ onBeforeUnmount(detachWindowListeners);
                 'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
                 variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
               ]"
-              :aria-label="`React with ${e}`"
+              :aria-label="emojiLabel(e)"
               @click="onSelect(e)"
             >{{ e }}</button>
           </div>

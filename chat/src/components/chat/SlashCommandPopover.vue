@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { Slash, AlertCircle } from "lucide-vue-next";
-import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
+import type { SlashCandidate } from "@/lib/slash-candidates";
 
 defineProps<{
-  candidates: DiscoveredExtensionCommand[];
+  candidates: SlashCandidate[];
   selectedIndex: number;
   prefix: string;
   blocked: boolean;
@@ -11,8 +11,14 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  pick: [command: DiscoveredExtensionCommand];
+  pick: [candidate: SlashCandidate];
 }>();
+
+function candidateKey(candidate: SlashCandidate): string {
+  return candidate.kind === "builtin"
+    ? `builtin:${candidate.command.name}`
+    : `extension:${candidate.command.serviceJid}:${candidate.command.node}`;
+}
 </script>
 
 <template>
@@ -26,18 +32,25 @@ const emit = defineEmits<{
     </div>
     <div v-else class="flex flex-col gap-1">
       <button
-        v-for="(command, i) in candidates"
-        :key="command.node"
+        v-for="(candidate, i) in candidates"
+        :key="candidateKey(candidate)"
         type="button"
         class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
         :class="i === selectedIndex
           ? 'bg-primary/15 hover:bg-primary/20'
           : 'hover:bg-muted'"
-        @mousedown.prevent="emit('pick', command)"
+        @mousedown.prevent="emit('pick', candidate)"
       >
-        <Slash class="h-4 w-4 text-primary" aria-hidden="true" />
-        <span class="type-emphasis">/{{ command.composerPrefix }}</span>
-        <span class="type-caption text-muted-foreground truncate">{{ command.name }}</span>
+        <Slash class="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+        <template v-if="candidate.kind === 'builtin'">
+          <span class="type-emphasis shrink-0">{{ candidate.command.usage }}</span>
+          <span class="type-caption text-muted-foreground truncate">{{ candidate.command.description }}</span>
+          <span class="type-caption ml-auto shrink-0 rounded border border-border px-1.5 text-muted-foreground">Built-in</span>
+        </template>
+        <template v-else>
+          <span class="type-emphasis">/{{ candidate.command.composerPrefix }}</span>
+          <span class="type-caption text-muted-foreground truncate">{{ candidate.command.name }}</span>
+        </template>
       </button>
     </div>
   </div>

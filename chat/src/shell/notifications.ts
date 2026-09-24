@@ -2,6 +2,7 @@ import { computed, ref, watch } from "vue";
 import { barePeerJid, jidDomainOrEmpty, type BrowserXmppClient, type NotifyMode } from "@/lib/xmpp-client";
 import { retryRegisterPushDeviceAfterSessionExpired } from "@/lib/xmpp/push-register-result";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
+import { formatMePreview } from "@/lib/me-command";
 import { createPushFlowLock } from "./push-flow-lock";
 import {
   clearDeviceId,
@@ -25,6 +26,12 @@ const MESSAGE_SOUNDS_STORAGE_KEY = "waddle.chat.message-sounds-enabled";
 const PUSH_KID_STORAGE_PREFIX = "waddle.chat.push-kid:";
 const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
 const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
+
+/** Banner text: XEP-0245 `/me` bodies read "* Sender action"; capped at 100 chars. */
+function notificationBody(body: string, sender: string): string {
+  const text = formatMePreview(body, sender);
+  return text.length > 100 ? `${text.slice(0, 100)}…` : text;
+}
 
 /// Push Service app-id for the browser/PWA chat. APNs ("ios") and
 /// FCM ("android") live behind the same `<register-device>` shape
@@ -175,8 +182,7 @@ export function usePushNotifications() {
     const title = opts.isBroadcast
       ? `@everyone in #${opts.channelName}`
       : `@${opts.senderNick} in #${opts.channelName}`;
-    const body =
-      opts.body.length > 100 ? `${opts.body.slice(0, 100)}…` : opts.body;
+    const body = notificationBody(opts.body, opts.senderNick);
 
     const notification = new Notification(title, {
       body,
@@ -205,7 +211,7 @@ export function usePushNotifications() {
     if (!hasNotificationApi()) return;
     if (permissionState.value !== "granted" || !notificationsEnabled.value) return;
 
-    const body = opts.body.length > 100 ? `${opts.body.slice(0, 100)}…` : opts.body;
+    const body = notificationBody(opts.body, opts.senderNick);
     const notification = new Notification(`@${opts.senderNick} in #${opts.channelName}`, {
       body,
       // Match mention notifications: one visible banner per room, with
@@ -227,7 +233,7 @@ export function usePushNotifications() {
   function showDmNotification(opts: DmNotificationOptions) {
     if (!hasNotificationApi()) return;
     if (permissionState.value !== "granted" || !notificationsEnabled.value) return;
-    const body = opts.body.length > 100 ? `${opts.body.slice(0, 100)}…` : opts.body;
+    const body = notificationBody(opts.body, opts.senderUsername);
     const notification = new Notification(`Message from @${opts.senderUsername}`, {
       body,
       tag: opts.peerJid,

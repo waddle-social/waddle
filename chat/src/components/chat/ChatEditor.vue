@@ -12,6 +12,11 @@ const props = withDefaults(
     embedded?: boolean;
     initialContent?: JSONContent;
     editorLabel?: string;
+    /**
+     * Synchronous paste decision. Return `true` when the paste was
+     * handled so ProseMirror inserts nothing; `false` for a normal paste.
+     */
+    pasteHandler?: (event: ClipboardEvent) => boolean;
   }>(),
   {
     placeholder: "Type a message…",
@@ -27,7 +32,6 @@ const emit = defineEmits<{
   cancel: [];
   update: [doc: JSONContent];
   selectionUpdate: [];
-  paste: [event: ClipboardEvent];
 }>();
 
 const editor = useEditor({
@@ -52,10 +56,7 @@ const editor = useEditor({
       }
       return false;
     },
-    handlePaste: (_view, event) => {
-      emit("paste", event);
-      return false;
-    },
+    handlePaste: (_view, event) => props.pasteHandler?.(event) ?? false,
     attributes: {
       ...(props.editorLabel ? { "aria-label": props.editorLabel } : {}),
       class: "outline-none",

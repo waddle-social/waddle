@@ -4,58 +4,204 @@
   box-shadow: var(--shadow-pane);
 }
 
-/* The composer input-shell is where the user writes — the most
- * emotionally-loaded interaction surface in the app. Previously it
- * relied on bg-muted + a focus ring for definition, which left the
- * at-rest state edgeless: the shell blended into the composer pane
- * backdrop with nothing saying "this is where you type." Two small
- * additions:
- *
- *   - A subtle border at rest so the shell reads as a card, not a
- *     muted band. ~30% --border in alpha so it sits behind the type
- *     without competing.
- *   - Primary-tinted border on focus-within so the surface "wakes"
- *     when the user lands the caret. The tailwind ring-2 + glow on
- *     :focus inside the shell still applies; the border colour swap
- *     gives the lift a clear edge in addition to the ambient halo.
- *
- * Transitions are short (180 ms) so the focus state feels responsive,
- * not floaty. */
-.chat-composer-input-shell {
-  min-height: var(--chat-composer-inner-height);
-  border-radius: var(--chat-composer-input-radius);
-  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
-  transition: border-color 0.18s ease, background-color 0.18s ease;
+/* Slack-style composer card: one rounded surface holding the optional
+ * formatting row, the editor, pending attachments and the action row.
+ * The card is the only framed element — buttons inside are flat until
+ * hovered — so the eye reads a single "write here" object. Focus lifts
+ * the border towards the foreground (Slack's treatment) plus a faint
+ * primary halo so keyboard users see where the caret landed. */
+.chat-composer-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-radius: var(--radius-xl);
+  border: 1px solid color-mix(in oklab, var(--border) 85%, var(--foreground) 15%);
+  background: var(--card);
+  box-shadow: 0 1px 2px oklch(0.12 0.012 248 / 0.06);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.chat-composer-input-shell:hover {
-  border-color: color-mix(in oklab, var(--border) 92%, transparent);
+.chat-composer-card:hover {
+  border-color: color-mix(in oklab, var(--border) 65%, var(--foreground) 35%);
 }
 
-.chat-composer-input-shell:has(:focus) {
-  border-color: color-mix(in oklab, var(--primary) 52%, transparent);
+.chat-composer-card:focus-within {
+  border-color: color-mix(in oklab, var(--border) 40%, var(--foreground) 60%);
+  box-shadow:
+    0 1px 2px oklch(0.12 0.012 248 / 0.08),
+    0 0 0 3px color-mix(in oklab, var(--primary) 14%, transparent);
 }
 
-.chat-composer-input-action {
-  border-radius: var(--chat-composer-input-control-radius);
+.chat-composer-card--disabled {
+  opacity: 0.7;
 }
 
-/* Typographic "GIF" mark — used in place of a photo-style icon for
- * the GIF search button. The picker is GIPHY-only, so calling it
- * out with a 3-letter badge avoids the "is this for any image?"
- * confusion the Image icon caused. Inherits color from the button so
- * the hover/active states light it up via `text-primary`. */
-.chat-composer-gif-badge {
+.chat-composer-editor-slot {
+  display: flex;
+  min-width: 0;
+  padding: var(--space-xs) var(--space-xs) 0;
+}
+
+.chat-composer-card-attachments {
+  padding: var(--space-xs) var(--space-sm) 0;
+}
+
+.chat-composer-format-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-xs);
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  background: color-mix(in oklab, var(--muted) 45%, transparent);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+}
+
+.chat-composer-format-bar__divider {
+  width: 1px;
+  height: 1.25rem;
+  margin-inline: var(--space-2xs);
+  background: var(--border);
+}
+
+.chat-composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-xs) var(--space-xs);
+}
+
+/* Flat icon button used across the action row and formatting bar. */
+.chat-composer-tool {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  padding: 0.1rem 0.28rem;
-  border-radius: 0.3rem;
-  border: 1.25px solid currentColor;
-  font-size: 0.6rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  line-height: 1;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-composer-tool:hover:not(:disabled) {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.chat-composer-tool--active {
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  color: var(--primary);
+}
+
+.chat-composer-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The `+` sits in a filled circle, as in Slack: it is the one entry point
+ * for adding non-text content, so it gets more visual weight. */
+.chat-composer-add {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  margin-right: var(--space-2xs);
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+  color: var(--foreground);
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.chat-composer-add:hover:not(:disabled),
+.chat-composer-add--open {
+  background: color-mix(in oklab, var(--muted) 70%, var(--foreground) 12%);
+}
+
+.chat-composer-add--open svg {
+  transform: rotate(45deg);
+}
+
+.chat-composer-add svg {
+  transition: transform 0.15s ease;
+}
+
+.chat-composer-add:disabled {
+  opacity: 0.4;
+}
+
+/* Send is muted until there is something to send, then fills primary. */
+.chat-composer-send {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  min-width: 2rem;
+  height: 2rem;
+  padding-inline: var(--space-xs);
+  border-radius: var(--radius-sm);
+  color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-composer-send--armed {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.chat-composer-send--armed:hover {
+  background: color-mix(in oklab, var(--primary) 88%, var(--foreground) 12%);
+}
+
+@media (pointer: coarse) {
+  .chat-composer-tool,
+  .chat-composer-add,
+  .chat-composer-send {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+}
+
+.chat-composer-add-menu {
+  min-width: 16rem;
+  padding: var(--space-2xs);
+}
+
+.chat-composer-add-menu__item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  transition: background-color 0.15s ease;
+}
+
+.chat-composer-add-menu__item:hover,
+.chat-composer-add-menu__item:focus-visible {
+  background: var(--muted);
+  outline: none;
+}
+
+.chat-composer-add-menu__icon {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+  color: var(--primary);
+}
+
+/* Compact icon button inside the inline message edit form. */
+.chat-composer-input-action {
+  border-radius: var(--chat-composer-input-control-radius);
 }
 
 .chat-composer-popover {

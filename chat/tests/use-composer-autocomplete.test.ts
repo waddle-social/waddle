@@ -4,6 +4,8 @@ import { useComposerAutocomplete } from "../src/components/chat/composables/use-
 import type { MentionCandidate } from "../src/lib/mentions";
 import type { DiscoveredExtensionCommand } from "../src/lib/xmpp/extension-commands";
 import type { SlashInvocation } from "../src/lib/slash-dispatch";
+import type { BuiltinSlashOutcome } from "../src/lib/slash-builtins";
+import { slashCandidateName } from "../src/lib/slash-candidates";
 
 interface ChainRecord {
   focused: boolean;
@@ -91,6 +93,7 @@ function makeHarness(options: {
   inMuc?: boolean;
   slashSubmitBlocked?: boolean;
   dispatcher?: (invocation: SlashInvocation) => Promise<boolean>;
+  runBuiltinSlash?: (outcome: BuiltinSlashOutcome) => void;
 } = {}) {
   const scope = effectScope();
   let api: ReturnType<typeof useComposerAutocomplete> | undefined;
@@ -102,6 +105,7 @@ function makeHarness(options: {
       inMuc: () => options.inMuc ?? true,
       slashSubmitBlocked: () => options.slashSubmitBlocked ?? false,
       dispatchSlashCommand: () => options.dispatcher,
+      runBuiltinSlash: options.runBuiltinSlash ?? (() => {}),
     });
   });
   if (!api) throw new Error("composable did not initialize");
@@ -178,7 +182,7 @@ describe("useComposerAutocomplete slash trigger", () => {
     api.checkAutocompleteFromEditor();
     expect(api.showSlash.value).toBe(true);
     expect(api.slashPrefix.value).toBe("po");
-    expect(api.slashCandidates.value.map((c) => c.composerPrefix)).toEqual(["poll"]);
+    expect(api.slashCandidates.value.map(slashCandidateName)).toEqual(["poll"]);
     expect(api.autocompleteAction.value).toBe("select-command");
 
     api.selectAutocompleteResult();
@@ -261,6 +265,136 @@ describe("useComposerAutocomplete slash trigger", () => {
   });
 });
 
+describe("useComposerAutocomplete built-in slash commands", () => {
+  function runHarness(text: string, options: Parameters<typeof makeHarness>[0] = {}) {
+    const { editor, chains } = makeEditor([text], { para: 0, offset: text.length });
+    const outcomes: BuiltinSlashOutcome[] = [];
+    const harness = makeHarness({
+      editor,
+      runBuiltinSlash: (outcome) => outcomes.push(outcome),
+      ...options,
+    });
+    harness.api.checkAutocompleteFromEditor();
+    return { ...harness, outcomes, chains };
+  }
+
+  test("Enter on `/shrug hi` hands the shrug send rewrite to the composer", () => {
+    const dispatcher = mock(async () => true);
+    const { api, stop, outcomes } = runHarness("/shrug hi", { dispatcher });
+    expect(api.autocompleteAction.value).toBe("submit-slash");
+    expect(api.selectAutocompleteResult()).toBe(true);
+    expect(outcomes).toEqual([{ kind: "send", rewrite: "shrug" }]);
+    expect(api.showSlash.value).toBe(false);
+    expect(dispatcher).not.toHaveBeenCalled();
+    stop();
+  });
+
+  test("`/giphy cats` and its `/gif` alias open the GIF picker with the query", () => {
+    for (const text of ["/giphy cats", "/gif cats", "/GIF cats"]) {
+      const { api, stop, outcomes } = runHarness(text);
+      expect(api.selectAutocompleteResult()).toBe(true);
+      expect(outcomes).toEqual([{ kind: "open-gif-picker", query: "cats" }]);
+      stop();
+    }
+  });
+
+  test("presence commands set the manual presence pick", () => {
+    const cases: Array<[string, BuiltinSlashOutcome]> = [
+      ["/away", { kind: "set-presence", pick: "away" }],
+      ["/active", { kind: "set-presence", pick: "available" }],
+      ["/dnd", { kind: "set-presence", pick: "dnd" }],
+    ];
+    for (const [text, expected] of cases) {
+      const { api, stop, outcomes } = runHarness(text);
+      expect(api.selectAutocompleteResult()).toBe(true);
+      expect(outcomes).toEqual([expected]);
+      stop();
+    }
+  });
+
+  test("`/me waves` sends; bare `/me` completes to `/me ` instead of sending", () => {
+    const ready = runHarness("/me waves");
+    expect(ready.api.selectAutocompleteResult()).toBe(true);
+    expect(ready.outcomes).toEqual([{ kind: "send", rewrite: "me" }]);
+    ready.stop();
+
+    const bare = runHarness("/me");
+    expect(bare.api.slashBlocked.value).toBe(false);
+    expect(bare.api.autocompleteAction.value).toBe("select-command");
+    expect(bare.api.selectAutocompleteResult()).toBe(true);
+    expect(bare.outcomes).toEqual([]);
+    expect(bare.chains[0]?.insertContent).toBe("/me ");
+    bare.stop();
+  });
+
+  test("built-ins are offered outside MUCs and never trip the unknown-command block", () => {
+    const { api, stop } = runHarness("/sh", { inMuc: false });
+    expect(api.slashCandidates.value.map(slashCandidateName)).toEqual(["shrug"]);
+    expect(api.slashBlocked.value).toBe(false);
+    stop();
+  });
+
+  test("a built-in shadows an extension command with the same name", async () => {
+    const dispatcher = mock(async () => true);
+    const shadowed = command({ node: "shrug#ext", composerPrefix: "shrug" });
+    const { api, stop, outcomes } = runHarness("/shrug hi", { commands: [shadowed], dispatcher });
+    expect(api.slashCandidates.value).toEqual([
+      { kind: "builtin", command: expect.objectContaining({ name: "shrug" }) },
+    ]);
+    expect(api.selectAutocompleteResult()).toBe(true);
+    await Promise.resolve();
+    expect(outcomes).toEqual([{ kind: "send", rewrite: "shrug" }]);
+    expect(dispatcher).not.toHaveBeenCalled();
+    stop();
+  });
+
+  test("unknown commands still block", () => {
+    const { api, stop, outcomes } = runHarness("/xyz hi");
+    expect(api.slashBlocked.value).toBe(true);
+    expect(api.autocompleteAction.value).toBe("block-slash");
+    expect(api.selectAutocompleteResult()).toBe(true);
+    expect(outcomes).toEqual([]);
+    stop();
+  });
+
+  test("a missing forum title holds sending built-ins but not local ones", () => {
+    const shrug = runHarness("/shrug hi", { slashSubmitBlocked: true });
+    expect(shrug.api.selectAutocompleteResult()).toBe(true);
+    expect(shrug.outcomes).toEqual([]);
+    shrug.stop();
+
+    const giphy = runHarness("/giphy cats", { slashSubmitBlocked: true });
+    expect(giphy.api.selectAutocompleteResult()).toBe(true);
+    expect(giphy.outcomes).toEqual([{ kind: "open-gif-picker", query: "cats" }]);
+    giphy.stop();
+
+    const away = runHarness("/away", { slashSubmitBlocked: true });
+    expect(away.api.selectAutocompleteResult()).toBe(true);
+    expect(away.outcomes).toEqual([{ kind: "set-presence", pick: "away" }]);
+    away.stop();
+  });
+
+  test("a bare `/` lists built-ins first, then extension commands", () => {
+    const { api, stop } = runHarness("/", { commands: [command()] });
+    expect(api.slashCandidates.value.map(slashCandidateName)).toEqual([
+      "me", "shrug", "giphy", "away", "active", "dnd", "poll",
+    ]);
+    stop();
+  });
+
+  test("`/ hello` (toolbar-inserted slash) expands a picked built-in over the slash and space", () => {
+    const { api, stop, chains } = runHarness("/ hello");
+    expect(api.slashPrefix.value).toBe("");
+    const shrug = api.slashCandidates.value.find((c) => slashCandidateName(c) === "shrug");
+    expect(shrug).toBeDefined();
+    api.expandSlashCandidate(shrug!);
+    expect(chains[0].setTextSelection).toEqual({ from: 1, to: 3 });
+    expect(chains[0].insertContent).toBe("/shrug ");
+    expect(api.slashPrefix.value).toBe("shrug");
+    stop();
+  });
+});
+
 describe("useComposerAutocomplete keyboard navigation", () => {
   function keyEvent(key: string): KeyboardEvent {
     return {
@@ -287,6 +421,36 @@ describe("useComposerAutocomplete keyboard navigation", () => {
     api.onKeydown(keyEvent("ArrowDown"));
     expect(api.selectedIndex.value).toBe(0);
     api.onKeydown(keyEvent("ArrowUp"));
+    expect(api.selectedIndex.value).toBe(1);
+    stop();
+  });
+
+  test("keys typed outside the editor (e.g. the + menu) are left alone", () => {
+    const { editor, chains } = makeEditor(["@"], { para: 0, offset: 1 });
+    const editorDom = { contains: (node: unknown) => node === editorDom };
+    const menuItem = {};
+    (editor as { view?: unknown }).view = { dom: editorDom };
+    const { api, stop } = makeHarness({
+      editor,
+      mentions: [candidate("alice"), candidate("bob")],
+    });
+    api.checkAutocompleteFromEditor();
+    let prevented = false;
+    const fromMenu = (key: string) => ({
+      ...keyEvent(key),
+      target: menuItem,
+      preventDefault() {
+        prevented = true;
+      },
+    }) as unknown as KeyboardEvent;
+
+    api.onKeydown(fromMenu("ArrowDown"));
+    api.onKeydown(fromMenu("Enter"));
+    expect(api.selectedIndex.value).toBe(0);
+    expect(chains).toHaveLength(0);
+    expect(prevented).toBe(false);
+
+    api.onKeydown({ ...keyEvent("ArrowDown"), target: editorDom } as unknown as KeyboardEvent);
     expect(api.selectedIndex.value).toBe(1);
     stop();
   });

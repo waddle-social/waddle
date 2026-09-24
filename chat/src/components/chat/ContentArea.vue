@@ -21,7 +21,7 @@ import {
   orderTimelineForScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
-import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
+import { extractDroppedFiles } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { CallMedia } from "@/lib/calls/types";
@@ -610,7 +610,7 @@ function onDragLeave() {
 function onDrop(e: DragEvent) {
   e.preventDefault();
   isDragging.value = false;
-  const files = extractFilesFromEvent(e);
+  const files = extractDroppedFiles(e);
   if (files.length > 0) composerRef.value?.addAttachments(files);
 }
 
@@ -888,6 +888,7 @@ function dayDividerLabel(createdAt: string): string {
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
+      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : undefined"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
@@ -896,7 +897,6 @@ function dayDividerLabel(createdAt: string): string {
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
       :is-top-pinned="true"
-      :extensions-open="extensionLauncherOpen"
       :slash-commands="allDiscoveredCommands"
       :in-muc="inMucContext"
       :dispatch-slash-command="dispatchSlashCommand"
@@ -1110,6 +1110,7 @@ function dayDividerLabel(createdAt: string): string {
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
+      :placeholder="dmPeer ? `Message ${dmPeer.peerUsername}` : undefined"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
@@ -1117,7 +1118,6 @@ function dayDividerLabel(createdAt: string): string {
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
-      :extensions-open="extensionLauncherOpen"
       :slash-commands="allDiscoveredCommands"
       :in-muc="inMucContext"
       :dispatch-slash-command="dispatchSlashCommand"

@@ -45,25 +45,8 @@ export async function uploadFile(
   return { getUrl: slot.getUrl, filename, contentType, size };
 }
 
-export function extractFilesFromEvent(event: ClipboardEvent | DragEvent): File[] {
-  const out: File[] = [];
-  if (event instanceof ClipboardEvent) {
-    const items = event.clipboardData?.items;
-    if (!items) return out;
-    for (let i = 0; i < items.length; i += 1) {
-      const file = items[i].getAsFile();
-      if (file && file.type.startsWith("image/")) out.push(file);
-    }
-  } else if (event instanceof DragEvent) {
-    const files = event.dataTransfer?.files;
-    if (!files) return out;
-    for (let i = 0; i < files.length; i += 1) out.push(files[i]);
-  }
-  return out;
-}
-
-export function extractImagesFromClipboardEvent(event: ClipboardEvent): File[] {
-  return extractFilesFromEvent(event).filter((file) => file.type.startsWith("image/"));
+export function extractDroppedFiles(event: DragEvent): File[] {
+  return Array.from(event.dataTransfer?.files ?? []);
 }
 
 function parseSlotResponse(response: WasmUploadSlot): SlotInfo {
