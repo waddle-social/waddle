@@ -5,6 +5,12 @@ import { parseSlashTrigger } from "../src/lib/slash-trigger";
 import { filterSlashCandidates, resolveSlashCommand } from "../src/lib/slash-match";
 import { buildSlashInvocation } from "../src/lib/slash-dispatch";
 import type { DiscoveredExtensionCommand } from "../src/lib/xmpp/extension-commands";
+import { effectScope } from "vue";
+import { useComposerAutocomplete } from "../src/components/chat/composables/use-composer-autocomplete";
+import type { BuiltinSlashOutcome } from "../src/lib/slash-builtins";
+import { slashCandidateName } from "../src/lib/slash-candidates";
+import { rewriteBuiltinSendDoc } from "../src/lib/slash-builtin-doc";
+import { tiptapToRichMessage } from "../src/lib/rich-message";
 
 if (typeof globalThis.requestAnimationFrame !== "function") {
   globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
@@ -139,5 +145,83 @@ describe("slash command flow against a live TipTap editor", () => {
     const text = firstParagraphText(editor);
     const trigger = parseSlashTrigger(text);
     expect(trigger).toEqual({ prefix: "ai", trailing: "" });
+  });
+});
+
+describe("built-in slash commands against a live TipTap editor", () => {
+  // `insertContent(string)` parses HTML, which needs a DOM `bun test` lacks;
+  // insert the composable's replacement as a plain text node instead.
+  function textInsertingEditor(editor: Editor) {
+    return {
+      get state() {
+        return editor.state;
+      },
+      chain() {
+        const chain = editor.chain();
+        const api = {
+          focus: () => api,
+          setTextSelection: (range: { from: number; to: number }) => {
+            chain.setTextSelection(range);
+            return api;
+          },
+          insertContent: (text: string) => {
+            chain.insertContent({ type: "text", text });
+            return api;
+          },
+          run: () => chain.run(),
+        };
+        return api;
+      },
+    };
+  }
+
+  function autocompleteFor(editor: Editor) {
+    const outcomes: BuiltinSlashOutcome[] = [];
+    const scope = effectScope();
+    const tiptap = textInsertingEditor(editor);
+    const api = scope.run(() =>
+      useComposerAutocomplete({
+        getTiptapEditor: () => tiptap,
+        mentionCandidates: () => [],
+        slashCommands: () => [ai, poll],
+        inMuc: () => true,
+        slashSubmitBlocked: () => false,
+        dispatchSlashCommand: () => undefined,
+        runBuiltinSlash: (outcome) => outcomes.push(outcome),
+      }),
+    )!;
+    return { api, outcomes, stop: () => scope.stop() };
+  }
+
+  test("`/ hello` + picking /shrug yields `/shrug hello`, which sends as `hello ¯\\_(ツ)_/¯`", () => {
+    const editor = createEditor("/ hello");
+    editor.commands.setTextSelection(2);
+    const { api, outcomes, stop } = autocompleteFor(editor);
+    api.checkAutocompleteFromEditor();
+
+    const shrug = api.slashCandidates.value.find((c) => slashCandidateName(c) === "shrug")!;
+    api.expandSlashCandidate(shrug);
+    expect(firstParagraphText(editor)).toBe("/shrug hello");
+
+    api.checkAutocompleteFromEditor();
+    expect(api.selectAutocompleteResult()).toBe(true);
+    expect(outcomes).toEqual([{ kind: "send", rewrite: "shrug" }]);
+
+    const sent = tiptapToRichMessage(rewriteBuiltinSendDoc("shrug", editor.getJSON()));
+    expect(sent.body).toBe("hello ¯\\_(ツ)_/¯");
+    stop();
+    editor.destroy();
+  });
+
+  test("`/me waves` sends the exact XEP-0245 body", () => {
+    const editor = createEditor("/me waves");
+    editor.commands.setTextSelection(4);
+    const { api, outcomes, stop } = autocompleteFor(editor);
+    api.checkAutocompleteFromEditor();
+    expect(api.selectAutocompleteResult()).toBe(true);
+    expect(outcomes).toEqual([{ kind: "send", rewrite: "me" }]);
+    expect(tiptapToRichMessage(rewriteBuiltinSendDoc("me", editor.getJSON())).body).toBe("/me waves");
+    stop();
+    editor.destroy();
   });
 });

@@ -31,6 +31,9 @@ import {
 } from "./composer-attachments";
 import { composerPlaceholder } from "./composer-placeholder";
 import { useComposerAutocomplete } from "./composables/use-composer-autocomplete";
+import type { BuiltinSlashOutcome } from "@/lib/slash-builtins";
+import { rewriteBuiltinSendDoc } from "@/lib/slash-builtin-doc";
+import { pickPresence } from "@/presence/presence-store";
 
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
@@ -176,6 +179,7 @@ const {
   inMuc: () => !!props.inMuc,
   slashSubmitBlocked: () => showForumTitleInput.value && !forumTitle.value.trim(),
   dispatchSlashCommand: () => props.dispatchSlashCommand,
+  runBuiltinSlash,
 });
 
 /** Whether the composer has nothing sendable (no text and no pending attachments). */
@@ -211,7 +215,12 @@ async function onSend(doc: JSONContent) {
     return;
   }
   if (action === "dismiss-autocomplete") clearAutocomplete();
+  await sendDoc(doc);
+}
 
+/** Serialize a TipTap doc (plus pending attachments) and emit it as a send. */
+async function sendDoc(doc: JSONContent) {
+  if (isPreparingSend.value) return;
   const serialized = tiptapToRichMessage(doc);
   const text = serialized.body.trim();
   const attachments = pendingAttachments.value;
@@ -246,6 +255,34 @@ async function onSend(doc: JSONContent) {
     isPreparingSend.value = false;
     refocusAfterSend();
   }
+}
+
+/** Empty the editor after a built-in command that does not send a message. */
+function clearComposerText() {
+  clearAutocomplete();
+  editorRef.value?.clear();
+  draft.value = "";
+}
+
+/**
+ * Carry out a client built-in slash command resolved by the autocomplete
+ * engine: `/me` and `/shrug` rewrite the draft and send it through the
+ * normal path; `/giphy` opens the GIF search; `/away`, `/active` and
+ * `/dnd` set the manual presence mode.
+ */
+function runBuiltinSlash(outcome: BuiltinSlashOutcome) {
+  if (outcome.kind === "send") {
+    const doc = getTiptapEditor()?.getJSON();
+    if (doc) void sendDoc(rewriteBuiltinSendDoc(outcome.rewrite, doc));
+    return;
+  }
+  clearComposerText();
+  if (outcome.kind === "open-gif-picker") {
+    openGifPicker(outcome.query);
+    return;
+  }
+  pickPresence(outcome.pick);
+  refocusAfterSend();
 }
 
 function focus() {
@@ -617,33 +654,31 @@ watch(isPreparingSend, (preparing) => {
           @remove="removeAttachment"
         />
       </div>
+      <ComposerAddMenu
+        v-if="showAddMenu"
+        :anchor-el="addButtonRef"
+        :show-extensions="showExtensions"
+        :is-top-pinned="isTopPinned"
+        @upload="onAddMenuUpload"
+        @gif="openGifPicker()"
+        @extensions="onAddMenuExtensions"
+        @close="showAddMenu = false"
+      />
       <div class="chat-composer-toolbar">
-        <div class="relative flex items-center">
-          <button
-            :ref="setAddButtonRef"
-            type="button"
-            class="chat-composer-add"
-            :class="{ 'chat-composer-add--open': showAddMenu }"
-            title="Attach"
-            aria-label="Attach"
-            aria-haspopup="menu"
-            :aria-expanded="showAddMenu"
-            :disabled="disabled || isPreparingSend"
-            @click="toggleAddMenu"
-          >
-            <Plus class="h-4 w-4" aria-hidden="true" />
-          </button>
-          <ComposerAddMenu
-            v-if="showAddMenu"
-            :anchor-el="addButtonRef"
-            :show-extensions="showExtensions"
-            :is-top-pinned="isTopPinned"
-            @upload="onAddMenuUpload"
-            @gif="openGifPicker()"
-            @extensions="onAddMenuExtensions"
-            @close="showAddMenu = false"
-          />
-        </div>
+        <button
+          :ref="setAddButtonRef"
+          type="button"
+          class="chat-composer-add"
+          :class="{ 'chat-composer-add--open': showAddMenu }"
+          title="Attach"
+          aria-label="Attach"
+          aria-haspopup="menu"
+          :aria-expanded="showAddMenu"
+          :disabled="disabled || isPreparingSend"
+          @click="toggleAddMenu"
+        >
+          <Plus class="h-4 w-4" aria-hidden="true" />
+        </button>
         <button
           type="button"
           class="chat-composer-tool"
@@ -713,6 +748,6 @@ watch(isPreparingSend, (preparing) => {
       @select="onEmojiPicked"
       @close="onEmojiPickerClose"
     />
-    <EditorBubbleToolbar v-if="tiptapEditor && !showFormatting" :editor="tiptapEditor" />
+    <EditorBubbleToolbar v-if="tiptapEditor" :editor="tiptapEditor" :suppressed="showFormatting" />
   </div>
 </template>

@@ -1,14 +1,24 @@
 import { extractPlainText } from "./nodes";
 import { richMessageToTiptap } from "./parse";
 import { safeUri } from "./urls";
-import type { MarkupSpan, MessageReference, TiptapMark, TiptapNode } from "./types";
+import type { BlockNode, MarkupSpan, MessageReference, TiptapMark, TiptapNode } from "./types";
+
+/**
+ * Display-only inline node carrying the XEP-0245 `/me` actor label
+ * ("* Name"). Rendered as escaped plain text — never mention-highlighted —
+ * and never produced by parsing a message, only by the `/me` renderer.
+ */
+export const ME_ACTOR_NODE_TYPE = "meActor";
 
 export function renderRichMessageHtml(input: {
   body: string;
   markup?: readonly MarkupSpan[];
   references?: readonly MessageReference[];
 }): string {
-  const doc = richMessageToTiptap(input);
+  return renderRichDocHtml(richMessageToTiptap(input));
+}
+
+export function renderRichDocHtml(doc: BlockNode): string {
   return renderBlocks((doc.content ?? []) as TiptapNode[]).trim();
 }
 
@@ -48,6 +58,7 @@ function renderListItem(node: TiptapNode): string {
 function renderInline(nodes: TiptapNode[]): string {
   return nodes.map((node) => {
     if (node.type === "hardBreak") return "<br>";
+    if (node.type === ME_ACTOR_NODE_TYPE) return `<span class="font-semibold">${escapeHtml(node.text ?? "")}</span>`;
     if (node.type !== "text") return "";
     return renderText(node.text ?? "", node.marks ?? []);
   }).join("");

@@ -3,7 +3,13 @@ import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction } from "@/lib/reply-ux";
 import type { MentionCandidate } from "@/lib/mentions";
 import { parseSlashTrigger } from "@/lib/slash-trigger";
-import { filterSlashCandidates, resolveSlashCommand } from "@/lib/slash-match";
+import {
+  listSlashCandidates,
+  resolveSlashTarget,
+  slashCandidateName,
+  type SlashCandidate,
+} from "@/lib/slash-candidates";
+import type { BuiltinSlashOutcome } from "@/lib/slash-builtins";
 import { buildSlashInvocation, type SlashInvocation } from "@/lib/slash-dispatch";
 import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
 
@@ -13,6 +19,18 @@ import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
  * result lists with keyboard navigation, and the select/submit routing
  * that decides whether an Enter press inserts a completion, dispatches a
  * slash command, or falls through to a normal message send.
+ *
+ * Built-in slash commands (`/me`, `/shrug`, `/giphy`|`/gif`, `/away`,
+ * `/active`, `/dnd`) are available in every composer and win over an
+ * extension command with the same name. When one resolves on Enter the
+ * composable hides the popover, calls `runBuiltinSlash(outcome)` and
+ * reports the key as consumed; the composer owns every effect:
+ * - `send`: send the current editor document rewritten by
+ *   `rewriteBuiltinSendDoc(outcome.rewrite, doc)`, then clear it as a
+ *   normal send would. Held (never called) while `slashSubmitBlocked()`.
+ * - `open-gif-picker`: open the GIF picker with `outcome.query` and clear
+ *   the typed command.
+ * - `set-presence`: `pickPresence(outcome.pick)` and clear the composer.
  */
 export function useComposerAutocomplete(input: {
   /** Underlying TipTap Editor instance (ProseMirror state + chains). */
@@ -23,6 +41,8 @@ export function useComposerAutocomplete(input: {
   /** True while a required forum title is missing — holds slash dispatch. */
   slashSubmitBlocked: () => boolean;
   dispatchSlashCommand: () => ((invocation: SlashInvocation) => Promise<boolean>) | undefined;
+  /** Performs a resolved built-in's effect (see the contract above). */
+  runBuiltinSlash: (outcome: BuiltinSlashOutcome) => void;
 }) {
   const showMentions = ref(false);
   const showEmoji = ref(false);
@@ -55,10 +75,10 @@ export function useComposerAutocomplete(input: {
 
   const slashContext = computed(() => ({ inMuc: input.inMuc() }));
   const slashCandidates = computed(() =>
-    filterSlashCandidates(slashPrefix.value, input.slashCommands(), slashContext.value),
+    listSlashCandidates(slashPrefix.value, input.slashCommands(), slashContext.value),
   );
   const slashResolution = computed(() =>
-    resolveSlashCommand(slashPrefix.value, input.slashCommands(), slashContext.value),
+    resolveSlashTarget(slashPrefix.value, slashTrailing.value, input.slashCommands(), slashContext.value),
   );
   const slashBlocked = computed(() =>
     showSlash.value && slashPrefix.value.length > 0 && !slashResolution.value && slashCandidates.value.length === 0,
@@ -209,27 +229,39 @@ export function useComposerAutocomplete(input: {
     triggerRange.value = null;
   }
 
-  function expandSlashCandidate(command: DiscoveredExtensionCommand) {
+  function expandSlashCandidate(candidate: SlashCandidate) {
     const tiptapEditor = input.getTiptapEditor();
-    if (!tiptapEditor || !command.composerPrefix) return;
+    const name = slashCandidateName(candidate);
+    if (!tiptapEditor || !name) return;
     // If the user already typed a space after the partial prefix, swallow it
     // so we don't end up with double spaces (e.g. `/p ` + `/poll ` → `/poll  `).
     const firstParagraph = firstParagraphTextFromDoc(tiptapEditor.state.doc);
     const consumedExtra = firstParagraph.charAt(1 + slashPrefix.value.length) === " " ? 1 : 0;
-    const replacement = `/${command.composerPrefix} `;
+    const replacement = `/${name} `;
     tiptapEditor.chain()
       .focus()
       .setTextSelection({ from: 1, to: 1 + 1 + slashPrefix.value.length + consumedExtra })
       .insertContent(replacement)
       .run();
-    slashPrefix.value = command.composerPrefix;
-    slashTrailing.value = "";
+    // Only the command word changes; any trailing text typed after it stays.
+    slashPrefix.value = name;
     showSlash.value = true;
   }
 
+  function runBuiltinResolution(outcome: BuiltinSlashOutcome): boolean {
+    // Sending built-ins honour the forum-title gate like any other send.
+    if (outcome.kind === "send" && input.slashSubmitBlocked()) return true;
+    showSlash.value = false;
+    triggerRange.value = null;
+    input.runBuiltinSlash(outcome);
+    return true;
+  }
+
   function dispatchSlashResolution(): boolean {
-    const command = slashResolution.value;
-    if (!command) return false;
+    const resolution = slashResolution.value;
+    if (!resolution) return false;
+    if (resolution.kind === "builtin") return runBuiltinResolution(resolution.outcome);
+    const command = resolution.command;
     // Forum channels demand a title; don't smuggle a slash dispatch past that gate.
     if (input.slashSubmitBlocked()) return true;
     const invocation = buildSlashInvocation(command, slashTrailing.value);

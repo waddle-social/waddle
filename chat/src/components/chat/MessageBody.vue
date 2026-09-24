@@ -30,6 +30,8 @@ import {
 } from "@/lib/chat-ui";
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
+import { parseMeAction } from "@/lib/me-command";
+import { renderMeActionHtml } from "@/lib/me-action-render";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
@@ -189,8 +191,19 @@ const {
 
 const isSticker = computed(() => !!props.message.isSticker && imageAttachments.value.length > 0);
 
+// XEP-0245: a body starting with exactly "/me " renders as an italic
+// "* Author action" line. Corrections (XEP-0308) replace `body`, so an
+// edited `/me` message follows the same path.
+const isMeAction = computed(() => parseMeAction(displayBody.value) !== null);
 const styledHtml = computed(() =>
-  renderStyledBody(displayBody.value, props.message.markup, props.message.references),
+  isMeAction.value
+    ? renderMeActionHtml({
+        body: displayBody.value,
+        markup: props.message.markup,
+        references: props.message.references,
+        actor: props.message.author,
+      })
+    : renderStyledBody(displayBody.value, props.message.markup, props.message.references),
 );
 const shouldRenderTextBody = computed(() =>
   !!displayBody.value && !props.message.extensionBodyFallback,
@@ -222,6 +235,7 @@ watch(
       :class="[
         'type-message-body styled-body',
         compact ? 'type-field-sm line-clamp-3' : '',
+        isMeAction ? 'italic' : '',
       ]"
       v-html="styledHtml"
     />
