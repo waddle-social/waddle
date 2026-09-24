@@ -21,6 +21,7 @@
 
 pub(crate) mod frame_receipts;
 mod muc_cleanup;
+mod remote_resource_compat;
 use frame_receipts::PendingReplyReceipts;
 pub use frame_receipts::RelayReplyReceiptToken;
 pub use muc_cleanup::{RelayMucCleanup, RelayMucCleanupOutcome};
@@ -735,50 +736,8 @@ pub struct RelayRouteRemoteResourceStanzaReply {
     pub replies: Vec<RemoteStanza>,
 }
 
-// This message serializes `RemoteResourceRouteTarget`; bump the suffix whenever
-// that target's wire shape changes. v2 adds the typed MUC proxy origin (#1703).
-// v3 adds canonical ingress identity and principal for room-owner admission (#1657).
-// v4 adds origin receipt confirmation for reply frames (#1657).
-// v5 adds durable owner reply identities for SM replay (#1657).
-// v6 removes capture-only detached stream identities from the reply (#1756).
-// v7: carry the recorded ingress append obligation on full-JID route targets (#1778).
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v8")]
-impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
-    type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
-
-    async fn handle(
-        &mut self,
-        msg: RelayRouteRemoteResourceStanza,
-        ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceRoute, &msg.trace);
-        span.record("jid", tracing::field::display(&msg.source_jid));
-        let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        let receipts = Arc::clone(&self.pending_reply_receipts);
-        spawn_in_dispatch_span(ctx, span, async move {
-            let Some(permit) = receipts.lock().await.reserve() else {
-                return RelayRouteRemoteResourceStanzaReply {
-                    reply_receipt: None,
-                    owner_receipts: Vec::new(),
-                    outcome: RemoteResourceRouteOutcome::Unavailable,
-                    replies: Vec::new(),
-                };
-            };
-            let mut completion = None;
-            let mut reply = bridge
-                .route_remote_resource_stanza_on_owner(msg, &mut completion)
-                .await;
-            if reply.outcome == RemoteResourceRouteOutcome::Delivered {
-                if let Some(completion) = completion {
-                    reply.owner_receipts = completion.frame_receipts();
-                    reply.reply_receipt =
-                        Some(receipts.lock().await.register_reserved(permit, completion));
-                }
-            }
-            reply
-        })
-    }
-}
+// The v8 receive contract is frozen separately in `remote_resource_compat`.
+// Domain types above can evolve only with explicit wire adapters.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayDeliverRemoteResourceFrame {
@@ -800,24 +759,6 @@ pub enum RelayRemoteResourceFrameStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayRemoteResourceFrameReply {
     pub status: RelayRemoteResourceFrameStatus,
-}
-
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_frame.v3")]
-impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
-    type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceFrameReply>;
-
-    async fn handle(
-        &mut self,
-        msg: RelayDeliverRemoteResourceFrame,
-        ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceFrame, &msg.trace);
-        span.record("jid", tracing::field::display(&msg.frame.jid));
-        let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        spawn_in_dispatch_span(ctx, span, async move {
-            bridge.deliver_remote_resource_frame_on_socket(msg).await
-        })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2095,22 +2036,26 @@ impl RelayHandle {
         message: RelayRouteRemoteResourceStanza,
     ) -> Result<RelayRouteRemoteResourceStanzaReply, RelayAskError> {
         let remote_ref = self.resolve().await?;
-        match remote_ref
-            .ask(&message)
-            .mailbox_timeout(self.mailbox_timeout)
-            .reply_timeout(self.reply_timeout)
-            .await
+        match remote_resource_compat::ask_route(
+            &remote_ref,
+            &message,
+            self.mailbox_timeout,
+            self.reply_timeout,
+        )
+        .await
         {
             Ok(reply) => Ok(reply),
             Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
-                let reply = remote_ref
-                    .ask(&message)
-                    .mailbox_timeout(self.mailbox_timeout)
-                    .reply_timeout(self.reply_timeout)
-                    .await
-                    .map_err(send_error)?;
+                let reply = remote_resource_compat::ask_route(
+                    &remote_ref,
+                    &message,
+                    self.mailbox_timeout,
+                    self.reply_timeout,
+                )
+                .await
+                .map_err(send_error)?;
                 Ok(reply)
             }
             Err(error) => Err(send_error(error)),
@@ -2135,22 +2080,26 @@ impl RelayHandle {
         message: RelayDeliverRemoteResourceFrame,
     ) -> Result<RelayRemoteResourceFrameReply, RelayAskError> {
         let remote_ref = self.resolve().await?;
-        match remote_ref
-            .ask(&message)
-            .mailbox_timeout(self.mailbox_timeout)
-            .reply_timeout(self.reply_timeout)
-            .await
+        match remote_resource_compat::ask_frame(
+            &remote_ref,
+            &message,
+            self.mailbox_timeout,
+            self.reply_timeout,
+        )
+        .await
         {
             Ok(reply) => Ok(reply),
             Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
-                remote_ref
-                    .ask(&message)
-                    .mailbox_timeout(self.mailbox_timeout)
-                    .reply_timeout(self.reply_timeout)
-                    .await
-                    .map_err(send_error)
+                remote_resource_compat::ask_frame(
+                    &remote_ref,
+                    &message,
+                    self.mailbox_timeout,
+                    self.reply_timeout,
+                )
+                .await
+                .map_err(send_error)
             }
             Err(error) => Err(send_error(error)),
         }

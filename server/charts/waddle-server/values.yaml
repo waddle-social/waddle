@@ -46,6 +46,12 @@ deployment:
 updateStrategy:
   type: Recreate
 
+# Production publisher derives this from git history. During the first rolling
+# upgrade after a Recreate window, Helm checks actual ready pods' WADDLE_GIT_SHA.
+cutoverGuard:
+  enabled: false
+  allowedRevisions: []
+
 # ADR-0017 Phase 0 preStop: seconds to sleep before SIGTERM so the endpoint
 # removal propagates through kube-proxy/ingress and no new connections land on
 # a terminating pod while the drain runs. Must be included in

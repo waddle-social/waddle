@@ -129,7 +129,7 @@ fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
         "waddle.clustering.relay.deliver_ordered.v12"
     );
     assert_eq!(
-        <RelayActor as kameo::remote::RemoteMessage<RelayRouteRemoteResourceStanza>>::REMOTE_ID,
+        <RelayActor as kameo::remote::RemoteMessage<remote_resource_compat::BaselineRoute>>::REMOTE_ID,
         "waddle.clustering.relay.remote_resource_route.v8"
     );
 }
@@ -147,7 +147,7 @@ fn remote_resource_frame_v3_carries_the_ingress_obligation() {
     use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 
     assert_eq!(
-        <RelayActor as kameo::remote::RemoteMessage<RelayDeliverRemoteResourceFrame>>::REMOTE_ID,
+        <RelayActor as kameo::remote::RemoteMessage<remote_resource_compat::BaselineFrame>>::REMOTE_ID,
         "waddle.clustering.relay.remote_resource_frame.v3"
     );
 
