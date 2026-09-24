@@ -39,14 +39,23 @@ final class RemoteImageStore: @unchecked Sendable {
     private static func download(_ url: URL) async throws -> Data {
         let (bytes, response) = try await URLSession.shared.bytes(from: url)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else { throw RemoteImageLoadError.rejected(status: status) }
-        guard response.expectedContentLength <= Int64(sizeLimit) else { throw RemoteImageLoadError.tooLarge }
+        guard (200..<300).contains(status) else {
+            bytes.task.cancel()
+            throw RemoteImageLoadError.rejected(status: status)
+        }
+        guard response.expectedContentLength <= Int64(sizeLimit) else {
+            bytes.task.cancel()
+            throw RemoteImageLoadError.tooLarge
+        }
         var data = Data()
         if response.expectedContentLength > 0 {
             data.reserveCapacity(Int(response.expectedContentLength))
         }
         for try await byte in bytes {
-            guard data.count < sizeLimit else { throw RemoteImageLoadError.tooLarge }
+            guard data.count < sizeLimit else {
+                bytes.task.cancel()
+                throw RemoteImageLoadError.tooLarge
+            }
             data.append(byte)
         }
         return data
