@@ -200,8 +200,10 @@ mod tests {
     /// implementing `Clone` (the fixed contract in `judge.rs` is not ours
     /// to change) while still letting a single judge instance answer
     /// differently for different rows in the same batch.
+    type FakeJudgeResponder = dyn Fn(&str) -> Result<IsQuestionJudgment, JudgeError> + Send + Sync;
+
     struct FakeJudge {
-        responder: Box<dyn Fn(&str) -> Result<IsQuestionJudgment, JudgeError> + Send + Sync>,
+        responder: Box<FakeJudgeResponder>,
         calls: Mutex<usize>,
     }
 
