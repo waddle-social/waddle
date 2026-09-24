@@ -10,7 +10,7 @@ import type { ComposerPastePlan } from "./plan-composer-paste";
  * unmounted), so nothing is attached after the fact.
  */
 
-export type ResolvableComposerPastePlan = Exclude<ComposerPastePlan, { kind: "none" }>;
+export type ResolvableComposerPastePlan = Extract<ComposerPastePlan, { kind: "files" | "animated-gif" }>;
 
 export type ComposerPasteResult =
   | { kind: "files"; files: File[] }

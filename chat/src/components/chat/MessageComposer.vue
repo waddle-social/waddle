@@ -184,10 +184,18 @@ const {
 /** Whether the composer has nothing sendable (no text and no pending attachments). */
 const isEmpty = computed(() => !draft.value.trim() && pendingAttachments.value.length === 0);
 const isSendBusy = computed(() => props.isSending || isPreparingSend.value);
+/** Pastes whose files are still resolving (e.g. fetching an animated GIF). */
+const pendingPastes = ref(0);
+/** Composer-level holds on any send: busy, disabled, slow mode, or a paste
+ * still resolving (sending now would let it land in the next message). */
+const isSendHeld = computed(() =>
+  isSendBusy.value ||
+  props.disabled ||
+  props.slowModeCooldown > 0 ||
+  pendingPastes.value > 0,
+);
 const canSend = computed(() =>
-  !isSendBusy.value &&
-  !props.disabled &&
-  props.slowModeCooldown <= 0 &&
+  !isSendHeld.value &&
   !isEmpty.value &&
   (!showForumTitleInput.value || !!forumTitle.value.trim()),
 );
@@ -219,7 +227,7 @@ async function onSend(doc: JSONContent) {
 
 /** Serialize a TipTap doc (plus pending attachments) and emit it as a send. */
 async function sendDoc(doc: JSONContent) {
-  if (isPreparingSend.value) return;
+  if (isSendHeld.value) return;
   const serialized = tiptapToRichMessage(doc);
   const text = serialized.body.trim();
   const attachments = pendingAttachments.value;
@@ -438,9 +446,17 @@ function onGifSelected(url: string) {
   refocusAfterSend();
 }
 
-/** Aborts in-flight pasted-GIF fetches when the composer unmounts. */
-const pasteAbort = new AbortController();
+/** Aborts in-flight pasted-GIF fetches when the composer unmounts or moves
+ * to another conversation, so a late result never lands in the wrong draft. */
+let pasteAbort = new AbortController();
 onBeforeUnmount(() => pasteAbort.abort());
+watch(
+  () => [props.channelName, props.linkPreviewScope],
+  () => {
+    pasteAbort.abort();
+    pasteAbort = new AbortController();
+  },
+);
 
 /**
  * Claim pastes that carry files or an animated GIF so ProseMirror does not
@@ -451,14 +467,23 @@ onBeforeUnmount(() => pasteAbort.abort());
 function onEditorPaste(event: ClipboardEvent): boolean {
   const plan = planComposerPaste(event.clipboardData);
   if (plan.kind === "none") return false;
+  if (plan.kind === "files-with-text") {
+    if (!isPreparingSend.value) addAttachments(plan.files);
+    return false;
+  }
   if (isPreparingSend.value) return true;
-  void resolveComposerPaste(plan, { signal: pasteAbort.signal }).then((result) => {
-    if (result.kind === "files") {
-      if (result.files.length > 0) addAttachments(result.files);
-      return;
-    }
-    getTiptapEditor()?.chain().focus().insertContent({ type: "text", text: result.text }).run();
-  });
+  pendingPastes.value += 1;
+  void resolveComposerPaste(plan, { signal: pasteAbort.signal })
+    .then((result) => {
+      if (result.kind === "files") {
+        if (result.files.length > 0) addAttachments(result.files);
+        return;
+      }
+      getTiptapEditor()?.chain().focus().insertContent({ type: "text", text: result.text }).run();
+    })
+    .finally(() => {
+      pendingPastes.value -= 1;
+    });
   return true;
 }
 
@@ -487,7 +512,7 @@ watch(isPreparingSend, (preparing) => {
     @keydown.capture="onKeydown"
   >
     <div
-      v-if="replyingTo || showForumTitleInput || linkPreview.showCard.value || uploadProgress.uploading"
+      v-if="replyingTo || showForumTitleInput || linkPreview.showCard.value || uploadProgress.uploading || pendingPastes > 0"
       class="chat-composer-aux-stack"
     >
       <!-- Reply context chip — appears above the composer when the
@@ -568,6 +593,15 @@ watch(isPreparingSend, (preparing) => {
         <p class="type-caption text-muted-foreground">
           Top-level forum posts need a title.
         </p>
+      </div>
+
+      <div
+        v-if="pendingPastes > 0"
+        class="type-caption flex items-center gap-2 text-muted-foreground animate-fade-in"
+        role="status"
+      >
+        <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
+        <span>Preparing pasted image…</span>
       </div>
 
       <!-- Upload progress bar -->

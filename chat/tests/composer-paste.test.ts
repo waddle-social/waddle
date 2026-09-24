@@ -4,7 +4,9 @@ import { planComposerPaste } from "../src/lib/composer-paste/plan-composer-paste
 import { resolveComposerPaste } from "../src/lib/composer-paste/resolve-composer-paste";
 import { fetchPastedGif } from "../src/lib/composer-paste/fetch-pasted-gif";
 import {
+  parseHasTextWithDom,
   parseImageSourcesWithDom,
+  scanHtmlHasText,
   scanHtmlImageSources,
 } from "../src/lib/composer-paste/html-image-sources";
 import { pastedAnimatedGifUrl } from "../src/lib/composer-paste/pasted-gif-url";
@@ -78,16 +80,17 @@ describe("planComposerPaste", () => {
     expect(plan).toEqual({ kind: "files", files: [png] });
   });
 
-  test("items are the fallback when files is empty and are de-duplicated", () => {
-    const png = file("image.png", "image/png");
+  test("items are the fallback when files is empty, keeping same-named distinct files", () => {
+    const first = file("image.png", "image/png");
+    const second = file("image.png", "image/png");
     const plan = planComposerPaste(clipboard({
       items: [
         { kind: "string", type: "text/html", file: null },
-        { kind: "file", type: "image/png", file: png },
-        { kind: "file", type: "image/png", file: file("image.png", "image/png") },
+        { kind: "file", type: "image/png", file: first },
+        { kind: "file", type: "image/png", file: second },
       ],
     }));
-    expect(plan).toEqual({ kind: "files", files: [png] });
+    expect(plan).toEqual({ kind: "files", files: [first, second] });
   });
 
   test("empty files are ignored", () => {
@@ -152,12 +155,66 @@ describe("planComposerPaste", () => {
     expect(plan).toEqual({ kind: "none" });
   });
 
+  test("a copied image whose plain text is its alt text still attaches the image", () => {
+    const png = file("image.png", "image/png");
+    const plan = planComposerPaste(clipboard({
+      files: [png],
+      data: { "text/html": "<meta charset='utf-8'><img src=\"https://h.test/cat.png\" alt=\"a cat\">", "text/plain": "a cat" },
+    }));
+    expect(plan).toEqual({ kind: "files", files: [png] });
+  });
+
+  test("an image copied with its caption attaches the image and keeps the text", () => {
+    const png = file("image.png", "image/png");
+    const plan = planComposerPaste(clipboard({
+      files: [png],
+      data: { "text/html": "<figure><img src=\"https://h.test/cat.png\"><figcaption>my cat</figcaption></figure>", "text/plain": "my cat" },
+    }));
+    expect(plan).toEqual({ kind: "files-with-text", files: [png] });
+  });
+
   test("office-style text with a rendered preview image pastes as text", () => {
     const plan = planComposerPaste(clipboard({
       files: [file("image.png", "image/png")],
       data: { "text/html": "<table><tr><td>1</td><td>2</td></tr></table>", "text/plain": "1\t2" },
     }));
     expect(plan).toEqual({ kind: "none" });
+  });
+});
+
+describe("scanHtmlHasText", () => {
+  test("image-only markup has no text", () => {
+    expect(scanHtmlHasText("<meta charset='utf-8'><img src=\"a.png\" alt=\"a cat\">")).toBe(false);
+    expect(scanHtmlHasText("<p>&nbsp;<img src=a.png></p><!-- note --> \n")).toBe(false);
+  });
+
+  test("script and style contents are not text", () => {
+    expect(scanHtmlHasText("<style>td{color:red}</style><script>x()</script><img src=a.png>")).toBe(false);
+  });
+
+  test("the DOMParser path drops raw-text elements before reading body text", () => {
+    const removed: string[] = [];
+    const parserFor = (text: string) => ({
+      parseFromString: () => ({
+        body: {
+          querySelectorAll: (selector: string) => [{ remove: () => removed.push(selector) }],
+          get textContent() {
+            return text;
+          },
+        },
+      }),
+    }) as unknown as DOMParser;
+
+    expect(parseHasTextWithDom("<img>", parserFor(" \n "))).toBe(false);
+    expect(parseHasTextWithDom("<p>hi</p>", parserFor("hi"))).toBe(true);
+    expect(removed[0]).toContain("script");
+    expect(removed[0]).toContain("style");
+  });
+
+  test("character data outside images is text", () => {
+    expect(scanHtmlHasText("<table><tr><td>1</td></tr></table>")).toBe(true);
+    expect(scanHtmlHasText("<p>look <img src=a.png></p>")).toBe(true);
+    expect(scanHtmlHasText("a &lt; b")).toBe(true);
   });
 });
 

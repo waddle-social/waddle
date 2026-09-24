@@ -32,6 +32,24 @@ export function readHtmlImageSources(html: string): string[] {
   return scanHtmlImageSources(html);
 }
 
+/**
+ * Whether clipboard `text/html` renders any text outside its images, i.e.
+ * a text selection (possibly with pictures) rather than a copied image.
+ */
+export function readHtmlHasText(html: string): boolean {
+  if (typeof DOMParser === "function") return parseHasTextWithDom(html, new DOMParser());
+  return scanHtmlHasText(html);
+}
+
+export function parseHasTextWithDom(html: string, parser: DOMParser): boolean {
+  const body = parser.parseFromString(html, "text/html").body;
+  if (!body) return false;
+  for (const hidden of Array.from(body.querySelectorAll(Array.from(RAW_TEXT_ELEMENTS).join(",")))) {
+    hidden.remove();
+  }
+  return (body.textContent ?? "").trim() !== "";
+}
+
 export function parseImageSourcesWithDom(html: string, parser: DOMParser): string[] {
   const doc = parser.parseFromString(html, "text/html");
   return Array.from(doc.querySelectorAll("img"))
@@ -53,23 +71,40 @@ export function scanHtmlImageSources(html: string): string[] {
   return sources;
 }
 
-/** Advance past the next comment or tag after `from`, reporting an `<img>` src. */
+export function scanHtmlHasText(html: string): boolean {
+  const lowerHtml = html.toLowerCase();
+  let cursor = 0;
+  while (cursor < html.length) {
+    const step = scanNextMarkup(html, lowerHtml, cursor);
+    const textEnd = step ? step.open : html.length;
+    if (decodeCharacterReferences(html.slice(cursor, textEnd)).trim() !== "") return true;
+    if (!step) return false;
+    cursor = step.end;
+  }
+  return false;
+}
+
+/**
+ * Advance past the next comment or tag after `from`: `open` is where it
+ * starts (text before it is character data), `end` is where scanning
+ * resumes, and `src` is reported for an `<img>`.
+ */
 function scanNextMarkup(
   html: string,
   lowerHtml: string,
   from: number,
-): { end: number; src?: string } | null {
+): { open: number; end: number; src?: string } | null {
   const open = html.indexOf("<", from);
   if (open < 0) return null;
   if (html.startsWith("<!--", open)) {
     const close = html.indexOf("-->", open + 4);
-    return close < 0 ? null : { end: close + 3 };
+    return { open, end: close < 0 ? html.length : close + 3 };
   }
   const tag = scanTag(html, open);
-  if (!tag) return { end: open + 1 };
-  if (tag.closing) return { end: tag.end };
-  if (RAW_TEXT_ELEMENTS.has(tag.name)) return { end: indexOfClosingTag(lowerHtml, tag.name, tag.end) };
-  return { end: tag.end, src: tag.name === "img" ? tag.attributes.get("src") : undefined };
+  if (!tag) return { open, end: open + 1 };
+  if (tag.closing) return { open, end: tag.end };
+  if (RAW_TEXT_ELEMENTS.has(tag.name)) return { open, end: indexOfClosingTag(lowerHtml, tag.name, tag.end) };
+  return { open, end: tag.end, src: tag.name === "img" ? tag.attributes.get("src") : undefined };
 }
 
 function scanTag(html: string, open: number): ScannedTag | null {
