@@ -127,10 +127,12 @@ access and read access to files the user picks.
 5. **Export compliance.** Neither target declares
    `ITSAppUsesNonExemptEncryption`, so each build waits in *Missing
    Compliance* until someone answers the encryption questions for it in App
-   Store Connect. The app uses TLS and XEP-0448 AES-GCM. Once the encryption
-   classification is settled, declare it with
-   `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption` in `project.yml` so builds go
-   straight to testers.
+   Store Connect. The app ships its own encryption, not only the OS's: TLS
+   through rustls/ring in the Rust core, and XEP-0448 AES-GCM through
+   swift-crypto. Once the classification is settled, declare it in
+   `project.yml`. `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO` sends
+   builds straight to testers; `YES` also needs
+   `INFOPLIST_KEY_ITSEncryptionExportComplianceCode` from App Store Connect.
 
 `Waddle/PrivacyInfo.xcprivacy` declares the app's required-reason API use
 (`UserDefaults`, reason CA92.1). Update it when the app starts using another
