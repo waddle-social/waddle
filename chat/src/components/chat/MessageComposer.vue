@@ -595,14 +595,13 @@ watch(isPreparingSend, (preparing) => {
         </p>
       </div>
 
-      <div
+      <output
         v-if="pendingPastes > 0"
         class="type-caption flex items-center gap-2 text-muted-foreground animate-fade-in"
-        role="status"
       >
         <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
         <span>Preparing pasted image…</span>
-      </div>
+      </output>
 
       <!-- Upload progress bar -->
       <div
