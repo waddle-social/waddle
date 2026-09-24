@@ -17,6 +17,7 @@ impl WaddleClient {
                 on_error: None,
                 on_message_delivery_acked: None,
                 on_message_delivery_failed: None,
+                on_message_rejected: None,
                 on_mds_displayed: None,
                 on_pubsub_event: None,
                 on_call: None,
@@ -73,6 +74,12 @@ impl WaddleClient {
 
     pub fn set_on_message_delivery_failed(&mut self, cb: Function) {
         self.inner.borrow_mut().on_message_delivery_failed = Some(cb);
+    }
+
+    /// Receive a parsed message rejection separately from incoming content.
+    /// The callback must correlate its stanza ID and sender with an outbound send.
+    pub fn set_on_message_rejected(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_message_rejected = Some(cb);
     }
 
     /// XEP-0490 §3.2 PEP event handler. Invoked once per displayed

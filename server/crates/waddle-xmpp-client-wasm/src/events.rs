@@ -146,6 +146,14 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(stanza_id.as_str()));
             }
         }
+        ClientEvent::MessageRejected(rejection) => {
+            let callback = inner.borrow().on_message_rejected.clone();
+            if let Some(callback) = callback {
+                if let Ok(value) = to_js_value(&JsMessageRejection(&rejection)) {
+                    let _ = callback.call1(&JsValue::NULL, &value);
+                }
+            }
+        }
         ClientEvent::Call(call_event) => {
             let callback = inner.borrow().on_call.clone();
             if let Some(callback) = callback {

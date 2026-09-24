@@ -236,6 +236,7 @@ internal class ConnectionLoop(
         if (event is XmppEvent.DeliveryAcked) {
             callbacks.onDeliveryAcked(event.stanzaId)
         }
+        if (event is XmppEvent.MessageRejected && !callbacks.onMessageRejected(event)) return
         router.dispatch(event)
     }
 
@@ -330,6 +331,7 @@ internal typealias SessionReadyListener = (
 internal class ConnectionLoopCallbacks(
     val onReady: SessionReadyListener,
     val onDeliveryAcked: suspend (String) -> Unit,
+    val onMessageRejected: suspend (XmppEvent.MessageRejected) -> Boolean,
     /**
      * Carries both the failing attempt's immutable lease and the exact
      * manager scope that launched this loop. The receiver must validate both

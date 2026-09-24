@@ -1,13 +1,11 @@
-import { type ComputedRef, onMounted, onUnmounted, type Ref, watch } from "vue";
+import { type ComputedRef, onMounted, onUnmounted, type Ref } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
 import type { useDirectMessageConversations } from "@/dms/conversations";
 import type { useDirectMessages } from "@/dms/messages";
 import type { useWaddleDirectory } from "@/waddles/directory";
 import type { ChatShellState } from "@/shell/state";
-import type { WaddleSession } from "@/lib/server-auth";
-import { jidDomain } from "@/lib/xmpp-client";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
-import { resolveChannelBySlug, resolveRoomByDmUsername } from "@/shell/route-helpers";
+import { resolveChannelBySlug } from "@/shell/route-helpers";
 import type { ActiveRightPanel } from "@/shell/controllers/use-thread-panels";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
 import type { ChannelLoadIntent } from "@/channels/room-access";
@@ -69,19 +67,18 @@ export function applyMatchToShellState(ui: ChatShellState, match: RouteMatch): v
 
 interface RouteSyncDeps {
   ui: ChatShellState;
-  session: ComputedRef<WaddleSession | null>;
   waddles: ReturnType<typeof useWaddleDirectory>;
   messaging: ReturnType<typeof useChannelMessages>;
   dmMessaging: ReturnType<typeof useDirectMessages>;
   dmConversations: ReturnType<typeof useDirectMessageConversations>;
   isApplyingRoute: Ref<boolean>;
-  activeDmPeer: ComputedRef<{ peerJid: string; peerUsername: string } | null>;
+  activeDmPeer: ComputedRef<{ peerJid: string } | null>;
   activeThreadStack: Ref<string[]>;
   activeThreadTargetMessageId: Ref<string | null>;
   activeRightPanel: Ref<ActiveRightPanel | null>;
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   clearPendingChannelRoomJidSelection: () => void;
-  openDm: (peerJid: string, options?: { intent?: ChannelLoadIntent }) => Promise<void>;
+  openDm: (peerJid: string, options?: { intent?: ChannelLoadIntent; scope?: "muc-occupant" }) => Promise<void>;
   selectGroupDm: (
     roomJid: string,
     options?: { updateUrl?: boolean; intent?: ChannelLoadIntent; fromRoute?: boolean },
@@ -100,7 +97,6 @@ interface RouteSyncDeps {
 export function useRouteSync(deps: RouteSyncDeps) {
   const {
     ui,
-    session,
     waddles,
     messaging,
     dmMessaging,
@@ -193,8 +189,9 @@ export function useRouteSync(deps: RouteSyncDeps) {
       if (activeDmPeer.value) {
         navigate({
           id: "dm",
-          params: { username: activeDmPeer.value.peerUsername },
-          search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
+          params: { peerJid: activeDmPeer.value.peerJid },
+          search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value,
+            ...(dmConversations.activeConversationScope?.value === "muc-occupant" ? { scope: "occupant" as const } : {}) },
         });
       } else if (channel?.isGroupDm && channel.jid) {
         navigate({
@@ -214,14 +211,6 @@ export function useRouteSync(deps: RouteSyncDeps) {
     } else {
       navigate({ id: "home" });
     }
-  }
-
-  function forgetEmptyCollidingDm(peerJid: string) {
-    const existing = dmConversations.conversations.value.find(
-      (conversation) => conversation.peerJid.toLowerCase() === peerJid.toLowerCase(),
-    );
-    if (existing?.lastMessageAt || existing?.lastMessageBody) return;
-    dmConversations.forgetPeer(peerJid);
   }
 
   function onPopState() {
@@ -286,40 +275,9 @@ export function useRouteSync(deps: RouteSyncDeps) {
     }
     if (match.id === "dm") {
       activeExtensionRouteKey.value = null;
-      const username = match.params.username.replace(/^@/, "").trim();
-      if (username) {
-        const domain = session.value ? jidDomain(session.value.jid) : "";
-        if (!domain) return;
-        // Failed disco must not invent username@user-domain (Greptile P1).
-        // Connection lifecycle parks `/dm/:username` until this is true.
-        if (waddles.hasLoadedStructure?.value === false) return;
-        const collidingRoom = resolveRoomByDmUsername(username, waddles.channels.value);
-        if (collidingRoom) {
-          forgetEmptyCollidingDm(`${username}@${domain}`);
-          if (collidingRoom.isGroupDm && collidingRoom.jid) {
-            const groupMatch = {
-              id: "groupDmRoom" as const,
-              params: { roomJid: collidingRoom.jid },
-              search: match.search,
-            };
-            navigate(groupMatch, { replace: true });
-            await applyRouteTarget(groupMatch, requestId, options);
-            return;
-          }
-          if (!collidingRoom.isGroupDm) {
-            const channelMatch = {
-              id: "channel" as const,
-              params: { channelId: collidingRoom.id },
-              search: match.search,
-            };
-            navigate(channelMatch, { replace: true });
-            await applyRouteTarget(channelMatch, requestId, options);
-            return;
-          }
-        }
-        await openDm(`${username}@${domain}`, { intent: "automatic" });
-        if (requestId !== routeRequestId) return;
-      }
+      await openDm(match.params.peerJid, { intent: "automatic",
+        ...(match.search.scope === "occupant" ? { scope: "muc-occupant" as const } : {}) });
+      if (requestId !== routeRequestId) return;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
       ui.showPinnedPanel.value = match.search.pinned;
@@ -462,28 +420,6 @@ export function useRouteSync(deps: RouteSyncDeps) {
       void messaging.backfillThread(threadId);
     }
   }
-
-  watch(
-    () => waddles.channels.value,
-    async (rooms) => {
-      if (rooms.length === 0 || isApplyingRoute.value) return;
-      if (typeof window === "undefined") return;
-      const match = matchLocation(window.location.pathname, window.location.search);
-      if (match.id !== "dm") return;
-      const username = match.params.username.replace(/^@/, "").trim();
-      if (!resolveRoomByDmUsername(username, rooms)) return;
-      const requestId = beginRouteRequest();
-      isApplyingRoute.value = true;
-      try {
-        await applyRouteTarget(match, requestId);
-      } finally {
-        if (isCurrentRouteRequest(requestId)) {
-          isApplyingRoute.value = false;
-        }
-      }
-    },
-    { deep: true },
-  );
 
   onMounted(() => {
     window.addEventListener("popstate", onPopState);

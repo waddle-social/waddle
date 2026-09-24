@@ -89,6 +89,7 @@ mod events;
 mod extension_routes;
 mod helpers;
 mod options;
+mod rejection;
 mod state;
 mod types;
 
@@ -100,6 +101,7 @@ pub(crate) use events::*;
 pub(crate) use extension_routes::*;
 pub(crate) use helpers::*;
 pub(crate) use options::*;
+pub(crate) use rejection::JsMessageRejection;
 pub(crate) use state::*;
 
 pub use state::{WaddleClient, WaddleConfig};

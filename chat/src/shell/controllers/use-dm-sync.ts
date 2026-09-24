@@ -4,11 +4,11 @@ import type { useDirectMessages } from "@/dms/messages";
 import type { useWaddleDirectory } from "@/waddles/directory";
 import type { useXmppRosterContacts } from "@/contacts/roster";
 import type { ChatShellState } from "@/shell/state";
-import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { DmConversationScope, BrowserXmppClient } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
-import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp-client";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
 import { groupDmSpawnPayloadFromDm } from "@/dms/group-dm-spawn";
-import { resolveRoomByDmUsername } from "@/shell/route-helpers";
+import type { UserSearchResult } from "@/lib/chat-types";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
 import type { ChannelLoadIntent } from "@/channels/room-access";
 
@@ -26,10 +26,6 @@ interface DmSyncDeps {
   cancelPendingRoute: () => void;
   updateUrl: () => void;
   selectGroupDm: (roomJid: string, options?: { updateUrl?: boolean }) => Promise<boolean>;
-  selectChannel: (
-    channelId: string,
-    options?: { roomJid?: string; surface?: "channels" | "dms"; intent?: ChannelLoadIntent },
-  ) => Promise<void>;
 }
 
 /**
@@ -52,61 +48,31 @@ export function useDmSync(deps: DmSyncDeps) {
     cancelPendingRoute,
     updateUrl,
     selectGroupDm,
-    selectChannel,
   } = deps;
 
   watch(() => ui.showNewGroupDm.value, (open) => {
     if (!open) ui.groupDmSeedPeerJid.value = null;
   });
 
-  function forgetEmptyCollidingUserDomainDms() {
-    const domain = selfDomain.value.toLowerCase();
-    if (!domain) return;
-    const rooms = waddles.channels.value;
-    const stale = dmConversations.conversations.value.filter((conversation) => {
-      if (jidDomain(conversation.peerJid).toLowerCase() !== domain) return false;
-      if (conversation.peerJid.toLowerCase() === (dmConversations.activePeerJid.value ?? "").toLowerCase()) {
-        // Skip the open conversation so a roster/threads click on a real
-        // never-messaged 1:1 is not deleted mid-open (#917).
-        return false;
-      }
-      const room = resolveRoomByDmUsername(jidLocalpart(conversation.peerJid), rooms);
-      if (!room) return false;
-      return !conversation.lastMessageAt && !conversation.lastMessageBody;
-    });
-    for (const conversation of stale) {
-      dmConversations.forgetPeer(conversation.peerJid);
-    }
-  }
-
-  watch(
-    [() => waddles.channels.value, () => dmConversations.conversations.value],
-    () => {
-      forgetEmptyCollidingUserDomainDms();
-    },
-    { deep: true },
-  );
-
-  async function handleOpenDm(peerJid: string, options: { intent?: ChannelLoadIntent } = {}) {
-    // Full JIDs are not slug-ambiguous: a user-domain partner whose node
-    // matches a channel id is still a 1:1 (#917). Room-wins applies only
-    // to `/dm/:username` and the New DM username field.
+  async function handleOpenDm(peerJid: string, options: { intent?: ChannelLoadIntent; scope?: DmConversationScope } = {}) {
     if (options.intent !== "automatic") cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "dms";
     activeExtensionRouteKey.value = null;
-    const opening = dmConversations.openDm(peerJid);
+    // A rejected target must not retain a previous account or group as send target.
+    dmConversations.closeDm();
+    waddles.activeChannelId.value = null;
+    dmMessaging.clearMessages();
+    const opening = dmConversations.openDm(peerJid, options.scope);
+    const selectedPeer = dmConversations.activePeerJid.value;
     // Let the panel watcher clear the old thread; reselecting a restored peer
     // still needs a URL update even when no watched ref changes.
     if (options.intent !== "automatic") void nextTick(updateUrl);
     await opening;
-    dmMessaging.clearMessages();
-    const activePeer = dmConversations.activePeerJid.value;
-    if (activePeer) {
-      const unreadAtLoad = dmConversations.conversations.value.find((c) => c.peerJid === activePeer)?.unreadCount ?? 0;
-      await dmMessaging.loadMessages(activePeer, unreadAtLoad);
-    }
+    if (!selectedPeer || selectedPeer !== dmConversations.activePeerJid.value) return;
+    const unreadAtLoad = dmConversations.conversations.value.find((c) => c.peerJid === selectedPeer)?.unreadCount ?? 0;
+    await dmMessaging.loadMessages(selectedPeer, unreadAtLoad);
     ui.showMobileNav.value = false;
   }
 
@@ -114,18 +80,48 @@ export function useDmSync(deps: DmSyncDeps) {
     await handleOpenDm(peerJid);
   }
 
-  async function handleNewDm(username: string) {
-    if (!selfDomain.value) return;
-    const collidingRoom = resolveRoomByDmUsername(username, waddles.channels.value);
-    if (collidingRoom?.isGroupDm && collidingRoom.jid) {
-      await selectGroupDm(collidingRoom.jid);
-      return;
+  let searchRequestId = 0;
+  let recipientSearch: {
+    client: BrowserXmppClient;
+    ownerJid: string;
+    results: UserSearchResult[];
+  } | null = null;
+
+  async function searchDmRecipients(input: string): Promise<UserSearchResult[]> {
+    const requestId = ++searchRequestId;
+    recipientSearch = null;
+    const query = input.trim().replace(/^@/, "");
+    if (!query) return [];
+    const client = xmppClient.value;
+    const ownerJid = session.value?.jid;
+    const domain = selfDomain.value.toLowerCase();
+    if (!client || !ownerJid || !domain) throw new Error("Connect to search for accounts.");
+    const address = query.includes("@") ? query.toLowerCase() : null;
+    if (query.includes("/") || (address && !/^[^@\s]+@[^@\s]+$/.test(address))) {
+      throw new Error("Enter a username or a local account address.");
     }
-    if (collidingRoom && !collidingRoom.isGroupDm) {
-      await selectChannel(collidingRoom.id, collidingRoom.jid ? { roomJid: collidingRoom.jid } : undefined);
-      return;
+    if (address && address.split("@")[1] !== domain) {
+      throw new Error(`Search for an account on ${domain}.`);
     }
-    await handleOpenDm(`${username}@${selfDomain.value}`);
+    // XEP-0055 returns the account JID. Never reconstruct it from a display name.
+    const users = await client.searchUsers(address ? jidLocalpart(address) : query);
+    if (requestId !== searchRequestId || client !== xmppClient.value || ownerJid !== session.value?.jid) return [];
+    const results = users.filter((user) => {
+      const jid = user.jid.toLowerCase();
+      return /^[^@/\s]+@[^@/\s]+$/.test(jid)
+        && jid.split("@")[1] === domain
+        && (!address || jid === address)
+        && !client.isKnownMucRoom?.(user.jid);
+    });
+    recipientSearch = { client, ownerJid, results };
+    return results;
+  }
+
+  async function handleNewDm(peerJid: string) {
+    if (recipientSearch?.client !== xmppClient.value || recipientSearch?.ownerJid !== session.value?.jid) return;
+    const recipient = recipientSearch.results.find((user) => user.jid === peerJid);
+    if (!recipient) return;
+    await handleOpenDm(recipient.jid);
   }
 
   function handleAddPeopleToDm(peerJid: string) {
@@ -185,6 +181,7 @@ export function useDmSync(deps: DmSyncDeps) {
   return {
     handleOpenDm,
     selectDm,
+    searchDmRecipients,
     handleNewDm,
     handleAddPeopleToDm,
     handleNewGroupDm,

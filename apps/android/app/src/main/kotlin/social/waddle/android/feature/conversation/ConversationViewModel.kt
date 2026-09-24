@@ -197,6 +197,7 @@ open class ConversationViewModel(
         when (event) {
             is XmppEvent.DeliveryAcked -> tracker.onDeliveryAcked(event.stanzaId)
             is XmppEvent.DeliveryFailed -> tracker.onDeliveryFailed(event.stanzaId)
+            is XmppEvent.MessageRejected -> tracker.onMessageRejected(event.stanzaId)
             // Reconnect catch-up: refetch the newest page.
             XmppEvent.SessionReady -> {
                 // A join tapped before the first Ready only persisted

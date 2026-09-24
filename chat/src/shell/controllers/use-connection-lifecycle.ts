@@ -205,9 +205,9 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       messaging.onMessageAck(id);
       dmMessaging.onMessageAck(id);
     });
-    client.setMessageDeliveryFailureHandler((id) => {
-      messaging.onMessageDeliveryFailure(id);
-      dmMessaging.onMessageDeliveryFailure(id);
+    client.setMessageDeliveryFailureHandler((id, reason) => {
+      messaging.onMessageDeliveryFailure(id, reason);
+      dmMessaging.onMessageDeliveryFailure(id, reason);
     });
     client.setQueuedMessageStatusHandler((id, status) => {
       messaging.onMessageQueueStatus(id, status);
@@ -254,13 +254,10 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
   }
 
   function routeNeedsDiscoveredChannel(match: RouteMatch): boolean {
-    return match.id === "channel" || match.id === "channelExtension" || match.id === "groupDmRoom" || match.id === "dm";
+    return match.id === "channel" || match.id === "channelExtension" || match.id === "groupDmRoom";
   }
 
   function channelRouteTargetMissing(match: RouteMatch): boolean {
-    if (match.id === "dm") {
-      return waddles.hasLoadedStructure.value === false;
-    }
     if (match.id === "groupDmRoom") {
       const roomJid = barePeerJid(match.params.roomJid);
       return !waddles.groupDms.value.some((group) => barePeerJid(group.roomJid) === roomJid);
@@ -272,16 +269,14 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
   async function applyPendingChannelRouteAfterStructure() {
     if (!pendingChannelRouteMatch) return;
     const match = matchLocation(window.location.pathname, window.location.search);
-    if (match.id === "dm") {
-      if (waddles.hasLoadedStructure.value === false) return;
-    } else if (waddles.channels.value.length === 0) {
+    if (waddles.channels.value.length === 0) {
       return;
     }
     if (!routeNeedsDiscoveredChannel(match)) {
       pendingChannelRouteMatch = null;
       return;
     }
-    if (match.id !== "dm" && channelRouteTargetMissing(match)) return;
+    if (channelRouteTargetMissing(match)) return;
     pendingChannelRouteMatch = null;
     const requestId = routeSync.beginRouteRequest();
     isApplyingRoute.value = true;

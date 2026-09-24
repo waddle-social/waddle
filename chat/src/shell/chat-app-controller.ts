@@ -277,7 +277,6 @@ export function useChatAppController() {
     updateUrl,
     clearPendingChannelRoomJidSelection: roomSync.clearPendingChannelRoomJidSelection,
     selectGroupDm: roomSync.selectGroupDm,
-    selectChannel: roomSync.selectChannel,
   });
 
   const panels = useThreadPanels({
@@ -394,7 +393,6 @@ export function useChatAppController() {
 
   const routeSync = useRouteSync({
     ui,
-    session,
     waddles,
     messaging,
     dmMessaging,
@@ -534,6 +532,7 @@ export function useChatAppController() {
     selectExtensionRoute: extension.selectExtensionRoute,
     handleOpenDm: dmSync.handleOpenDm,
     selectDm: dmSync.selectDm,
+    searchDmRecipients: dmSync.searchDmRecipients,
     handleNewDm: dmSync.handleNewDm,
     handleNewGroupDm: dmSync.handleNewGroupDm,
     handleAddPeopleToDm: dmSync.handleAddPeopleToDm,

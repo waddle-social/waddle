@@ -138,7 +138,7 @@ const NS_HINTS: &str = "urn:xmpp:hints";
 /// Parse a `<message>` stanza for a JMI envelope. Returns `None`
 /// when no `urn:xmpp:jingle-message:0` child is present.
 pub fn parse_jmi_message(stanza: &Element) -> Option<InboundCallEvent> {
-    if stanza.name() != "message" {
+    if stanza.name() != "message" || stanza.attr("type") == Some("error") {
         return None;
     }
     let from = stanza.attr("from").and_then(|s| s.parse::<Jid>().ok())?;

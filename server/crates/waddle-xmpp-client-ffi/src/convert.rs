@@ -72,6 +72,13 @@ pub(super) fn dispatch_event(
                 stanza_id: stanza_id.to_string(),
             });
         }
+        ClientEvent::MessageRejected(rejection) => {
+            listener.on_event(WaddleClientEvent::MessageRejected {
+                stanza_id: rejection.stanza_id,
+                from: rejection.from,
+                to: rejection.to,
+            });
+        }
         ClientEvent::Call(call) => {
             listener.on_event(WaddleClientEvent::Call {
                 event: call_event_to_ffi(*call),
@@ -2426,6 +2433,57 @@ mod tests {
             }
             _ => panic!("expected Call variant"),
         }
+    }
+
+    #[test]
+    fn dispatch_message_rejection_preserves_typed_identity_through_ffi() {
+        use waddle_xmpp_client::messaging::MessageRejection;
+        use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
+        let listener = CapturingListener::default();
+        let id = StanzaId::new("rejected-1").expect("valid id");
+        let from: Jid = "room@muc.waddle.test/bob".parse().expect("valid sender");
+        let to: Jid = "alice@waddle.test/phone".parse().expect("valid recipient");
+        dispatch_event(
+            ClientEvent::MessageRejected(Box::new(MessageRejection {
+                stanza_id: id.clone(),
+                from: from.clone(),
+                to: Some(to.clone()),
+                error: StanzaError::new(
+                    ErrorType::Cancel,
+                    DefinedCondition::ServiceUnavailable,
+                    "en",
+                    "Unavailable",
+                ),
+            })),
+            "alice@waddle.test",
+            &listener,
+        );
+        let events = listener.events();
+        assert_eq!(events.len(), 1);
+        let lowered =
+            <WaddleClientEvent as uniffi::Lower<crate::UniFfiTag>>::lower(events[0].clone());
+        let lifted = <WaddleClientEvent as uniffi::Lift<crate::UniFfiTag>>::try_lift(lowered)
+            .expect("typed event round trip");
+        let WaddleClientEvent::MessageRejected {
+            stanza_id,
+            from: actual_from,
+            to: actual_to,
+        } = lifted
+        else {
+            panic!("rejection must not surface as message content or a transport failure");
+        };
+        assert_eq!(stanza_id, id);
+        assert_eq!(actual_from, from);
+        assert_eq!(actual_to, Some(to));
+    }
+
+    #[test]
+    fn rejection_custom_types_reject_invalid_abi_values() {
+        let invalid_jid = <String as uniffi::Lower<crate::UniFfiTag>>::lower("@waddle.test".into());
+        assert!(<Jid as uniffi::Lift<crate::UniFfiTag>>::try_lift(invalid_jid).is_err());
+        let empty_id = <String as uniffi::Lower<crate::UniFfiTag>>::lower("  ".into());
+        assert!(<StanzaId as uniffi::Lift<crate::UniFfiTag>>::try_lift(empty_id).is_err());
     }
 
     #[test]

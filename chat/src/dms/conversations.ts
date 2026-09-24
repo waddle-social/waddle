@@ -397,8 +397,10 @@ export function useDirectMessageConversations(
     }
   }
 
-  async function openDm(peerJid: string) {
-    const bare = conversationKeyFor(peerJid);
+  async function openDm(peerJid: string, scope?: DmConversationScope) {
+    if (scope === "muc-occupant" && !peerJid.includes("/")) return;
+    const bare = scope === "muc-occupant" ? peerJid.trim()
+      : scope === "account" ? barePeerJid(peerJid.trim()) : conversationKeyFor(peerJid);
     if (isRoomPeer(bare)) return;
     // #1256: an initiated MUC-PM conversation gets the same provenance
     // metadata as a received one, and no presence subscribe is sent —
@@ -406,6 +408,7 @@ export function useDirectMessageConversations(
     // the room bare JID.
     const isOccupant = bare.includes("/");
     if (isOccupant) {
+      xmppClient.value?.rememberMucPmPeer?.(bare);
       ensureConversation(bare, mucPmDisplayName(bare), barePeerJid(bare));
     } else {
       ensureConversation(bare);
@@ -482,7 +485,12 @@ export function useDirectMessageConversations(
   }
 
   watch([conversations, activePeerJid], persist, { deep: true });
-  watch([knownRoomKeys, xmppClient], () => pruneRoomConversations());
+  watch([knownRoomKeys, xmppClient], () => {
+    pruneRoomConversations();
+    for (const conversation of conversations.value) {
+      if (conversation.mucPm) xmppClient.value?.rememberMucPmPeer?.(conversation.peerJid);
+    }
+  }, { immediate: true });
 
   watch(
     () => session.value?.jid,

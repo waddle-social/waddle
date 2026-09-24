@@ -1,5 +1,16 @@
 import type { CallEvent } from "@/lib/calls/types";
 
+export interface WasmMessageRejection {
+  stanza_id: string;
+  from: string;
+  to?: string | null;
+  error: {
+    error_type: "auth" | "cancel" | "continue" | "modify" | "wait";
+    condition: string;
+    text?: string | null;
+  };
+}
+
 /** TypeScript interfaces for Rust/WASM callback payload shapes.
  * Field casing follows the Rust serde attributes for each exposed type.
  */

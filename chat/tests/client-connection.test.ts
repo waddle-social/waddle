@@ -298,7 +298,7 @@ describe("OfflineSendQueue drain ordering", () => {
       outboundH: 2,
       unhandledOutboundEntries: [{
         xml: '<message id="dm-native" to="bob@example.com"><body>native replay</body></message>',
-        sentAt: "2026-07-26T12:34:56.789Z",
+        sentAt: "2026-07-26T12:34:56.789Z", rejected: false,
       }],
     });
 
@@ -377,7 +377,7 @@ describe("OfflineSendQueue drain ordering", () => {
       outboundH: 1,
       unhandledOutboundEntries: [{
         xml: '<message id="dm-native"><body>native fallback</body></message>',
-        sentAt: "2026-07-26T12:34:56.789Z",
+        sentAt: "2026-07-26T12:34:56.789Z", rejected: false,
       }],
     });
     queue.markInflight("dm-ordinary");
@@ -409,7 +409,7 @@ describe("OfflineSendQueue drain ordering", () => {
       outboundH: 2,
       unhandledOutboundEntries: [{
         xml: '<message id="dm-replay-failed"><body>native replay</body></message>',
-        sentAt: "2026-07-26T12:34:56.789Z",
+        sentAt: "2026-07-26T12:34:56.789Z", rejected: false,
       }],
     });
 
@@ -582,7 +582,7 @@ describe("ResumeStateStore", () => {
       inboundH: 0,
       outboundH: 0,
       hasUnackedOutbound: true,
-      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }],
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z", rejected: false }],
     };
 
     store.persistForPageHide(liveState, "web-abc", () => undefined);
@@ -755,4 +755,111 @@ describe("ResumeStateStore", () => {
       "finish",
     ]);
   });
+});
+
+describe("message stanza rejection", () => {
+  test("unrelated acknowledged traffic cannot discard a delayed rejection", () => {
+    const { queue, events } = createQueue();
+    const failures: string[] = [];
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    queue.persistPendingDirectSend("chat@example.com", "oldest", { id: "oldest" });
+    queue.handleAck("oldest");
+    for (let index = 0; index < 2100; index += 1) {
+      const id = `newer-${index}`;
+      queue.recordSentRecipient(id, "bob@example.com", "account");
+      queue.handleAck(id);
+    }
+    queue.handleRejected({ stanza_id: "oldest", from: "chat@example.com", to: SCOPE });
+    queue.handleAck("oldest");
+    expect(failures).toEqual(["oldest"]);
+    expect(queue.wasRejected("oldest")).toBe(true);
+    queue.dispose();
+    expect(queue.wasRejected("oldest")).toBe(false);
+  });
+
+  test.each([false, true])("rejects a matching send with prior SM ack=%s and never retries it", async (ackFirst) => {
+    const sent: string[] = [];
+    const { queue, events } = createQueue({ sendDirect: async (_peer, _body, opts) => {
+      sent.push(opts.id);
+      return opts.id;
+    } });
+    const failures: Array<[string, string | undefined]> = [];
+    const acknowledgements: string[] = [];
+    events.on("messageDeliveryFailure", (id, reason) => failures.push([id, reason]));
+    events.on("messageAck", (id) => acknowledgements.push(id));
+    queue.queueDirectMessage("chat@example.com", "hello", { id: "rejected-dm" });
+    await queue.flushDirect();
+    if (ackFirst) queue.handleAck("rejected-dm");
+    queue.handleRejected({ stanza_id: "rejected-dm", from: "chat@example.com", to: SCOPE });
+    queue.handleAck("rejected-dm");
+    queue.handleFailed("rejected-dm");
+    queue.clearOrdinaryInflight();
+    await queue.flushDirect();
+    expect(failures).toEqual([["rejected-dm", "rejected"]]);
+    expect(acknowledgements).toEqual(ackFirst ? ["rejected-dm"] : []);
+    expect(sent).toEqual(["rejected-dm"]);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(queue.wasRejected("rejected-dm")).toBe(true);
+    queue.dispose();
+  });
+
+  test("ignores unrelated senders, recipients, unknown IDs, and unsent queue entries", async () => {
+    const { queue, events } = createQueue();
+    const failures: string[] = [];
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    queue.queueDirectMessage("bob@example.com", "hello", { id: "dm" });
+    queue.handleRejected({ stanza_id: "dm", from: "bob@example.com" });
+    await queue.flushDirect();
+    queue.handleRejected({ stanza_id: "dm", from: "mallory@example.com" });
+    queue.handleRejected({ stanza_id: "dm", from: "bob@example.com", to: "someone@example.com" });
+    queue.handleRejected({ stanza_id: "unknown", from: "bob@example.com" });
+    expect(failures).toEqual([]);
+    expect(listQueuedMessages(SCOPE)).toHaveLength(1);
+    queue.handleRejected({ stanza_id: "dm", from: "bob@example.com/phone", to: `${SCOPE}/web` });
+    expect(failures).toEqual(["dm"]);
+    queue.dispose();
+  });
+
+  test("preserves exact MUC occupant identity and rejects room errors only from the room or service", async () => {
+    const { queue, events } = createQueue();
+    const failures: string[] = [];
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    queue.queueDirectMessage("room@muc.example.com/Bob", "private", { id: "pm", mucPm: true });
+    queue.queueRoomMessage("room@muc.example.com", "public", { id: "room" });
+    await queue.flushDirect();
+    await queue.flushRoom("room@muc.example.com");
+    queue.handleRejected({ stanza_id: "pm", from: "room@muc.example.com/bob" });
+    queue.handleRejected({ stanza_id: "pm", from: "room@muc.example.com/Mallory" });
+    queue.handleRejected({ stanza_id: "room", from: "room@muc.example.com/Mallory" });
+    expect(failures).toEqual([]);
+    queue.handleRejected({ stanza_id: "pm", from: "room@muc.example.com/Bob" });
+    queue.handleRejected({ stanza_id: "room", from: "room@muc.example.com" });
+    expect(failures).toEqual(["pm", "room"]);
+    queue.dispose();
+  });
+
+  test("a restored unacked send accepts a rejection before queue drain", () => {
+    const { queue } = createQueue();
+    queue.queueDirectMessage("bob@example.com", "hello", { id: "restored" });
+    queue.seedFromResumeState({ previd: "resume", inboundH: 0, outboundH: 1,
+      unhandledOutboundEntries: [{ xml: '<message id="restored" to="bob@example.com"/>', sentAt: new Date().toISOString(), rejected: false }] });
+    queue.handleRejected({ stanza_id: "restored", from: "example.com" });
+    expect(queue.wasRejected("restored")).toBe(true);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    queue.dispose();
+  });
+});
+
+test("restored native rejection removes a stale browser queue copy before drain", async () => {
+  const sent: string[] = [];
+  const { queue } = createQueue({ sendDirect: async (_peer, _body, opts) => { sent.push(opts.id); return opts.id; } });
+  queue.queueDirectMessage("chat@example.com", "hello", { id: "rejected-before-crash" });
+  queue.seedFromResumeState({ previd: "resume", inboundH: 1, outboundH: 1,
+    unhandledOutboundEntries: [{ xml: '<message id="rejected-before-crash" to="chat@example.com"/>', sentAt: new Date().toISOString(), rejected: true }] });
+  queue.clearOrdinaryInflight();
+  await queue.flushDirect();
+  expect(sent).toEqual([]);
+  expect(listQueuedMessages(SCOPE)).toEqual([]);
+  expect(queue.wasRejected("rejected-before-crash")).toBe(true);
+  queue.dispose();
 });

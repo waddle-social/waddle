@@ -163,7 +163,7 @@ extension SessionCoordinator {
     /// Keeps every unconfirmed written message so disconnect replay and
     /// outbox persistence cannot drop one before an ack or server echo.
     private func rememberSent(_ message: OutboundMessage) {
-        removeRecentlyAcknowledged(message.clientID)
+        recentlyAcknowledgedOutbound[message.clientID] = nil
         sentOutbound[message.clientID] = message
         sentOrder.removeAll { $0 == message.clientID }
         sentOrder.append(message.clientID)
@@ -182,8 +182,30 @@ extension SessionCoordinator {
         retryingOutboundIDs.remove(clientID)
         resetBeforeRetryIDs.remove(clientID)
         if let message {
-            rememberRecentlyAcknowledged(message)
+            recentlyAcknowledgedOutbound[message.clientID] = message
         }
+    }
+
+    /// Correlate explicit errors without trusting their echoed body or metadata.
+    func messageRejected(_ clientID: String, from: JID, to: JID?) {
+        guard to == nil || to?.bare == account.jid,
+              let message = sentOutbound[clientID]
+                ?? outboundQueue.first(where: { $0.clientID == clientID })
+                ?? recentlyAcknowledgedOutbound[clientID]
+                ?? failedOutbound[clientID]
+        else { return }
+        let recipient = message.conversation.jid
+        // Only a service domain can report failures for another recipient.
+        // Our bare account is a peer identity, including when the core uses
+        // it as the RFC 6120 default for a missing `from`.
+        let serviceError = from.resource == nil && from.bare.localpart == nil
+            && (from.bare.domain == account.jid.domain || from.bare.domain == recipient.domain)
+        // Native conversations target bare accounts or bare rooms. A room
+        // occupant is a distinct entity and cannot reject a groupchat send.
+        let recipientError = from.bare == recipient
+            && (!message.conversation.isRoom || from.resource == nil)
+        guard serviceError || recipientError else { return }
+        sentMessageFailed(clientID, bounced: true)
     }
 
     /// The written message failed after all (XEP-0198 or an error bounce):
@@ -220,28 +242,9 @@ extension SessionCoordinator {
             failedOutbound[clientID] = message
         } else if deliveries.state(of: clientID) == .acknowledged, let message {
             failedOutbound[clientID] = nil
-            rememberRecentlyAcknowledged(message)
+            recentlyAcknowledgedOutbound[message.clientID] = message
         }
         persistOutbox()
-    }
-
-    private func rememberRecentlyAcknowledged(_ message: OutboundMessage) {
-        let clientID = message.clientID
-        recentlyAcknowledgedOutbound[clientID] = message
-        recentlyAcknowledgedOrder.removeAll { $0 == clientID }
-        recentlyAcknowledgedOrder.append(clientID)
-        if recentlyAcknowledgedOrder.count > 200 {
-            let expired = recentlyAcknowledgedOrder.removeFirst()
-            recentlyAcknowledgedOutbound[expired] = nil
-            if deliveries.state(of: expired) == .acknowledged {
-                deliveries.forget(expired)
-            }
-        }
-    }
-
-    private func removeRecentlyAcknowledged(_ clientID: String) {
-        recentlyAcknowledgedOutbound[clientID] = nil
-        recentlyAcknowledgedOrder.removeAll { $0 == clientID }
     }
 
     /// The optimistic row: our occupant JID in a room (so the reflection

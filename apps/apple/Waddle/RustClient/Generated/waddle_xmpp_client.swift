@@ -12013,6 +12013,12 @@ public enum WaddleClientEvent: Equatable, Hashable {
     case deliveryFailed(stanzaId: String
     )
     /**
+     * Explicit message rejection. Consumers must match both the id and
+     * addresses against a retained outbound send before changing its state.
+     */
+    case messageRejected(stanzaId: StanzaId, from: Jid, to: Jid?
+    )
+    /**
      * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
      * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
      * query-response entries resolve the `fetch_inbox` verb and are
@@ -12081,16 +12087,19 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case 7: return .deliveryFailed(stanzaId: try FfiConverterString.read(from: &buf)
         )
 
-        case 8: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
+        case 8: return .messageRejected(stanzaId: try FfiConverterTypeStanzaId.read(from: &buf), from: try FfiConverterTypeJid.read(from: &buf), to: try FfiConverterOptionTypeJid.read(from: &buf)
         )
 
-        case 9: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        case 9: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
         )
 
-        case 10: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        case 10: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         )
 
-        case 11: return .error(description: try FfiConverterString.read(from: &buf)
+        case 11: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        )
+
+        case 12: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -12134,23 +12143,30 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             FfiConverterString.write(stanzaId, into: &buf)
 
 
-        case let .inboxPush(entry):
+        case let .messageRejected(stanzaId,from,to):
             writeInt(&buf, Int32(8))
+            FfiConverterTypeStanzaId.write(stanzaId, into: &buf)
+            FfiConverterTypeJid.write(from, into: &buf)
+            FfiConverterOptionTypeJid.write(to, into: &buf)
+
+
+        case let .inboxPush(entry):
+            writeInt(&buf, Int32(9))
             FfiConverterTypeWaddleInboxEntry.write(entry, into: &buf)
 
 
         case let .call(event):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(10))
             FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
 
 
         case let .authenticationFailed(condition):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
 
 
         case let .error(description):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterString.write(description, into: &buf)
 
         }
@@ -15724,6 +15740,30 @@ fileprivate struct FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry: FfiCon
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeJid: FfiConverterRustBuffer {
+    typealias SwiftType = Jid?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeJid.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeJid.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt16: FfiConverterRustBuffer {
     typealias SwiftType = [UInt16]
 
@@ -16620,6 +16660,94 @@ fileprivate struct FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBu
         return seq
     }
 }
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
+public typealias Jid = String
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeJid: FfiConverter {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Jid {
+        return try FfiConverterString.read(from: &buf)
+    }
+
+    public static func write(_ value: Jid, into buf: inout [UInt8]) {
+        return FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func lift(_ value: RustBuffer) throws -> Jid {
+        return try FfiConverterString.lift(value)
+    }
+
+    public static func lower(_ value: Jid) -> RustBuffer {
+        return FfiConverterString.lower(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeJid_lift(_ value: RustBuffer) throws -> Jid {
+    return try FfiConverterTypeJid.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeJid_lower(_ value: Jid) -> RustBuffer {
+    return FfiConverterTypeJid.lower(value)
+}
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
+public typealias StanzaId = String
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStanzaId: FfiConverter {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StanzaId {
+        return try FfiConverterString.read(from: &buf)
+    }
+
+    public static func write(_ value: StanzaId, into buf: inout [UInt8]) {
+        return FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func lift(_ value: RustBuffer) throws -> StanzaId {
+        return try FfiConverterString.lift(value)
+    }
+
+    public static func lower(_ value: StanzaId) -> RustBuffer {
+        return FfiConverterString.lower(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStanzaId_lift(_ value: RustBuffer) throws -> StanzaId {
+    return try FfiConverterTypeStanzaId.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStanzaId_lower(_ value: StanzaId) -> RustBuffer {
+    return FfiConverterTypeStanzaId.lower(value)
+}
+
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_WAKE: Int8 = 1
 

@@ -189,6 +189,7 @@ import type {
   WasmMamPage,
   WasmMdsDisplayedEntry,
   WasmMessage,
+  WasmMessageRejection,
   WasmPinEvent,
   WasmPresence,
   WasmPubsubEvent,
@@ -355,6 +356,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_presence?: (cb: (presence: WasmPresence) => void) => void;
   set_on_message_delivery_acked?: (cb: (id: string) => void) => void;
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
+  set_on_message_rejected?: (cb: (rejection: WasmMessageRejection) => void) => void;
   set_on_call?: (cb: (event: CallEvent) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
@@ -508,6 +510,7 @@ export class BrowserXmppClient {
   private roomDiscoveryGeneration = 0;
   private uploadServiceJid: string | null = null;
   private mucServiceJid = "";
+  private readonly selectedMucPmPeers = new Set<string>();
   private discoveredRoomJids = new Map<string, string>();
   private readonly reconnect: ReconnectScheduler;
   private readonly resume: ResumeStateStore;
@@ -927,7 +930,7 @@ export class BrowserXmppClient {
   setPresenceHandler(h: (presence: RoomPresence) => void) { this.events.set("presence", h); }
   setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.events.set("lastSeen", h); }
   setMessageAckHandler(h: (messageId: string) => void) { this.events.set("messageAck", h); }
-  setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.events.set("messageDeliveryFailure", h); }
+  setMessageDeliveryFailureHandler(h: (messageId: string, reason?: "rejected") => void) { this.events.set("messageDeliveryFailure", h); }
   setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.events.set("queuedMessageStatus", h); }
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.events.set("sessionLifecycle", h); }
   setCatchupFailureHandler(h: (failure: CatchupConversationFailure) => void) { this.events.set("catchupFailure", h); }
@@ -1885,7 +1888,7 @@ export class BrowserXmppClient {
         throw error;
       }
       if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(attempt);
-      return { id, state: "sending" };
+      return { id, state: this.outboundQueue.wasRejected(outboundId) ? "rejected" : "sending" };
     }
     const queued = this.outboundQueue.queueRoomMessage(roomJid, body, opts);
     void this.connect().then(() => this.switchRoom(spaceId, channelId)).then(() => this.flushQueuedRoomMessages(roomJid)).catch(() => undefined);
@@ -1936,7 +1939,7 @@ export class BrowserXmppClient {
         throw error;
       }
       if (id !== outboundId) this.outboundQueue.rollbackLiveAttempt(attempt);
-      return { id, state: "sending" };
+      return { id, state: this.outboundQueue.wasRejected(outboundId) ? "rejected" : "sending" };
     }
     return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
   }
@@ -3234,6 +3237,7 @@ export class BrowserXmppClient {
     this.presence.handle(presence);
   }
   private handleMessage(message: InboundWasmMessage) {
+    if (message.message_type === "error") return;
     const inboxPush = message.inboxPush ?? (message.inbox_push ? inboxEntryFromWasm(message.inbox_push) : undefined);
     if (inboxPush) { this.events.emit("inboxPush", inboxPush); return; }
     // The marker is sender-controlled. Unknown room PM copies may be ignored
@@ -3250,6 +3254,13 @@ export class BrowserXmppClient {
       // Dropped BEFORE any dedupe bookkeeping so a typing burst can't
       // flood the bounded set and evict ids still guarding real rows.
       if (message.carbon.sent && ((message.chat_state && !message.body) || message.displayed_marker_id)) return;
+      // A verified sent carbon is outbound evidence from another device.
+      // Its later received error must fail that self row on this device too.
+      if (message.carbon.sent && message.id && message.to
+        && bareJidKey(message.from ?? "") === bareJidKey(this.session.jid)) {
+        this.outboundQueue.recordSentRecipient(message.id, message.to,
+          message.is_muc ? "room" : this.mucPmOccupant(message) ? "occupant" : "account");
+      }
       // Remember row-producing carbon ids (scoped by sender — stanza
       // ids are only unique per sender) so a duplicate direct delivery
       // of the same stanza drops below, and an SM-replayed copy of the
@@ -3350,6 +3361,11 @@ export class BrowserXmppClient {
     if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else { const occupant = this.mucPmOccupant(message); this.events.emit("dmDisplayed", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); } return; }
     if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const occupant = this.mucPmOccupant(message); const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = occupant?.occupantJid ?? (fromBare === selfBare ? toBare : fromBare); const reactorJid = (occupant && fromBare !== selfBare ? occupant.occupantJid : fromBare) || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
     this.dispatchLiveBodyMessage(message);
+    // Rejections settle the retry queue immediately, even during catch-up.
+    // A sent carbon can reach the timeline later when the resume buffer drains.
+    if (message.id && this.outboundQueue.wasRejected(message.id)) {
+      this.events.emit("messageDeliveryFailure", message.id, "rejected");
+    }
   }
 
   private dispatchLiveBodyMessage(message: InboundWasmMessage) {
@@ -3484,11 +3500,18 @@ export class BrowserXmppClient {
       || this.isKnownMucRoomBare(barePeerJid(bareJid));
   }
 
+  /** An explicit occupant conversation is user-selected address context,
+   * not proof of room membership or authority for other occupants. */
+  rememberMucPmPeer(peerJid: string): void {
+    if (resourceOf(peerJid)) this.selectedMucPmPeers.add(fullJidIdentityKey(peerJid));
+  }
+
   /** Public: whether `peerJid` is a full occupant JID proven by the
    * configured MUC service, a discovered room, or persisted catch-up scope. */
   isMucPmPeer(peerJid: string): boolean {
     if (!resourceOf(peerJid)) return false;
-    return this.isMucServicePeer(peerJid)
+    return this.selectedMucPmPeers.has(fullJidIdentityKey(peerJid))
+      || this.isMucServicePeer(peerJid)
       || this.isKnownMucRoomBare(barePeerJid(peerJid))
       || this.catchup.getDmScope(peerJid) === "muc-occupant";
   }
@@ -3572,6 +3595,10 @@ export class BrowserXmppClient {
     xmpp.set_on_message_delivery_failed?.((id: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handleMessageFailed(id);
+    });
+    xmpp.set_on_message_rejected?.((rejection: WasmMessageRejection) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.outboundQueue.handleRejected(rejection);
     });
     xmpp.set_on_stream_management?.((event: StreamManagementTelemetry) => {
       if (!this.isCurrentXmpp(xmpp)) return;

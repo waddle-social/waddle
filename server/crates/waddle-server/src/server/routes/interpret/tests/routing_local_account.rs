@@ -1,6 +1,77 @@
 use super::*;
 use crate::ingress::IngressEffectCapture;
 
+#[tokio::test]
+async fn account_lookup_failure_rejects_bare_and_full_targets_without_storage() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+    use xmpp_parsers::message::MessageType;
+
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "ALTER TABLE native_users RENAME TO unavailable_native_users".into(),
+            params: vec![],
+        })
+        .await
+        .expect("make lookup fail");
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = Deps {
+        web_socket_state: Some(&state),
+        ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
+    };
+    for target in ["bob@example.com", "bob@example.com/absent"] {
+        for kind in [MessageType::Chat, MessageType::Headline, MessageType::Error] {
+            let mut message = chat_msg(jid("alice@example.com/web"), jid(target), "hello");
+            message.type_ = kind.clone();
+            let outcome = interpret(
+                vec![OutboundEvent::RouteToConnection {
+                    jid: target.parse().expect("target"),
+                    stanza: Box::new(Stanza::Message(message)),
+                    call_setup: None,
+                }],
+                &deps,
+            )
+            .await;
+            if kind == MessageType::Error {
+                assert!(outcome.frames.is_empty(), "never answer an error");
+                continue;
+            }
+            assert_eq!(outcome.frames.len(), 1, "{target} {kind:?}");
+            let reply: Element = outcome.frames[0].parse().expect("XML reply");
+            let reply = xmpp_parsers::message::Message::try_from(reply).expect("message");
+            let error = reply
+                .payloads
+                .iter()
+                .find_map(|payload| StanzaError::try_from(payload.clone()).ok())
+                .expect("typed error");
+            assert_eq!(error.type_, ErrorType::Wait);
+            assert_eq!(
+                error.defined_condition,
+                DefinedCondition::InternalServerError
+            );
+        }
+    }
+    let archive = mam
+        .query_messages(
+            &"bob@example.com".parse().expect("recipient"),
+            waddle_xmpp::mam::MamArchiveKind::Personal,
+            &Default::default(),
+        )
+        .await
+        .expect("archive");
+    assert!(archive.messages.is_empty());
+}
+
 // ---------------------------------------------------------------------
 // #1246 — RFC 6121 §8.5.1: message to a nonexistent local account is
 // bounced with <service-unavailable/>, never persisted.

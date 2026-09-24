@@ -108,6 +108,7 @@ impl TryFrom<Element> for CountableReplayStanza {
 pub struct UnhandledOutboundEntry {
     stanza: CountableReplayStanza,
     message_stanza_id: Option<StanzaId>,
+    rejected: bool,
     sent_at: DateTime<Utc>,
 }
 
@@ -123,9 +124,20 @@ impl UnhandledOutboundEntry {
         let stanza = CountableReplayStanza::try_from(element)?;
         Ok(Self {
             message_stanza_id: message_delivery_stanza_id(&stanza.element),
+            rejected: false,
             stanza,
             sent_at,
         })
+    }
+
+    /// Restore the terminal outcome alongside the stanza at persistence I/O.
+    pub fn with_rejected(mut self, rejected: bool) -> Self {
+        self.rejected = rejected;
+        self
+    }
+
+    pub fn is_rejected(&self) -> bool {
+        self.rejected
     }
 
     /// Expose the retained XML only for the literal persistence I/O boundary.
@@ -237,6 +249,7 @@ impl SmResumeState {
     pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
         self.outbound_queue
             .iter()
+            .filter(|queued| !queued.rejected)
             .filter_map(|queued| queued.message_stanza_id.clone())
             .collect()
     }
@@ -331,7 +344,9 @@ impl SmState {
         let outbound_queue = self
             .outbound_queue
             .iter()
-            .filter(|queued| matches!(queued.stanza.element.name(), "message" | "presence"))
+            .filter(|queued| {
+                !queued.rejected && matches!(queued.stanza.element.name(), "message" | "presence")
+            })
             .cloned()
             .collect::<VecDeque<_>>();
         if outbound_queue.is_empty() {
@@ -471,8 +486,10 @@ impl SmState {
             .min(self.outbound_queue.len());
         for _ in 0..to_drop {
             if let Some(queued) = self.outbound_queue.pop_front() {
-                if let Some(stanza_id) = queued.message_stanza_id {
-                    acked.push(stanza_id);
+                if !queued.rejected {
+                    if let Some(stanza_id) = queued.message_stanza_id {
+                        acked.push(stanza_id);
+                    }
                 }
             }
         }
@@ -570,6 +587,21 @@ impl SmState {
         h.wrapping_sub(self.server_h) > self.outbound_count.wrapping_sub(self.server_h)
     }
 
+    /// Keep a rejected stanza's SM ordinal until it is acknowledged, but do
+    /// not resend it on a fresh stream or report subsequent acknowledgement
+    /// as delivery. Only a matching outbound recipient can set this flag.
+    pub(crate) fn reject_message(
+        &mut self,
+        rejection: &crate::messaging::MessageRejection,
+        account: &jid::BareJid,
+    ) {
+        for queued in &mut self.outbound_queue {
+            if rejection.matches_outbound(&queued.stanza.element, account) {
+                queued.rejected = true;
+            }
+        }
+    }
+
     /// Mark currently unhandled outbound stanzas for replay and return them.
     pub fn mark_unhandled_for_replay(&mut self) -> Vec<Element> {
         let replay: Vec<Element> = self
@@ -589,7 +621,9 @@ impl SmState {
             // semantics for IQ and the original request might already have
             // taken effect.  XEP-0198 resumption may replay it verbatim, but
             // fresh-stream fallback must leave IQ recovery to its owner.
-            .filter(|queued| matches!(queued.stanza.element.name(), "message" | "presence"))
+            .filter(|queued| {
+                !queued.rejected && matches!(queued.stanza.element.name(), "message" | "presence")
+            })
             .map(UnhandledOutboundEntry::element_for_fallback_retry)
             .collect()
     }
@@ -597,6 +631,7 @@ impl SmState {
     pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
         self.outbound_queue
             .iter()
+            .filter(|queued| !queued.rejected)
             .filter_map(|queued| queued.message_stanza_id.clone())
             .collect()
     }

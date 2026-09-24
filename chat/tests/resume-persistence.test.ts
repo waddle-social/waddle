@@ -437,13 +437,13 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 7,
       outboundH: 11,
       maxResumeSeconds: 300,
-      unhandledOutboundEntries: [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }],
     });
 
     expect(calls).toEqual([
       {
         method: "with_resume_state_entries_with_max",
-        args: ["prev-1", 7, 11, [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z" }], 300],
+        args: ["prev-1", 7, 11, [{ xml: "<message/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }], 300],
       },
     ]);
   });
@@ -456,13 +456,13 @@ describe("applyResumeStateToWasmConfig", () => {
       resumable: false,
       inboundH: 0,
       outboundH: 0,
-      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }],
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z", rejected: false }],
     });
 
     expect(calls).toEqual([
       {
         method: "with_fresh_stream_retry_state_entries",
-        args: ["declined-sm-stream", 0, 0, [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z" }]],
+        args: ["declined-sm-stream", 0, 0, [{ xml: "<message id='m1'/>", sentAt: "2026-07-28T10:00:00.000Z", rejected: false }]],
       },
     ]);
   });
@@ -493,13 +493,13 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 1,
       outboundH: 2,
       maxResumeSeconds: 300,
-      unhandledOutboundEntries: [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }],
     });
 
     expect(calls).toEqual([
       {
         method: "with_resume_state_entries",
-        args: ["prev-3", 1, 2, [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z" }]],
+        args: ["prev-3", 1, 2, [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }]],
       },
     ]);
   });
@@ -512,7 +512,7 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 1,
       outboundH: 2,
       maxResumeSeconds: 300,
-      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<message id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }],
     });
 
     expect(calls).toEqual([]);
@@ -544,7 +544,7 @@ describe("malformed persisted SM snapshots", () => {
       previd: "corrupt-sm",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundEntries: [{ xml: "<not-xml", sentAt: "not-a-timestamp" }],
+      unhandledOutboundEntries: [{ xml: "<not-xml", sentAt: "not-a-timestamp", rejected: false }],
     });
     let configs = 0;
     let connected = 0;
@@ -1240,7 +1240,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
-      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: true }],
     };
     persistence.saveSm(state);
     // Round-trip strips the internal `savedAt` so the caller gets
@@ -1259,11 +1259,11 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       unhandledOutboundEntries: [
         {
           xml: "<message xmlns='jabber:client' id='message-retry'><origin-id xmlns='urn:xmpp:sid:0' id='message-origin'/><delay xmlns='urn:xmpp:delay' stamp='2026-07-28T10:11:12.000Z'/></message>",
-          sentAt: "2026-07-28T10:11:12.000Z",
+          sentAt: "2026-07-28T10:11:12.000Z", rejected: false,
         },
         {
           xml: "<presence xmlns='jabber:client' id='presence-retry'><delay xmlns='urn:xmpp:delay' stamp='2026-07-28T10:11:12.000Z'/></presence>",
-          sentAt: "2026-07-28T10:11:12.000Z",
+          sentAt: "2026-07-28T10:11:12.000Z", rejected: false,
         },
       ],
     };
@@ -1776,7 +1776,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       inboundH: 4,
       outboundH: 9,
       resource: "web-existing-resource",
-      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-owned-sm-tail'/>", sentAt: "2026-08-08T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-owned-sm-tail'/>", sentAt: "2026-08-08T12:34:56.789Z", rejected: false }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -1896,7 +1896,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           outboundH: number;
           maxResumeSeconds: number;
           hasUnackedOutbound: boolean;
-          unhandledOutboundEntries: Array<{ xml: string; sentAt: string }>;
+          unhandledOutboundEntries: Array<{ xml: string; sentAt: string; rejected: boolean }>;
         };
       };
     }).xmpp = {
@@ -1906,7 +1906,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         outboundH: 9,
         maxResumeSeconds: 300,
         hasUnackedOutbound: true,
-        unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+        unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }],
       }),
     };
 
@@ -1917,7 +1917,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       inboundH: 4,
       outboundH: 9,
       maxResumeSeconds: 300,
-      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='unacked'/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }],
     });
   });
 
@@ -1927,7 +1927,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -1957,7 +1957,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       resource: "web-original-resource",
       unhandledOutboundEntries: [{
         xml: `<message xmlns='jabber:client' id='${messageId}'/>`,
-        sentAt: "2026-07-26T12:34:56.789Z",
+        sentAt: "2026-07-26T12:34:56.789Z", rejected: false,
       }],
     };
     seedCopiedOwnerHandoff(ownerId, state);
@@ -1995,7 +1995,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z" }],
+      unhandledOutboundEntries: [{ xml: "<message xmlns='jabber:client' id='dm-live-1'/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",

@@ -75,11 +75,11 @@ class PendingSendTrackerTest {
     }
 
     @Test
-    fun `failure beating the send continuation wins over an ack`() {
+    fun `rejection beating the send continuation wins over an ack`() {
         val message = tracker.append("racy", extras = null, timestampMillis = 1_000L)
 
         tracker.onDeliveryAcked("s-1")
-        tracker.onDeliveryFailed("s-1")
+        tracker.onMessageRejected("s-1")
         tracker.onSendResult(
             message.localId,
             SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "s-1"),
@@ -89,6 +89,46 @@ class PendingSendTrackerTest {
         assertTrue(updated.failed)
         assertFalse(updated.acked)
         assertFalse(updated.queued)
+    }
+
+    @Test
+    fun `rejection restores an acknowledged stored row and survives later acks`() {
+        val message = tracker.append("rejected", extras = null, timestampMillis = 1_000L)
+        tracker.onSendResult(message.localId, SendResult(WaddleSendMessageOutcome.Sent("s-1")))
+        tracker.pruneAgainst(setOf("s-1"))
+        tracker.onDeliveryAcked("s-1")
+        assertTrue(tracker.pending.value.isEmpty())
+
+        tracker.onMessageRejected("s-1")
+        tracker.onDeliveryAcked("s-1")
+        tracker.pruneAgainst(setOf("s-1"))
+        val failed = row(message.localId)
+        assertTrue(failed.failed)
+        assertFalse(failed.acked)
+        assertFalse(failed.queued)
+        assertEquals("rejected", failed.body)
+        assertEquals(failed, tracker.takeRetry(message.localId))
+    }
+
+    @Test
+    fun `other conversation errors cannot evict a visible rejection`() {
+        val message = tracker.append("rejected", extras = null, timestampMillis = 1_000L)
+        tracker.onSendResult(message.localId, SendResult(WaddleSendMessageOutcome.Sent("s-1")))
+        tracker.onMessageRejected("s-1")
+        repeat(300) { tracker.onMessageRejected("other-$it") }
+        tracker.onDeliveryAcked("s-1")
+        assertTrue(row(message.localId).failed)
+        assertFalse(row(message.localId).acked)
+    }
+
+    @Test
+    fun `transport failure does not override server acknowledgement`() {
+        val message = tracker.append("handled", extras = null, timestampMillis = 1_000L)
+        tracker.onDeliveryAcked("s-1")
+        tracker.onDeliveryFailed("s-1")
+        tracker.onSendResult(message.localId, SendResult(WaddleSendMessageOutcome.Sent("s-1")))
+        assertTrue(row(message.localId).acked)
+        assertFalse(row(message.localId).failed)
     }
 
     @Test

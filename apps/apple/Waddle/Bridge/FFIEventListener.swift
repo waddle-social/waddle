@@ -38,6 +38,11 @@ final class FFIEventListener: WaddleEventListener {
             return .deliveryAcked(stanzaID: stanzaId)
         case let .deliveryFailed(stanzaId):
             return .deliveryFailed(stanzaID: stanzaId)
+        case let .messageRejected(stanzaId, from, to):
+            guard let sender = JID(parsing: from) else { return nil }
+            let recipient = to.flatMap(JID.init(parsing:))
+            guard to == nil || recipient != nil else { return nil }
+            return .messageRejected(stanzaID: stanzaId, from: sender, to: recipient)
         case .call:
             BridgeLog.debug("dropped call event: calls are not bridged")
             return nil

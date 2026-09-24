@@ -34,8 +34,10 @@ public enum XmppEvent: Sendable {
     case presence(WirePresence)
     /// XEP-0198 acknowledged the outbound stanza with this client id.
     case deliveryAcked(stanzaID: String)
-    /// The outbound stanza with this client id will not be delivered.
+    /// Transport failure, which cannot override an acknowledgement.
     case deliveryFailed(stanzaID: String)
+    /// Explicit error, subject to outbound id and address validation.
+    case messageRejected(stanzaID: String, from: JID, to: JID?)
     /// Live `urn:waddle:inbox:0` unread push.
     case inboxPush(InboxEntry)
     /// SASL failure: the presented credential is dead.

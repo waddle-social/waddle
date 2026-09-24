@@ -35,6 +35,9 @@ class XmppEventBridgeTest {
         bridge.onEvent(WaddleClientEvent.DeliveryFailed("stanza-2"))
         assertEquals(XmppEvent.DeliveryFailed("stanza-2"), received())
 
+        bridge.onEvent(WaddleClientEvent.MessageRejected("stanza-3", "alice@waddle.test", "bob@waddle.test/p"))
+        assertEquals(XmppEvent.MessageRejected("stanza-3", "alice@waddle.test", "bob@waddle.test/p"), received())
+
         bridge.onEvent(WaddleClientEvent.Call(call))
         assertEquals(XmppEvent.Call(call), received())
 

@@ -135,7 +135,7 @@ export function useChatSend(deps: UseChatSendDeps) {
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
       if (isStillActive) {
         if (msgId) {
-          pendingEchoClientIds.add(msgId);
+          if (result?.state !== "rejected") pendingEchoClientIds.add(msgId);
           const optimistic: TimelineMessage = {
             id: msgId,
             correctionTargetId: msgId,
@@ -234,8 +234,9 @@ export function useChatSend(deps: UseChatSendDeps) {
     messages.value = applyDeliveryEventById(messages.value, messageId, status);
   }
 
-  function onMessageDeliveryFailure(messageId: string) {
-    messages.value = applyDeliveryEventById(messages.value, messageId, "failed");
+  function onMessageDeliveryFailure(messageId: string, reason?: "rejected") {
+    if (reason === "rejected") pendingEchoClientIds.delete(messageId);
+    messages.value = applyDeliveryEventById(messages.value, messageId, reason ?? "failed");
   }
 
   return {

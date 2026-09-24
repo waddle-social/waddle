@@ -51,6 +51,7 @@ export function findLiveMergeTarget(
       (m) =>
         pendingEchoClientIds.has(m.id)
         && m.isSelf
+        && m.deliveryStatus !== "rejected"
         && m.body === msg.body
         && (!mucScoped || hasMessageSenderContinuity(m, msg)),
     )
@@ -62,6 +63,7 @@ export function findLiveMergeTarget(
         && m.body === msg.body
         && !!m.deliveryStatus
         && m.deliveryStatus !== "delivered"
+        && m.deliveryStatus !== "rejected"
         && (!mucScoped || hasMessageSenderContinuity(m, msg)),
     )
     : undefined;

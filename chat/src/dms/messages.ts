@@ -367,6 +367,7 @@ export function useDirectMessages(
           m.deliveryStatus === "queued"
           || m.deliveryStatus === "sending"
           || m.deliveryStatus === "failed"
+          || m.deliveryStatus === "rejected"
         ),
     );
     void (async () => {

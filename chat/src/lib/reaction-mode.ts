@@ -6,14 +6,14 @@ export type ReactionModeMessage = {
   createdAt: string;
   threadId?: string;
   isRetracted?: boolean;
-  deliveryStatus?: "queued" | "sending" | "delivered" | "failed";
+  deliveryStatus?: "queued" | "sending" | "delivered" | "failed" | "rejected";
   canReact?: boolean;
 };
 
 function isReactionModeMessageEligible(message: ReactionModeMessage, scope: ReactionModeScope): boolean {
   if (message.isRetracted) return false;
   if (message.canReact === false) return false;
-  if (message.deliveryStatus === "queued" || message.deliveryStatus === "sending" || message.deliveryStatus === "failed") {
+  if (message.deliveryStatus === "queued" || message.deliveryStatus === "sending" || message.deliveryStatus === "failed" || message.deliveryStatus === "rejected") {
     return false;
   }
   return scope === "thread" || !message.threadId || message.threadId === message.id;

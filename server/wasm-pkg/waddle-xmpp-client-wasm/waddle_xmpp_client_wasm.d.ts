@@ -472,6 +472,11 @@ export class WaddleClient {
     set_on_message(cb: Function): void;
     set_on_message_delivery_acked(cb: Function): void;
     set_on_message_delivery_failed(cb: Function): void;
+    /**
+     * Receive a parsed message rejection separately from incoming content.
+     * The callback must correlate its stanza ID and sender with an outbound send.
+     */
+    set_on_message_rejected(cb: Function): void;
     set_on_presence(cb: Function): void;
     /**
      * Generic XEP-0060 pubsub event handler. Invoked once per

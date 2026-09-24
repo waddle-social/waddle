@@ -26,6 +26,8 @@ class PendingSendTracker {
     // lifetime.
     private val ackedIds = linkedSetOf<String>()
     private val failedIds = linkedSetOf<String>()
+    private val rejectedIds = linkedSetOf<String>()
+    private val acknowledgedRows = linkedMapOf<String, PendingMessage>()
 
     // The timeline can receive the local DM projection while the send
     // continuation is still suspended below the manager. Keep its latest
@@ -66,13 +68,12 @@ class PendingSendTracker {
             return false
         }
         updatePending(localId) {
+            val failed = trackedId in rejectedIds || (trackedId in failedIds && trackedId !in ackedIds)
             it.copy(
                 stanzaId = trackedId,
-                queued = result.queued && trackedId !in failedIds,
-                // Both the ack AND the failure event can beat this
-                // continuation; failure wins.
-                acked = trackedId in ackedIds && trackedId !in failedIds,
-                failed = trackedId in failedIds,
+                queued = result.queued && !failed && trackedId !in ackedIds,
+                acked = trackedId in ackedIds && !failed,
+                failed = failed,
             )
         }
         removeAcknowledgedStoredRows()
@@ -87,6 +88,7 @@ class PendingSendTracker {
      * when the stored echo matches an identity id.
      */
     fun onDeliveryAcked(stanzaId: String) {
+        if (stanzaId in rejectedIds) return
         remember(ackedIds, stanzaId)
         _pending.update { list ->
             list.map {
@@ -97,10 +99,23 @@ class PendingSendTracker {
     }
 
     fun onDeliveryFailed(stanzaId: String) {
+        if (stanzaId in ackedIds || stanzaId in acknowledgedRows) return
         remember(failedIds, stanzaId)
         _pending.update { list ->
             list.map {
                 if (it.stanzaId == stanzaId) it.copy(failed = true, queued = false) else it
+            }
+        }
+    }
+
+    /** The manager has validated the id and sender against its outbound send. */
+    fun onMessageRejected(stanzaId: String) {
+        remember(rejectedIds, stanzaId)
+        val retained = acknowledgedRows.remove(stanzaId)
+        _pending.update { list ->
+            val rows = if (retained != null && list.none { it.stanzaId == stanzaId }) list + retained else list
+            rows.map {
+                if (it.stanzaId == stanzaId) it.copy(failed = true, acked = false, queued = false) else it
             }
         }
     }
@@ -145,6 +160,10 @@ class PendingSendTracker {
             .mapNotNull { it.stanzaId }
             .toSet()
         if (settled.isEmpty()) return
+        _pending.value.filter { it.stanzaId in settled }.forEach { row ->
+            acknowledgedRows[checkNotNull(row.stanzaId)] = row
+        }
+        while (acknowledgedRows.size > MAX_TRACKED_DELIVERY_IDS) acknowledgedRows.remove(acknowledgedRows.keys.first())
         ackedIds -= settled
         failedIds -= settled
         _pending.update { list ->
@@ -155,7 +174,13 @@ class PendingSendTracker {
     private fun remember(ids: LinkedHashSet<String>, id: String) {
         ids.remove(id)
         ids.add(id)
-        while (ids.size > MAX_TRACKED_DELIVERY_IDS) ids.remove(ids.first())
+        // Bound orphan events without forgetting the terminal state of a
+        // failed row that the user can still see or retry.
+        val visibleIds = _pending.value.mapNotNull { it.stanzaId }.toSet()
+        while (ids.size > MAX_TRACKED_DELIVERY_IDS) {
+            val orphan = ids.firstOrNull { it !in visibleIds } ?: break
+            ids.remove(orphan)
+        }
     }
 
     private companion object {

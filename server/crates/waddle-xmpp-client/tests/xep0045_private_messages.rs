@@ -41,7 +41,24 @@ fn private_message_marker_survives_chat_and_normal_parsing() {
 #[test]
 fn groupchat_and_other_namespaces_are_not_private_message_markers() {
     assert!(!parsed_message(Some("groupchat"), Some(MUC_USER_NS)).muc_pm);
-    assert!(!parsed_message(Some("error"), Some(MUC_USER_NS)).muc_pm);
     assert!(!parsed_message(Some("chat"), Some(NS_CLIENT)).muc_pm);
     assert!(!parsed_message(Some("chat"), None).muc_pm);
+}
+
+#[test]
+fn private_message_error_never_becomes_an_inbound_private_message() {
+    let error = Element::builder("message", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "room@conference.example/nick/phone",
+        )
+        .append(Element::builder("x", MUC_USER_NS).build())
+        .append(
+            Element::builder("body", NS_CLIENT)
+                .append("echoed body")
+                .build(),
+        )
+        .build();
+    assert!(parse(&error).is_none());
 }

@@ -1,3 +1,4 @@
+import { applyDeliveryEvent } from "@/lib/xmpp/delivery-lifecycle";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { mergeMessageIds } from "@/lib/message-ids";
 import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
@@ -92,7 +93,7 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
   // #1182: the reconciled row is only still identity-less if both sides were.
   if (!(existing.synthesizedId && incoming.synthesizedId)) delete updated.synthesizedId;
   if (existing.isSelf && incoming.isSelf) {
-    updated.deliveryStatus = "delivered";
+    updated.deliveryStatus = applyDeliveryEvent(existing.deliveryStatus, incoming.deliveryStatus === "rejected" ? "rejected" : "delivered");
   }
   return updated;
 }

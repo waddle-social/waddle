@@ -1,5 +1,7 @@
 package social.waddle.android.client
 
+import social.waddle.client.ffi.Jid
+import social.waddle.client.ffi.StanzaId
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleInboxEntry
@@ -37,6 +39,9 @@ sealed interface XmppEvent {
      * eviction / permanent replay rejection).
      */
     data class DeliveryFailed(val stanzaId: String) : XmppEvent
+
+    /** Explicit stanza error. The connection loop validates it before UI fan-out. */
+    data class MessageRejected(val stanzaId: StanzaId, val from: Jid, val to: Jid?) : XmppEvent
 
     data class Call(val event: WaddleCallEvent) : XmppEvent
 
