@@ -8,8 +8,10 @@ import {
   type GiphyGif,
 } from "@/lib/gif-picker-fetch";
 
-defineProps<{
+const props = defineProps<{
   isTopPinned?: boolean;
+  /** Search to run on open, e.g. from `/giphy cats`. */
+  initialQuery?: string;
 }>();
 
 const emit = defineEmits<{
@@ -22,7 +24,7 @@ onMounted(() => {
   searchInput.value?.focus();
 });
 
-const query = ref("");
+const query = ref(props.initialQuery ?? "");
 const results = ref<GiphyGif[]>([]);
 const isLoading = ref(false);
 const notConfigured = ref(false);
@@ -62,7 +64,7 @@ watch(query, (q) => {
   debounceTimer = setTimeout(() => fetchGifs(q), 300);
 });
 
-fetchGifs("");
+fetchGifs(query.value);
 
 function selectGif(gif: GiphyGif) {
   emit("select", gif.images.original.url);

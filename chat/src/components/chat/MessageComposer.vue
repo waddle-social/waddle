@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount, nextTick } from "vue";
-import { Send, Paperclip, FileText, Puzzle, X, Loader2, CornerDownLeft } from "lucide-vue-next";
+import { AtSign, CaseSensitive, CornerDownLeft, FileText, Loader2, Plus, SendHorizontal, Smile, SquareSlash, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import ComposerAddMenu from "@/components/chat/ComposerAddMenu.vue";
 import ComposerAttachmentGrid from "@/components/chat/ComposerAttachmentGrid.vue";
+import ComposerFormattingBar from "@/components/chat/ComposerFormattingBar.vue";
 import ComposerEmojiPopover from "@/components/chat/ComposerEmojiPopover.vue";
 import ComposerMentionPopover from "@/components/chat/ComposerMentionPopover.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
+import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import SlashCommandPopover from "@/components/chat/SlashCommandPopover.vue";
 import { getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
@@ -25,6 +28,7 @@ import {
   attachmentPreviewKind,
   type PendingAttachment,
 } from "./composer-attachments";
+import { composerPlaceholder } from "./composer-placeholder";
 import { useComposerAutocomplete } from "./composables/use-composer-autocomplete";
 
 const draft = defineModel<string>("draft", { required: true });
@@ -48,6 +52,8 @@ const props = defineProps<{
   linkPreviewScope?: string | null;
   composerLabel?: string;
   showExtensions?: boolean;
+  /** Overrides the default `Message #channel` placeholder (DMs, threads). */
+  placeholder?: string;
 }>();
 
 const emit = defineEmits<{
@@ -71,6 +77,10 @@ const replyAuthorName = computed(() => {
 });
 
 const showGifPicker = ref(false);
+const gifPickerQuery = ref("");
+const showAddMenu = ref(false);
+const showEmojiPicker = ref(false);
+const showFormatting = ref(false);
 const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editorRef.value = instance;
@@ -79,9 +89,13 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 const setFileInputRef = (el: HTMLInputElement | null) => {
   fileInputRef.value = el;
 };
-const extensionButtonRef = ref<HTMLButtonElement | null>(null);
-const setExtensionButtonRef = (el: HTMLButtonElement | null) => {
-  extensionButtonRef.value = el;
+const addButtonRef = ref<HTMLButtonElement | null>(null);
+const setAddButtonRef = (el: HTMLButtonElement | null) => {
+  addButtonRef.value = el;
+};
+const emojiButtonRef = ref<HTMLButtonElement | null>(null);
+const setEmojiButtonRef = (el: HTMLButtonElement | null) => {
+  emojiButtonRef.value = el;
 };
 
 /** Get the underlying TipTap Editor instance from the ChatEditor ref. */
@@ -173,18 +187,15 @@ const canSend = computed(() =>
   !isEmpty.value &&
   (!showForumTitleInput.value || !!forumTitle.value.trim()),
 );
-const editorPlaceholder = computed(() => {
-  if (props.slowModeCooldown > 0) {
-    return `Slow mode — wait ${props.slowModeCooldown}s`;
-  }
-  if (showForumTitleInput.value) {
-    return "Write the opening post";
-  }
-  if (props.isForumChannel) {
-    return "Reply in this topic";
-  }
-  return `Message #${props.channelName}`;
-});
+const editorPlaceholder = computed(() =>
+  composerPlaceholder({
+    slowModeCooldown: props.slowModeCooldown,
+    needsForumTitle: showForumTitleInput.value,
+    isForumChannel: props.isForumChannel,
+    placeholder: props.placeholder,
+    channelName: props.channelName,
+  }),
+);
 
 function onEditorUpdate(doc: JSONContent) {
   draft.value = tiptapToRichMessage(doc).body;
@@ -252,8 +263,10 @@ function refocusAfterSend() {
   void nextTick(() => editorRef.value?.focus());
 }
 
+/** Return focus to the composer's `+` menu trigger, which is where the
+ * extensions launcher lives. */
 function focusExtensions() {
-  extensionButtonRef.value?.focus();
+  addButtonRef.value?.focus();
 }
 
 defineExpose({ addAttachments, focus, focusExtensions });
@@ -296,6 +309,85 @@ function onEditorCancel() {
   }
 }
 
+/** Close every composer popover the toolbar opens, so only one shows. */
+function closeToolbarPopovers() {
+  showAddMenu.value = false;
+  showEmojiPicker.value = false;
+  showGifPicker.value = false;
+}
+
+function toggleAddMenu() {
+  const next = !showAddMenu.value;
+  closeToolbarPopovers();
+  showAddMenu.value = next;
+}
+
+function openGifPicker(query = "") {
+  closeToolbarPopovers();
+  gifPickerQuery.value = query;
+  showGifPicker.value = true;
+}
+
+function onAddMenuUpload() {
+  closeToolbarPopovers();
+  openFilePicker();
+}
+
+function onAddMenuExtensions() {
+  closeToolbarPopovers();
+  emit("openExtensions");
+}
+
+function toggleEmojiPicker() {
+  const next = !showEmojiPicker.value;
+  closeToolbarPopovers();
+  showEmojiPicker.value = next;
+}
+
+function onEmojiPicked(emoji: string) {
+  showEmojiPicker.value = false;
+  getTiptapEditor()?.chain().focus().insertContent(emoji).run();
+}
+
+function onEmojiPickerClose() {
+  showEmojiPicker.value = false;
+  focus();
+}
+
+/** Insert `@` at the caret (space-separated from a preceding word) so the
+ * mention autocomplete opens, as Slack's `@` button does. */
+function startMention() {
+  const editor = getTiptapEditor();
+  if (!editor) return;
+  const { from } = editor.state.selection;
+  const before = from > 1 ? editor.state.doc.textBetween(from - 1, from, "\n", "\n") : "";
+  const needsSpace = before !== "" && !/\s/.test(before);
+  editor.chain().focus().insertContent(needsSpace ? " @" : "@").run();
+}
+
+/** Arm slash-command mode: prefix the first paragraph with `/` so the
+ * command list opens; any text already typed becomes the arguments. */
+function startSlashCommand() {
+  const editor = getTiptapEditor();
+  if (!editor) return;
+  const first = editor.state.doc.firstChild;
+  if (!first || first.type.name !== "paragraph") {
+    editor.commands.focus();
+    return;
+  }
+  if (first.textContent.startsWith("/")) {
+    editor.chain().focus().setTextSelection(2).run();
+    return;
+  }
+  const prefix = first.textContent.length > 0 ? "/ " : "/";
+  editor.chain().focus().insertContentAt(1, prefix).setTextSelection(2).run();
+}
+
+function toggleFormatting() {
+  showFormatting.value = !showFormatting.value;
+  focus();
+}
+
 function onGifSelected(url: string) {
   if (isPreparingSend.value) return;
   showGifPicker.value = false;
@@ -324,6 +416,7 @@ watch(
 
 watch(isPreparingSend, (preparing) => {
   if (preparing) showGifPicker.value = false;
+  if (preparing) showAddMenu.value = false;
 });
 
 </script>
@@ -335,7 +428,7 @@ watch(isPreparingSend, (preparing) => {
     @keydown.capture="onKeydown"
   >
     <div
-      v-if="replyingTo || showForumTitleInput || linkPreview.showCard.value || pendingAttachments.length > 0 || uploadProgress.uploading"
+      v-if="replyingTo || showForumTitleInput || linkPreview.showCard.value || uploadProgress.uploading"
       class="chat-composer-aux-stack"
     >
       <!-- Reply context chip — appears above the composer when the
@@ -418,12 +511,6 @@ watch(isPreparingSend, (preparing) => {
         </p>
       </div>
 
-      <ComposerAttachmentGrid
-        v-if="pendingAttachments.length > 0"
-        :attachments="pendingAttachments"
-        @remove="removeAttachment"
-      />
-
       <!-- Upload progress bar -->
       <div
         v-if="uploadProgress.uploading"
@@ -443,6 +530,7 @@ watch(isPreparingSend, (preparing) => {
     <GifPicker
       v-if="showGifPicker"
       :is-top-pinned="isTopPinned"
+      :initial-query="gifPickerQuery"
       @select="onGifSelected"
       @close="showGifPicker = false"
     />
@@ -474,9 +562,10 @@ watch(isPreparingSend, (preparing) => {
       @pick="expandSlashCandidate"
     />
 
-    <div
-      class="chat-composer-input-shell flex min-w-0 flex-nowrap items-center gap-2 bg-muted p-1 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/30 has-[:focus]:shadow-[0_0_22px_var(--glow-strong)]"
-    >
+    <!-- Slack-style card: optional formatting row, the editor, pending
+         attachments, then one action row (add, format, emoji, mention,
+         command on the left; send on the right). -->
+    <div class="chat-composer-card" :class="{ 'chat-composer-card--disabled': disabled }">
       <input
         :ref="setFileInputRef"
         type="file"
@@ -485,76 +574,128 @@ watch(isPreparingSend, (preparing) => {
         :disabled="disabled || isPreparingSend"
         @change="onFileInputChange"
       />
-      <!-- LEFT cluster: content-add actions (attach, GIF). The picker
-           launched by the second button is GIPHY-only — not a generic
-           photo browser — so the affordance is a typographic GIF mark
-           rather than a photo icon. -->
-      <button
-        type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
-        title="Attach files"
-        aria-label="Attach files"
+      <ComposerFormattingBar
+        v-if="showFormatting && tiptapEditor"
+        :editor="tiptapEditor"
         :disabled="disabled || isPreparingSend"
-        @click="openFilePicker"
-      >
-        <Paperclip class="w-4 h-4" aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 active:scale-[0.94] disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
-        :class="showGifPicker ? 'bg-background/80 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-primary'"
-        title="Search GIFs"
-        aria-label="Search GIFs"
-        :aria-expanded="showGifPicker"
-        :disabled="disabled || isPreparingSend"
-        @click="showGifPicker = !showGifPicker"
-      >
-        <span class="chat-composer-gif-badge" aria-hidden="true">GIF</span>
-      </button>
-      <ChatEditor
-        :ref="setEditorRef"
-        class="min-w-0"
-        embedded
-        :placeholder="editorPlaceholder"
-        :disabled="disabled || slowModeCooldown > 0 || isPreparingSend"
-        :editor-label="composerLabel ?? `${channelName} composer`"
-        @send="onSend"
-        @update="onEditorUpdate"
-        @selection-update="checkAutocompleteFromEditor"
-        @cancel="onEditorCancel"
-        @paste="onEditorPaste"
       />
-      <!-- RIGHT cluster: dispatch actions (extensions menu, send).
-           Extensions live next to send so the right edge is consistently
-           "fire an action"; the left edge is consistently "add to the
-           message draft". -->
-      <button
-        v-if="showExtensions"
-        :ref="setExtensionButtonRef"
-        type="button"
-        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
-        title="Extensions"
-        aria-label="Extensions"
-        :aria-expanded="extensionsOpen"
-        :disabled="disabled || isPreparingSend"
-        @click="emit('openExtensions')"
-      >
-        <Puzzle class="w-4 h-4" aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        class="chat-composer-send chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center bg-primary text-primary-foreground transition-all duration-200 disabled:opacity-20 active:scale-[0.94] motion-safe:hover:scale-[1.04] [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
-        :class="canSend ? 'chat-composer-send--armed shadow-[0_0_18px_var(--glow-strong)]' : ''"
-        :disabled="!canSend"
-        :aria-label="isSendBusy ? 'Sending message' : 'Send message'"
-        :aria-busy="isSendBusy"
-        @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
-      >
-        <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
-        <Loader2 v-else-if="isSendBusy" class="w-4 h-4 motion-safe:animate-spin" aria-hidden="true" />
-        <Send v-else class="w-4 h-4" aria-hidden="true" />
-      </button>
+      <div class="chat-composer-editor-slot">
+        <ChatEditor
+          :ref="setEditorRef"
+          class="min-w-0"
+          embedded
+          :placeholder="editorPlaceholder"
+          :disabled="disabled || slowModeCooldown > 0 || isPreparingSend"
+          :editor-label="composerLabel ?? `${channelName} composer`"
+          @send="onSend"
+          @update="onEditorUpdate"
+          @selection-update="checkAutocompleteFromEditor"
+          @cancel="onEditorCancel"
+          @paste="onEditorPaste"
+        />
+      </div>
+      <div v-if="pendingAttachments.length > 0" class="chat-composer-card-attachments">
+        <ComposerAttachmentGrid
+          :attachments="pendingAttachments"
+          @remove="removeAttachment"
+        />
+      </div>
+      <div class="chat-composer-toolbar">
+        <div class="relative flex items-center">
+          <button
+            :ref="setAddButtonRef"
+            type="button"
+            class="chat-composer-add"
+            :class="{ 'chat-composer-add--open': showAddMenu }"
+            title="Attach"
+            aria-label="Attach"
+            aria-haspopup="menu"
+            :aria-expanded="showAddMenu"
+            :disabled="disabled || isPreparingSend"
+            @click="toggleAddMenu"
+          >
+            <Plus class="h-4 w-4" aria-hidden="true" />
+          </button>
+          <ComposerAddMenu
+            v-if="showAddMenu"
+            :anchor-el="addButtonRef"
+            :show-extensions="showExtensions"
+            :is-top-pinned="isTopPinned"
+            @upload="onAddMenuUpload"
+            @gif="openGifPicker()"
+            @extensions="onAddMenuExtensions"
+            @close="showAddMenu = false"
+          />
+        </div>
+        <button
+          type="button"
+          class="chat-composer-tool"
+          :class="{ 'chat-composer-tool--active': showFormatting }"
+          :title="showFormatting ? 'Hide formatting' : 'Show formatting'"
+          :aria-label="showFormatting ? 'Hide formatting' : 'Show formatting'"
+          :aria-pressed="showFormatting"
+          :disabled="disabled || isPreparingSend"
+          @click="toggleFormatting"
+        >
+          <CaseSensitive class="h-5 w-5" aria-hidden="true" />
+        </button>
+        <button
+          :ref="setEmojiButtonRef"
+          type="button"
+          class="chat-composer-tool"
+          :class="{ 'chat-composer-tool--active': showEmojiPicker }"
+          title="Emoji"
+          aria-label="Emoji"
+          aria-haspopup="dialog"
+          :aria-expanded="showEmojiPicker"
+          :disabled="disabled || isPreparingSend"
+          @click="toggleEmojiPicker"
+        >
+          <Smile class="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class="chat-composer-tool"
+          title="Mention someone"
+          aria-label="Mention someone"
+          :disabled="disabled || isPreparingSend"
+          @click="startMention"
+        >
+          <AtSign class="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class="chat-composer-tool"
+          title="Run a command"
+          aria-label="Run a command"
+          :disabled="disabled || isPreparingSend"
+          @click="startSlashCommand"
+        >
+          <SquareSlash class="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class="chat-composer-send"
+          :class="{ 'chat-composer-send--armed': canSend }"
+          :disabled="!canSend"
+          :title="isSendBusy ? 'Sending message' : 'Send now'"
+          :aria-label="isSendBusy ? 'Sending message' : 'Send message'"
+          :aria-busy="isSendBusy"
+          @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
+        >
+          <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
+          <Loader2 v-else-if="isSendBusy" class="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" />
+          <SendHorizontal v-else class="h-4 w-4" aria-hidden="true" />
+        </button>
+      </div>
     </div>
-    <EditorBubbleToolbar v-if="tiptapEditor" :editor="tiptapEditor" />
+    <EmojiPicker
+      :open="showEmojiPicker"
+      :anchor-el="emojiButtonRef"
+      purpose="insert"
+      @select="onEmojiPicked"
+      @close="onEmojiPickerClose"
+    />
+    <EditorBubbleToolbar v-if="tiptapEditor && !showFormatting" :editor="tiptapEditor" />
   </div>
 </template>

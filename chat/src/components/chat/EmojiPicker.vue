@@ -14,8 +14,10 @@ const props = withDefaults(
      * controls positioning — used inside the mobile action sheet.
      */
     variant?: "popover" | "sheet";
+    /** "react" labels picks as reactions; "insert" as composer insertions. */
+    purpose?: "react" | "insert";
   }>(),
-  { variant: "popover" },
+  { variant: "popover", purpose: "react" },
 );
 
 const emit = defineEmits<{
@@ -41,6 +43,12 @@ const COMMON_EMOJIS = [
   "🌸", "🌺", "🌻", "🌷", "🍀", "🎂", "🍰", "🍕",
   "🍔", "🍟", "🍜", "🍣", "🍺", "🍷", "🍾", "☕",
 ];
+
+const panelLabel = computed(() => (props.purpose === "insert" ? "Insert an emoji" : "Choose a reaction"));
+
+function emojiLabel(emoji: string): string {
+  return props.purpose === "insert" ? `Insert ${emoji}` : `React with ${emoji}`;
+}
 
 const query = ref("");
 const recents = ref<string[]>([]);
@@ -184,7 +192,7 @@ onBeforeUnmount(detachWindowListeners);
       v-if="open"
       ref="panelEl"
       :role="variant === 'popover' ? 'dialog' : 'group'"
-      aria-label="Choose a reaction"
+      :aria-label="panelLabel"
       :class="[
         'flex flex-col overflow-hidden',
         variant === 'popover'
@@ -231,7 +239,7 @@ onBeforeUnmount(detachWindowListeners);
                 'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
                 variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
               ]"
-              :aria-label="`React with ${e}`"
+              :aria-label="emojiLabel(e)"
               @click="onSelect(e)"
             >{{ e }}</button>
           </div>
@@ -258,7 +266,7 @@ onBeforeUnmount(detachWindowListeners);
                   'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
                   variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
                 ]"
-                :aria-label="`React with ${e}`"
+                :aria-label="emojiLabel(e)"
                 @click="onSelect(e)"
               >{{ e }}</button>
             </div>
@@ -273,7 +281,7 @@ onBeforeUnmount(detachWindowListeners);
                 'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
                 variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
               ]"
-              :aria-label="`React with ${e}`"
+              :aria-label="emojiLabel(e)"
               @click="onSelect(e)"
             >{{ e }}</button>
           </div>
