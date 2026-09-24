@@ -132,6 +132,33 @@ async fn process_row(
     row: PendingJudgmentRow,
     now_ms: i64,
 ) -> RowOutcome {
+    // A prior pass over this exact row can have already judged it
+    // successfully (insert_judgment committed) and then failed on the
+    // *next* step (e.g. a transient mark_done error), leaving the row due
+    // again. Re-invoking the judge in that case risks a second, unrelated
+    // failure overwriting last_error on a row that is, in truth, already
+    // judged -- a completed judgment misreported as failed. Skip straight
+    // to marking it done instead.
+    match store::judgment_exists(db, &row.stanza_id, store::IS_QUESTION_JUDGMENT_NAME).await {
+        Ok(true) => {
+            return match store::mark_done(db, &row.id).await {
+                Ok(()) => RowOutcome::Judged,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "message_judgment_outbox: mark_done for already-judged row failed"
+                    );
+                    RowOutcome::StoreErrorIgnored
+                }
+            };
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, "message_judgment_outbox: judgment_exists check failed");
+            // Fall through and attempt the judge call as normal; failing
+            // the existence check is not a reason to skip processing.
+        }
+    }
     match judge.is_question(&row.body_snapshot).await {
         Ok(judgment) => {
             let record = JudgmentRecord {
@@ -165,9 +192,17 @@ async fn process_row(
                 // so the audit trail doesn't silently drop the one failure
                 // that actually ended the row's retries.
                 return match store::dead_letter(db, &row.id, &judge_error.to_string()).await {
-                    Ok(()) => RowOutcome::Failed {
+                    Ok(true) => RowOutcome::Failed {
                         dead_lettered: true,
                     },
+                    Ok(false) => {
+                        // Lost the race: a concurrent drain worker already
+                        // completed this row between this call's judge
+                        // invocation and this write. This failure is stale
+                        // and must not overwrite the completed judgment's
+                        // audit trail.
+                        RowOutcome::StoreErrorIgnored
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "message_judgment_outbox: dead_letter failed");
                         RowOutcome::Failed {
@@ -177,7 +212,7 @@ async fn process_row(
                 };
             }
             let delay = retry_delay_ms(next_attempt);
-            if let Err(error) = store::record_failure(
+            match store::record_failure(
                 db,
                 &row.id,
                 &judge_error.to_string(),
@@ -185,7 +220,15 @@ async fn process_row(
             )
             .await
             {
-                tracing::warn!(%error, "message_judgment_outbox: record_failure failed");
+                Ok(true) => {}
+                Ok(false) => {
+                    // Same race as above, one retry earlier: don't record
+                    // a stale failure over an already-completed row.
+                    return RowOutcome::StoreErrorIgnored;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "message_judgment_outbox: record_failure failed");
+                }
             }
             RowOutcome::Failed {
                 dead_lettered: false,
@@ -495,5 +538,68 @@ mod tests {
             .expect("query");
         let row = rows.next().await.expect("row").expect("row present");
         assert_eq!(row.get::<f64>(0).expect("probability"), 0.75);
+    }
+
+    #[tokio::test]
+    async fn drain_once_does_not_re_judge_a_row_already_durably_judged() {
+        // Simulates the aftermath of a prior pass whose judge call and
+        // insert_judgment both succeeded, but which failed afterward (e.g.
+        // a transient mark_done error) -- leaving the outbox row not done,
+        // so it's still due, even though `message_judgments` already has a
+        // correct, durable result for it.
+        let db = test_db().await;
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-already-judged"),
+                body: "body".to_string(),
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue");
+        store::insert_judgment(
+            &db,
+            JudgmentRecord {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-already-judged"),
+                judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                taxonomy_version: "v1".to_string(),
+                model_version: "jev-1".to_string(),
+                probability: 0.75,
+                confidence: 0.6,
+                decided_at_ms: 0,
+                created_at_ms: 0,
+            },
+        )
+        .await
+        .expect("pre-seed judgment");
+
+        // A judge that always fails: if `drain_once` called it, this row
+        // would come out failed/dead-lettered and `last_error` would be
+        // overwritten -- exactly the misreport this guards against.
+        let judge = FakeJudge::new(|_body| err_judgment());
+        let outcome = drain_once(&db, &judge, 0, 10).await;
+
+        assert_eq!(outcome.judged, 1);
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(
+            judge.call_count(),
+            0,
+            "the judge must not be called for a row that's already durably judged"
+        );
+
+        let connection = db.guard().await.expect("guard");
+        let mut rows = connection
+            .query(
+                "SELECT done, last_error FROM message_judgment_outbox WHERE stanza_id = ?",
+                crate::db_params!["stanza-already-judged"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row present");
+        assert!(row.get::<bool>(0).expect("done"));
+        assert_eq!(row.get::<Option<String>>(1).expect("last_error"), None);
     }
 }

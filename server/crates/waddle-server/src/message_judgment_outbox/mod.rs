@@ -32,9 +32,9 @@ pub use drain::{
 pub use jev_client::{JevClient, JevClientConfig, JevClientConfigError};
 pub use judge::{IsQuestionJudgment, JudgeError, MessageJudge};
 pub use store::{
-    enqueue_pending, fetch_due_batch, insert_judgment, mark_done, record_failure, JudgmentRecord,
-    MessageJudgmentOutboxId, PendingJudgmentInput, PendingJudgmentRow, IS_QUESTION_JUDGMENT_NAME,
-    MAX_BODY_SNAPSHOT_CHARS,
+    dead_letter, enqueue_pending, fetch_due_batch, insert_judgment, judgment_exists, mark_done,
+    record_failure, JudgmentRecord, MessageJudgmentOutboxId, PendingJudgmentInput,
+    PendingJudgmentRow, IS_QUESTION_JUDGMENT_NAME, MAX_BODY_SNAPSHOT_CHARS,
 };
 
 use crate::db::{Database, DatabaseError};

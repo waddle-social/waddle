@@ -166,21 +166,30 @@ pub async fn mark_done(
 /// [`record_failure`]) would appear in the durable audit trail, silently
 /// dropping the one error that actually caused the row to stop being
 /// retried.
+///
+/// Guarded on `NOT done`: this outbox tolerates more than one drain worker
+/// running concurrently (see the module docs), so it's possible for a
+/// different worker to judge this exact row successfully — inserting a
+/// judgment and marking it done — *between* this call's judge invocation
+/// and this write. Without the guard, this call would win the race anyway
+/// and overwrite a completed judgment's row with a stale terminal failure.
+/// Returns `true` if this call's write actually applied, `false` if it was
+/// a no-op because the row was already done.
 pub async fn dead_letter(
     db: &Database,
     id: &MessageJudgmentOutboxId,
     error: &str,
-) -> Result<(), MessageJudgmentOutboxError> {
+) -> Result<bool, MessageJudgmentOutboxError> {
     let connection = db.guard().await?;
-    connection
+    let affected = connection
         .execute(
             "UPDATE message_judgment_outbox \
              SET attempt_count = attempt_count + 1, last_error = ?, done = TRUE \
-             WHERE id = ?",
+             WHERE id = ? AND NOT done",
             crate::db_params![error, id.as_str()],
         )
         .await?;
-    Ok(())
+    Ok(affected > 0)
 }
 
 /// Record one failed judgment attempt: increments `attempt_count`, stores
@@ -188,22 +197,53 @@ pub async fn dead_letter(
 /// not itself decide whether the row should be dead-lettered instead — that
 /// policy lives in `drain::drain_once`, which calls [`dead_letter`] directly
 /// once `drain::MAX_ATTEMPTS` is reached rather than calling this function.
+///
+/// Guarded on `NOT done` for the same reason as [`dead_letter`]: a
+/// concurrent drain worker can have already completed this row between this
+/// call's judge invocation and this write. Returns `true` if this call's
+/// write actually applied, `false` if it was a no-op because the row was
+/// already done.
 pub async fn record_failure(
     db: &Database,
     id: &MessageJudgmentOutboxId,
     error: &str,
     next_attempt_at_ms: i64,
-) -> Result<(), MessageJudgmentOutboxError> {
+) -> Result<bool, MessageJudgmentOutboxError> {
     let connection = db.guard().await?;
-    connection
+    let affected = connection
         .execute(
             "UPDATE message_judgment_outbox \
              SET attempt_count = attempt_count + 1, last_error = ?, available_at_ms = ? \
-             WHERE id = ?",
+             WHERE id = ? AND NOT done",
             crate::db_params![error, next_attempt_at_ms, id.as_str()],
         )
         .await?;
-    Ok(())
+    Ok(affected > 0)
+}
+
+/// Whether any judgment already exists for `(stanza_id, judgment_name)`,
+/// under any `model_version`. Checked by the drain worker before invoking
+/// the judge again for a row that is still due: a judge call can succeed
+/// and durably insert a judgment, yet the *same* `process_row` pass can
+/// still fail afterward (e.g. `mark_done` errors transiently), leaving the
+/// row due again on the next poll. Without this check, that next poll would
+/// call the judge a second time, and if that second call happened to fail,
+/// the row's `last_error` would be overwritten with a spurious failure even
+/// though a correct judgment was already durably recorded — a completed
+/// judgment misreported as failed.
+pub async fn judgment_exists(
+    db: &Database,
+    stanza_id: &StanzaId,
+    judgment_name: &str,
+) -> Result<bool, MessageJudgmentOutboxError> {
+    let connection = db.guard().await?;
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM message_judgments WHERE stanza_id = ? AND judgment_name = ? LIMIT 1",
+            crate::db_params![stanza_id.id.as_str(), judgment_name],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Insert one judgment result. Idempotent under replay: a second insert for
@@ -556,5 +596,96 @@ mod tests {
             .get(0)
             .expect("count");
         assert_eq!(count, 2, "distinct model_version must not collide");
+    }
+
+    #[tokio::test]
+    async fn dead_letter_is_a_no_op_when_row_already_done() {
+        // Simulates losing a race against a concurrent drain worker that
+        // already completed this row between this call's judge invocation
+        // and this write.
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-raced"),
+                body: "body".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        let id = due[0].id.clone();
+        mark_done(&db, &id)
+            .await
+            .expect("simulate concurrent winner");
+
+        let applied = dead_letter(&db, &id, "stale failure")
+            .await
+            .expect("dead_letter must not error on an already-done row");
+        assert!(
+            !applied,
+            "dead_letter must be a no-op once the row is already done"
+        );
+
+        let connection = db.guard().await.expect("guard");
+        let mut rows = connection
+            .query(
+                "SELECT attempt_count, last_error FROM message_judgment_outbox WHERE id = ?",
+                crate::db_params![id.as_str()],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row present");
+        assert_eq!(row.get::<i64>(0).expect("attempt_count"), 0);
+        assert_eq!(row.get::<Option<String>>(1).expect("last_error"), None);
+    }
+
+    #[tokio::test]
+    async fn record_failure_is_a_no_op_when_row_already_done() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-raced-retry"),
+                body: "body".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        let id = due[0].id.clone();
+        mark_done(&db, &id)
+            .await
+            .expect("simulate concurrent winner");
+
+        let applied = record_failure(&db, &id, "stale failure", 50_000)
+            .await
+            .expect("record_failure must not error on an already-done row");
+        assert!(
+            !applied,
+            "record_failure must be a no-op once the row is already done"
+        );
+
+        let connection = db.guard().await.expect("guard");
+        let mut rows = connection
+            .query(
+                "SELECT attempt_count, last_error FROM message_judgment_outbox WHERE id = ?",
+                crate::db_params![id.as_str()],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row present");
+        assert_eq!(row.get::<i64>(0).expect("attempt_count"), 0);
+        assert_eq!(row.get::<Option<String>>(1).expect("last_error"), None);
     }
 }
