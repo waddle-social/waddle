@@ -429,10 +429,9 @@ pub enum FullJidDeliveryOutcome {
     /// classified `MaybeEnqueued` (never routed to detached, to avoid
     /// double-delivery).
     Dropped,
-    /// The relay ask may have reached the target and committed the delivery,
-    /// but the sender did not observe the reply. Callers must suppress local
-    /// or headless fallback to avoid duplicate user-visible effects.
-    #[cfg(feature = "clustering")]
+    /// Delivery completion could not be established: a relay reply was lost,
+    /// or a local socket could not revalidate durable receipt/stream authority.
+    /// Suppress fallback and retry the frozen obligation without inferring failure.
     MaybeCommitted,
 }
 
@@ -441,7 +440,6 @@ impl FullJidDeliveryOutcome {
         match self {
             Self::Delivered | Self::QueuedDetached => true,
             Self::Unavailable | Self::Dropped => false,
-            #[cfg(feature = "clustering")]
             Self::MaybeCommitted => true,
         }
     }
@@ -483,7 +481,6 @@ pub(crate) fn close_call_setup_from_outcome(
         FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
             ticket.delivered();
         }
-        #[cfg(feature = "clustering")]
         FullJidDeliveryOutcome::MaybeCommitted => ticket.delivered(),
         FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {
             ticket.undeliverable();

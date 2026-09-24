@@ -65,7 +65,6 @@ async fn handled_full_jid_relay_failure_never_falls_back() {
         ..Deps::registry_only(&state.deps.protocol.connection_registry)
     };
     for handled in [
-        #[cfg(feature = "clustering")]
         FullJidDeliveryOutcome::MaybeCommitted,
         FullJidDeliveryOutcome::Dropped,
         FullJidDeliveryOutcome::Unavailable,

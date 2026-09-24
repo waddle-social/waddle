@@ -139,11 +139,8 @@ async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
         .with_resource_str("sibling")
         .expect("sibling");
     let (sibling_tx, mut sibling_rx) = tokio::sync::mpsc::channel(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(sibling.clone(), sibling_tx);
+    crate::server::routes::websocket::tests::register_test_connection(&state, &sibling, sibling_tx)
+        .await;
     assert!(state
         .deps
         .protocol

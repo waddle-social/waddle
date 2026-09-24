@@ -567,8 +567,8 @@ async fn forged_room_stamp(
     assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id, peer_is_member).await;
     assert_eq!(
         take_room_frames(&mut rx, &room, &room_id.1, &client_id, 0),
-        1,
-        "duplicate sender reflection"
+        0,
+        "a completed archived sender reflection is not repeated"
     );
     assert_eq!(
         take_room_frames(&mut peer_rx, &room, &room_id.1, &client_id, 1),

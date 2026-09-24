@@ -7,6 +7,7 @@ pub(crate) struct RecipientInventory {
     pub live: Vec<ResourceRoutingState>,
     pub detached: Vec<FullJid>,
     pub detached_carbons: Vec<FullJid>,
+    pub detached_headlines: Vec<FullJid>,
 }
 
 pub(super) struct RecipientSelection {
@@ -15,6 +16,34 @@ pub(super) struct RecipientSelection {
 }
 
 impl RecipientInventory {
+    /// RFC 6121 §8.5.2.1.1: headline originals reach every available
+    /// non-negative resource; an unmatched full JID never falls back to bare.
+    pub(super) fn select_headline(&self, requested: &Jid) -> RecipientSelection {
+        let mut originals = match requested.try_as_full() {
+            Ok(full) => {
+                if self.live.iter().any(|resource| &resource.jid == full)
+                    || self.detached.contains(full)
+                {
+                    vec![full.clone()]
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(_) => self
+                .live
+                .iter()
+                .filter(|resource| resource.available && resource.priority >= 0)
+                .map(|resource| resource.jid.clone())
+                .chain(self.detached_headlines.iter().cloned())
+                .collect(),
+        };
+        originals.sort();
+        originals.dedup();
+        RecipientSelection {
+            originals,
+            carbons: Vec::new(),
+        }
+    }
     pub(super) fn select(&self, requested: &Jid) -> RecipientSelection {
         let full = requested.clone().try_into_full().ok();
         let mut originals = match full.filter(|full| {
@@ -67,19 +96,27 @@ pub(crate) async fn local_recipient_inventory(
             .map_err(|_| ())?,
         None => Vec::new(),
     };
-    let (detached, detached_carbons) = match deps.sm_session_registry {
+    let (detached, detached_carbons, detached_headlines) = match deps.sm_session_registry {
         Some(sm) => (
             sm.detached_resources_for_user(bare).await.map_err(|_| ())?,
             sm.detached_carbon_resources_for_user(bare, &[])
                 .await
                 .map_err(|_| ())?,
+            sm.available_detached_presence_states_for_user(bare)
+                .await
+                .map_err(|_| ())?
+                .into_iter()
+                .filter(|state| state.priority >= 0)
+                .map(|state| state.resource)
+                .collect(),
         ),
-        None => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
     Ok(RecipientInventory {
         live,
         detached,
         detached_carbons,
+        detached_headlines,
     })
 }
 
@@ -114,6 +151,32 @@ mod tests {
             priority,
             carbons_enabled: true,
         }
+    }
+
+    #[test]
+    fn archived_headlines_freeze_all_available_nonnegative_resources_without_full_fallback() {
+        let low = resource("low", 1);
+        let high = resource("high", 10);
+        let negative = resource("negative", -1);
+        let mut unavailable = resource("unavailable", 20);
+        unavailable.available = false;
+        let inventory = RecipientInventory {
+            live: vec![low.clone(), high.clone(), negative.clone(), unavailable],
+            ..Default::default()
+        };
+        let selected = inventory.select_headline(&"bob@example.com".parse().unwrap());
+        assert_eq!(selected.originals, vec![high.jid, low.jid]);
+        assert!(selected.carbons.is_empty());
+        assert!(inventory
+            .select_headline(&"bob@example.com/missing".parse().unwrap())
+            .originals
+            .is_empty());
+        assert_eq!(
+            inventory
+                .select_headline(&negative.jid.clone().into())
+                .originals,
+            vec![negative.jid]
+        );
     }
 
     #[test]

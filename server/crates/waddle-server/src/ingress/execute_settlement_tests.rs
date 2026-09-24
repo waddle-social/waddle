@@ -29,6 +29,10 @@ fn settled_outcome_proves_only_persisted_keys_independently_of_completion() {
         (SettledCompletion::Complete, ExternalOutcome::Done),
         (SettledCompletion::Incomplete, ExternalOutcome::Failed),
         (SettledCompletion::Uncertain, ExternalOutcome::Uncertain),
+        (
+            SettledCompletion::Deferred,
+            ExternalOutcome::AwaitingPredecessor,
+        ),
     ] {
         let outcome = EffectOutcome::Settled(SettledOutcome {
             refusal: None,

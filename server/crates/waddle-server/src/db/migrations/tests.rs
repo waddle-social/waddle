@@ -567,7 +567,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 31);
+    assert_eq!(migration_ledger_row_count(&db).await, 32);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -1078,7 +1078,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 31);
+    assert_eq!(migration_ledger_row_count(&db).await, 32);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1345,6 +1345,13 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         .expect("run migrations in isolated postgres schema");
     assert_nonterminal_monitoring_index(&db).await;
 
+    crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+        db.clone(),
+        waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+    )
+    .await
+    .expect("pending delivery schema used by ingress GC monitoring");
+
     let query_pool = sqlx::PgPool::connect(db.database_url())
         .await
         .expect("connect isolated postgres query pool");
@@ -1427,6 +1434,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                 assert_eq!(
                     tables,
                     [
+                        "ingress_archive_dispatch",
                         "ingress_deliveries",
                         "ingress_effect_intents",
                         "ingress_effect_receipts",

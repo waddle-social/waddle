@@ -810,12 +810,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        // Match MAM's id-first lookup. A missing/tombstoned archive pointer is
-        // still claimed, so the resolver can discard the poison row instead of
-        // leaving it as a permanent dispatch barrier.
-        const ORDINAL: &str = "COALESCE( \
-            (SELECT archive_seq FROM mam_messages m WHERE m.room_jid = pending_delivery.archive_stanza_by AND m.id = pending_delivery.archive_stanza_id), \
-            (SELECT MIN(archive_seq) FROM mam_messages m WHERE m.room_jid = pending_delivery.archive_stanza_by AND m.stanza_id = pending_delivery.archive_stanza_id))";
+        // Match the archive resolver's newest row for either UID or stanza-id.
+        // Missing pointers are still claimed so materialization can discard them.
+        const ORDINAL: &str = "(SELECT MAX(archive_seq) FROM mam_messages m WHERE m.room_jid = pending_delivery.archive_stanza_by AND (m.id = pending_delivery.archive_stanza_id OR m.stanza_id = pending_delivery.archive_stanza_id))";
         let sql = format!(
             "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, claimed_at_ms = ? \
              WHERE flushed_in_session IS NULL AND row_id IN ( \

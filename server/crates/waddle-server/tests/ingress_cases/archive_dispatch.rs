@@ -97,7 +97,7 @@ async fn wire_ids(sm: &InMemorySmSessionRegistry, target: &FullJid) -> Vec<Strin
             let message = xmpp_parsers::message::Message::try_from(xml).expect("wire message");
             extract_stanza_ids(&message)
                 .into_iter()
-                .find(|id| id.by == jid::Jid::from(target.to_bare()))
+                .find(|id| id.by == target.to_bare())
                 .expect("recipient archive UID on wire")
                 .id
         })
@@ -119,14 +119,17 @@ async fn assert_archive_matches_wire(
     );
 }
 
-async fn reversed_execution(fixture: IngressFixture, mixed_targets: bool) {
+async fn reversed_execution(fixture: IngressFixture, mixed_targets: bool, headline: bool) {
     let sender_b = second_sender(&fixture).await;
     let [target, _, _] = delivery::resources();
     let connections = ConnectionRegistry::new();
     let sm = delivery::registry(&fixture).await;
     delivery::attach(&sm, &target).await;
     let targets = std::slice::from_ref(&target);
-    let a = submission(&fixture, &fixture.principal, "dispatch-a", targets, false);
+    let mut a = submission(&fixture, &fixture.principal, "dispatch-a", targets, false);
+    if headline {
+        make_stored_headline(&mut a);
+    }
     let b = submission(&fixture, &sender_b, "dispatch-b", targets, mixed_targets);
     let first = commit_submission(&fixture.uow, &a, 5)
         .await
@@ -286,7 +289,7 @@ async fn reversed_live_execution(fixture: IngressFixture) {
         delivered.push(
             extract_stanza_ids(&message)
                 .into_iter()
-                .find(|id| id.by == jid::Jid::from(target.to_bare()))
+                .find(|id| id.by == target.to_bare())
                 .expect("recipient archive UID")
                 .id,
         );
@@ -380,22 +383,22 @@ async fn recovery_order(fixture: IngressFixture) {
 
 #[tokio::test]
 async fn reversed_dispatch_sqlite() {
-    reversed_execution(IngressFixture::sqlite().await, false).await;
+    reversed_execution(IngressFixture::sqlite().await, false, false).await;
 }
 #[tokio::test]
 async fn reversed_dispatch_postgres() {
     if let Some(fixture) = IngressFixture::postgres("ord_rev").await {
-        reversed_execution(fixture, false).await;
+        reversed_execution(fixture, false, false).await;
     }
 }
 #[tokio::test]
 async fn mixed_bare_full_dispatch_sqlite() {
-    reversed_execution(IngressFixture::sqlite().await, true).await;
+    reversed_execution(IngressFixture::sqlite().await, true, false).await;
 }
 #[tokio::test]
 async fn mixed_bare_full_dispatch_postgres() {
     if let Some(fixture) = IngressFixture::postgres("ord_mixed").await {
-        reversed_execution(fixture, true).await;
+        reversed_execution(fixture, true, false).await;
     }
 }
 #[tokio::test]
@@ -650,5 +653,54 @@ async fn pending_dispatch_without_ack_sqlite() {
 async fn pending_dispatch_without_ack_postgres() {
     if let Some(fixture) = IngressFixture::postgres("ord_ack").await {
         pending_stream_progress(fixture).await;
+    }
+}
+
+fn make_stored_headline(submission: &mut IngressSubmission) {
+    use waddle_server::ingress::{
+        effects::{delivery::ExternalDeliveryEffect, direct::DurableDirectEffect, Effect},
+        DurableEffect, ExternalEffect,
+    };
+    submission.plan.sanitized_message.type_ = xmpp_parsers::message::MessageType::Headline;
+    waddle_xmpp::xep::xep0334::add_hint(
+        &mut submission.plan.sanitized_message,
+        waddle_xmpp::xep::xep0334::Hint::Store,
+    );
+    for planned in &mut submission.plan.plan {
+        match &mut planned.effect {
+            Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+                message,
+                ..
+            })) => {
+                message.message_type = xmpp_parsers::message::MessageType::Headline;
+            }
+            Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+                stanza,
+                ..
+            })) => {
+                **stanza = waddle_xmpp::Stanza::Message(submission.plan.sanitized_message.clone());
+            }
+            _ => {}
+        }
+    }
+    submission.digest_input = DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![submission.principal.bare_jid().clone()],
+            stanza_lang: None,
+        },
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn archived_headline_dispatch_sqlite() {
+    reversed_execution(IngressFixture::sqlite().await, true, true).await;
+}
+#[tokio::test]
+async fn archived_headline_dispatch_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("ord_head").await {
+        reversed_execution(fixture, true, true).await;
     }
 }

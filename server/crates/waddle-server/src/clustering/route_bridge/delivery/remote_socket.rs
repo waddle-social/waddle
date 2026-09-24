@@ -180,6 +180,11 @@ impl OrderedRelayDeliveryBridge {
                     ingress_append.as_ref(),
                 )
                 .await;
+                if super::ingress_append::requires_ordering_authority(ingress_append.as_ref())
+                    && ingress_append_context.is_none()
+                {
+                    return remote_resource_route_reply(FullJidDeliveryOutcome::Unavailable.into());
+                }
                 let outcome = if let Some(remote) = self
                     .try_deliver_full_jid_remote(
                         &target,
@@ -388,7 +393,12 @@ impl OrderedRelayDeliveryBridge {
                 status: RelayRemoteResourceFrameStatus::Unavailable,
             };
         };
-        if let Some(obligation) = msg.frame.ingress_append.as_ref() {
+        if let Some(obligation) = msg
+            .frame
+            .ingress_append
+            .as_ref()
+            .filter(|obligation| !obligation.archive_positions.is_empty())
+        {
             let Some(state) = services.web_socket_state.upgrade() else {
                 return RelayRemoteResourceFrameReply {
                     status: RelayRemoteResourceFrameStatus::Unavailable,
@@ -417,6 +427,37 @@ impl OrderedRelayDeliveryBridge {
                 return RelayRemoteResourceFrameReply {
                     status: RelayRemoteResourceFrameStatus::Unavailable,
                 };
+            }
+            if !obligation.archive_positions.is_empty() {
+                let Some(entry) = services
+                    .connection_registry
+                    .entry_if_owner(&msg.frame.jid, &registration.owner)
+                else {
+                    return RelayRemoteResourceFrameReply {
+                        status: RelayRemoteResourceFrameStatus::Unavailable,
+                    };
+                };
+                let stream = entry.sm_stream_id();
+                let context = obligation.clone().into_context();
+                match state
+                    .deps
+                    .protocol
+                    .ingress
+                    .socket_delivery_readiness(&context, &msg.frame.jid, stream.as_ref())
+                    .await
+                {
+                    Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+                        return RelayRemoteResourceFrameReply {
+                            status: RelayRemoteResourceFrameStatus::Delivered,
+                        }
+                    }
+                    Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
+                    Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
+                        return RelayRemoteResourceFrameReply {
+                            status: RelayRemoteResourceFrameStatus::Backpressure,
+                        }
+                    }
+                }
             }
         }
         let outbound = OutboundStanza {

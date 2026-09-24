@@ -168,6 +168,19 @@ fn groupchat_route_direct_is_unrecoverable() {
 fn headline_route_is_deferred() {
     deferred_type(MessageType::Headline);
 }
+
+#[test]
+fn archived_headline_recovery_uses_recorded_recipient_authority() {
+    let mut message = full_envelope().message().clone();
+    message.type_ = MessageType::Headline;
+    waddle_xmpp::xep::xep0334::add_hint(&mut message, waddle_xmpp::xep::xep0334::Hint::Store);
+    let route = route_intent(&["juliet@example.com/phone"]);
+    assert_detached(&run(
+        &MessageEnvelope::new(message),
+        &[route.clone(), archive()],
+        &[route],
+    ));
+}
 #[test]
 fn route_to_a_recipient_other_than_the_target_is_unrecoverable() {
     let mut message = envelope("hello").message().clone();

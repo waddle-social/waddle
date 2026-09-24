@@ -249,9 +249,9 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool
             "retry delivers to the newly available occupant"
         );
         assert!(
-            terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
                 .await
-                .expect("settled room fanout")
+                .expect("original reflection remains owed to its unavailable sender")
         );
     }
     let mut tx = fixture.uow.begin().await.expect("inspect retry");

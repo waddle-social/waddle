@@ -378,7 +378,7 @@ impl ConnectionEntry {
         entry
     }
 
-    pub(crate) fn is_locally_hosted(&self) -> bool {
+    pub fn is_locally_hosted(&self) -> bool {
         self.hosting == ConnectionHosting::Local
     }
 

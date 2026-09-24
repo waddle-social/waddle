@@ -240,11 +240,13 @@ fn pending_kinds(intents: &[IngressEffectIntent]) -> Vec<IngressEffectKind> {
 }
 
 fn classify_report(report: &super::execute::ExecutionReport) -> AttemptClassification {
-    if report
-        .outcomes
-        .iter()
-        .any(|(_, outcome)| *outcome == super::execute::ExternalOutcome::Uncertain)
-        || !report.receipt_failures.is_empty()
+    if report.outcomes.iter().any(|(_, outcome)| {
+        matches!(
+            outcome,
+            super::execute::ExternalOutcome::Uncertain
+                | super::execute::ExternalOutcome::AwaitingPredecessor
+        )
+    }) || !report.receipt_failures.is_empty()
         || report.terminalization_failure.is_some()
     {
         AttemptClassification::Inconclusive

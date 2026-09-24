@@ -221,6 +221,8 @@ use room_pin::apply_pin_change_event;
 use room_subject::{
     persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use route_to_connection::deliver_ordered_local_copy;
 #[cfg(all(test, feature = "clustering"))]
 pub(crate) use route_to_connection::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
 pub(crate) use route_to_connection::{

@@ -52,6 +52,13 @@ pub(super) async fn initialize(
     // `ALTER COLUMN ... TYPE BIGINT` that still takes ACCESS EXCLUSIVE
     // even when the column is already BIGINT.
     if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
+        // GC monitoring checks retained row identities without reading content.
+        storage
+            .execute(
+                "GRANT SELECT (row_id) ON pending_delivery TO pg_monitor",
+                (),
+            )
+            .await?;
         widen_postgres_timestamp_millis_column_to_bigint(
             storage,
             "pending_delivery",

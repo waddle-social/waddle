@@ -243,7 +243,8 @@ pub(crate) async fn route_to_connection(
         if deps.effects.is_planning()
             && deps.message_dispatcher.is_some()
             && matches!(stanza.as_ref(), Stanza::Message(message)
-                if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal))
+                if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal)
+                    || (message.type_ == XmppMessageType::Headline && waddle_xmpp::protocol::handlers::archive::is_archivable(message)))
         {
             return route_planned_direct_message(deps, &jid, *stanza, recursion_depth).await;
         }
@@ -282,13 +283,22 @@ async fn route_planned_direct_message(
             return Vec::new();
         }
     };
-    let selection = inventory.select(requested);
+    let archived_headline =
+        matches!(&stanza, Stanza::Message(message) if message.type_ == XmppMessageType::Headline);
+    let selection = if archived_headline {
+        inventory.select_headline(requested)
+    } else {
+        inventory.select(requested)
+    };
     if selection.originals.is_empty() {
         if bare.domain().as_str() != deps.local_domain {
             return Vec::new();
         }
         if !local_account_exists_for(deps, &bare).await {
             return plan::bounce_nonexistent(deps, &stanza);
+        }
+        if archived_headline && requested.is_full() {
+            return Vec::new();
         }
         run_headless_recipient_pass(deps, &bare, stanza, depth + 1).await;
         return Vec::new();
@@ -1175,6 +1185,16 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
         );
         return FullJidDeliveryOutcome::Delivered;
     }
+    if let Some(outcome) = deliver_ordered_local_copy(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::PeerStanza,
+    )
+    .await
+    {
+        return outcome;
+    }
     if let Some(outcome) = routing::existing_ingress_delivery(
         deps.sm_session_registry,
         deps.ingress_append_context.as_ref(),
@@ -1222,6 +1242,16 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
         );
         return FullJidDeliveryOutcome::Delivered;
     }
+    if let Some(outcome) = deliver_ordered_local_copy(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::DirectFrame,
+    )
+    .await
+    {
+        return outcome;
+    }
     if let Some(outcome) = routing::existing_ingress_delivery(
         deps.sm_session_registry,
         deps.ingress_append_context.as_ref(),
@@ -1232,8 +1262,9 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
         return outcome;
     }
     #[cfg(feature = "clustering")]
-    if matches!(stanza, Stanza::Message(message)
-        if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal))
+    if deps.ingress_append_context.is_some()
+        && matches!(stanza, Stanza::Message(message)
+        if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal | XmppMessageType::Headline))
     {
         if let (Some(origin), Some(bridge)) = (
             deps.ordered_relay_origin.as_ref(),
@@ -1279,11 +1310,21 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     .await
 }
 
-pub(crate) fn deliver_direct_to_full_locally(
+pub(crate) async fn deliver_direct_to_full_locally(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    if let Some(outcome) = deliver_ordered_local_copy(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::DirectFrame,
+    )
+    .await
+    {
+        return outcome;
+    }
     let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
     outbound.ingress_append = crate::ingress::identity::IngressAppendObligationRef::for_message(
         deps.ingress_append_context.as_ref(),
@@ -1301,6 +1342,74 @@ pub(crate) fn deliver_direct_to_full_locally(
             FullJidDeliveryOutcome::Unavailable
         }
     }
+}
+
+/// Frozen actor selection authorizes the target; this is the local socket's
+/// acceptance boundary. Its owner witness survives the database await so a
+/// delayed retry cannot migrate to a replacement socket with an empty frontier.
+pub(crate) async fn deliver_ordered_local_copy(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: waddle_xmpp::registry::DeliveryKind,
+) -> Option<FullJidDeliveryOutcome> {
+    let context = deps
+        .ingress_append_context
+        .as_ref()
+        .filter(|context| !context.archive_positions.is_empty())?;
+    let state = deps.web_socket_state?;
+    let entry = deps
+        .connection_registry
+        .get_entry(target)
+        .filter(|entry| entry.is_locally_hosted())?;
+    let stream = entry.sm_stream_id();
+    if context
+        .dispatch_stream
+        .as_ref()
+        .is_some_and(|expected| stream.as_ref() != Some(expected))
+    {
+        return Some(FullJidDeliveryOutcome::MaybeCommitted);
+    }
+    match state
+        .deps
+        .protocol
+        .ingress
+        .socket_delivery_readiness(context, target, stream.as_ref())
+        .await
+    {
+        Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+            return Some(FullJidDeliveryOutcome::Delivered)
+        }
+        Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
+            return Some(FullJidDeliveryOutcome::MaybeCommitted)
+        }
+        Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
+    }
+    let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
+    outbound.kind = kind;
+    outbound.ingress_append =
+        crate::ingress::identity::IngressAppendObligationRef::for_message(Some(context), stanza)
+            .map(|obligation| obligation.into_relayed_for(target.clone()));
+    Some(
+        match deps.connection_registry.try_send_outbound_if_owner(
+            target,
+            &entry.carbons_enabled,
+            outbound,
+        ) {
+            waddle_xmpp::registry::BroadcastOutcome::Delivered => {
+                if let Some(kind) = waddle_xmpp::telemetry::messages::delivered_message_kind(stanza)
+                {
+                    waddle_xmpp::telemetry::messages::record_delivered_message(kind);
+                }
+                FullJidDeliveryOutcome::Delivered
+            }
+            waddle_xmpp::registry::BroadcastOutcome::DroppedFull => FullJidDeliveryOutcome::Dropped,
+            waddle_xmpp::registry::BroadcastOutcome::NotConnected
+            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {
+                FullJidDeliveryOutcome::Unavailable
+            }
+        },
+    )
 }
 
 #[cfg(all(test, feature = "clustering"))]

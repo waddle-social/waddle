@@ -401,10 +401,11 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
     )
     .await
     .expect("confirm origin dispatch");
-    assert!(
+    assert_eq!(
         terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
-            .expect("complete fanout")
+            .expect("original reflection is independent of the sibling reply"),
+        destination != Destination::Remote,
     );
     fixture.close().await;
 }

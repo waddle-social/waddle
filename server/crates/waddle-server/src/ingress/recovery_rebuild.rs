@@ -369,7 +369,9 @@ fn direct_provenance(
     let (Some(target), Some(sender)) = (message.to.as_ref(), message.from.as_ref()) else {
         return false;
     };
-    if !matches!(message.type_, MessageType::Chat | MessageType::Normal)
+    let archived_headline = message.type_ == MessageType::Headline && recorded.iter().any(|intent|
+        matches!(intent, IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == recipient));
+    if !(matches!(message.type_, MessageType::Chat | MessageType::Normal) || archived_headline)
         || target.to_bare() != *recipient
         || recorded
             .iter()

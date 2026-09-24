@@ -438,19 +438,23 @@ happens before the progress transaction; progress and the aggregate kind-2
 receipt commit together under the canonical row lock. The aggregate is arm-owned,
 not generic all-or-nothing fanout evidence.
 
-The sender reflection remains `Always`: every duplicate can resend it, including
-a relayed-owner frame. It carries no kind-2 receipt identity, contributes no
-occupant progress, and supplies no aggregate proof through frame completion or
-`owner_receipts`. Its delivery proof remains the sender's XEP-0198 stream.
-Ordinary cross-node occupant copies use `deliver_ordered.v11`; a definite
+Transient sender reflections remain `Always` and can be resent on a duplicate.
+An archived original reflection instead owns an exact-resource direct receipt:
+transport completion settles it independently of the kind-2 occupant aggregate.
+A delayed execution decision rechecks that receipt and cannot resend a completed
+archived reflection. A retransmission from a sibling resource preserves that
+attempt's reflection without replacing the original resource's obligation.
+Ordinary cross-node occupant copies use `deliver_ordered.v12`; a definite
 `Delivered` ACK proves that occupant's copy. The MUC-only `RelayFullJid` executor
 arm records progress and preserves the MUC append context when ownership becomes
 local before execution or during relay fallback. Declined or uncertain delivery
 leaves the occupant pending. Both direct-route and MUC groupchat obligations
 carry their append identity through ordered relay and the
-`remote_resource_route.v7` full-JID second hop. Receiver-authorized detached
-appends and the registered-socket detach drain (#1789) are keyed, subject to the
-authorization-failure fallback and unchanged #1760 custody limits in §3.3a.
+`remote_resource_route.v8` full-JID second hop. Archive-ordered copies require
+valid canonical authority before entering the destination queue; failed
+validation cannot turn them into unkeyed deliveries. Already accepted frames
+retain the registered-socket detach drain behavior and #1760 custody limits
+in §3.3a.
 
 Phase B freezes the room-canonical groupchat envelope at first owner acceptance,
 independently of observer eligibility, retaining observer request context when
@@ -649,8 +653,9 @@ so other resources do not wait indefinitely on a quiet client. The gate also con
 by SM promotion. Retention cannot remove a canonical pending barrier while its
 pending row remains.
 
-A blocked executor returns without waiting for its predecessor. The existing
-maintenance pump replays frozen effects off the connection loop, preserving
+A blocked executor returns without waiting for its predecessor. An ordering
+deferral does not accrue a stalled-row cooldown; predecessor progress can release
+it on the next maintenance pass. The existing maintenance pump replays frozen effects off the connection loop, preserving
 SM acknowledgement progress and avoiding the carbon/backpressure cycle. Partial
 fanout advances each resource independently. Original room reflections have a
 separate recorded delivery receipt, completed at the transport write boundary;
@@ -660,7 +665,9 @@ transaction before broadcast.
 
 Archive positions accompany the exact append obligation through local actors,
 remote owners and registered sockets. The receiver validates them against
-canonical authority before using them. Queue acceptance and a per-archive
+canonical authority before using them. The final socket boundary rechecks durable completion while retaining its exact
+connection owner across the read, so a delayed attempt cannot move onto a
+replacement socket with an empty acceptance cache. Queue acceptance and a per-archive
 frontier share one non-blocking critical section on the connection entry. This
 closes the concurrent-attempt race where A1 completes, B is released, then a
 previously admitted A2 tries to enqueue behind B. Only receipt identities at
@@ -670,8 +677,11 @@ do not advance the frontier. Detached allocation continues to use durable
 `sm_ingress_appends` custody.
 
 Personal-message planning freezes the recipient owner's original and carbon
-resource inventory before the shared recipient pass. A full-JID hit selects
-one original; a missing full JID selects the bare audience before preparation.
+resource inventory before the shared recipient pass, including explicitly stored
+headline messages that share the personal archive. Headline selection retains
+its all-available, non-negative-priority audience and has no unmatched-full-JID
+fallback. A full-JID hit selects
+one original; a missing full JID for chat/normal selects the bare audience before preparation.
 Recipient archive/inbox work therefore commits with sender authority, including
 live full-JID delivery. Processed copies preserve the selected full target
 through owner refresh and bypass recipient processing at the destination.

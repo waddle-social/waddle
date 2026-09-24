@@ -18,6 +18,26 @@ use crate::{
 
 use super::{EffectReceiptKey, IngressDecision};
 
+impl super::IngressAuthority {
+    /// Recheck at the socket after network or actor delay. The caller retains
+    /// the exact connection owner across this read and the queue acceptance.
+    pub(crate) async fn socket_delivery_readiness(
+        &self,
+        context: &crate::server::routes::interpret::SmIngressAppendContext,
+        resource: &FullJid,
+        stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
+    ) -> Result<DispatchReadiness, IngressUowError> {
+        resource_ready(
+            &self.uow,
+            context.message_key,
+            &context.receipt,
+            Some(resource),
+            stream,
+        )
+        .await
+    }
+}
+
 pub(super) async fn record(
     tx: &mut IngressUowTransaction<'_>,
     key: MessageKey,
@@ -171,9 +191,15 @@ pub(super) async fn effect_ready(
     index: usize,
     effect: &ExternalEffect,
     deps: &crate::server::routes::interpret::Deps<'_>,
-) -> Result<(bool, Option<waddle_xmpp::pending_delivery::SmSessionId>), IngressUowError> {
+) -> Result<
+    (
+        DispatchReadiness,
+        Option<waddle_xmpp::pending_delivery::SmSessionId>,
+    ),
+    IngressUowError,
+> {
     let Some(key) = decision.message_key else {
-        return Ok((true, None));
+        return Ok((DispatchReadiness::Ready, None));
     };
     let target = match effect {
         ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) => {
@@ -187,20 +213,31 @@ pub(super) async fn effect_ready(
             waddle_xmpp::Stanza::Message(message) => {
                 message.to.as_ref().and_then(|jid| jid.try_as_full().ok())
             }
-            _ => return Ok((true, None)),
+            _ => return Ok((DispatchReadiness::Ready, None)),
         },
         // Progress-owned original copies are gated separately for each resource,
         // so an unavailable sibling cannot block an already-ready local copy.
-        _ => return Ok((true, None)),
+        _ => return Ok((DispatchReadiness::Ready, None)),
     };
     let stream = target.and_then(|resource| deps.connection_registry.local_sm_stream(resource));
+    let mut readiness = DispatchReadiness::Completed;
+    let mut checked = false;
     for receipt in &decision.external_receipts[index] {
-        if matches!(
-            resource_ready(uow, key, receipt, target, stream.as_ref()).await?,
-            DispatchReadiness::Blocked(_)
-        ) {
-            return Ok((false, None));
+        // Error replies and transient reflections retain their replay semantics.
+        if matches!(effect, ExternalEffect::Frame(_))
+            && positions(uow, key, receipt).await?.is_empty()
+        {
+            continue;
+        }
+        checked = true;
+        match resource_ready(uow, key, receipt, target, stream.as_ref()).await? {
+            blocked @ DispatchReadiness::Blocked(_) => return Ok((blocked, None)),
+            DispatchReadiness::Ready => readiness = DispatchReadiness::Ready,
+            DispatchReadiness::Completed => {}
         }
     }
-    Ok((true, stream))
+    if !checked {
+        readiness = DispatchReadiness::Ready;
+    }
+    Ok((readiness, stream))
 }

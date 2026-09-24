@@ -168,6 +168,11 @@ impl RouteProgress {
     pub(crate) fn correlates(&self, effect: &ExternalEffect) -> bool {
         let room = match &self.obligation {
             ProgressObligation::Direct { recipient } => {
+                if self.reflection_room.is_some()
+                    && !single_target(effect).is_some_and(|target| self.fanout.contains(target))
+                {
+                    return false;
+                }
                 if let ExternalEffect::Delivery(ExternalDeliveryEffect::HostOwnedCopy {
                     target,
                     ..

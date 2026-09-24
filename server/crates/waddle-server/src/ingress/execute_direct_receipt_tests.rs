@@ -215,3 +215,189 @@ async fn postgres_relay_full_jid_delivery_receipts_direct_route_and_terminalizes
         relayed_direct_receipt(fixture).await;
     }
 }
+
+#[tokio::test]
+async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
+    use crate::ingress_substrate::MessageEnvelope;
+    use crate::ingress_uow::{
+        ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget,
+        EffectIntentRepository,
+    };
+    use crate::server::routes::interpret::{
+        deliver_direct_to_full_with_registered_remote, SmIngressAppendContext,
+    };
+    use waddle_xmpp::{
+        ingress::{MessageKey, SemanticDigest},
+        mam::ArchiveOrdinal,
+        stream_management::ArchiveDispatchPosition,
+    };
+    let state = socket_tests::create_test_websocket_state().await;
+    let target: jid::FullJid = "juliet@example.com/phone".parse().unwrap();
+    let (old_sender, old_receiver) = tokio::sync::mpsc::channel(8);
+    socket_tests::register_test_connection(&state, &target, old_sender).await;
+    let key = MessageKey::new();
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: target.to_bare(),
+        fanout: vec![target.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
+    };
+    let receipt = crate::ingress::receipt_key(&intent).unwrap();
+    let mut message = xmpp_parsers::message::Message::new(Some(target.clone().into()));
+    message.from = Some("romeo@example.com/phone".parse().unwrap());
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .bodies
+        .insert(Default::default(), "older copy".into());
+    let authority = &state.deps.protocol.ingress;
+    let mut tx = authority.uow.begin().await.unwrap();
+    CanonicalMessageRepository::record_message(
+        &mut tx,
+        key,
+        &SemanticDigest::from_storage(1, [7; 32]).unwrap(),
+        Some(&MessageEnvelope::new(message.clone())),
+    )
+    .await
+    .unwrap();
+    EffectIntentRepository::reconcile(&mut tx, key, std::slice::from_ref(&intent), false)
+        .await
+        .unwrap();
+    ArchiveDispatchRepository::record(
+        &mut tx,
+        key,
+        &target.to_bare(),
+        ArchiveOrdinal::FIRST,
+        &[ArchiveDispatchObligation {
+            receipt: receipt.clone(),
+            target: DispatchTarget::Resource(target.clone()),
+        }],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    deps.user_registry = Some(&state.deps.protocol.user_registry);
+    deps.web_socket_state = Some(&state);
+    deps.ingress_append_context = Some(SmIngressAppendContext {
+        message_key: key,
+        receipt: receipt.clone(),
+        received_at: None,
+        dispatch_stream: None,
+        archive_positions: vec![ArchiveDispatchPosition {
+            archive: target.to_bare(),
+            ordinal: ArchiveOrdinal::FIRST,
+        }],
+    });
+    let stanza = Stanza::Message(message);
+    assert_eq!(
+        deliver_direct_to_full_with_registered_remote(&deps, &target, &stanza).await,
+        FullJidDeliveryOutcome::Delivered
+    );
+    let mut tx = authority.uow.begin().await.unwrap();
+    EffectReceiptRepository::record_receipt(
+        &mut tx,
+        key,
+        receipt.kind,
+        &receipt.semantic_identity_hash,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    // The old socket and its process-local acceptance frontier disappear.
+    // A replacement must use durable completion to reject the delayed attempt.
+    drop(old_receiver);
+    let (new_sender, mut replacement) = tokio::sync::mpsc::channel(8);
+    socket_tests::register_test_connection(&state, &target, new_sender).await;
+    assert_eq!(
+        deliver_direct_to_full_with_registered_remote(&deps, &target, &stanza).await,
+        FullJidDeliveryOutcome::Delivered
+    );
+    assert!(
+        replacement.try_recv().is_err(),
+        "a completed older copy must not enter the replacement's queue"
+    );
+}
+
+async fn archived_reflection_rechecks_completed_receipt(fixture: IngressFixture) {
+    use crate::ingress_uow::{
+        ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget,
+    };
+    let mut submission = fixture.submission(Some("delayed-reflection"), "original room message");
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let stamp = waddle_xmpp_core::xep0359::StanzaId::new("reflection", room.clone().into());
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: submission.sender.to_bare(),
+        fanout: vec![submission.sender.clone()],
+        route_identity: EffectMessageIdentity::stanza(stamp.clone()),
+    };
+    let mut message = submission.plan.sanitized_message.clone();
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message.from = Some(room.with_resource_str("sender").expect("nick").into());
+    message.to = Some(submission.sender.clone().into());
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
+    submission.plan.intents = vec![intent.clone()];
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(ExternalEffect::Frame(
+        Box::new(Stanza::Message(message)),
+    )))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit reflection");
+    let receipt = crate::ingress::receipt_key(&intent).expect("receipt");
+    let mut tx = fixture.uow.begin().await.expect("dispatch registration");
+    ArchiveDispatchRepository::record(
+        &mut tx,
+        decision.message_key.expect("key"),
+        &room,
+        waddle_xmpp::mam::ArchiveOrdinal::FIRST,
+        &[ArchiveDispatchObligation {
+            receipt,
+            target: DispatchTarget::Resource(submission.sender),
+        }],
+    )
+    .await
+    .expect("register archived reflection");
+    tx.commit().await.expect("commit registration");
+    let registry = waddle_xmpp::registry::ConnectionRegistry::new();
+    let deps = Deps::registry_only(&registry);
+    let mut first = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(first.frame_obligations.len(), 1);
+    first
+        .complete_frame_obligations(&fixture.uow, &fixture.db, Duration::from_secs(5))
+        .await
+        .expect("transport confirms first reflection");
+    // Reuse the old decision: it was prepared before the first write completed.
+    let delayed = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        delayed.frame_obligations.is_empty(),
+        "late duplicate cannot write behind a newer archive entry"
+    );
+    assert!(delayed.receipt_failures.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_archived_reflection_rechecks_completed_receipt() {
+    archived_reflection_rechecks_completed_receipt(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_archived_reflection_rechecks_completed_receipt() {
+    if let Some(fixture) = IngressFixture::postgres("reflection_completion").await {
+        archived_reflection_rechecks_completed_receipt(fixture).await;
+    }
+}

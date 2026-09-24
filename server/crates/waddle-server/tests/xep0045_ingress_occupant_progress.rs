@@ -71,3 +71,15 @@ async fn xep0045_ingress_occupant_progress_maintenance_postgres() {
         muc_progress_support::maintenance(fixture).await;
     }
 }
+
+#[tokio::test]
+async fn xep0045_archived_reflection_replay_sqlite() {
+    muc_progress_support::archived_reflection_replay(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn xep0045_archived_reflection_replay_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("xep0045_archived_reflection").await {
+        muc_progress_support::archived_reflection_replay(fixture).await;
+    }
+}

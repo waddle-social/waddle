@@ -136,7 +136,9 @@ pub fn restore_delivery_payloads(
             | ExternalDeliveryEffect::RouteToPeer { stanza, .. },
         ) = effect
         {
-            if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(_)) {
+            if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
+                if message.type_ != xmpp_parsers::message::MessageType::Groupchat)
+            {
                 **stanza = waddle_xmpp::Stanza::Message(delivery_message(
                     envelope,
                     &recipient,

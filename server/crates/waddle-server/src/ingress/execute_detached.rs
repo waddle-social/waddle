@@ -93,11 +93,15 @@ pub(super) async fn execute(
                 continue;
             }
             Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) => {
+                if completion != SettledCompletion::Uncertain {
+                    completion = SettledCompletion::Deferred;
+                }
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
                 continue;
             }
             Err(error) => {
                 tracing::warn!(%error, "archive dispatch ordering unavailable; preserving delivery");
+                completion = SettledCompletion::Uncertain;
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
                 continue;
             }
@@ -129,6 +133,7 @@ pub(super) async fn execute(
             Ok(positions) => positions,
             Err(error) => {
                 tracing::warn!(%error, "archive dispatch positions unavailable; preserving delivery");
+                completion = SettledCompletion::Uncertain;
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
                 continue;
             }
@@ -234,7 +239,7 @@ async fn append_resource(
             } else if deps.delivery_execution_context
                 == crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery
             {
-                deliver_direct_to_full_locally(deps, resource, stanza)
+                deliver_direct_to_full_locally(deps, resource, stanza).await
             } else {
                 deliver_direct_to_full_with_registered_remote(deps, resource, stanza).await
             }
@@ -263,7 +268,6 @@ async fn append_resource(
         }
         _ => FullJidDeliveryOutcome::Unavailable,
     };
-    #[cfg(feature = "clustering")]
     if outcome == FullJidDeliveryOutcome::MaybeCommitted {
         certainty = DeliveryCertainty::Uncertain;
     }

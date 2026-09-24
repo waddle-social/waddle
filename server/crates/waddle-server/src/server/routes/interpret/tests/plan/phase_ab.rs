@@ -300,8 +300,10 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
     );
     super::sqlite_writes::assert_untouched(database).await;
     match scenario {
-        Scenario::OfflineDm => assert_eq!(fixture.count("mam_messages").await, 2),
-        Scenario::LiveFullDm | Scenario::LocalRoom => {
+        Scenario::OfflineDm | Scenario::LiveFullDm => {
+            assert_eq!(fixture.count("mam_messages").await, 2)
+        }
+        Scenario::LocalRoom => {
             assert_eq!(fixture.count("mam_messages").await, 1)
         }
         #[cfg(feature = "clustering")]
@@ -369,21 +371,25 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
         let delivered = recipient_rx.try_recv().expect("post-commit peer delivery");
         assert_eq!(
             delivered.kind,
-            waddle_xmpp::registry::DeliveryKind::PeerStanza
+            waddle_xmpp::registry::DeliveryKind::DirectFrame
         );
         let Stanza::Message(delivered) = delivered.stanza else {
             panic!("message")
         };
-        assert_eq!(delivered.to, Some(recipient.into()));
+        assert_eq!(delivered.to, Some(recipient.clone().into()));
         assert_eq!(delivered.bodies, message.bodies);
         assert!(waddle_xmpp_core::xep0359::extract_stanza_id_by(
             &delivered,
             &sender.to_bare().into()
         )
         .is_some());
-        // The destination still owns its recipient archive pass; no eager
-        // recipient archive has been inserted by planning/committing/enqueueing.
-        assert_eq!(fixture.count("mam_messages").await, 1);
+        // Sender and recipient archives commit before the processed copy is sent.
+        assert_eq!(fixture.count("mam_messages").await, 2);
+        assert!(waddle_xmpp_core::xep0359::extract_stanza_id_by(
+            &delivered,
+            &recipient.to_bare().into()
+        )
+        .is_some());
     }
     fixture.close().await;
 }

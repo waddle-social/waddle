@@ -331,7 +331,6 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                     );
                     failure.get_or_insert(CarbonFanoutFailure::Delivery);
                 }
-                #[cfg(feature = "clustering")]
                 FullJidDeliveryOutcome::MaybeCommitted => {
                     debug!(
                         target = %target,

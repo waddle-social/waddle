@@ -474,10 +474,10 @@ async fn recorded_predecessors(
     Ok(blockers)
 }
 
-// Match the archive resolver: canonical UID first, legacy stanza-id fallback
-// second. A pointer whose archive row was removed is discarded by the existing
-// materializer and has no remaining archive position to order.
-const PENDING_ORDINAL: &str = "COALESCE((SELECT archive_seq FROM mam_messages m WHERE m.room_jid = p.archive_stanza_by AND m.id = p.archive_stanza_id), (SELECT MIN(archive_seq) FROM mam_messages m WHERE m.room_jid = p.archive_stanza_by AND m.stanza_id = p.archive_stanza_id))";
+// Match the row the archive resolver actually replays: newest UID or stanza-id
+// match. Removed pointers have no remaining archive position and are discarded
+// by the existing materializer.
+const PENDING_ORDINAL: &str = "(SELECT MAX(archive_seq) FROM mam_messages m WHERE m.room_jid = p.archive_stanza_by AND (m.id = p.archive_stanza_id OR m.stanza_id = p.archive_stanza_id))";
 
 async fn pending_store_exists(tx: &mut IngressUowTransaction<'_>) -> Result<bool, IngressUowError> {
     let query = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {

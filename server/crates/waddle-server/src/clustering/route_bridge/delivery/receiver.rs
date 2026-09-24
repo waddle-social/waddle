@@ -8,6 +8,12 @@ impl OrderedRelayDeliveryBridge {
         stanza: &Stanza,
         context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Result<(), OrderedRelayNackReason> {
+        if let Some(result) =
+            deliver_ordered_local_copy(services, target, stanza, context, DeliveryKind::DirectFrame)
+                .await
+        {
+            return result;
+        }
         let outcome = match self
             .try_deliver_registered_remote_resource(
                 target,
@@ -44,6 +50,17 @@ impl OrderedRelayDeliveryBridge {
         stanza: &Stanza,
         ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Result<(), OrderedRelayNackReason> {
+        if let Some(result) = deliver_ordered_local_copy(
+            services,
+            target,
+            stanza,
+            ingress_append_context,
+            DeliveryKind::PeerStanza,
+        )
+        .await
+        {
+            return result;
+        }
         if let Some(outcome) = self
             .try_deliver_registered_remote_resource(
                 target,
@@ -84,6 +101,33 @@ impl OrderedRelayDeliveryBridge {
             FullJidDeliveryOutcome::Unavailable => Err(OrderedRelayNackReason::TargetUnavailable),
         }
     }
+}
+
+async fn deliver_ordered_local_copy(
+    services: &OrderedRelayDeliveryServices,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    kind: DeliveryKind,
+) -> Option<Result<(), OrderedRelayNackReason>> {
+    let context = context.filter(|context| !context.archive_positions.is_empty())?;
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return Some(Err(OrderedRelayNackReason::Unreachable));
+    };
+    let mut deps = build_interpret_deps(&state, None);
+    deps.connection_registry = &services.connection_registry;
+    deps.user_registry = Some(&services.user_registry);
+    deps.sm_session_registry = Some(&services.sm_session_registry);
+    deps.ingress_append_context = Some(context.clone());
+    let outcome =
+        crate::server::routes::interpret::deliver_ordered_local_copy(&deps, target, stanza, kind)
+            .await?;
+    Some(match outcome {
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => Ok(()),
+        FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
+        FullJidDeliveryOutcome::MaybeCommitted => Err(OrderedRelayNackReason::MaybeCommitted),
+        FullJidDeliveryOutcome::Unavailable => Err(OrderedRelayNackReason::TargetUnavailable),
+    })
 }
 
 pub(in super::super) async fn deliver_reserved_full_jid_peer_live_only(

@@ -20,13 +20,13 @@ impl ConnectionEntry {
     pub(crate) fn try_send_archive_ordered(
         &self,
         outbound: OutboundStanza,
-    ) -> Result<(), TrySendError<OutboundStanza>> {
+    ) -> Result<(), TrySendError<()>> {
         let Some(obligation) = outbound
             .ingress_append
             .as_ref()
             .filter(|obligation| !obligation.archive_positions.is_empty())
         else {
-            return self.sender.try_send(outbound);
+            return self.sender.try_send(outbound).map_err(queue_error);
         };
         let key = obligation.key.clone();
         if obligation
@@ -36,11 +36,11 @@ impl ConnectionEntry {
         {
             // Backpressure, not "disconnected": the caller must recheck its
             // predecessor gate instead of falling through to a different stream.
-            return Err(TrySendError::Full(outbound));
+            return Err(TrySendError::Full(()));
         }
         let positions = obligation.archive_positions.clone();
         let Ok(mut state) = self.archive_dispatch.lock() else {
-            return Err(TrySendError::Full(outbound));
+            return Err(TrySendError::Full(()));
         };
         let duplicate = positions.iter().any(|position| {
             state
@@ -55,12 +55,12 @@ impl ConnectionEntry {
             // Queue acceptance is sufficient for ordinary ingress delivery.
             // It cannot fabricate the separate write-acceptance callback.
             return if outbound.write_acceptance.is_some() {
-                Err(TrySendError::Full(outbound))
+                Err(TrySendError::Full(()))
             } else {
                 Ok(())
             };
         }
-        self.sender.try_send(outbound)?;
+        self.sender.try_send(outbound).map_err(queue_error)?;
         for position in positions {
             let entry = state
                 .archives
@@ -74,6 +74,13 @@ impl ConnectionEntry {
             }
         }
         Ok(())
+    }
+}
+
+fn queue_error(error: TrySendError<OutboundStanza>) -> TrySendError<()> {
+    match error {
+        TrySendError::Full(_) => TrySendError::Full(()),
+        TrySendError::Closed(_) => TrySendError::Closed(()),
     }
 }
 

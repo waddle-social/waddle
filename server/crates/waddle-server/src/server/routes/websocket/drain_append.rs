@@ -55,7 +55,7 @@ impl DrainAuthority {
     ) -> Option<SmRelayedAppendObligation> {
         use crate::ingress::append_authority::{
             check_canonical_obligation, check_canonical_sender, check_stanza_binding,
-            record_degraded_to_unkeyed, AppendAuthorityRejection,
+            record_authorization_failure, AppendAuthorityRejection,
         };
         use waddle_xmpp::telemetry::attributes::IngressAppendAuthorizationFailure;
 
@@ -114,7 +114,7 @@ impl DrainAuthority {
                     reason.failure_class(),
                     IngressAppendAuthorizationFailure::Indeterminate
                 );
-                record_degraded_to_unkeyed(&reason, &obligation.sender_bare);
+                record_authorization_failure(&reason, &obligation.sender_bare);
                 None
             }
         }
@@ -184,7 +184,7 @@ pub(super) fn bind_live(
         obligation.key.kind.to_storage(),
         &obligation.key.resource,
     ) {
-        crate::ingress::append_authority::record_degraded_to_unkeyed(
+        crate::ingress::append_authority::record_authorization_failure(
             &reason,
             &obligation.sender_bare,
         );
@@ -197,7 +197,7 @@ pub(super) fn bind_live(
     ) {
         Ok(()) => Some(obligation),
         Err(reason) => {
-            crate::ingress::append_authority::record_degraded_to_unkeyed(
+            crate::ingress::append_authority::record_authorization_failure(
                 &reason,
                 &obligation.sender_bare,
             );
@@ -222,7 +222,7 @@ pub(super) fn key_recipient_pass_frame(
     match message {
         Some(message) => Some((obligation.key, Stanza::Message(message))),
         None => {
-            crate::ingress::append_authority::record_degraded_to_unkeyed(
+            crate::ingress::append_authority::record_authorization_failure(
                 &crate::ingress::append_authority::AppendAuthorityRejection::NotMessage,
                 &obligation.sender_bare,
             );

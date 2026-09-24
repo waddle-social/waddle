@@ -2,7 +2,9 @@
 //!
 //! Shared by every place a relayed obligation is about to key an XEP-0198 replay
 //! append: the ordered-relay receivers (#1778) and the registered-socket detach
-//! drain (#1789). Failure removes the optional deduplication key, never delivery.
+//! drain (#1789). An archive-ordered relay must retain valid authority to enter
+//! the destination queue. Already accepted transport frames keep their drain
+//! behavior when optional deduplication authority cannot be recovered.
 
 use std::time::Duration;
 
@@ -16,6 +18,10 @@ mod carbons;
 #[cfg(test)]
 #[path = "append_authority_carbon_tests.rs"]
 mod carbon_tests;
+
+#[cfg(test)]
+#[path = "append_authority_room_tests.rs"]
+mod room_tests;
 
 const AUTHORIZATION_READ_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -130,7 +136,10 @@ pub(crate) async fn check_canonical_obligation(
     stanza: &Stanza,
     obligation: &super::identity::IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {
-    if obligation.receipt.kind.to_storage() == IngressEffectKind::RouteMucGroupchat.storage_tag() {
+    if obligation.receipt.kind.to_storage() == IngressEffectKind::RouteMucGroupchat.storage_tag()
+        || (obligation.receipt.kind.to_storage() == IngressEffectKind::RouteDirect.storage_tag()
+            && matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat))
+    {
         tokio::time::timeout(
             AUTHORIZATION_READ_TIMEOUT,
             authorize_room_route(db, stanza, obligation),
@@ -185,7 +194,7 @@ async fn authorize_room_route(
         if super::receipt_key(intent).ok().as_ref() != Some(&obligation.receipt) {
             continue;
         }
-        let (room, occupants) = match intent {
+        let (room, occupants, source_intent) = match intent {
             waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat {
                 room,
                 occupants,
@@ -195,10 +204,23 @@ async fn authorize_room_route(
                 room,
                 occupants,
                 ..
-            } => (room, occupants),
+            } => (room, occupants, intent),
+            waddle_xmpp::ingress::IngressEffectIntent::RouteDirect { fanout, .. } => {
+                let Some(source_intent) = intents.iter().find(|source| {
+                    super::reflection_dispatch::original_intent(source).as_ref() == Some(intent)
+                }) else {
+                    continue;
+                };
+                let waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat { room, .. } =
+                    source_intent
+                else {
+                    continue;
+                };
+                (room, fanout, source_intent)
+            }
             _ => continue,
         };
-        if let Ok(source) = super::room_canonical::source(&envelope, intent) {
+        if let Ok(source) = super::room_canonical::source(&envelope, source_intent) {
             let expected = super::room_canonical::occupant_copy_message(source, target, &intents);
             if *room == obligation.sender_bare && occupants.contains(target) && expected == *message
             {
@@ -229,8 +251,8 @@ pub(crate) async fn check_canonical_sender(
     Ok(())
 }
 
-/// Record that a relayed obligation degraded to unkeyed delivery.
-pub(crate) fn record_degraded_to_unkeyed(
+/// Record failed authority validation at a relay or accepted-frame drain boundary.
+pub(crate) fn record_authorization_failure(
     reason: &AppendAuthorityRejection,
     sender_bare: &jid::BareJid,
 ) {
@@ -243,21 +265,19 @@ pub(crate) fn record_degraded_to_unkeyed(
         IngressAppendAuthorizationFailure::Unauthorized => tracing::warn!(
             ?reason,
             sender = %sender_bare,
-            "relay append identity unauthorized; continuing with unkeyed delivery"
+            "relay append identity unauthorized"
         ),
         IngressAppendAuthorizationFailure::Indeterminate => tracing::debug!(
             ?reason,
             sender = %sender_bare,
-            "relay append identity could not be authorized; continuing with \
-             unkeyed delivery"
+            "relay append identity could not be authorized"
         ),
     }
     waddle_xmpp::counter_add!(
         "waddle.clustering.ingress_append.authorization_failed",
         "{obligation}",
-        "Relayed ingress append identities degraded to unkeyed delivery -- \
-         `indeterminate` means this node could not read canonical state and the \
-         cross-node duplicate window is open for as long as it persists.",
+        "Relayed ingress append authority failures -- indeterminate means \
+         this node could not read canonical state.",
         1,
         reason.failure_class(),
     );

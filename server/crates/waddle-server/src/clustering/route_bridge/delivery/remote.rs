@@ -361,6 +361,11 @@ impl OrderedRelayDeliveryBridge {
                     ingress_append.as_ref(),
                 )
                 .await;
+                if super::ingress_append::requires_ordering_authority(ingress_append.as_ref())
+                    && ingress_append_context.is_none()
+                {
+                    return Some(FullJidDeliveryOutcome::Unavailable);
+                }
                 if let Some(remote) = self
                     .try_deliver_full_jid_remote(
                         &target,

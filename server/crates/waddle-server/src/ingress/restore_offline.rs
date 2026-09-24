@@ -16,6 +16,49 @@ use crate::{
     },
 };
 
+/// A disconnect after acceptance cannot turn a frozen live audience into a new
+/// offline queue obligation or create notification work for that new decision.
+pub(super) fn retain_recorded_delivery_mode(
+    plan: &mut IngressPlan,
+    recorded: &[IngressEffectIntent],
+) {
+    let live_original = |recipient: &jid::BareJid| {
+        recorded.iter().any(|intent| matches!(intent,
+        IngressEffectIntent::RouteDirect { recipient: saved, fanout, route_identity, .. }
+            if saved == recipient && !fanout.is_empty()
+                && !matches!(route_identity, waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(_))))
+    };
+    let new_offline_notification =
+        |owner: &jid::BareJid, mutation: &NotificationActivityMutation| {
+            live_original(owner)
+                && matches!(mutation,
+            NotificationActivityMutation::NotificationCandidate { conversation, .. }
+                | NotificationActivityMutation::OfflineDelivery { conversation, .. } if conversation == owner)
+                && !recorded.contains(&IngressEffectIntent::NotificationActivityPreview {
+                    owner: owner.clone(),
+                    mutation: mutation.clone(),
+                })
+        };
+    plan.intents.retain(|intent| match intent {
+        IngressEffectIntent::PendingDelivery { mutation } => {
+            !live_original(pending_identity(mutation).0) || recorded.contains(intent)
+        }
+        IngressEffectIntent::NotificationActivityPreview { owner, mutation } => {
+            !new_offline_notification(owner, mutation)
+        }
+        _ => true,
+    });
+    plan.plan.retain(|planned| match &planned.effect {
+        Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { row, .. })) => {
+            !live_original(&row.recipient) || recorded.iter().any(|intent| matches!(intent,
+                IngressEffectIntent::PendingDelivery { mutation } if pending_identity(mutation) == (&row.recipient, &row.id)))
+        }
+        Effect::External(ExternalEffect::Direct(super::effects::direct::ExternalDirectEffect::NotificationActivity { owner, mutation })) =>
+            !new_offline_notification(owner, mutation),
+        _ => true,
+    });
+}
+
 pub(super) fn restore_recorded_offline_deliveries(
     plan: &mut IngressPlan,
     recorded: &[IngressEffectIntent],

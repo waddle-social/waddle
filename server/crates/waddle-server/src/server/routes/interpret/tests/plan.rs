@@ -147,6 +147,35 @@ async fn live_full_dm_plans_recipient_effects_and_processed_copy_without_sending
 }
 
 #[tokio::test]
+async fn stored_full_headline_plans_recipient_archive_before_processed_delivery() {
+    let registry = test_registry();
+    let target: jid::FullJid = "bob@example.com/phone".parse().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let users = waddle_xmpp::registry::UserRegistryActor::spawn(
+        waddle_xmpp::registry::UserRegistryActor::new(),
+    );
+    register_into_both_tiers(&registry, &users, &target, tx).await;
+    let mam: Arc<dyn MamStorage> = Arc::new(poison::PoisonMam(InMemoryMamStorage::new()));
+    let inbox: Arc<dyn InboxStorage> = Arc::new(poison::PoisonInbox(InMemoryInboxStorage::new()));
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let deps = Deps {
+        user_registry: Some(&users),
+        ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
+    };
+    let mut message = outgoing(target.clone().into());
+    message.type_ = xmpp_parsers::message::MessageType::Headline;
+    waddle_xmpp::xep::xep0334::add_hint(&mut message, waddle_xmpp::xep::xep0334::Hint::Store);
+    let plan = plan_message_dispatch(&mut sender_machine(), message, &deps).await;
+    assert!(plan.failure.is_none());
+    assert_eq!(plan.intents.iter().filter(|intent| matches!(intent,
+        waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &target.to_bare())).count(), 1);
+    assert!(plan.plan.iter().any(|item| matches!(&item.effect,
+        Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, kind: PeerDeliveryKind::DirectFrame, .. })) if jid == &target)));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn detached_full_dm_plans_recipient_writes_and_defers_replay_append() {
     let registry = test_registry();
     let target: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");

@@ -292,8 +292,8 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
             "only proven pending copies deliver"
         );
         assert!(
-            receivers[2].try_recv().is_ok(),
-            "fresh reflection survives provenance failure"
+            receivers[2].try_recv().is_err(),
+            "the completed archived reflection is not repeated"
         );
         assert!(c_rx.try_recv().is_ok(), "C receives subject reapplication");
         if matches!(case, ReplayCase::DetachedSubject) {

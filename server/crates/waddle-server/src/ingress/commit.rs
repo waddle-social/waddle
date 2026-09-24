@@ -302,6 +302,7 @@ async fn commit_attempt(
     // repair is not a duplicate fan-out: today's plan could not produce it.
     let mut reconstructed = false;
     if alias == AliasOutcomeClass::Existing {
+        super::restore_offline::retain_recorded_delivery_mode(&mut plan, &recorded);
         retain_live_recipient_plan(submission, &recorded, &mut plan);
         let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await?

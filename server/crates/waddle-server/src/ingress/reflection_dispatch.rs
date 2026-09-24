@@ -14,6 +14,15 @@ pub(super) fn freeze(plan: &mut IngressPlan, recorded: &[IngressEffectIntent]) {
             let IngressEffectIntent::RouteMucGroupchat { room, .. } = intent else {
                 return None;
             };
+            // Only archived reflections participate in the archive frontier.
+            // Transient room traffic keeps its existing sender-stream lifetime.
+            if !plan.intents.iter().chain(recorded).any(|saved| {
+                matches!(saved,
+                    IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == room
+                )
+            }) {
+                return None;
+            }
             let authority = recorded.iter().find(|saved| matches!(saved,
             IngressEffectIntent::RouteMucGroupchat { room: saved_room, .. } if saved_room == room
         )).unwrap_or(intent);
@@ -71,6 +80,7 @@ pub(super) fn bind(plan: &mut IngressPlan) {
             .intents
             .iter()
             .filter_map(original_intent)
+            .filter(|intent| plan.intents.contains(intent))
             .find_map(|intent| {
                 let IngressEffectIntent::RouteDirect {
                     fanout,
@@ -138,6 +148,21 @@ mod tests {
             room_execution: RoomExecutionPath::None,
         };
         freeze(&mut plan, std::slice::from_ref(&original));
+        assert_eq!(
+            plan.intents.len(),
+            1,
+            "transient reflections need no archive receipt"
+        );
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        plan.intents
+            .push(IngressEffectIntent::ArchiveAuthoritative {
+                ordinal: None,
+                archive: room.clone(),
+                by: room.clone(),
+                stanza_id: waddle_xmpp_core::xep0359::StanzaId::new("frozen", room.into()),
+                archived_at: chrono::Utc::now(),
+            });
+        freeze(&mut plan, std::slice::from_ref(&original));
         let reflection = original_intent(&original).expect("original reflection");
         assert_eq!(
             plan.intents
@@ -159,8 +184,9 @@ mod tests {
             waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &id);
             ExternalEffect::Frame(Box::new(Stanza::Message(message)))
         });
-        let receipts = super::super::receipts::external_receipts(&frames, &[reflection.clone()])
-            .expect("receipts");
+        let receipts =
+            super::super::receipts::external_receipts(&frames, std::slice::from_ref(&reflection))
+                .expect("receipts");
         assert_eq!(
             receipts[0],
             vec![super::super::receipt_key(&reflection).expect("key")]

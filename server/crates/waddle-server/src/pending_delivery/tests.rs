@@ -964,6 +964,32 @@ async fn assert_archive_ordered_pending_batches(storage: &DatabasePendingDeliver
         .await
         .unwrap()
         .is_empty());
+    storage.release_claim(&session).await.unwrap();
+    // The MAM resolver selects the newest archive position matching either
+    // UID or stanza-id. An older exact UID cannot override that choice.
+    storage
+        .database()
+        .guard()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO mam_messages (id, room_jid, stanza_id, archive_seq) VALUES (?, ?, ?, ?)",
+            crate::db_params!["newer-match", "alice@example.com", "first", 3_i64],
+        )
+        .await
+        .unwrap();
+    let resolved_order = storage
+        .claim_archive_ordered_batch_for_session(&recipient, &session, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved_order
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a-earlier-pending-id", "z-later-pending-id"],
+        "order must follow the archive row the resolver will actually replay"
+    );
 }
 
 #[tokio::test]
