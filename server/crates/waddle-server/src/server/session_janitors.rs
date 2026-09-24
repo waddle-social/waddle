@@ -1123,8 +1123,8 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 .list(&session.jid.to_bare())
                 .await
             {
-                Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
-                Err(_) => false,
+                Ok(rows) => rows.iter().any(|row| row.outbound_sequence.is_none()),
+                Err(_) => true,
             };
             let released_redrive_aborted = (row_release.released_rows || has_unflushed_backlog)
                 && routes::websocket::redrive_terminal_pending_rows_to_live_resource(
@@ -7934,8 +7934,8 @@ async fn run_graceful_shutdown_drain(
                     .list(&session.jid.to_bare())
                     .await
                 {
-                    Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
-                    Err(_) => false,
+                    Ok(rows) => rows.iter().any(|row| row.outbound_sequence.is_none()),
+                    Err(_) => true,
                 };
                 let released_redrive_aborted = (row_release.released_rows || has_unflushed_backlog)
                     && routes::websocket::redrive_terminal_pending_rows_to_live_resource(

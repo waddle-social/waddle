@@ -28,7 +28,7 @@ pub trait PendingDispatchGate: Send + Sync {
 }
 
 /// Outcome of a flush attempt for one resource.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct FlushOutcome {
     /// Number of rows claimed from `pending_delivery`.
     pub claimed: u32,
@@ -61,6 +61,9 @@ pub struct FlushOutcome {
     /// re-evaluation, issue #209 PR #360). Blocked rows are deleted
     /// from `pending_delivery` since the block is final until lifted.
     pub dropped_blocked: u32,
+    // Owned retry work crosses the bounded terminal-flush handoff without
+    // losing the exact claim token or allowing a copied outcome to fork it.
+    failed_releases: Vec<DeferredClaimRelease>,
 }
 
 /// Per-flush context bundling the optional / contextual parameters
@@ -109,9 +112,38 @@ pub async fn flush_for_resource_with_retry<R>(
 where
     R: ArchiveResolver + ?Sized,
 {
-    let mut total = FlushOutcome::default();
+    resume_flush_for_resource_with_retry(
+        storage,
+        registry,
+        recipient,
+        resource,
+        ctx,
+        FlushOutcome::default(),
+    )
+    .await
+}
+
+/// Continue the retry pump from a bounded pass, including release work that
+/// must settle even after its original resource becomes unavailable/replaced.
+pub(crate) async fn resume_flush_for_resource_with_retry<R>(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    registry: &ConnectionRegistry,
+    recipient: &BareJid,
+    resource: &FullJid,
+    ctx: FlushContext<'_, R>,
+    mut total: FlushOutcome,
+) -> FlushOutcome
+where
+    R: ArchiveResolver + ?Sized,
+{
     let mut delay = std::time::Duration::from_millis(100);
     loop {
+        retry_ordering_releases(storage, &mut total.failed_releases).await;
+        if !total.failed_releases.is_empty() {
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_secs(5));
+            continue;
+        }
         if let Some(owner) = ctx.owner {
             let Some(entry) = registry.entry_if_owner(resource, owner) else {
                 return total;
@@ -121,7 +153,7 @@ where
                 return total;
             }
         }
-        let outcome = flush_for_resource(
+        let mut outcome = flush_for_resource(
             storage,
             registry,
             recipient,
@@ -136,6 +168,7 @@ where
             },
         )
         .await;
+        total.failed_releases.append(&mut outcome.failed_releases);
         total.claimed += outcome.claimed;
         total.batches += outcome.batches;
         total.pushed += outcome.pushed;
@@ -155,7 +188,9 @@ where
 }
 
 /// Flush every currently-unclaimed `pending_delivery` row for the
-/// given recipient to the given resource.
+/// given recipient to the given resource. Release failures are retained in the
+/// returned outcome for the retry pump; this single pass never waits for a
+/// failing release backend to recover.
 ///
 /// Called by the presence handler once `claim_offline_flush()` has
 /// returned `true` on the recovering [`ConnectionEntry`] — i.e. the
@@ -176,7 +211,7 @@ where
     R: ArchiveResolver + ?Sized,
 {
     let mut failed_releases = Vec::new();
-    let outcome = flush_for_resource_inner(
+    let mut outcome = flush_for_resource_inner(
         storage,
         registry,
         recipient,
@@ -185,19 +220,12 @@ where
         &mut failed_releases,
     )
     .await;
-    // Terminal cleanup also invokes this single-pass entry point before
-    // handing ordering contention to a pump. It must not drop release work.
-    let mut delay = std::time::Duration::from_millis(100);
-    while !failed_releases.is_empty() {
-        tokio::time::sleep(delay).await;
-        retry_ordering_releases(storage, &mut failed_releases).await;
-        delay = (delay * 2).min(std::time::Duration::from_secs(5));
-    }
+    outcome.failed_releases = failed_releases;
     outcome
 }
 
-/// Failed ordering releases remain owned by the retry pump until storage
-/// confirms release or reports that the original unpushed claim is gone.
+/// Exact claims still awaiting an ordering-deferred release.
+#[derive(Debug, PartialEq, Eq)]
 struct DeferredClaimRelease {
     row_id: PendingRowId,
     session: SmSessionId,

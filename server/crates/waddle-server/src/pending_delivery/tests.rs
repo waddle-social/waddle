@@ -1317,6 +1317,7 @@ struct OrderingReleaseFails {
     attempts: std::sync::atomic::AtomicUsize,
     failed: tokio::sync::Notify,
     ambiguous_release: Option<Arc<tokio::sync::Notify>>,
+    release_blocked: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -1369,6 +1370,15 @@ impl PendingDeliveryStorage for OrderingReleaseFails {
         let attempt = self
             .attempts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .release_blocked
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.failed.notify_one();
+            return Err(PendingStorageError::Other(
+                "release backend still unavailable".into(),
+            ));
+        }
         if attempt < 2 {
             if let Some(resume) = &self.ambiguous_release {
                 self.inner
@@ -1536,6 +1546,7 @@ async fn ordered_pending_pump_retries_failed_release_without_new_presence() {
         attempts: std::sync::atomic::AtomicUsize::new(0),
         failed: tokio::sync::Notify::new(),
         ambiguous_release: None,
+        release_blocked: std::sync::atomic::AtomicBool::new(false),
     });
     let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
     let registry = Arc::new(ConnectionRegistry::new());
@@ -1736,6 +1747,7 @@ async fn ordered_pending_pump_settles_failed_releases_after_owner_replacement() 
         attempts: std::sync::atomic::AtomicUsize::new(0),
         failed: tokio::sync::Notify::new(),
         ambiguous_release: None,
+        release_blocked: std::sync::atomic::AtomicBool::new(true),
     });
     let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
     let registry = Arc::new(ConnectionRegistry::new());
@@ -1778,6 +1790,13 @@ async fn ordered_pending_pump_settles_failed_releases_after_owner_replacement() 
     let (tx, mut replacement_rx) = tokio::sync::mpsc::channel(8);
     registry.register(resource.clone(), tx);
     registry.update_presence(&resource, true, 0);
+    assert!(
+        !task.is_finished(),
+        "failed releases remain owned after replacement"
+    );
+    fault
+        .release_blocked
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
         .expect("pending delivery flush finishes before timeout")
@@ -5049,20 +5068,24 @@ async fn ordering_release_retry_preserves_replacement_and_pushed_claims() {
 }
 
 #[tokio::test]
-async fn single_pass_ordering_flush_settles_failed_releases_before_handoff() {
+async fn single_pass_ordering_flush_hands_off_persistent_release_failure() {
     let fault = Arc::new(OrderingReleaseFails {
         inner: ordered_pending_fixture(None).await,
         attempts: std::sync::atomic::AtomicUsize::new(0),
         failed: tokio::sync::Notify::new(),
         ambiguous_release: None,
+        release_blocked: std::sync::atomic::AtomicBool::new(true),
     });
     let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
-    let registry = ConnectionRegistry::new();
+    let registry = Arc::new(ConnectionRegistry::new());
     let resource = full("alice@example.com/phone");
     let session = SmSessionId::new("single-pass-failed-release");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let owner = registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
     let resolver = ordered_pending_resolver().await;
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(1),
         flush_for_resource(
             &storage,
             &registry,
@@ -5072,23 +5095,79 @@ async fn single_pass_ordering_flush_settles_failed_releases_before_handoff() {
                 server_domain: "example.com",
                 sm_session: Some(&session),
                 blocking_storage: None,
-                owner: None,
+                owner: Some(&owner),
                 archive_resolver: &resolver,
                 dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Deferred)),
             },
         ),
     )
     .await
-    .expect("single pass settles release work before handoff");
+    .expect("bounded pass returns while release backend remains unavailable");
     assert_eq!(outcome.deferred_ordering, 2);
     assert_eq!(outcome.pushed, 0);
-    assert_eq!(fault.attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(fault.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     let remaining = storage
         .list(&resource.to_bare())
         .await
-        .expect("list released rows");
+        .expect("list retained rows");
     assert_eq!(remaining.len(), 2);
-    assert!(remaining.iter().all(|row| row.flushed_in_session.is_none()));
+    assert!(remaining
+        .iter()
+        .all(|row| row.flushed_in_session.as_ref() == Some(&session)));
+    let retry = {
+        let storage = storage.clone();
+        let registry = registry.clone();
+        let resource = resource.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            resume_flush_for_resource_with_retry(
+                &storage,
+                &registry,
+                &resource.to_bare(),
+                &resource,
+                FlushContext {
+                    server_domain: "example.com",
+                    sm_session: Some(&session),
+                    blocking_storage: None,
+                    owner: Some(&owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Ready)),
+                },
+                outcome,
+            )
+            .await
+        })
+    };
+    assert!(!retry.is_finished());
+    assert!(rx.try_recv().is_err());
+    fault
+        .release_blocked
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), retry)
+        .await
+        .expect("handoff retries release then delivery without new presence")
+        .expect("retry succeeds");
+    assert_eq!(completed.pushed, 2);
+    for (sequence, expected) in [(1, "z-later-pending-id"), (2, "a-earlier-pending-id")] {
+        let row_id = rx
+            .try_recv()
+            .expect("delivered row")
+            .pending_row_id
+            .expect("row id");
+        assert_eq!(row_id.as_str(), expected);
+        storage
+            .record_pushed_at(&row_id, sequence)
+            .await
+            .expect("stamp delivery");
+    }
+    assert!(rx.try_recv().is_err(), "no duplicate delivery");
+    assert_eq!(
+        storage
+            .delete_acked_in_window(&session, 0, 2)
+            .await
+            .expect("ack delivery"),
+        2
+    );
 }
 
 #[tokio::test]
@@ -5099,6 +5178,7 @@ async fn ambiguous_ordering_release_preserves_new_same_session_claim() {
         attempts: std::sync::atomic::AtomicUsize::new(0),
         failed: tokio::sync::Notify::new(),
         ambiguous_release: Some(resume.clone()),
+        release_blocked: std::sync::atomic::AtomicBool::new(false),
     });
     let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
     let registry = Arc::new(ConnectionRegistry::new());
@@ -5173,6 +5253,24 @@ async fn ambiguous_ordering_release_preserves_new_same_session_claim() {
         .expect("release settlement finishes")
         .expect("first flush succeeds");
     assert_eq!(first.pushed, 0);
+    let resolver = ordered_pending_resolver().await;
+    let final_pass = resume_flush_for_resource_with_retry(
+        &storage,
+        &registry,
+        &resource.to_bare(),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&session),
+            blocking_storage: None,
+            owner: None,
+            archive_resolver: &resolver,
+            dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Ready)),
+        },
+        first,
+    )
+    .await;
+    assert_eq!(final_pass.pushed, 1);
     let remaining = storage
         .list(&resource.to_bare())
         .await
@@ -5190,23 +5288,6 @@ async fn ambiguous_ordering_release_preserves_new_same_session_claim() {
         .record_pushed_at(&delivered_id, 1)
         .await
         .expect("stamp protected claim");
-    let resolver = ordered_pending_resolver().await;
-    let final_pass = flush_for_resource(
-        &storage,
-        &registry,
-        &resource.to_bare(),
-        &resource,
-        FlushContext {
-            server_domain: "example.com",
-            sm_session: Some(&session),
-            blocking_storage: None,
-            owner: None,
-            archive_resolver: &resolver,
-            dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Ready)),
-        },
-    )
-    .await;
-    assert_eq!(final_pass.pushed, 1);
     let row_id = rx
         .try_recv()
         .expect("second row delivered")

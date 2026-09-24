@@ -51,6 +51,7 @@ pub(crate) mod database;
 mod flush;
 
 pub use database::DatabasePendingDeliveryStorage;
+pub(crate) use flush::resume_flush_for_resource_with_retry;
 pub use flush::{
     flush_for_resource, flush_for_resource_with_retry, ArchiveResolveError, ArchiveResolver,
     FlushContext, FlushOutcome, MamArchiveResolver, NullArchiveResolver, PendingDispatchGate,

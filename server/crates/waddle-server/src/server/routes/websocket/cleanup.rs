@@ -1740,13 +1740,10 @@ struct LivePendingFlushTarget {
 }
 
 fn preferred_live_pending_flush_target(
-    state: &WebSocketState,
+    registry: &waddle_xmpp::registry::ConnectionRegistry,
     recipient: &BareJid,
 ) -> Option<LivePendingFlushTarget> {
-    let mut resources = state
-        .deps
-        .protocol
-        .connection_registry
+    let mut resources = registry
         .get_available_resources_for_user(recipient)
         .into_iter()
         // Match the XEP-0160/RFC 6121 gate in the normal initial-presence
@@ -1760,27 +1757,22 @@ fn preferred_live_pending_flush_target(
             .then_with(|| left_jid.to_string().cmp(&right_jid.to_string()))
     });
     resources.into_iter().find_map(|(resource, _)| {
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .get_entry(&resource)
-            .and_then(|entry| {
-                // The availability snapshot above and this entry lookup are
-                // two reads: the resource can go unavailable/negative or a
-                // silent same-FullJID replacement can register in between.
-                // Revalidate on the entry actually adopted, otherwise the
-                // flush would owner-gate successfully against a resource
-                // that RFC 6121/XEP-0160 exclude from offline delivery.
-                if !entry.is_presence_available() || entry.presence_priority() < 0 {
-                    return None;
-                }
-                Some(LivePendingFlushTarget {
-                    resource,
-                    owner: std::sync::Arc::clone(&entry.carbons_enabled),
-                    sm_session: entry.sm_stream_id(),
-                })
+        registry.get_entry(&resource).and_then(|entry| {
+            // The availability snapshot above and this entry lookup are
+            // two reads: the resource can go unavailable/negative or a
+            // silent same-FullJID replacement can register in between.
+            // Revalidate on the entry actually adopted, otherwise the
+            // flush would owner-gate successfully against a resource
+            // that RFC 6121/XEP-0160 exclude from offline delivery.
+            if !entry.is_presence_available() || entry.presence_priority() < 0 {
+                return None;
+            }
+            Some(LivePendingFlushTarget {
+                resource,
+                owner: std::sync::Arc::clone(&entry.carbons_enabled),
+                sm_session: entry.sm_stream_id(),
             })
+        })
     })
 }
 
@@ -1822,7 +1814,10 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     // chasing an unbounded stream of reconnects.
     let mut last_attempt_left_rows = false;
     for _ in 0..2 {
-        let Some(target) = preferred_live_pending_flush_target(state, recipient) else {
+        let Some(target) = preferred_live_pending_flush_target(
+            &state.deps.protocol.connection_registry,
+            recipient,
+        ) else {
             return TerminalRedriveOutcome::NoLiveTarget;
         };
         let resolver = crate::pending_delivery::MamArchiveResolver {
@@ -1849,10 +1844,10 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             .connection_registry
             .entry_if_owner(&target.resource, &target.owner)
             .is_some();
-        if target_still_current && outcome.deferred_ordering > 0 {
-            spawn_terminal_pending_ordering_retry(state, &target);
-        }
         if !target_still_current && (outcome.claimed > 0 || outcome.pushed > 0) {
+            if outcome.deferred_ordering > 0 {
+                spawn_terminal_pending_ordering_retry(state, target, outcome);
+            }
             // Rows were claimed/pushed into a session that has since been
             // superseded: they sit in that session's channel until ITS
             // cleanup releases and re-drives them. Reporting Settled here
@@ -1860,7 +1855,8 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             // ahead of those rows — treat the attempt as aborted instead.
             return TerminalRedriveOutcome::Aborted;
         }
-        last_attempt_left_rows = terminal_reflush_left_retryable_rows(state, recipient).await;
+        last_attempt_left_rows = outcome.deferred_ordering > 0
+            || terminal_reflush_left_retryable_rows(state, recipient).await;
         if target_still_current && last_attempt_left_rows {
             if let Some(entry) = state
                 .deps
@@ -1881,6 +1877,9 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
                 "terminal cleanup re-drove pending_delivery rows onto a live resource"
             );
         }
+        if outcome.deferred_ordering > 0 {
+            spawn_terminal_pending_ordering_retry(state, target, outcome);
+        }
         if target_still_current {
             return if last_attempt_left_rows {
                 TerminalRedriveOutcome::Aborted
@@ -1896,37 +1895,54 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     }
 }
 
-fn spawn_terminal_pending_ordering_retry(state: &WebSocketState, target: &LivePendingFlushTarget) {
+fn spawn_terminal_pending_ordering_retry(
+    state: &WebSocketState,
+    mut target: LivePendingFlushTarget,
+    mut outcome: crate::pending_delivery::FlushOutcome,
+) {
     let storage = state.deps.protocol.pending_delivery_storage.clone();
     let registry = state.deps.protocol.connection_registry.clone();
     let blocking = state.deps.protocol.blocking_storage.clone();
     let ingress = state.deps.protocol.ingress.clone();
     let mam_storage = state.deps.protocol.mam_storage.clone();
     let domain = state.deps.auth_state.xmpp_domain.clone();
-    let resource = target.resource.clone();
-    let owner = target.owner.clone();
-    let sm_session = target.sm_session.clone();
+    let recipient = target.resource.to_bare();
     tokio::spawn(async move {
         let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
-        let outcome = crate::pending_delivery::flush_for_resource_with_retry(
-            &storage,
-            &registry,
-            &resource.to_bare(),
-            &resource,
-            crate::pending_delivery::FlushContext {
-                server_domain: &domain,
-                sm_session: sm_session.as_ref(),
-                blocking_storage: Some(&blocking),
-                owner: Some(&owner),
-                archive_resolver: &resolver,
-                dispatch_gate: Some(ingress.as_ref()),
-            },
-        )
-        .await;
-        if outcome.deferred_transient > 0 {
-            if let Some(entry) = registry.entry_if_owner(&resource, &owner) {
-                entry.reset_offline_flush();
+        // Release settlement is independent of resource ownership. Afterwards,
+        // allow one fresh target selection: its initial presence may already
+        // have run while the old claim was still waiting for storage recovery.
+        for _ in 0..2 {
+            outcome = crate::pending_delivery::resume_flush_for_resource_with_retry(
+                &storage,
+                &registry,
+                &recipient,
+                &target.resource,
+                crate::pending_delivery::FlushContext {
+                    server_domain: &domain,
+                    sm_session: target.sm_session.as_ref(),
+                    blocking_storage: Some(&blocking),
+                    owner: Some(&target.owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(ingress.as_ref()),
+                },
+                outcome,
+            )
+            .await;
+            if let Some(entry) = registry.entry_if_owner(&target.resource, &target.owner) {
+                if entry.is_presence_available() && entry.presence_priority() >= 0 {
+                    if outcome.deferred_transient > 0 {
+                        entry.reset_offline_flush();
+                    }
+                    return;
+                }
             }
+            let Some(replacement) = preferred_live_pending_flush_target(&registry, &recipient)
+            else {
+                return;
+            };
+            target = replacement;
+            outcome = crate::pending_delivery::FlushOutcome::default();
         }
     });
 }
@@ -1945,7 +1961,10 @@ async fn terminal_reflush_left_retryable_rows(state: &WebSocketState, recipient:
         .list(recipient)
         .await
     {
-        Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
+        // Claimed but unsequenced rows can still belong to a failed-release
+        // worker. A second terminal pass must not promote its later tail ahead
+        // of those rows merely because it could not claim them itself.
+        Ok(rows) => rows.iter().any(|row| row.outbound_sequence.is_none()),
         Err(error) => {
             warn!(
                 recipient = %recipient,
