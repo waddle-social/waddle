@@ -1839,6 +1839,7 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
                 blocking_storage: Some(blocking_storage),
                 owner: Some(&target.owner),
                 archive_resolver: &resolver,
+                dispatch_gate: Some(state.deps.protocol.ingress.as_ref()),
             },
         )
         .await;
@@ -1848,6 +1849,9 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             .connection_registry
             .entry_if_owner(&target.resource, &target.owner)
             .is_some();
+        if target_still_current && outcome.deferred_ordering > 0 {
+            spawn_terminal_pending_ordering_retry(state, &target);
+        }
         if !target_still_current && (outcome.claimed > 0 || outcome.pushed > 0) {
             // Rows were claimed/pushed into a session that has since been
             // superseded: they sit in that session's channel until ITS
@@ -1890,6 +1894,41 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     } else {
         TerminalRedriveOutcome::Settled
     }
+}
+
+fn spawn_terminal_pending_ordering_retry(state: &WebSocketState, target: &LivePendingFlushTarget) {
+    let storage = state.deps.protocol.pending_delivery_storage.clone();
+    let registry = state.deps.protocol.connection_registry.clone();
+    let blocking = state.deps.protocol.blocking_storage.clone();
+    let ingress = state.deps.protocol.ingress.clone();
+    let mam_storage = state.deps.protocol.mam_storage.clone();
+    let domain = state.deps.auth_state.xmpp_domain.clone();
+    let resource = target.resource.clone();
+    let owner = target.owner.clone();
+    let sm_session = target.sm_session.clone();
+    tokio::spawn(async move {
+        let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
+        let outcome = crate::pending_delivery::flush_for_resource_with_retry(
+            &storage,
+            &registry,
+            &resource.to_bare(),
+            &resource,
+            crate::pending_delivery::FlushContext {
+                server_domain: &domain,
+                sm_session: sm_session.as_ref(),
+                blocking_storage: Some(&blocking),
+                owner: Some(&owner),
+                archive_resolver: &resolver,
+                dispatch_gate: Some(ingress.as_ref()),
+            },
+        )
+        .await;
+        if outcome.deferred_transient > 0 {
+            if let Some(entry) = registry.entry_if_owner(&resource, &owner) {
+                entry.reset_offline_flush();
+            }
+        }
+    });
 }
 
 /// Terminal reflush must re-open the replacement session's once-only offline

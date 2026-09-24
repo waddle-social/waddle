@@ -801,6 +801,70 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn claim_archive_ordered_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Match MAM's id-first lookup. A missing/tombstoned archive pointer is
+        // still claimed, so the resolver can discard the poison row instead of
+        // leaving it as a permanent dispatch barrier.
+        const ORDINAL: &str = "COALESCE( \
+            (SELECT archive_seq FROM mam_messages m WHERE m.room_jid = pending_delivery.archive_stanza_by AND m.id = pending_delivery.archive_stanza_id), \
+            (SELECT MIN(archive_seq) FROM mam_messages m WHERE m.room_jid = pending_delivery.archive_stanza_by AND m.stanza_id = pending_delivery.archive_stanza_id))";
+        let sql = format!(
+            "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, claimed_at_ms = ? \
+             WHERE flushed_in_session IS NULL AND row_id IN ( \
+                 SELECT row_id FROM pending_delivery \
+                 WHERE recipient_jid = ? AND flushed_in_session IS NULL \
+                 ORDER BY CASE WHEN payload_kind = 'archived' THEN 0 ELSE 1 END, \
+                          {ORDINAL} ASC NULLS FIRST, row_id ASC LIMIT ? \
+             ) \
+             RETURNING row_id, recipient_jid, original_receipt_at, payload_kind, \
+                       archive_stanza_by, archive_stanza_id, transient_xml, \
+                       flushed_in_session, outbound_sequence, {ORDINAL}"
+        );
+        let mut rows = self
+            .query(
+                &sql,
+                crate::db_params![
+                    session.as_str().to_string(),
+                    chrono::Utc::now().timestamp_millis(),
+                    recipient.to_string(),
+                    limit as i64,
+                ],
+            )
+            .await?;
+        let mut claimed = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        {
+            let ordinal: Option<i64> = row
+                .get(9)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let ordinal = ordinal
+                .map(waddle_xmpp::mam::ArchiveOrdinal::from_storage)
+                .transpose()
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            claimed.push((decode_row(&row)?, ordinal));
+        }
+        // UPDATE RETURNING has no ordering guarantee on either backend.
+        claimed.sort_by(|(left, left_ordinal), (right, right_ordinal)| {
+            left.payload
+                .is_transient()
+                .cmp(&right.payload.is_transient())
+                .then_with(|| left_ordinal.cmp(right_ordinal))
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(claimed.into_iter().map(|(row, _)| row).collect())
+    }
+
     async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
         self.execute(
             "DELETE FROM pending_delivery WHERE row_id = ?",

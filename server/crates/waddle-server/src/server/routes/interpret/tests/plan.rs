@@ -110,7 +110,7 @@ async fn offline_dm_plans_both_archives_and_inboxes_without_writes() {
 }
 
 #[tokio::test]
-async fn live_full_dm_plans_destination_processing_without_sending() {
+async fn live_full_dm_plans_recipient_effects_and_processed_copy_without_sending() {
     let registry = test_registry();
     let target: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -118,9 +118,13 @@ async fn live_full_dm_plans_destination_processing_without_sending() {
         waddle_xmpp::registry::UserRegistryActor::new(),
     );
     register_into_both_tiers(&registry, &user_registry, &target, tx).await;
+    let mam: Arc<dyn MamStorage> = Arc::new(poison::PoisonMam(InMemoryMamStorage::new()));
+    let inbox: Arc<dyn InboxStorage> = Arc::new(poison::PoisonInbox(InMemoryInboxStorage::new()));
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
     let deps = Deps {
         user_registry: Some(&user_registry),
-        ..Deps::registry_only(&registry)
+        ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
     let plan = plan_message_dispatch(
         &mut sender_machine(),
@@ -129,7 +133,10 @@ async fn live_full_dm_plans_destination_processing_without_sending() {
     )
     .await;
     assert!(plan.plan.iter().any(|item| matches!(&item.effect,
-        Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, kind: PeerDeliveryKind::PeerStanza, .. })) if jid == &target)));
+        Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, kind: PeerDeliveryKind::DirectFrame, .. })) if jid == &target)));
+    assert_personal_writes(&plan.plan, &target.to_bare());
+    assert_eq!(plan.intents.iter().filter(|intent| matches!(intent,
+        waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &target.to_bare())).count(), 1);
     let route = plan.plan.iter().find(|item| matches!(&item.effect,
         Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. })) if jid == &target)).expect("peer route");
     assert_eq!(route.suppression, PlanSuppressionPolicy::SenderOnly);

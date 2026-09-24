@@ -58,6 +58,8 @@ pub struct IngressAppendObligationRef {
     pub sender_bare: BareJid,
     pub receipt: super::EffectReceiptKey,
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub archive_positions: Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>,
+    pub dispatch_stream: Option<SmSessionId>,
 }
 
 impl IngressAppendObligationRef {
@@ -70,6 +72,8 @@ impl IngressAppendObligationRef {
             sender_bare,
             receipt: context.receipt.clone(),
             received_at: context.received_at,
+            archive_positions: context.archive_positions.clone(),
+            dispatch_stream: context.dispatch_stream.clone(),
         }
     }
 
@@ -79,11 +83,11 @@ impl IngressAppendObligationRef {
         context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
         stanza: &waddle_xmpp::Stanza,
     ) -> Option<Self> {
-        let waddle_xmpp::Stanza::Message(message) = stanza else {
-            return None;
-        };
-        let sender = message.from.as_ref()?.to_bare();
-        Some(Self::from_context(context?, sender)).filter(Self::kind_is_append_eligible)
+        let context = context?;
+        let sender =
+            super::append_authority::stanza_sender(stanza, context.receipt.kind.to_storage())
+                .ok()?;
+        Some(Self::from_context(context, sender)).filter(Self::kind_is_append_eligible)
     }
 
     pub fn into_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {
@@ -91,6 +95,8 @@ impl IngressAppendObligationRef {
             message_key: self.message_key,
             receipt: self.receipt,
             received_at: self.received_at,
+            archive_positions: self.archive_positions,
+            dispatch_stream: self.dispatch_stream,
         }
     }
 
@@ -115,6 +121,8 @@ impl IngressAppendObligationRef {
             },
             sender_bare: self.sender_bare,
             received_at: self.received_at,
+            archive_positions: self.archive_positions,
+            dispatch_stream: self.dispatch_stream,
         }
     }
 
@@ -131,6 +139,8 @@ impl IngressAppendObligationRef {
                 semantic_identity_hash: obligation.key.semantic_identity_hash,
             },
             received_at: obligation.received_at,
+            archive_positions: obligation.archive_positions,
+            dispatch_stream: obligation.dispatch_stream,
         }
     }
 }

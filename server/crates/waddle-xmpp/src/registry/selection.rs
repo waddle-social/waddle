@@ -107,6 +107,22 @@ pub async fn try_get_resources_for_user(
         })
 }
 
+/// Read routing and carbon policy together without converting failure to offline.
+pub async fn routing_resources_for_user(
+    user_registry: &ActorRef<UserRegistryActor>,
+    bare_jid: &BareJid,
+) -> Result<Vec<super::user_actor::ResourceRoutingState>, ResourceLookupError> {
+    let Some(actor) = try_resolve_user_actor(user_registry, bare_jid).await? else {
+        return Ok(Vec::new());
+    };
+    actor
+        .ask(super::user_actor::GetRoutingResources)
+        .mailbox_timeout(SELECTION_ASK_TIMEOUT)
+        .reply_timeout(SELECTION_ASK_TIMEOUT)
+        .await
+        .map_err(|_| ResourceLookupError::UserActorUnavailable)
+}
+
 /// Every currently-connected resource of `bare_jid`, sourced from the
 /// authoritative actor tree. Mirrors the retired DashMap
 /// `get_resources_for_user` exactly: no presence filter, every registered

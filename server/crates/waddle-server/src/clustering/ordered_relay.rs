@@ -219,6 +219,12 @@ pub enum MucProxyOrigin {
 /// typed `RemoteStanza`; XML text exists only inside the existing codec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OrderedRelayPayload {
+    /// A frozen recipient-prepared original or carbon; never runs peer processing.
+    ProcessedDirectMessage {
+        recipient: jid::Jid,
+        stanza: RemoteStanza,
+        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+    },
     Message {
         recipient: jid::Jid,
         stanza: RemoteStanza,
@@ -247,7 +253,8 @@ pub enum OrderedRelayPayload {
 impl OrderedRelayPayload {
     fn stanza(&self) -> &waddle_xmpp::Stanza {
         match self {
-            OrderedRelayPayload::Message { stanza, .. }
+            OrderedRelayPayload::ProcessedDirectMessage { stanza, .. }
+            | OrderedRelayPayload::Message { stanza, .. }
             | OrderedRelayPayload::Iq { stanza, .. }
             | OrderedRelayPayload::Presence { stanza, .. }
             | OrderedRelayPayload::MucProxy { stanza, .. } => &stanza.0,
@@ -256,7 +263,16 @@ impl OrderedRelayPayload {
 
     fn matches_ingress_append_obligation(&self) -> bool {
         match self {
+            Self::ProcessedDirectMessage {
+                ingress_append: None,
+                ..
+            } => false,
             Self::Message {
+                recipient,
+                ingress_append: Some(obligation),
+                ..
+            }
+            | Self::ProcessedDirectMessage {
                 recipient,
                 ingress_append: Some(obligation),
                 ..
@@ -267,6 +283,17 @@ impl OrderedRelayPayload {
 
     fn matches_stanza_kind(&self) -> bool {
         match (self, self.stanza()) {
+            (
+                Self::ProcessedDirectMessage { recipient, .. },
+                waddle_xmpp::Stanza::Message(message),
+            ) => {
+                recipient.is_full()
+                    && matches!(
+                        message.type_,
+                        xmpp_parsers::message::MessageType::Chat
+                            | xmpp_parsers::message::MessageType::Normal
+                    )
+            }
             (
                 OrderedRelayPayload::Message { recipient, .. },
                 waddle_xmpp::Stanza::Message(message),
@@ -284,13 +311,15 @@ impl OrderedRelayPayload {
     fn matches_channel_recipient(&self, recipient: &OrderedRelayRecipient) -> bool {
         match (self, recipient) {
             (
-                OrderedRelayPayload::Message { recipient, .. }
+                OrderedRelayPayload::ProcessedDirectMessage { recipient, .. }
+                | OrderedRelayPayload::Message { recipient, .. }
                 | OrderedRelayPayload::Iq { recipient, .. }
                 | OrderedRelayPayload::Presence { recipient, .. },
                 OrderedRelayRecipient::BareJid(bare),
             ) => recipient == &jid::Jid::from(bare.clone()),
             (
-                OrderedRelayPayload::Message { recipient, .. }
+                OrderedRelayPayload::ProcessedDirectMessage { recipient, .. }
+                | OrderedRelayPayload::Message { recipient, .. }
                 | OrderedRelayPayload::Iq { recipient, .. }
                 | OrderedRelayPayload::Presence { recipient, .. },
                 OrderedRelayRecipient::FullJid(full),
@@ -305,6 +334,9 @@ impl OrderedRelayPayload {
 
     fn matches_stanza_addressing(&self) -> bool {
         match self {
+            Self::ProcessedDirectMessage {
+                recipient, stanza, ..
+            } => processed_message_matches_target(&stanza.0, recipient),
             OrderedRelayPayload::Message {
                 recipient, stanza, ..
             }
@@ -323,7 +355,8 @@ impl OrderedRelayPayload {
 
     fn matches_target_claim(&self, claim: &OrderedRelayClaim) -> bool {
         match self {
-            OrderedRelayPayload::Message { recipient, .. }
+            OrderedRelayPayload::ProcessedDirectMessage { recipient, .. }
+            | OrderedRelayPayload::Message { recipient, .. }
             | OrderedRelayPayload::Iq { recipient, .. }
             | OrderedRelayPayload::Presence { recipient, .. } => {
                 claim.entity.entity_type == EntityType::UserActor
@@ -337,6 +370,14 @@ impl OrderedRelayPayload {
     }
 
     fn matches_sender_claim(&self, claim: &OrderedRelayClaim) -> bool {
+        if matches!(self, Self::ProcessedDirectMessage { .. }) {
+            return processed_message_sender(self.stanza()).is_some_and(|from| {
+                matches!(
+                    claim.entity.entity_type,
+                    EntityType::UserActor | EntityType::RoomActor
+                ) && claim.entity.id == from.to_string()
+            });
+        }
         let Some(from) = stanza_from(self.stanza()) else {
             return false;
         };
@@ -366,6 +407,15 @@ impl OrderedRelayPayload {
 
     fn fingerprint(&self) -> OrderedRelayPayloadFingerprint {
         match self {
+            Self::ProcessedDirectMessage {
+                recipient,
+                stanza,
+                ingress_append,
+            } => OrderedRelayPayloadFingerprint::ProcessedDirectMessage {
+                recipient: recipient.clone(),
+                stanza: stanza.0.to_element(),
+                ingress_append: ingress_append.clone(),
+            },
             OrderedRelayPayload::Message {
                 recipient,
                 stanza,
@@ -618,6 +668,11 @@ impl From<&RemoteStanzaEnvelope> for OrderedRelayEnvelopeFingerprint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OrderedRelayPayloadFingerprint {
+    ProcessedDirectMessage {
+        recipient: jid::Jid,
+        stanza: minidom::Element,
+        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+    },
     Message {
         recipient: jid::Jid,
         stanza: minidom::Element,
@@ -1099,7 +1154,8 @@ impl OrderedRelayPayload {
             OrderedRelayPayload::MucProxy { kind, origin, .. } => {
                 kind.requires_connection_origin() == matches!(origin, MucProxyOrigin::Connection(_))
             }
-            OrderedRelayPayload::Message { .. }
+            OrderedRelayPayload::ProcessedDirectMessage { .. }
+            | OrderedRelayPayload::Message { .. }
             | OrderedRelayPayload::Iq { .. }
             | OrderedRelayPayload::Presence { .. } => true,
         }
@@ -1245,3 +1301,48 @@ mod invariant_tests;
 // small private invariant probes above remain in the release lib-test target.
 #[cfg(all(test, debug_assertions))]
 mod tests;
+
+/// Carbon authorship is the forwarded message's sender; the outer sender is
+/// the archive owner required by XEP-0280. Validate both before trusting it.
+pub(crate) fn processed_message_sender(stanza: &waddle_xmpp::Stanza) -> Option<jid::BareJid> {
+    let waddle_xmpp::Stanza::Message(message) = stanza else {
+        return None;
+    };
+    for payload in &message.payloads {
+        let forwarded = xmpp_parsers::carbons::Received::try_from(payload.clone())
+            .map(|carbon| carbon.forwarded)
+            .or_else(|_| {
+                xmpp_parsers::carbons::Sent::try_from(payload.clone())
+                    .map(|carbon| carbon.forwarded)
+            });
+        if let Ok(forwarded) = forwarded {
+            let owner = message.from.as_ref()?;
+            if !owner.is_bare() || message.to.as_ref()?.to_bare() != owner.to_bare() {
+                return None;
+            }
+            return forwarded.message.from.as_ref().map(jid::Jid::to_bare);
+        }
+    }
+    message.from.as_ref().map(jid::Jid::to_bare)
+}
+
+pub(crate) fn processed_message_matches_target(
+    stanza: &waddle_xmpp::Stanza,
+    recipient: &jid::Jid,
+) -> bool {
+    let waddle_xmpp::Stanza::Message(message) = stanza else {
+        return false;
+    };
+    let is_carbon = message.payloads.iter().any(|payload| {
+        xmpp_parsers::carbons::Received::try_from(payload.clone()).is_ok()
+            || xmpp_parsers::carbons::Sent::try_from(payload.clone()).is_ok()
+    });
+    recipient.is_full()
+        && message.to.as_ref().is_some_and(|to| {
+            if is_carbon {
+                to == recipient
+            } else {
+                to.to_bare() == recipient.to_bare()
+            }
+        })
+}

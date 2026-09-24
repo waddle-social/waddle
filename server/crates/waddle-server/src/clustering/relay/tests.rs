@@ -126,11 +126,11 @@ async fn relay_replies_follow_repeated_identity_rotations_without_respawn() {
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v11"
+        "waddle.clustering.relay.deliver_ordered.v12"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayRouteRemoteResourceStanza>>::REMOTE_ID,
-        "waddle.clustering.relay.remote_resource_route.v7"
+        "waddle.clustering.relay.remote_resource_route.v8"
     );
 }
 
@@ -140,7 +140,7 @@ fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
 /// and must not be read as a stale registration — the mirror has to survive a
 /// rolling update so the retry can land once the peer is upgraded.
 #[test]
-fn remote_resource_frame_v2_carries_the_ingress_obligation() {
+fn remote_resource_frame_v3_carries_the_ingress_obligation() {
     use crate::ingress::identity::IngressAppendObligationRef;
     use crate::ingress::EffectReceiptKey;
     use crate::ingress_substrate::EffectReceiptKind;
@@ -148,10 +148,12 @@ fn remote_resource_frame_v2_carries_the_ingress_obligation() {
 
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverRemoteResourceFrame>>::REMOTE_ID,
-        "waddle.clustering.relay.remote_resource_frame.v2"
+        "waddle.clustering.relay.remote_resource_frame.v3"
     );
 
     let obligation = IngressAppendObligationRef {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
         sender_bare: "romeo@example.test".parse().expect("sender"),
         receipt: EffectReceiptKey {
@@ -177,7 +179,7 @@ fn remote_resource_frame_v2_carries_the_ingress_obligation() {
 
     let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
         actor_remote_id: "actor".into(),
-        message_remote_id: "waddle.clustering.relay.remote_resource_frame.v2".into(),
+        message_remote_id: "waddle.clustering.relay.remote_resource_frame.v3".into(),
     });
     assert!(
         matches!(
@@ -206,7 +208,7 @@ fn resource_presence_is_a_new_message_id_with_a_round_tripping_reply() {
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v11",
+        "waddle.clustering.relay.deliver_ordered.v12",
         "a new relay message must not bump the ordered-relay envelope id"
     );
 

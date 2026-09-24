@@ -4400,6 +4400,7 @@ async fn terminal_release_rearms_replacement_flush_after_zero_deferred_claim_fai
         &jid.to_bare(),
         &jid,
         crate::pending_delivery::FlushContext {
+            dispatch_gate: None,
             server_domain: state.deps.auth_state.xmpp_domain.as_str(),
             sm_session: Some(&replacement_stream),
             blocking_storage: Some(&state.deps.protocol.blocking_storage),

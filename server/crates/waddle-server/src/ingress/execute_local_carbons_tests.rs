@@ -9,21 +9,24 @@ use crate::server::routes::interpret::{
     effects::{EffectSink, PlanSink},
     interpret,
 };
+use kameo::actor::{ActorRef, Spawn};
 use waddle_xmpp::{
     ingress::IngressEffectIntent,
     protocol::{CarbonKind, OutboundEvent},
-    registry::ConnectionRegistry,
+    registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
 };
 
 async fn plan_carbons(
     submission: &mut IngressSubmission,
     registry: &ConnectionRegistry,
+    users: &ActorRef<UserRegistryActor>,
     foreign_first: bool,
 ) {
     let sink = PlanSink::new();
     sink.observe_sender(&submission.sender);
     let capture = IngressEffectCapture::new();
     let mut deps = Deps::new(registry, "example.com");
+    deps.user_registry = Some(users);
     deps.effects = &sink;
     deps.ingress_effect_capture = Some(capture.clone());
     let mut exclude = vec![submission.sender.clone()];
@@ -56,8 +59,10 @@ async fn local_carbons_receipts(
     audience_size: usize,
     partial: bool,
     foreign_first: bool,
+    recovery: bool,
 ) {
     let registry = ConnectionRegistry::new();
+    let users = UserRegistryActor::spawn(UserRegistryActor::new());
     let mut submission = fixture.submission(Some("local-carbons-receipts"), "ordinary DM");
     let (source_tx, mut source_rx) = tokio::sync::mpsc::channel(8);
     registry.register(submission.sender.clone(), source_tx);
@@ -77,9 +82,16 @@ async fn local_carbons_receipts(
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         registry.register(resource.clone(), sender);
         assert!(registry.set_carbons_enabled(resource, true));
+        users
+            .ask(RegisterUserResource {
+                jid: resource.clone(),
+                entry: registry.get_entry(resource).expect("registered resource"),
+            })
+            .await
+            .expect("register actor resource");
         receivers.push(Some(receiver));
     }
-    plan_carbons(&mut submission, &registry, foreign_first).await;
+    plan_carbons(&mut submission, &registry, &users, foreign_first).await;
     assert_eq!(submission.plan.intents.len(), audience_size);
     assert!(submission.plan.intents.iter().all(|intent| matches!(intent,
         IngressEffectIntent::Carbons {carbon_recipients, ..} if carbon_recipients.len() == 1)));
@@ -99,7 +111,8 @@ async fn local_carbons_receipts(
     if partial {
         drop(receivers[1].take());
     }
-    let deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.user_registry = Some(&users);
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -141,6 +154,15 @@ async fn local_carbons_receipts(
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         registry.register(resources[1].clone(), sender);
         assert!(registry.set_carbons_enabled(&resources[1], true));
+        users
+            .ask(RegisterUserResource {
+                jid: resources[1].clone(),
+                entry: registry
+                    .get_entry(&resources[1])
+                    .expect("reconnected resource"),
+            })
+            .await
+            .expect("register reconnected actor resource");
         receivers[1] = Some(receiver);
         let late = submission
             .sender
@@ -150,30 +172,54 @@ async fn local_carbons_receipts(
         let (late_tx, mut late_rx) = tokio::sync::mpsc::channel(8);
         registry.register(late.clone(), late_tx);
         assert!(registry.set_carbons_enabled(&late, true));
-        plan_carbons(&mut submission, &registry, foreign_first).await;
-        let retry = commit_submission(&fixture.uow, &submission, 1)
+        users
+            .ask(RegisterUserResource {
+                jid: late.clone(),
+                entry: registry.get_entry(&late).expect("late resource"),
+            })
             .await
-            .expect("recommit same origin");
-        assert!(retry.class.advances());
-        assert_eq!(retry.message_key, Some(key));
-        let report = execute_effects(
-            &fixture.uow,
-            &fixture.db,
-            &retry,
-            &ImmediateSink,
-            &deps,
-            Duration::from_secs(5),
-        )
-        .await;
-        assert!(report.receipt_failures.is_empty());
+            .expect("register late actor resource");
+        if recovery {
+            let result = crate::ingress::recovery_executor::recover_row(
+                &fixture.db,
+                &fixture.uow,
+                &deps,
+                key,
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("recover without sender retry");
+            assert!(
+                matches!(result, crate::ingress::recovery_executor::RowRecovery::Executed {
+                unrecoverable, unsupported: false, ..
+            } if unrecoverable.is_empty())
+            );
+        } else {
+            plan_carbons(&mut submission, &registry, &users, foreign_first).await;
+            let retry = commit_submission(&fixture.uow, &submission, 1)
+                .await
+                .expect("recommit same origin");
+            assert!(retry.class.advances());
+            assert_eq!(retry.message_key, Some(key));
+            let report = execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &retry,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            )
+            .await;
+            assert!(report.receipt_failures.is_empty());
+            assert!(report
+                .outcomes
+                .iter()
+                .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
+        }
         assert!(
             late_rx.try_recv().is_err(),
             "retry preserves the original audience"
         );
-        assert!(report
-            .outcomes
-            .iter()
-            .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
         for (index, receiver) in receivers.iter_mut().enumerate() {
             let receiver = receiver.as_mut().expect("connected resource");
             assert_eq!(
@@ -198,42 +244,54 @@ async fn local_carbons_receipts(
 
 #[tokio::test]
 async fn sqlite_single_resource_dm_skips_empty_carbons_and_terminalizes() {
-    local_carbons_receipts(IngressFixture::sqlite().await, 0, false, false).await;
+    local_carbons_receipts(IngressFixture::sqlite().await, 0, false, false, false).await;
 }
 #[tokio::test]
 async fn postgres_single_resource_dm_skips_empty_carbons_and_terminalizes() {
     if let Some(fixture) = IngressFixture::postgres("empty_carbons").await {
-        local_carbons_receipts(fixture, 0, false, false).await;
+        local_carbons_receipts(fixture, 0, false, false, false).await;
     }
 }
 #[tokio::test]
 async fn sqlite_multi_resource_dm_receipts_carbons_and_terminalizes() {
-    local_carbons_receipts(IngressFixture::sqlite().await, 3, false, false).await;
+    local_carbons_receipts(IngressFixture::sqlite().await, 3, false, false, false).await;
 }
 #[tokio::test]
 async fn postgres_multi_resource_dm_receipts_carbons_and_terminalizes() {
     if let Some(fixture) = IngressFixture::postgres("complete_carbons").await {
-        local_carbons_receipts(fixture, 3, false, false).await;
+        local_carbons_receipts(fixture, 3, false, false, false).await;
     }
 }
 #[tokio::test]
 async fn sqlite_partial_carbons_retry_delivers_only_missing_resource() {
-    local_carbons_receipts(IngressFixture::sqlite().await, 3, true, false).await;
+    local_carbons_receipts(IngressFixture::sqlite().await, 3, true, false, false).await;
 }
 #[tokio::test]
 async fn postgres_partial_carbons_retry_delivers_only_missing_resource() {
     if let Some(fixture) = IngressFixture::postgres("partial_carbons").await {
-        local_carbons_receipts(fixture, 3, true, false).await;
+        local_carbons_receipts(fixture, 3, true, false, false).await;
     }
 }
 
 #[tokio::test]
 async fn sqlite_carbons_foreign_first_exclusion_preserves_sender_receipts() {
-    local_carbons_receipts(IngressFixture::sqlite().await, 3, false, true).await;
+    local_carbons_receipts(IngressFixture::sqlite().await, 3, false, true, false).await;
 }
 #[tokio::test]
 async fn postgres_carbons_foreign_first_exclusion_preserves_sender_receipts() {
     if let Some(fixture) = IngressFixture::postgres("foreign_carbon_exclusion").await {
-        local_carbons_receipts(fixture, 3, false, true).await;
+        local_carbons_receipts(fixture, 3, false, true, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_partial_carbons_recovery_delivers_only_missing_frozen_resource() {
+    local_carbons_receipts(IngressFixture::sqlite().await, 3, true, true, true).await;
+}
+
+#[tokio::test]
+async fn postgres_partial_carbons_recovery_delivers_only_missing_frozen_resource() {
+    if let Some(fixture) = IngressFixture::postgres("recover_carbons").await {
+        local_carbons_receipts(fixture, 3, true, true, true).await;
     }
 }

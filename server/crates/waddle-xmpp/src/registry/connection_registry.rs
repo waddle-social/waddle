@@ -14,6 +14,7 @@ use tracing::{debug, info, instrument};
 
 use crate::Stanza;
 
+mod archive_dispatch;
 mod connections;
 mod outbound;
 mod presence;

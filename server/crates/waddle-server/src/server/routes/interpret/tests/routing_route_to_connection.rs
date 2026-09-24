@@ -1,47 +1,71 @@
 use super::*;
 use crate::ingress::IngressEffectCapture;
 
-// #229 PR12 — RouteToConnection delivers as PeerStanza
-// -----------------------------------------------------------------
-
+// Live full-JID messages prepare recipient effects before enqueue.
 #[tokio::test]
-async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
-    // Locks in the staged-cutover contract: full-JID
-    // RouteToConnection events queue an OutboundStanza tagged
-    // PeerStanza so the destination's main loop runs the
-    // recipient pass before any wire write.
+async fn route_to_connection_full_jid_prepares_once_then_queues_direct_frame() {
+    use crate::server::routes::interpret::effects::delivery::{
+        ExternalDeliveryEffect, PeerDeliveryKind,
+    };
+    use crate::server::routes::interpret::effects::{Effect, ExternalEffect, PlanSink};
     use waddle_xmpp::registry::{DeliveryKind, UserRegistryActor};
     let registry = ConnectionRegistry::new();
     let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
     let bob: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
     let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
-    // ADR-0017 Slice 3: full-JID delivery now routes exclusively through the
-    // authoritative actor (`deliver_peer_to_full` no longer has a DashMap
-    // path), so register into both tiers and drive it with a `Some`
-    // user_registry.
     register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
-
-    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
-    let events = vec![OutboundEvent::RouteToConnection {
-        jid: jid::Jid::from(bob.clone()),
-        stanza: Box::new(Stanza::Message(msg)),
-        call_setup: None,
-    }];
-    let _outcome = interpret(
-        events,
-        &Deps::registry_with_user_registry(&registry, &user_registry),
+    let sink = PlanSink::new();
+    let dispatcher = pipelined_dispatcher();
+    let deps = Deps {
+        effects: &sink,
+        message_dispatcher: Some(&dispatcher),
+        local_domain: "example.com",
+        ..Deps::registry_with_user_registry(&registry, &user_registry)
+    };
+    let message = chat_msg(jid("alice@example.com/web"), bob.clone().into(), "hi");
+    interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: bob.clone().into(),
+            stanza: Box::new(Stanza::Message(message)),
+            call_setup: None,
+        }],
+        &deps,
     )
     .await;
-
-    let queued = drain_inbound(&mut bob_rx);
-    assert_eq!(queued.len(), 1, "delivered to bob's queue exactly once");
-    assert_eq!(
-        queued[0].kind,
-        DeliveryKind::PeerStanza,
-        "RouteToConnection MUST tag PeerStanza so the destination main \
-         loop runs the recipient pass; got {:?}",
-        queued[0].kind
+    assert!(bob_rx.try_recv().is_err(), "preparation must not enqueue");
+    let plan = sink.snapshot();
+    let processed = plan
+        .iter()
+        .find_map(|effect| match &effect.effect {
+            Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                jid,
+                stanza,
+                kind: PeerDeliveryKind::DirectFrame,
+                ..
+            })) if jid == &bob => Some(stanza.as_ref()),
+            _ => None,
+        })
+        .expect("processed original");
+    let Stanza::Message(message) = processed else {
+        panic!("message");
+    };
+    assert!(
+        waddle_xmpp_core::xep0359::extract_stanza_id_by(message, &bob.to_bare().into()).is_some()
     );
+    let immediate = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
+        ..deps.clone()
+    };
+    assert_eq!(
+        super::super::route_to_connection::deliver_direct_to_full_with_registered_remote(
+            &immediate, &bob, processed
+        )
+        .await,
+        super::super::FullJidDeliveryOutcome::Delivered
+    );
+    let queued = drain_inbound(&mut bob_rx);
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].kind, DeliveryKind::DirectFrame);
 }
 
 #[tokio::test]

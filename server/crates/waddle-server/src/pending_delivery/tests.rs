@@ -179,6 +179,7 @@ async fn flush_with_no_rows_is_noop() {
         &bare("alice@example.com"),
         &full("alice@example.com/web"),
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: None,
             blocking_storage: None,
@@ -419,6 +420,7 @@ async fn assert_v1014_claim_reset_once(database_url: &str) {
         &recipient,
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: None,
             blocking_storage: None,
@@ -516,6 +518,7 @@ async fn flush_pushes_transient_rows_and_keeps_them_for_sm_ack() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -584,6 +587,7 @@ async fn flush_non_sm_session_deletes_on_push() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: None, // ← no SM session: delete-on-push fallback
             blocking_storage: None,
@@ -627,6 +631,7 @@ async fn flush_releases_rows_when_no_push_succeeds() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -690,6 +695,7 @@ async fn flush_drains_large_backlog_in_bounded_batches_with_concurrent_consumer(
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -742,6 +748,7 @@ async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
         &recipient,
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -769,6 +776,7 @@ async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
         &recipient,
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -910,6 +918,400 @@ async fn db_storage_claim_batch_returns_fifo_prefix_and_continues_by_cursor() {
         .await
         .unwrap();
     assert_eq!(b3.len(), 1, "final short batch drains the backlog");
+}
+
+async fn ordered_pending_fixture(database_url: Option<&str>) -> DatabasePendingDeliveryStorage {
+    let storage = DatabasePendingDeliveryStorage::open(database_url, QuotaPolicy::Unlimited)
+        .await
+        .unwrap();
+    storage.database().guard().await.unwrap().execute(
+        "CREATE TABLE mam_messages (id TEXT PRIMARY KEY, room_jid TEXT NOT NULL, stanza_id TEXT, archive_seq BIGINT NOT NULL)",
+        (),
+    ).await.unwrap();
+    for (id, ordinal) in [("first", 1_i64), ("second", 2_i64)] {
+        storage.database().guard().await.unwrap().execute(
+            "INSERT INTO mam_messages (id, room_jid, stanza_id, archive_seq) VALUES (?, ?, ?, ?)",
+            crate::db_params![id, "alice@example.com", id, ordinal],
+        ).await.unwrap();
+    }
+    // Receipt creation and pending insertion both disagree with archive order.
+    let mut second = archived_row("alice@example.com", "second");
+    second.id = PendingRowId::new("a-earlier-pending-id");
+    let mut first = archived_row("alice@example.com", "first");
+    first.id = PendingRowId::new("z-later-pending-id");
+    storage.insert(second).await.unwrap();
+    storage.insert(first).await.unwrap();
+    storage
+}
+
+async fn assert_archive_ordered_pending_batches(storage: &DatabasePendingDeliveryStorage) {
+    let recipient = bare("alice@example.com");
+    let session = SmSessionId::new("ordered-pending");
+    let first = storage
+        .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id.as_str(), "z-later-pending-id");
+    let second = storage
+        .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].id.as_str(), "a-earlier-pending-id");
+    assert!(storage
+        .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn archive_ordered_pending_batches_follow_mam_positions_without_row_id_cursor() {
+    let storage = ordered_pending_fixture(None).await;
+    assert_archive_ordered_pending_batches(&storage).await;
+}
+
+#[tokio::test]
+async fn postgres_archive_ordered_pending_batches_follow_mam_positions_without_row_id_cursor() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (archive ordered pending)");
+        return;
+    };
+    let (schema, scoped_url) = create_postgres_test_schema(&database_url, "pending_order").await;
+    let storage = ordered_pending_fixture(Some(&scoped_url)).await;
+    assert_archive_ordered_pending_batches(&storage).await;
+    drop(storage);
+    drop_postgres_test_schema(&database_url, &schema).await;
+}
+
+struct FixedPendingDispatch(PendingDispatchReadiness);
+
+#[async_trait]
+impl PendingDispatchGate for FixedPendingDispatch {
+    async fn check_turn(
+        &self,
+        _row: &PendingRow,
+        _resource: &FullJid,
+        _stream: Option<&SmSessionId>,
+    ) -> Result<PendingDispatchReadiness, PendingStorageError> {
+        Ok(self.0)
+    }
+}
+
+#[tokio::test]
+async fn archived_pending_dispatch_deferral_releases_whole_batch_without_enqueuing() {
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(ordered_pending_fixture(None).await);
+    let mam = InMemoryMamStorage::new();
+    for id in ["first", "second"] {
+        seed_archived_message(
+            &mam,
+            "alice@example.com",
+            id,
+            Some(valid_archived_stanza_xml("alice@example.com", id)),
+        )
+        .await;
+    }
+    let resolver = MamArchiveResolver {
+        mam_storage: Arc::new(mam),
+    };
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/phone");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let session = SmSessionId::new("pending-deferred");
+    let result = flush_for_resource(
+        &storage,
+        &registry,
+        &resource.to_bare(),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&session),
+            blocking_storage: None,
+            owner: None,
+            archive_resolver: &resolver,
+            dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Deferred)),
+        },
+    )
+    .await;
+    assert_eq!(result.pushed, 0);
+    assert_eq!(result.deferred_transient, 2);
+    assert!(rx.try_recv().is_err());
+    let pending = storage.list(&resource.to_bare()).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().all(|row| row.flushed_in_session.is_none()));
+}
+
+#[tokio::test]
+async fn archived_pending_flush_enqueues_canonical_archive_order() {
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(ordered_pending_fixture(None).await);
+    let mam = InMemoryMamStorage::new();
+    for id in ["first", "second"] {
+        seed_archived_message(
+            &mam,
+            "alice@example.com",
+            id,
+            Some(valid_archived_stanza_xml("alice@example.com", id)),
+        )
+        .await;
+    }
+    let resolver = MamArchiveResolver {
+        mam_storage: Arc::new(mam),
+    };
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/phone");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    let session = SmSessionId::new("pending-ordered");
+    let result = flush_for_resource(
+        &storage,
+        &registry,
+        &resource.to_bare(),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&session),
+            blocking_storage: None,
+            owner: None,
+            archive_resolver: &resolver,
+            dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Ready)),
+        },
+    )
+    .await;
+    assert_eq!(result.pushed, 2);
+    for expected in ["first", "second"] {
+        let outbound = rx.try_recv().expect("ordered pending replay");
+        let Stanza::Message(message) = outbound.stanza else {
+            panic!("expected message");
+        };
+        assert_eq!(
+            message.bodies.values().next().map(String::as_str),
+            Some(expected)
+        );
+    }
+}
+
+struct PendingAckDispatchGate {
+    storage: Arc<dyn PendingDeliveryStorage>,
+    deferred: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl PendingDispatchGate for PendingAckDispatchGate {
+    async fn check_turn(
+        &self,
+        row: &PendingRow,
+        _resource: &FullJid,
+        _stream: Option<&SmSessionId>,
+    ) -> Result<PendingDispatchReadiness, PendingStorageError> {
+        if row.id.as_str() == "a-earlier-pending-id"
+            && self
+                .storage
+                .list(&row.recipient)
+                .await?
+                .iter()
+                .any(|pending| pending.id.as_str() == "z-later-pending-id")
+        {
+            self.deferred.notify_one();
+            return Ok(PendingDispatchReadiness::Deferred);
+        }
+        Ok(PendingDispatchReadiness::Ready)
+    }
+}
+
+async fn ordered_pending_resolver() -> MamArchiveResolver {
+    let mam = InMemoryMamStorage::new();
+    for id in ["first", "second"] {
+        seed_archived_message(
+            &mam,
+            "alice@example.com",
+            id,
+            Some(valid_archived_stanza_xml("alice@example.com", id)),
+        )
+        .await;
+    }
+    MamArchiveResolver {
+        mam_storage: Arc::new(mam),
+    }
+}
+
+#[tokio::test]
+async fn ordered_pending_pump_resumes_after_ack_without_new_presence() {
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(ordered_pending_fixture(None).await);
+    let registry = Arc::new(ConnectionRegistry::new());
+    let resource = full("alice@example.com/phone");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let owner = registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
+    let session = SmSessionId::new("pending-ack-pump");
+    let deferred = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let storage = storage.clone();
+        let registry = registry.clone();
+        let resource = resource.clone();
+        let session = session.clone();
+        let deferred = deferred.clone();
+        tokio::spawn(async move {
+            let resolver = ordered_pending_resolver().await;
+            let gate = PendingAckDispatchGate {
+                storage: storage.clone(),
+                deferred,
+            };
+            flush_for_resource_with_retry(
+                &storage,
+                &registry,
+                &resource.to_bare(),
+                &resource,
+                FlushContext {
+                    server_domain: "example.com",
+                    sm_session: Some(&session),
+                    blocking_storage: None,
+                    owner: Some(&owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(&gate),
+                },
+            )
+            .await
+        })
+    };
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let first_id = first.pending_row_id.unwrap();
+    assert_eq!(first_id.as_str(), "z-later-pending-id");
+    assert!(rx.try_recv().is_err());
+    tokio::time::timeout(std::time::Duration::from_secs(2), deferred.notified())
+        .await
+        .unwrap();
+    storage.record_pushed_at(&first_id, 1).await.unwrap();
+    storage
+        .delete_acked_in_window(&session, 0, 1)
+        .await
+        .unwrap();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        second.pending_row_id.unwrap().as_str(),
+        "a-earlier-pending-id"
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.pushed, 2);
+    assert_eq!(outcome.deferred_ordering, 0);
+}
+
+struct NotifyDeferredPendingGate(Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl PendingDispatchGate for NotifyDeferredPendingGate {
+    async fn check_turn(
+        &self,
+        _row: &PendingRow,
+        _resource: &FullJid,
+        _stream: Option<&SmSessionId>,
+    ) -> Result<PendingDispatchReadiness, PendingStorageError> {
+        self.0.notify_one();
+        Ok(PendingDispatchReadiness::Deferred)
+    }
+}
+
+#[tokio::test]
+async fn ordered_pending_pump_stops_when_resource_owner_is_replaced() {
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(ordered_pending_fixture(None).await);
+    let registry = Arc::new(ConnectionRegistry::new());
+    let resource = full("alice@example.com/phone");
+    let (tx, mut old_rx) = tokio::sync::mpsc::channel(8);
+    let owner = registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let storage = storage.clone();
+        let registry = registry.clone();
+        let resource = resource.clone();
+        let entered = entered.clone();
+        tokio::spawn(async move {
+            let resolver = ordered_pending_resolver().await;
+            let gate = NotifyDeferredPendingGate(entered);
+            flush_for_resource_with_retry(
+                &storage,
+                &registry,
+                &resource.to_bare(),
+                &resource,
+                FlushContext {
+                    server_domain: "example.com",
+                    sm_session: None,
+                    blocking_storage: None,
+                    owner: Some(&owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(&gate),
+                },
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let (tx, mut replacement_rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.pushed, 0);
+    assert!(old_rx.try_recv().is_err());
+    assert!(replacement_rx.try_recv().is_err());
+    assert!(storage
+        .list(&resource.to_bare())
+        .await
+        .unwrap()
+        .iter()
+        .all(|row| row.flushed_in_session.is_none()));
+}
+
+#[tokio::test]
+async fn transient_only_fake_supports_ordered_claims_but_archived_rows_fail_closed() {
+    let storage = InMemoryPendingDeliveryStorage::unlimited();
+    let recipient = bare("alice@example.com");
+    let session = SmSessionId::new("transient-ordered");
+    storage
+        .insert(transient_row("alice@example.com", "transient"))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .claim_archive_ordered_batch_for_session(&recipient, &session, 8)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    storage
+        .insert(archived_row("alice@example.com", "archive-1"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage
+            .claim_archive_ordered_batch_for_session(&recipient, &session, 8)
+            .await,
+        Err(PendingStorageError::ArchiveOrderingUnsupported)
+    ));
+    assert!(storage
+        .list(&recipient)
+        .await
+        .unwrap()
+        .iter()
+        .find(|row| row.payload.is_archived())
+        .unwrap()
+        .flushed_in_session
+        .is_none());
 }
 
 #[tokio::test]
@@ -1399,6 +1801,7 @@ async fn pending_row_deleted_only_after_sm_ack() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&session_id),
             blocking_storage: None,
@@ -1473,6 +1876,7 @@ async fn pending_row_released_on_pre_ack_session_death() {
         &bare("alice@example.com"),
         &resource_a,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&session_a),
             blocking_storage: None,
@@ -1512,6 +1916,7 @@ async fn pending_row_released_on_pre_ack_session_death() {
         &bare("alice@example.com"),
         &resource_b,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&session_b),
             blocking_storage: None,
@@ -1741,6 +2146,7 @@ async fn flush_drops_pending_row_when_sender_blocked_after_intake() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
@@ -1800,6 +2206,7 @@ async fn flush_aborts_on_blocking_storage_failure_fail_closed() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
@@ -2431,6 +2838,7 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: Some(&blocking_arc),
@@ -2505,6 +2913,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
         &alice_bare,
         &alice_jid,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session_id),
             blocking_storage: None,
@@ -3333,6 +3742,7 @@ async fn flush_archived_row_transient_resolver_error_releases_row_for_retry() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3391,6 +3801,7 @@ async fn flush_archived_row_genuine_mam_miss_is_poison_pill_deleted() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3448,6 +3859,7 @@ async fn flush_archived_row_unparseable_stanza_xml_is_poison_pill() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3506,6 +3918,7 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3526,6 +3939,7 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3621,6 +4035,7 @@ async fn flush_transient_error_aborts_batch_releases_remaining_rows_and_preserve
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3670,6 +4085,7 @@ async fn flush_transient_error_aborts_batch_releases_remaining_rows_and_preserve
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3731,6 +4147,7 @@ async fn flush_archived_row_serialization_error_is_poison_pill_not_transient() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3841,6 +4258,7 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,
@@ -3865,6 +4283,7 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
         &bare("alice@example.com"),
         &resource,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: Some(&sm_session),
             blocking_storage: None,

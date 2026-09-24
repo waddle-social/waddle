@@ -1,6 +1,42 @@
 use super::*;
 
 impl OrderedRelayDeliveryBridge {
+    pub(super) async fn deliver_processed_resource(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        target: &jid::FullJid,
+        stanza: &Stanza,
+        context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    ) -> Result<(), OrderedRelayNackReason> {
+        let outcome = match self
+            .try_deliver_registered_remote_resource(
+                target,
+                stanza,
+                DeliveryKind::DirectFrame,
+                context,
+            )
+            .await
+        {
+            Some(outcome) => outcome,
+            None => {
+                crate::server::routes::interpret::deliver_direct_to_full(
+                    Some(&services.user_registry),
+                    Some(&services.sm_session_registry),
+                    target,
+                    stanza,
+                    context,
+                )
+                .await
+            }
+        };
+        match outcome {
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => Ok(()),
+            FullJidDeliveryOutcome::Unavailable => Err(OrderedRelayNackReason::TargetUnavailable),
+            FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
+            FullJidDeliveryOutcome::MaybeCommitted => Err(OrderedRelayNackReason::MaybeCommitted),
+        }
+    }
+
     pub(super) async fn deliver_reserved_full_jid(
         &self,
         services: &OrderedRelayDeliveryServices,
@@ -388,7 +424,10 @@ pub(in super::super) fn relay_payload_target(
     envelope: &RemoteStanzaEnvelope,
 ) -> Result<RelayPayloadTarget<'_>, OrderedRelayNackReason> {
     let (recipient, stanza) = match &envelope.payload {
-        OrderedRelayPayload::Message {
+        OrderedRelayPayload::ProcessedDirectMessage {
+            recipient, stanza, ..
+        }
+        | OrderedRelayPayload::Message {
             recipient, stanza, ..
         }
         | OrderedRelayPayload::Iq { recipient, stanza }

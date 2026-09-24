@@ -240,6 +240,14 @@ pub(crate) async fn route_to_connection(
             }
         }
 
+        if deps.effects.is_planning()
+            && deps.message_dispatcher.is_some()
+            && matches!(stanza.as_ref(), Stanza::Message(message)
+                if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal))
+        {
+            return route_planned_direct_message(deps, &jid, *stanza, recursion_depth).await;
+        }
+
         match jid.clone().try_into_full() {
             Ok(full) => route_to_full_jid(deps, full, stanza, recursion_depth, call_setup).await,
             Err(bare) => {
@@ -255,6 +263,73 @@ pub(crate) async fn route_to_connection(
             }
         }
     }
+}
+
+/// Select once before preparing recipient effects. Retries execute the recorded
+/// full-resource copies, never rerun selection or the recipient pipeline.
+async fn route_planned_direct_message(
+    deps: &Deps<'_>,
+    requested: &Jid,
+    stanza: Stanza,
+    depth: u8,
+) -> Vec<Stanza> {
+    let bare = requested.to_bare();
+    let inventory = match super::recipient_selection::recipient_inventory(deps, &bare).await {
+        Ok(inventory) => inventory,
+        Err(()) => {
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::OwnershipLookup);
+            return Vec::new();
+        }
+    };
+    let selection = inventory.select(requested);
+    if selection.originals.is_empty() {
+        if bare.domain().as_str() != deps.local_domain {
+            return Vec::new();
+        }
+        if !local_account_exists_for(deps, &bare).await {
+            return plan::bounce_nonexistent(deps, &stanza);
+        }
+        run_headless_recipient_pass(deps, &bare, stanza, depth + 1).await;
+        return Vec::new();
+    }
+    match super::routing::run_selected_recipient_pass(
+        deps,
+        &bare,
+        selection.originals.clone(),
+        Some(&selection.carbons),
+        stanza,
+        depth + 1,
+    )
+    .await
+    {
+        FanoutPassResult::Ran {
+            processed,
+            side_routes,
+        } => {
+            if let Some(processed) = processed {
+                for target in &selection.originals {
+                    if inventory
+                        .live
+                        .iter()
+                        .any(|resource| &resource.jid == target)
+                    {
+                        deliver_direct_to_full_with_registered_remote(deps, target, &processed)
+                            .await;
+                    } else {
+                        plan::queue_detached(deps, vec![target.clone()], &processed);
+                    }
+                }
+                capture_route_direct_intent(deps, &bare, selection.originals);
+            }
+            route_side_stanzas(deps, side_routes, depth).await;
+        }
+        FanoutPassResult::Unavailable { .. } => {
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::RecipientBlocklistRead);
+        }
+    }
+    Vec::new()
 }
 
 /// RFC 6121 §8.5.3 full-JID delivery.
@@ -1156,6 +1231,34 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     {
         return outcome;
     }
+    #[cfg(feature = "clustering")]
+    if matches!(stanza, Stanza::Message(message)
+        if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal))
+    {
+        if let (Some(origin), Some(bridge)) = (
+            deps.ordered_relay_origin.as_ref(),
+            deps.web_socket_state.and_then(|state| {
+                state
+                    .deps
+                    .app_state
+                    .clustering_claims
+                    .ordered_relay_delivery_bridge
+                    .as_ref()
+            }),
+        ) {
+            if let Some(outcome) = bridge
+                .try_deliver_processed_full_jid_remote(
+                    target,
+                    stanza,
+                    origin,
+                    deps.ingress_append_context.clone(),
+                )
+                .await
+            {
+                return outcome;
+            }
+        }
+    }
     if let Some(outcome) = deliver_registered_remote_resource(
         deps,
         target,
@@ -1181,9 +1284,15 @@ pub(crate) fn deliver_direct_to_full_locally(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
+    outbound.ingress_append = crate::ingress::identity::IngressAppendObligationRef::for_message(
+        deps.ingress_append_context.as_ref(),
+        stanza,
+    )
+    .map(|obligation| obligation.into_relayed_for(target.clone()));
     match deps
         .connection_registry
-        .try_send_to_locally_hosted(target, stanza.clone())
+        .try_send_outbound_to_locally_hosted(target, outbound)
     {
         waddle_xmpp::registry::BroadcastOutcome::Delivered => FullJidDeliveryOutcome::Delivered,
         waddle_xmpp::registry::BroadcastOutcome::DroppedFull => FullJidDeliveryOutcome::Dropped,

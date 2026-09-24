@@ -26,6 +26,12 @@ pub enum PendingStorageError {
     #[error("pending delivery store does not support tombstone snapshots")]
     TombstoneSnapshotUnsupported,
 
+    #[error("pending delivery store does not support archive-ordered claims")]
+    ArchiveOrderingUnsupported,
+
+    #[error("pending delivery archive ordering is temporarily unavailable")]
+    ArchiveOrderingUnavailable,
+
     /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): a fenced
     /// `insert_fenced` call's own `SELECT ... FOR SHARE` fencing check
     /// (against `clustering_claims`, mirroring
@@ -268,6 +274,32 @@ pub trait PendingDeliveryStorage: Send + Sync {
         after: Option<&PendingRowId>,
         limit: usize,
     ) -> Result<Vec<PendingRow>, PendingStorageError>;
+
+    /// Claim a bounded batch in canonical MAM archive order. Archived rows
+    /// precede transient rows; transient rows retain their row-id order.
+    /// Already claimed rows are excluded, so this operation needs no row-id
+    /// cursor (a later archive ordinal may have an earlier pending row id).
+    /// Implementations without access to canonical archive positions fail
+    /// closed rather than silently weakening the dispatch ordering guarantee.
+    async fn claim_archive_ordered_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let rows = self
+            .claim_batch_for_session(recipient, session, None, limit)
+            .await?;
+        if rows.iter().any(|row| row.payload.is_archived()) {
+            // Stores without a MAM authority can still handle transient-only
+            // traffic, but must never emit archived rows in a guessed order.
+            for row in &rows {
+                self.release_row(&row.id).await?;
+            }
+            return Err(PendingStorageError::ArchiveOrderingUnsupported);
+        }
+        Ok(rows)
+    }
 
     /// Delete every row previously claimed by `session`. Used by paths
     /// that succeed or fail as a unit — e.g. SM-ack of the entire

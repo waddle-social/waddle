@@ -180,6 +180,17 @@ pub(super) async fn run_fanout_recipient_pass(
     stanza: Stanza,
     depth: u8,
 ) -> FanoutPassResult {
+    run_selected_recipient_pass(deps, recipient_bare, delivery_fanout, None, stanza, depth).await
+}
+
+pub(super) async fn run_selected_recipient_pass(
+    deps: &Deps<'_>,
+    recipient_bare: &jid::BareJid,
+    delivery_fanout: Vec<jid::FullJid>,
+    carbon_recipients: Option<&[jid::FullJid]>,
+    stanza: Stanza,
+    depth: u8,
+) -> FanoutPassResult {
     let Some(dispatcher) = deps.message_dispatcher else {
         debug!(
             bare_jid = %recipient_bare,
@@ -260,6 +271,21 @@ pub(super) async fn run_fanout_recipient_pass(
     let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
     for event in events {
         match event {
+            OutboundEvent::SendCarbons {
+                owner,
+                message,
+                kind,
+                exclude,
+            } if deps.effects.is_planning() && carbon_recipients.is_some() => {
+                super::carbons::plan_carbon_resources(
+                    deps,
+                    owner,
+                    message,
+                    kind,
+                    exclude,
+                    carbon_recipients.unwrap_or_default().to_vec(),
+                );
+            }
             OutboundEvent::SendStanza(boxed) if matches!(boxed.as_ref(), Stanza::Message(_)) => {
                 if processed.is_some() {
                     warn!(
@@ -892,6 +918,11 @@ pub(super) async fn append_detached(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> Result<bool, waddle_xmpp::stream_management::SmRegistryError> {
+    if context.is_some_and(|context| context.dispatch_stream.is_some()) {
+        // The predecessor exemption was for a live stream that has since gone.
+        // Retry with a fresh gate, never transplant that proof to a detached one.
+        return Ok(false);
+    }
     match context {
         Some(context) => sm
             .record_keyed_stanza_for_detached_bound_resource(

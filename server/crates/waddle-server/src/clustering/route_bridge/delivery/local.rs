@@ -15,7 +15,10 @@ impl OrderedRelayDeliveryBridge {
         match relay_payload_target(envelope)? {
             RelayPayloadTarget::Full(target, stanza) => {
                 let obligation = match &envelope.payload {
-                    OrderedRelayPayload::Message { ingress_append, .. } => ingress_append.as_ref(),
+                    OrderedRelayPayload::Message { ingress_append, .. }
+                    | OrderedRelayPayload::ProcessedDirectMessage { ingress_append, .. } => {
+                        ingress_append.as_ref()
+                    }
                     _ => None,
                 };
                 // Authorize unconditionally. Deciding from a detached-session
@@ -30,6 +33,23 @@ impl OrderedRelayDeliveryBridge {
                     obligation,
                 )
                 .await;
+                if matches!(
+                    envelope.payload,
+                    OrderedRelayPayload::ProcessedDirectMessage { .. }
+                ) {
+                    if obligation.is_some() && ingress_append_context.is_none() {
+                        return Err(OrderedRelayNackReason::TargetUnavailable);
+                    }
+                    return self
+                        .deliver_processed_resource(
+                            &services,
+                            target,
+                            stanza,
+                            ingress_append_context.as_ref(),
+                        )
+                        .await
+                        .map(|()| Vec::new());
+                }
                 self.deliver_reserved_full_jid(
                     &services,
                     target,
@@ -98,6 +118,22 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
             outcome.frame_completion =
                 completion.map(crate::ingress::execute::RelayFrameReceiptCompletion::new);
             outcome
+        }
+        OrderedRelayPayload::ProcessedDirectMessage { .. } => {
+            let outcome = match target.clone().try_into_full() {
+                Ok(full) => match services.web_socket_state.upgrade() {
+                    Some(state) => {
+                        let mut deps = build_interpret_deps(state.as_ref(), None);
+                        deps.ingress_append_context = ingress_append_context.cloned();
+                        crate::server::routes::interpret::deliver_direct_to_full_with_registered_remote(
+                            &deps, &full, stanza,
+                        ).await
+                    }
+                    None => FullJidDeliveryOutcome::Unavailable,
+                },
+                Err(_) => FullJidDeliveryOutcome::Unavailable,
+            };
+            no_client_reply_outcome(outcome)
         }
         OrderedRelayPayload::Message { .. }
         | OrderedRelayPayload::Iq { .. }

@@ -74,6 +74,34 @@ pub(super) async fn execute(
     for resource in resources.iter().filter(|resource| {
         progress.fanout.contains(resource) && !progress.completed.contains(resource)
     }) {
+        let dispatch_stream = deps.connection_registry.local_sm_stream(resource);
+        match crate::ingress::archive_dispatch::resource_ready(
+            uow,
+            key,
+            &progress.receipt,
+            Some(resource),
+            dispatch_stream.as_ref(),
+        )
+        .await
+        {
+            Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
+            Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+                // Another executor may have completed this same copy since
+                // this decision was frozen. Its durable proof supersedes the
+                // stale snapshot; never enqueue an older copy behind successors.
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Delivered));
+                continue;
+            }
+            Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) => {
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "archive dispatch ordering unavailable; preserving delivery");
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+        }
         #[cfg(test)]
         if STALL_DELIVERY_RESOURCE
             .try_with(|(target, entered)| {
@@ -91,10 +119,26 @@ pub(super) async fn execute(
         // The recorded receipt, rather than today's stanza or audience, owns
         // this resource's append. Each resource gets an independent context.
         let mut resource_deps = immediate.clone();
+        let archive_positions = match crate::ingress::archive_dispatch::positions(
+            uow,
+            key,
+            &progress.receipt,
+        )
+        .await
+        {
+            Ok(positions) => positions,
+            Err(error) => {
+                tracing::warn!(%error, "archive dispatch positions unavailable; preserving delivery");
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+        };
         resource_deps.ingress_append_context = Some(SmIngressAppendContext {
             message_key: key,
             receipt: progress.receipt.clone(),
             received_at: progress.received_at,
+            archive_positions,
+            dispatch_stream,
         });
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;

@@ -52,8 +52,9 @@ mod flush;
 
 pub use database::DatabasePendingDeliveryStorage;
 pub use flush::{
-    flush_for_resource, ArchiveResolveError, ArchiveResolver, FlushContext, FlushOutcome,
-    MamArchiveResolver, NullArchiveResolver,
+    flush_for_resource, flush_for_resource_with_retry, ArchiveResolveError, ArchiveResolver,
+    FlushContext, FlushOutcome, MamArchiveResolver, NullArchiveResolver, PendingDispatchGate,
+    PendingDispatchReadiness,
 };
 // Crate-internal: an implementation constant the tests assert against, kept
 // out of the public API surface (Greptile review on PR #1234). Test-only, so

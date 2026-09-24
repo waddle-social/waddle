@@ -31,6 +31,9 @@ pub enum ProgressObligation {
 
 #[derive(Clone, Debug)]
 pub struct RouteProgress {
+    /// Original reflection uses a direct receipt but retains room membership
+    /// authority for recovery and departed-occupant settlement.
+    pub reflection_room: Option<BareJid>,
     pub receipt: EffectReceiptKey,
     pub obligation: ProgressObligation,
     pub route_identity: EffectMessageIdentity,
@@ -98,6 +101,7 @@ impl RouteProgress {
             _ => return Ok(None),
         };
         Ok(Some(Self {
+            reflection_room: None,
             receipt: crate::ingress::receipt_key(intent)?,
             obligation,
             route_identity: route_identity.clone(),
@@ -149,6 +153,9 @@ impl RouteProgress {
     /// The room whose occupancy owns this frozen fanout, or `None` for a
     /// direct route, whose audience no room roster can decide.
     pub(crate) fn room(&self) -> Option<&BareJid> {
+        if let Some(room) = &self.reflection_room {
+            return Some(room);
+        }
         match &self.obligation {
             ProgressObligation::Direct { .. } => None,
             ProgressObligation::MucGroupchat { room, .. }
@@ -161,8 +168,23 @@ impl RouteProgress {
     pub(crate) fn correlates(&self, effect: &ExternalEffect) -> bool {
         let room = match &self.obligation {
             ProgressObligation::Direct { recipient } => {
+                if let ExternalEffect::Delivery(ExternalDeliveryEffect::HostOwnedCopy {
+                    target,
+                    ..
+                }) = effect
+                {
+                    return target.to_bare() == *recipient
+                        && self.fanout.contains(target)
+                        && crate::ingress::receipts::routing::full_delivery(effect, target)
+                            .is_some_and(|message| {
+                                crate::ingress::receipts::routing::message_identity(
+                                    message,
+                                    &self.route_identity,
+                                )
+                            });
+                }
                 return external_route_recipient(effect).as_ref() == Some(recipient)
-                    && external_route_identity(effect) == Some(&self.route_identity)
+                    && external_route_identity(effect) == Some(&self.route_identity);
             }
             ProgressObligation::MucGroupchat {
                 room, reflection, ..

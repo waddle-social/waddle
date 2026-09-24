@@ -1,4 +1,8 @@
 //! XEP-0313 archive identity at the ingress transaction and MAM wire boundaries.
+#[path = "ingress_cases/archive_dispatch.rs"]
+mod archive_dispatch;
+#[path = "ingress_cases/detached_progress_support.rs"]
+pub mod detached_progress_support;
 pub mod ingress_support;
 
 use std::time::Duration;

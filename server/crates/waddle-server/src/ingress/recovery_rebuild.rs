@@ -26,7 +26,7 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::message::MessageType;
 
-pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 8] = [
+pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 10] = [
     IngressEffectKind::RouteDirect,
     IngressEffectKind::RouteMucGroupchat,
     IngressEffectKind::NotificationActivityPreview,
@@ -35,6 +35,8 @@ pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 8] = [
     IngressEffectKind::GroupchatNotificationRecovery,
     IngressEffectKind::PendingDelivery,
     IngressEffectKind::RoomObserver,
+    IngressEffectKind::Carbons,
+    IngressEffectKind::RelayCarbons,
 ];
 
 pub(super) struct RecoveryInput<'a> {
@@ -122,7 +124,8 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
             Err(error) => return Err(error),
         }
     }
-    let discarded_receipts = restore_direct_routes(&mut plan, &input)?;
+    let mut discarded_receipts = restore_direct_routes(&mut plan, &input)?;
+    discarded_receipts.extend(carbons::restore(&mut plan, &input)?);
     muc::restore_muc_routes(&mut plan, &input)?;
     let delegated = delegated_recoveries(&input);
     let mut external = super::suppression::filter_external_effects(
@@ -463,3 +466,6 @@ mod tests;
 
 #[path = "recovery_muc.rs"]
 mod muc;
+
+#[path = "recovery_rebuild_carbons.rs"]
+mod carbons;

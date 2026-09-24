@@ -116,6 +116,7 @@ enum RelayDispatchKind {
     Demote,
     ReassertMediaGrants,
     ResourcePresence,
+    RecipientInventory,
 }
 
 impl RelayDispatchKind {
@@ -135,6 +136,7 @@ impl RelayDispatchKind {
             Self::Demote => "demote",
             Self::ReassertMediaGrants => "reassert_media_grants",
             Self::ResourcePresence => "resource_presence",
+            Self::RecipientInventory => "recipient_inventory",
         }
     }
 }
@@ -485,7 +487,8 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // v10: remove capture-only detached stream identities from side-effect and
 // remote-resource replies; companion endpoint versions are v3 and v6 (#1756).
 // v11: carry the recorded ingress append obligation on full-JID message payloads (#1778).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v11")]
+// v12: frozen processed recipient copies bypass the recipient pipeline (#1770).
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v12")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -739,7 +742,7 @@ pub struct RelayRouteRemoteResourceStanzaReply {
 // v5 adds durable owner reply identities for SM replay (#1657).
 // v6 removes capture-only detached stream identities from the reply (#1756).
 // v7: carry the recorded ingress append obligation on full-JID route targets (#1778).
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v7")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v8")]
 impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
 
@@ -799,7 +802,7 @@ pub struct RelayRemoteResourceFrameReply {
     pub status: RelayRemoteResourceFrameStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_frame.v2")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_frame.v3")]
 impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceFrameReply>;
 
@@ -1169,6 +1172,43 @@ pub struct RelayResourcePresence {
     /// relay semantics. Stamped at the send seam by [`RelayHandle`].
     #[serde(default)]
     pub trace: RelayTraceContext,
+}
+
+/// Read-only recipient policy at an exact UserActor ownership epoch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RelayRecipientInventory {
+    pub target: jid::BareJid,
+    pub epoch: ClaimEpoch,
+    pub trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub(crate) enum RelayRecipientInventoryReply {
+    Inventory(crate::server::routes::interpret::RecipientInventory),
+    Unavailable,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.recipient_inventory.v1")]
+impl Message<RelayRecipientInventory> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRecipientInventoryReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayRecipientInventory,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::RecipientInventory, &msg.trace);
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            match bridge
+                .recipient_inventory_local(&msg.target, msg.epoch)
+                .await
+            {
+                Ok(inventory) => RelayRecipientInventoryReply::Inventory(inventory),
+                Err(()) => RelayRecipientInventoryReply::Unavailable,
+            }
+        })
+    }
 }
 
 /// Reply to [`RelayResourcePresence`]. Only [`Self::Absent`] is proof, and
@@ -2370,6 +2410,25 @@ impl RelayHandle {
             }
             Err(error) => Err(send_error(error)),
         }
+    }
+
+    pub(crate) async fn recipient_inventory(
+        &mut self,
+        target: jid::BareJid,
+        epoch: ClaimEpoch,
+    ) -> Result<RelayRecipientInventoryReply, RelayAskError> {
+        let message = RelayRecipientInventory {
+            target,
+            epoch,
+            trace: RelayTraceContext::capture(),
+        };
+        let remote_ref = self.resolve().await?;
+        remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+            .map_err(send_error)
     }
 
     async fn demote_inner(

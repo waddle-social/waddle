@@ -44,66 +44,31 @@ pub(super) async fn send_carbons(
     exclude: Vec<FullJid>,
 ) {
     if deps.effects.is_planning() {
-        if super::route_to_connection::plan::remote_owner(deps, &owner).await {
-            deps.capture_intent(IngressEffectIntent::RelayCarbons {
-                owner: owner.clone(),
-                exclude: exclude.clone(),
-                kind,
-            });
-            super::effects::delivery::record(
-                deps,
-                super::effects::delivery::ExternalDeliveryEffect::RelayCarbons {
-                    origin: deps.ordered_relay_origin.clone(),
-                    owner,
-                    exclude,
-                    message,
-                    kind,
-                },
-            );
-            return;
-        }
-        let mut carbon_recipients = registry.get_other_carbon_resources_for_user(&owner, &exclude);
-        if let Some(sm) = deps.sm_session_registry {
-            match sm
-                .detached_carbon_resources_for_user(&owner, &exclude)
-                .await
-            {
-                Ok(detached) => carbon_recipients.extend(detached),
-                Err(error) => {
-                    warn!(%owner, %error, "carbon inventory unavailable during planning");
-                    deps.effects
-                        .fail_plan(super::effects::PlanFailure::CarbonInventoryRead);
-                    return;
-                }
+        let inventory = match super::recipient_selection::recipient_inventory(deps, &owner).await {
+            Ok(inventory) => inventory,
+            Err(()) => {
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::CarbonInventoryRead);
+                return;
             }
+        };
+        let mut carbon_recipients: Vec<_> = inventory
+            .live
+            .iter()
+            .filter(|resource| resource.carbons_enabled)
+            .map(|resource| resource.jid.clone())
+            .chain(inventory.detached_carbons)
+            .filter(|resource| !exclude.contains(resource))
+            .collect();
+        // Registry-only embedders have no actor tree. Production planners
+        // always supply it; retain their explicit carbon-policy source.
+        if deps.user_registry.is_none() {
+            carbon_recipients
+                .extend(registry.get_other_carbon_resources_for_user(&owner, &exclude));
         }
         carbon_recipients.sort();
         carbon_recipients.dedup();
-        // Each resource is an independently receiptable obligation. An empty
-        // confirmed inventory creates neither an intent nor an external effect.
-        for recipient in carbon_recipients {
-            if let Some(excluded_source) = exclude
-                .iter()
-                .find(|source| source.to_bare() == owner)
-                .cloned()
-            {
-                deps.capture_intent(IngressEffectIntent::Carbons {
-                    carbon_recipients: vec![recipient.clone()],
-                    excluded_source,
-                    kind,
-                });
-            }
-            super::effects::delivery::record(
-                deps,
-                super::effects::delivery::ExternalDeliveryEffect::Carbons {
-                    owner: owner.clone(),
-                    recipient,
-                    exclude: exclude.clone(),
-                    message: message.clone(),
-                    kind,
-                },
-            );
-        }
+        plan_carbon_resources(deps, owner, message, kind, exclude, carbon_recipients);
         return;
     }
     if relay_carbons_only(deps, &owner, &message, kind, &exclude)
@@ -125,6 +90,41 @@ pub(super) async fn send_carbons(
         exclude,
     )
     .await;
+}
+
+pub(super) fn plan_carbon_resources(
+    deps: &Deps<'_>,
+    owner: BareJid,
+    message: Box<Message>,
+    kind: CarbonKind,
+    exclude: Vec<FullJid>,
+    carbon_recipients: Vec<FullJid>,
+) {
+    // Each resource is an independently receiptable obligation. An empty
+    // confirmed inventory creates neither an intent nor an external effect.
+    for recipient in carbon_recipients {
+        if let Some(excluded_source) = exclude
+            .iter()
+            .find(|source| source.to_bare() == owner)
+            .cloned()
+        {
+            deps.capture_intent(IngressEffectIntent::Carbons {
+                carbon_recipients: vec![recipient.clone()],
+                excluded_source,
+                kind,
+            });
+        }
+        super::effects::delivery::record(
+            deps,
+            super::effects::delivery::ExternalDeliveryEffect::Carbons {
+                owner: owner.clone(),
+                recipient,
+                exclude: exclude.clone(),
+                message: message.clone(),
+                kind,
+            },
+        );
+    }
 }
 
 /// Executes only the frozen remote carbon obligation. A changed owner must be
@@ -457,40 +457,10 @@ pub(super) async fn send_carbon_to_resource(
         return FullJidDeliveryOutcome::Unavailable;
     };
     let stanza = Stanza::Message(envelope);
-    if deps.connection_registry.is_carbons_enabled(recipient) {
-        if let Some(outcome) =
-            try_deliver_registered_remote_resource(deps.web_socket_state, recipient, &stanza).await
-        {
-            return outcome;
-        }
-        match deps
-            .connection_registry
-            .send_to(recipient, stanza.clone())
-            .await
-        {
-            waddle_xmpp::registry::SendResult::Sent => return FullJidDeliveryOutcome::Delivered,
-            waddle_xmpp::registry::SendResult::ChannelClosed => {
-                return FullJidDeliveryOutcome::Unavailable
-            }
-            waddle_xmpp::registry::SendResult::NotConnected => {}
-        }
-    }
-    if let Some(sm) = deps.sm_session_registry {
-        if !sm
-            .detached_carbon_resources_for_user(owner, &[])
-            .await
-            .is_ok_and(|resources| resources.contains(recipient))
-        {
-            return FullJidDeliveryOutcome::Unavailable;
-        }
-        if let Ok(true) = sm
-            .record_stanza_for_detached_bound_resource(recipient, &stanza, chrono::Utc::now())
-            .await
-        {
-            return FullJidDeliveryOutcome::QueuedDetached;
-        }
-    }
-    FullJidDeliveryOutcome::Unavailable
+    super::route_to_connection::deliver_direct_to_full_with_registered_remote(
+        deps, recipient, &stanza,
+    )
+    .await
 }
 
 async fn try_deliver_registered_remote_resource(

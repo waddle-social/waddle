@@ -7,6 +7,25 @@ use super::*;
 /// between batches instead of materializing the whole offline backlog at once.
 pub(crate) const FLUSH_BATCH_SIZE: usize = 64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingDispatchReadiness {
+    Ready,
+    Deferred,
+}
+
+/// Durable predecessor check for an archived offline replay. This check must
+/// not wait on the receiving connection's inbound loop or treat a completed
+/// offline-enqueue receipt as proof that the pending row reached the client.
+#[async_trait::async_trait]
+pub trait PendingDispatchGate: Send + Sync {
+    async fn check_turn(
+        &self,
+        row: &PendingRow,
+        resource: &FullJid,
+        stream: Option<&SmSessionId>,
+    ) -> Result<PendingDispatchReadiness, PendingStorageError>;
+}
+
 /// Outcome of a flush attempt for one resource.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct FlushOutcome {
@@ -32,6 +51,10 @@ pub struct FlushOutcome {
     /// re-attempts the flush (another recovering resource can also
     /// pick the rows up).
     pub deferred_transient: u32,
+    /// Rows deferred by the archive predecessor gate. This is a subset of
+    /// `deferred_transient`, allowing the off-connection delivery pump to retry
+    /// ordering contention without retrying unrelated MAM lookup failures.
+    pub deferred_ordering: u32,
     /// Number of rows dropped because the recipient blocked the sender
     /// AFTER the row was inserted (XEP-0191 §2 step 4 flush-time
     /// re-evaluation, issue #209 PR #360). Blocked rows are deleted
@@ -68,6 +91,66 @@ where
     pub owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Resolves Archived `PendingRow` references against MAM.
     pub archive_resolver: &'a R,
+    /// Canonical archive-order dispatch gate, required by production callers.
+    pub dispatch_gate: Option<&'a dyn PendingDispatchGate>,
+}
+
+/// Re-drive ordering contention off the connection loop. Ownership and
+/// availability are checked before every pass so a sleeping pump cannot claim
+/// rows for a replacement or an unavailable resource.
+pub async fn flush_for_resource_with_retry<R>(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    registry: &ConnectionRegistry,
+    recipient: &BareJid,
+    resource: &FullJid,
+    ctx: FlushContext<'_, R>,
+) -> FlushOutcome
+where
+    R: ArchiveResolver + ?Sized,
+{
+    let mut total = FlushOutcome::default();
+    let mut delay = std::time::Duration::from_millis(100);
+    loop {
+        if let Some(owner) = ctx.owner {
+            let Some(entry) = registry.entry_if_owner(resource, owner) else {
+                return total;
+            };
+            if !entry.is_presence_available() || entry.presence_priority() < 0 {
+                entry.reset_offline_flush();
+                return total;
+            }
+        }
+        let outcome = flush_for_resource(
+            storage,
+            registry,
+            recipient,
+            resource,
+            FlushContext {
+                server_domain: ctx.server_domain,
+                sm_session: ctx.sm_session,
+                blocking_storage: ctx.blocking_storage,
+                owner: ctx.owner,
+                archive_resolver: ctx.archive_resolver,
+                dispatch_gate: ctx.dispatch_gate,
+            },
+        )
+        .await;
+        total.claimed += outcome.claimed;
+        total.batches += outcome.batches;
+        total.pushed += outcome.pushed;
+        total.unresolved += outcome.unresolved;
+        total.dropped_blocked += outcome.dropped_blocked;
+        total.deferred_transient = outcome.deferred_transient;
+        total.deferred_ordering = outcome.deferred_ordering;
+        if outcome.deferred_ordering == 0 {
+            return total;
+        }
+        if outcome.pushed > 0 {
+            delay = std::time::Duration::from_millis(100);
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(std::time::Duration::from_secs(5));
+    }
 }
 
 /// Flush every currently-unclaimed `pending_delivery` row for the
@@ -97,6 +180,7 @@ where
         blocking_storage,
         owner,
         archive_resolver,
+        dispatch_gate,
     } = ctx;
     // Snapshot the recipient's current blocklist once for the whole
     // flush batch. XEP-0191 §2 step 4: if the recipient blocked the
@@ -145,18 +229,29 @@ where
     // `PendingDeliveryStorage::claim_batch_for_session`).
     let mut cursor: Option<PendingRowId> = None;
     'batches: loop {
-        let batch = match storage
-            .claim_batch_for_session(
-                recipient,
-                session_id_for_claim,
-                cursor.as_ref(),
-                FLUSH_BATCH_SIZE,
-            )
-            .await
-        {
+        let claimed = if dispatch_gate.is_some() {
+            storage
+                .claim_archive_ordered_batch_for_session(
+                    recipient,
+                    session_id_for_claim,
+                    FLUSH_BATCH_SIZE,
+                )
+                .await
+        } else {
+            storage
+                .claim_batch_for_session(
+                    recipient,
+                    session_id_for_claim,
+                    cursor.as_ref(),
+                    FLUSH_BATCH_SIZE,
+                )
+                .await
+        };
+        let batch = match claimed {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(error = %error, "claim_batch_for_session failed; ending flush");
+                outcome.deferred_transient += 1;
                 break 'batches;
             }
         };
@@ -284,6 +379,35 @@ where
                             }
                         }
                         continue;
+                    }
+                }
+            }
+            if row.payload.is_archived() {
+                if let Some(gate) = dispatch_gate {
+                    let ready = match gate.check_turn(&row, resource, sm_session).await {
+                        Ok(PendingDispatchReadiness::Ready) => true,
+                        Ok(PendingDispatchReadiness::Deferred) => false,
+                        Err(error) => {
+                            warn!(row_id = %row.id, error = %error, "pending archive dispatch check failed");
+                            false
+                        }
+                    };
+                    if !ready {
+                        outcome.deferred_transient += 1;
+                        outcome.deferred_ordering += 1;
+                        release_row_or_warn(storage, &row.id, "archive predecessor outstanding")
+                            .await;
+                        for deferred in rows.by_ref() {
+                            outcome.deferred_transient += 1;
+                            outcome.deferred_ordering += 1;
+                            release_row_or_warn(
+                                storage,
+                                &deferred.id,
+                                "archive predecessor outstanding (batch abort)",
+                            )
+                            .await;
+                        }
+                        break 'batches;
                     }
                 }
             }

@@ -228,6 +228,40 @@ impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
 /// Get all connected resource JIDs.
 pub struct GetResources;
 
+/// One atomic routing-policy snapshot from the actor that owns the account.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResourceRoutingState {
+    pub jid: FullJid,
+    pub available: bool,
+    pub priority: i8,
+    pub carbons_enabled: bool,
+}
+
+pub struct GetRoutingResources;
+
+impl kameo::message::Message<GetRoutingResources> for UserActor {
+    type Reply = Vec<ResourceRoutingState>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetRoutingResources,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut resources: Vec<_> = self
+            .connections
+            .iter()
+            .map(|(jid, entry)| ResourceRoutingState {
+                jid: jid.clone(),
+                available: entry.is_presence_available(),
+                priority: entry.presence_priority(),
+                carbons_enabled: entry.carbons_enabled.load(Ordering::Relaxed),
+            })
+            .collect();
+        resources.sort_by(|a, b| a.jid.cmp(&b.jid));
+        resources
+    }
+}
+
 impl kameo::message::Message<GetResources> for UserActor {
     type Reply = Vec<FullJid>;
 

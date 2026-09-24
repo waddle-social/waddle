@@ -60,7 +60,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 
 ## Wave 6–7
 
-- [ ] ⚠ **#1658** `feat(server): idempotent direct-message effect execution` (after #1657) — keeps #1316's regression seam green.
+- [ ] ⚠ **#1658** `feat(server): idempotent direct-message effect execution` (after #1657) — keeps #1316's regression seam green. #1770 stage 2 and its #1759 recipient-preparation dependency are implemented in draft PR #1834; completion is pending verification and merge.
 - [ ] ⚠ **#1659** `feat(server): fenced MUC effect manifest and reflection` (after #1658 + #1646) — deletes `GroupchatRetrySuppression`.
 - [ ] ⚠ **#1660** `feat(server): opaque delivery keys for extension effects` (after #1658, ∥ #1659) — single receipt authority; calls/pins stay `AwaitingDurableOwner`.
 

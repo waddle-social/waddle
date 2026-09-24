@@ -93,9 +93,9 @@ pub(super) fn remote_resource_muc_ask_error_outcome(
             ..
         } => OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
         RemoteResourceRouteTarget::MucProxy { .. } => OrderedRelayMucProxyOutcome::MaybeCommitted,
-        RemoteResourceRouteTarget::FullJid { .. } | RemoteResourceRouteTarget::BareJid { .. } => {
-            OrderedRelayMucProxyOutcome::Dropped
-        }
+        RemoteResourceRouteTarget::ProcessedDirectMessage { .. }
+        | RemoteResourceRouteTarget::FullJid { .. }
+        | RemoteResourceRouteTarget::BareJid { .. } => OrderedRelayMucProxyOutcome::Dropped,
     }
 }
 

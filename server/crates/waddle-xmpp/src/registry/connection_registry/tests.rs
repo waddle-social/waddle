@@ -62,9 +62,9 @@ fn locally_hosted_send_excludes_remote_owner_mirror() {
     let (tx, mut rx) = mpsc::channel(1);
     registry.register_entry(jid.clone(), ConnectionEntry::remote_hosted(tx));
 
-    let outcome = registry.try_send_to_locally_hosted(
+    let outcome = registry.try_send_outbound_to_locally_hosted(
         &jid,
-        Stanza::Message(make_test_message("remote@example.com")),
+        OutboundStanza::new(Stanza::Message(make_test_message("remote@example.com"))),
     );
 
     assert_eq!(outcome, BroadcastOutcome::NotConnected);

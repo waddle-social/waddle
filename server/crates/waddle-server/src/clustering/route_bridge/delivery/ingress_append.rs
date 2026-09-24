@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ingress::append_authority::{
-    check_canonical_sender, check_stanza_binding, record_degraded_to_unkeyed,
+    check_canonical_obligation, check_stanza_binding, record_degraded_to_unkeyed,
     AppendAuthorityRejection,
 };
 use crate::ingress::identity::IngressAppendObligationRef;
@@ -44,10 +44,5 @@ async fn check_authority(
         &obligation.sender_bare,
         obligation.receipt.kind.to_storage(),
     )?;
-    check_canonical_sender(
-        state.deps.app_state.db_pool.global(),
-        obligation.message_key,
-        &obligation.sender_bare,
-    )
-    .await
+    check_canonical_obligation(state.deps.app_state.db_pool.global(), stanza, obligation).await
 }

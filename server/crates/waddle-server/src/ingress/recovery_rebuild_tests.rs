@@ -320,15 +320,142 @@ fn groupchat_notification_recovery_is_delegated_not_executed() {
     assert!(result.unrecoverable.is_empty());
 }
 #[test]
-fn carbons_are_reported_unrecoverable() {
+fn sent_carbons_rebuild_only_unreceipted_frozen_resources() {
     let intents = [IngressEffectIntent::Carbons {
         carbon_recipients: vec![full("romeo@example.com/laptop")],
         excluded_source: full("romeo@example.com/phone"),
         kind: CarbonKind::Sent,
     }];
     let result = run(&envelope("hello"), &intents, &intents);
+    assert!(result.unrecoverable.is_empty());
+    assert!(result.unsupported_receipts.is_empty());
+    let [ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+        owner,
+        recipient,
+        exclude,
+        message,
+        kind,
+    })] = result.decision.external.as_slice()
+    else {
+        panic!("one frozen carbon resource");
+    };
+    assert_eq!(owner, &bare("romeo@example.com"));
+    assert_eq!(recipient, &full("romeo@example.com/laptop"));
+    assert_eq!(exclude, &[full("romeo@example.com/phone")]);
+    assert_eq!(*kind, CarbonKind::Sent);
+    assert_eq!(message.as_ref(), envelope("hello").message());
+    assert_eq!(
+        result.decision.external_receipts[0],
+        result.decision.receipts_pending
+    );
+    assert!(run(&envelope("hello"), &intents, &[])
+        .decision
+        .external
+        .is_empty());
+}
+
+#[test]
+fn received_carbon_recovery_keeps_original_addressing_and_archive_identity() {
+    let carbon = IngressEffectIntent::Carbons {
+        carbon_recipients: vec![full("juliet@example.com/laptop")],
+        excluded_source: full("juliet@example.com/phone"),
+        kind: CarbonKind::Received,
+    };
+    let result = run(&envelope("hello"), &[archive(), carbon.clone()], &[carbon]);
+    assert!(result.unrecoverable.is_empty());
+    let [ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+        owner,
+        message,
+        kind,
+        ..
+    })] = result.decision.external.as_slice()
+    else {
+        panic!("one received carbon");
+    };
+    assert_eq!(owner, &bare("juliet@example.com"));
+    assert_eq!(*kind, CarbonKind::Received);
+    assert_eq!(message.from, envelope("hello").message().from);
+    assert_eq!(message.to, envelope("hello").message().to);
+    assert_eq!(
+        waddle_xmpp::xep::extract_stanza_ids(message),
+        vec![StanzaId::new(
+            "recipient-archive",
+            bare("juliet@example.com").into()
+        )]
+    );
+}
+
+#[test]
+fn relay_carbon_recovery_preserves_frozen_exclusions_and_direction() {
+    for kind in [CarbonKind::Sent, CarbonKind::Received] {
+        let owner = match kind {
+            CarbonKind::Sent => bare("romeo@example.com"),
+            CarbonKind::Received => bare("juliet@example.com"),
+        };
+        let exclude = vec![
+            owner.with_resource_str("phone").expect("phone"),
+            owner.with_resource_str("desktop").expect("desktop"),
+        ];
+        let intents = [IngressEffectIntent::RelayCarbons {
+            owner: owner.clone(),
+            exclude: exclude.clone(),
+            kind,
+        }];
+        let result = run(&envelope("hello"), &intents, &intents);
+        assert!(result.unrecoverable.is_empty());
+        assert!(result.unsupported_receipts.is_empty());
+        let [ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons {
+            owner: restored_owner,
+            exclude: restored_exclude,
+            message,
+            kind: restored_kind,
+            ..
+        })] = result.decision.external.as_slice()
+        else {
+            panic!("one relay carbon");
+        };
+        assert_eq!(restored_owner, &owner);
+        assert_eq!(restored_exclude, &exclude);
+        assert_eq!(*restored_kind, kind);
+        assert_eq!(message.as_ref(), envelope("hello").message());
+        assert_eq!(
+            result.decision.external_receipts[0],
+            result.decision.receipts_pending
+        );
+    }
+}
+
+#[test]
+fn blocked_received_carbons_settle_without_replaying_local_or_remote_copies() {
+    let owner = bare("juliet@example.com");
+    let intents = [
+        IngressEffectIntent::Carbons {
+            carbon_recipients: vec![full("juliet@example.com/laptop")],
+            excluded_source: full("juliet@example.com/phone"),
+            kind: CarbonKind::Received,
+        },
+        IngressEffectIntent::RelayCarbons {
+            owner: owner.clone(),
+            exclude: vec![full("juliet@example.com/phone")],
+            kind: CarbonKind::Received,
+        },
+    ];
+    let result = rebuild(RecoveryInput {
+        key: MessageKey::new(),
+        envelope: &envelope("hello"),
+        created_at: Utc::now(),
+        recorded: &intents,
+        unreceipted: &intents,
+        route_progress: vec![],
+        host_owned_resources: vec![],
+        departed_occupants: vec![],
+        blocked_recipients: &[owner],
+    })
+    .expect("rebuild blocked carbons");
     assert!(result.decision.external.is_empty());
-    assert_eq!(result.unrecoverable, vec![IngressEffectKind::Carbons]);
+    assert!(result.unrecoverable.is_empty());
+    assert!(result.unsupported_receipts.is_empty());
+    assert_eq!(result.discarded_receipts, result.decision.receipts_pending);
 }
 fn pin_intents(both: bool) -> Vec<IngressEffectIntent> {
     let sender = bare("romeo@example.com");

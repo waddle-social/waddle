@@ -6,6 +6,8 @@ use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 
 fn obligation() -> IngressAppendObligationRef {
     IngressAppendObligationRef {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1778)),
         sender_bare: "romeo@example.test".parse().expect("sender"),
         receipt: EffectReceiptKey {
@@ -38,18 +40,104 @@ fn obligation_envelope() -> RemoteStanzaEnvelope {
     }
 }
 
+#[test]
+fn processed_direct_payload_preserves_bare_address_but_binds_frozen_full_target() {
+    let mut envelope = obligation_envelope();
+    let OrderedRelayPayload::Message {
+        recipient,
+        mut stanza,
+        ingress_append,
+    } = envelope.payload
+    else {
+        panic!("message fixture");
+    };
+    let waddle_xmpp::Stanza::Message(message) = &mut stanza.0 else {
+        panic!("message");
+    };
+    message.to = Some("juliet@example.test".parse().unwrap());
+    envelope.payload = OrderedRelayPayload::ProcessedDirectMessage {
+        recipient,
+        stanza,
+        ingress_append,
+    };
+    assert!(envelope_is_consistent(&envelope));
+    let encoded = serde_json::to_vec(&envelope).unwrap();
+    let decoded: RemoteStanzaEnvelope = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        envelope.signing_bytes().unwrap(),
+        decoded.signing_bytes().unwrap()
+    );
+    let OrderedRelayPayload::ProcessedDirectMessage { recipient, .. } = &mut envelope.payload
+    else {
+        unreachable!()
+    };
+    *recipient = "juliet@example.test/other".parse().unwrap();
+    assert!(
+        !envelope_is_consistent(&envelope),
+        "channel freezes the exact resource"
+    );
+}
+
+#[test]
+fn processed_copy_cannot_discard_its_canonical_obligation() {
+    let mut envelope = obligation_envelope();
+    let OrderedRelayPayload::Message {
+        recipient, stanza, ..
+    } = envelope.payload
+    else {
+        panic!("message fixture");
+    };
+    envelope.payload = OrderedRelayPayload::ProcessedDirectMessage {
+        recipient,
+        stanza,
+        ingress_append: None,
+    };
+    assert!(!envelope_is_consistent(&envelope));
+}
+
+#[test]
+fn changing_raw_to_processed_changes_signed_bytes_and_replay_fingerprint() {
+    let raw = obligation_envelope();
+    let mut processed = raw.clone();
+    let OrderedRelayPayload::Message {
+        recipient,
+        stanza,
+        ingress_append,
+    } = processed.payload
+    else {
+        panic!("message fixture");
+    };
+    processed.payload = OrderedRelayPayload::ProcessedDirectMessage {
+        recipient,
+        stanza,
+        ingress_append,
+    };
+    assert!(envelope_is_consistent(&processed));
+    assert_ne!(
+        raw.signing_bytes().unwrap(),
+        processed.signing_bytes().unwrap()
+    );
+    assert_ne!(raw.payload.fingerprint(), processed.payload.fingerprint());
+}
+
 fn changed_obligations() -> Vec<IngressAppendObligationRef> {
     let original = obligation();
     vec![
         IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1779)),
             ..original.clone()
         },
         IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             sender_bare: "other@example.test".parse().expect("other sender"),
             ..original.clone()
         },
         IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             receipt: EffectReceiptKey {
                 kind: EffectReceiptKind::from_storage(
                     IngressEffectKind::RouteMucGroupchat.storage_tag(),
@@ -59,6 +147,8 @@ fn changed_obligations() -> Vec<IngressAppendObligationRef> {
             ..original.clone()
         },
         IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             receipt: EffectReceiptKey {
                 semantic_identity_hash: [18; 32],
                 ..original.receipt.clone()
@@ -66,6 +156,8 @@ fn changed_obligations() -> Vec<IngressAppendObligationRef> {
             ..original.clone()
         },
         IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             received_at: chrono::DateTime::from_timestamp(1_700_000_001, 0),
             ..original
         },

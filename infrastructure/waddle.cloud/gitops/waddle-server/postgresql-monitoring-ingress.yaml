@@ -27,7 +27,8 @@ data:
           'ingress_deliveries',
           'ingress_sm_streams',
           'ingress_effect_intents',
-          'ingress_effect_receipts'
+          'ingress_effect_receipts',
+          'ingress_archive_dispatch'
         )
         ORDER BY relname
       primary: true
@@ -60,7 +61,13 @@ data:
             message.message_key,
             message.terminal_at,
             message.message_key IN (SELECT alias.message_key FROM ingress_origin_aliases alias) AS has_alias,
-            message.message_key IN (SELECT ref.message_key FROM ingress_sm_refs ref) AS has_ref,
+            message.message_key IN (
+              SELECT ref.message_key FROM ingress_sm_refs ref
+              UNION
+              SELECT dispatch.message_key FROM ingress_archive_dispatch dispatch
+              JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
+              WHERE dispatch.pending_row_id <> ''
+            ) AS has_ref,
             message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery) AS has_delivery,
             NOT EXISTS (
               SELECT 1 FROM ingress_effect_intents intent
@@ -95,7 +102,7 @@ data:
             description: Age in seconds of the oldest ingress message eligible for retention GC.
         - retained_referenced_messages:
             usage: GAUGE
-            description: Expired terminal ingress messages retained by an SM reference or pending effect intents.
+            description: Expired terminal ingress messages retained by an SM reference, archived pending delivery, or pending effect intents.
 
     waddle_ingress_messages:
       target_databases: ["waddle"]

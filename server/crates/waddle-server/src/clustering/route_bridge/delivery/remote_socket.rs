@@ -116,6 +116,58 @@ impl OrderedRelayDeliveryBridge {
         };
 
         match msg.target {
+            RemoteResourceRouteTarget::ProcessedDirectMessage {
+                target,
+                stanza,
+                ingress_append,
+            } => {
+                if super::super::super::ordered_relay::processed_message_sender(&stanza.0).as_ref()
+                    != Some(&msg.source_jid.to_bare())
+                {
+                    return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
+                }
+                if ingress_append.is_none()
+                    || !crate::clustering::ordered_relay::processed_message_matches_target(
+                        &stanza.0,
+                        &target.clone().into(),
+                    )
+                {
+                    return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
+                }
+                let context = super::ingress_append::authorize_ingress_append(
+                    &services,
+                    &origin.sender_entity,
+                    &stanza.0,
+                    ingress_append.as_ref(),
+                )
+                .await;
+                if ingress_append.is_some() && context.is_none() {
+                    return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
+                }
+                let outcome = if let Some(outcome) = self
+                    .try_deliver_processed_full_jid_remote(
+                        &target,
+                        &stanza.0,
+                        &origin,
+                        context.clone(),
+                    )
+                    .await
+                {
+                    outcome
+                } else {
+                    match self
+                        .deliver_processed_resource(&services, &target, &stanza.0, context.as_ref())
+                        .await
+                    {
+                        Ok(()) => FullJidDeliveryOutcome::Delivered,
+                        Err(OrderedRelayNackReason::TargetUnavailable) => {
+                            FullJidDeliveryOutcome::Unavailable
+                        }
+                        Err(_) => FullJidDeliveryOutcome::MaybeCommitted,
+                    }
+                };
+                remote_resource_route_reply(outcome.into())
+            }
             RemoteResourceRouteTarget::FullJid {
                 target,
                 stanza,
@@ -336,14 +388,45 @@ impl OrderedRelayDeliveryBridge {
                 status: RelayRemoteResourceFrameStatus::Unavailable,
             };
         };
+        if let Some(obligation) = msg.frame.ingress_append.as_ref() {
+            let Some(state) = services.web_socket_state.upgrade() else {
+                return RelayRemoteResourceFrameReply {
+                    status: RelayRemoteResourceFrameStatus::Unavailable,
+                };
+            };
+            let authority = async {
+                crate::ingress::append_authority::check_stanza_binding(
+                    &msg.frame.stanza.0,
+                    &obligation.sender_bare,
+                    obligation.receipt.kind.to_storage(),
+                )?;
+                crate::ingress::append_authority::check_resource_binding(
+                    &msg.frame.stanza.0,
+                    obligation.receipt.kind.to_storage(),
+                    &msg.frame.jid,
+                )?;
+                crate::ingress::append_authority::check_canonical_obligation(
+                    state.deps.app_state.db_pool.global(),
+                    &msg.frame.stanza.0,
+                    obligation,
+                )
+                .await
+            }
+            .await;
+            if authority.is_err() {
+                return RelayRemoteResourceFrameReply {
+                    status: RelayRemoteResourceFrameStatus::Unavailable,
+                };
+            }
+        }
         let outbound = OutboundStanza {
             stanza: msg.frame.stanza.0,
             kind: msg.frame.kind,
             pending_row_id: None,
             pending_row_original_receipt_at: None,
             write_acceptance: None,
-            // Queued unverified: only a detach drain ever reads it, and it
-            // authorizes there (issue #1789).
+            // Canonical positions are authorized before they can advance this
+            // socket's acceptance frontier.
             ingress_append: msg
                 .frame
                 .ingress_append

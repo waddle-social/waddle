@@ -48,6 +48,16 @@ pub struct SmRelayedAppendObligation {
     pub sender_bare: jid::BareJid,
     /// The origin's receipt time, for the replayed XEP-0203 delay.
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Canonical archive positions governing this exact delivery receipt.
+    pub archive_positions: Vec<ArchiveDispatchPosition>,
+    /// A same-session pending exemption is valid only on this live stream.
+    pub dispatch_stream: Option<crate::pending_delivery::SmSessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArchiveDispatchPosition {
+    pub archive: jid::BareJid,
+    pub ordinal: crate::mam::ArchiveOrdinal,
 }
 
 /// An obligation the ledger reported unallocated while a socket's queue was being

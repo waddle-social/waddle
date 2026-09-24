@@ -197,6 +197,8 @@ async fn ingress_append_authority(
             .await
             .expect("canonical row");
         let mut obligation = IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             message_key: decision.message_key.expect("canonical key"),
             sender_bare: source.to_bare(),
             receipt: receipt.clone(),
@@ -415,6 +417,8 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         .await
         .expect("canonical row naming the sender");
     let obligation = IngressAppendObligationRef {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: decision.message_key.expect("canonical key"),
         sender_bare: source.to_bare(),
         receipt,
@@ -607,6 +611,8 @@ async fn origin_preparation_signs_direct_and_muc_ingress_append_obligations() {
             }
         };
         let context = crate::server::routes::interpret::SmIngressAppendContext {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             message_key: waddle_xmpp::ingress::MessageKey::new(),
             receipt: crate::ingress::receipt_key(&intent).expect("receipt"),
             received_at: Some(

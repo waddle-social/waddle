@@ -227,6 +227,11 @@ pub struct RemoteResourceWriteAcceptedOutboundFrame {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RemoteResourceRouteTarget {
+    ProcessedDirectMessage {
+        target: jid::FullJid,
+        stanza: RemoteStanza,
+        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+    },
     FullJid {
         target: jid::FullJid,
         stanza: RemoteStanza,
@@ -250,7 +255,8 @@ pub enum RemoteResourceRouteTarget {
 
 pub(super) fn route_target_stanza_is_iq(target: &RemoteResourceRouteTarget) -> bool {
     match target {
-        RemoteResourceRouteTarget::FullJid { stanza, .. }
+        RemoteResourceRouteTarget::ProcessedDirectMessage { stanza, .. }
+        | RemoteResourceRouteTarget::FullJid { stanza, .. }
         | RemoteResourceRouteTarget::BareJid { stanza, .. }
         | RemoteResourceRouteTarget::MucProxy { stanza, .. } => matches!(stanza.0, Stanza::Iq(_)),
     }
@@ -267,7 +273,8 @@ pub(super) struct RouteOutcomeLog {
 
 pub(super) fn route_outcome_log(target: &RemoteResourceRouteTarget) -> RouteOutcomeLog {
     match target {
-        RemoteResourceRouteTarget::FullJid { target, stanza, .. } => RouteOutcomeLog {
+        RemoteResourceRouteTarget::ProcessedDirectMessage { target, stanza, .. }
+        | RemoteResourceRouteTarget::FullJid { target, stanza, .. } => RouteOutcomeLog {
             kind: "full-JID",
             entity: target.to_string(),
             message_id: stanza_message_id(&stanza.0).to_owned(),

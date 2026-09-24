@@ -311,6 +311,8 @@ async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
         .expect("socket registration")
         .registration_id;
     let obligation = IngressAppendObligationRef {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
         sender_bare: sender_full().to_bare(),
         receipt: EffectReceiptKey {
@@ -355,6 +357,8 @@ fn registered_remote_frame_carries_the_executors_ingress_obligation() {
     use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 
     let context = |kind: IngressEffectKind| SmIngressAppendContext {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
         receipt: EffectReceiptKey {
             kind: EffectReceiptKind::from_storage(kind.storage_tag()),
@@ -2187,6 +2191,8 @@ async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope
         .expect("socket registration")
         .registration_id;
     let obligation = IngressAppendObligationRef {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1805)),
         sender_bare: sender_full().to_bare(),
         receipt: EffectReceiptKey {

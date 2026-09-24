@@ -475,6 +475,14 @@ pub async fn execute_effects(
             match tokio::time::timeout_at(
                 deadline,
                 async {
+                    let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
+                        Ok((true, stream)) => stream,
+                        Ok((false, _)) => return EffectOutcome::Unavailable,
+                        Err(error) => {
+                            tracing::warn!(%error, "archive dispatch ordering unavailable; leaving obligation pending");
+                            return EffectOutcome::Unavailable;
+                        }
+                    };
                     if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, effect, deps, deadline).await {
                         result
                     } else {
@@ -493,6 +501,18 @@ pub async fn execute_effects(
                         // unrelated effects (including MUC) get no append context.
                         let mut effect_deps = deps.clone();
                         effect_deps.ingress_append_context = None;
+                        if let Some(message_key) = decision.message_key {
+                            match carbon_progress::append_context(uow, message_key, effect, &decision.external_receipts[index]).await {
+                                Ok(mut context) => {
+                                    if let Some(context) = context.as_mut() { context.dispatch_stream = dispatch_stream.clone(); }
+                                    effect_deps.ingress_append_context = context;
+                                },
+                                Err(error) => {
+                                    tracing::warn!(%error, "carbon append authority unavailable; leaving obligation pending");
+                                    return EffectOutcome::Unavailable;
+                                }
+                            }
+                        }
                         if let ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) = effect {
                             if let Some(message_key) = decision.message_key {
                                 if let Some(progress) = decision.route_progress.iter().find(|progress| {
@@ -500,10 +520,19 @@ pub async fn execute_effects(
                                         && progress.fanout.contains(target)
                                         && decision.external_receipts[index].contains(&progress.receipt)
                                 }) {
+                                    let archive_positions = match super::archive_dispatch::positions(uow, message_key, &progress.receipt).await {
+                                        Ok(positions) => positions,
+                                        Err(error) => {
+                                            tracing::warn!(%error, "relay archive positions unavailable; preserving delivery");
+                                            return EffectOutcome::Unavailable;
+                                        }
+                                    };
                                     effect_deps.ingress_append_context = Some(SmIngressAppendContext {
                                         message_key,
                                         receipt: progress.receipt.clone(),
                                         received_at: progress.received_at,
+                                        archive_positions,
+                                        dispatch_stream: dispatch_stream.clone(),
                                     });
                                 }
                             }

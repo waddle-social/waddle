@@ -1055,6 +1055,57 @@ CREATE INDEX idx_sm_ingress_appends_stream ON sm_ingress_appends (accepting_stre
 CREATE INDEX idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms);
 "#;
 
+/// Archive ordering obligations survive MAM retention and use exact ingress
+/// receipt identities. Stop pre-gate writers before this cutover: they cannot
+/// register dispatch obligations for newly allocated archive positions.
+pub const V1020_ARCHIVE_DISPATCH: &str = r#"
+CREATE TABLE ingress_archive_dispatch (
+    archive_jid TEXT NOT NULL,
+    archive_seq BIGINT NOT NULL CHECK (archive_seq > 0),
+    message_key TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL,
+    resource TEXT NOT NULL,
+    pending_row_id TEXT NOT NULL DEFAULT '',
+    CHECK (pending_row_id = '' OR resource = ''),
+    PRIMARY KEY (archive_jid, message_key, kind, semantic_identity_hash, resource, pending_row_id),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE INDEX ingress_archive_dispatch_predecessors ON ingress_archive_dispatch (archive_jid, archive_seq, resource);
+CREATE INDEX ingress_archive_dispatch_effect ON ingress_archive_dispatch (message_key, kind, semantic_identity_hash);
+CREATE INDEX ingress_archive_dispatch_pending ON ingress_archive_dispatch (archive_jid, pending_row_id) WHERE pending_row_id <> '';
+"#;
+
+pub const V1020_ARCHIVE_DISPATCH_POSTGRES: &str = r#"
+CREATE TABLE ingress_archive_dispatch (
+    archive_jid TEXT NOT NULL,
+    archive_seq BIGINT NOT NULL CHECK (archive_seq > 0),
+    message_key UUID NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL,
+    resource TEXT NOT NULL,
+    pending_row_id TEXT NOT NULL DEFAULT '',
+    CHECK (pending_row_id = '' OR resource = ''),
+    PRIMARY KEY (archive_jid, message_key, kind, semantic_identity_hash, resource, pending_row_id),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE INDEX ingress_archive_dispatch_predecessors ON ingress_archive_dispatch (archive_jid, archive_seq, resource);
+CREATE INDEX ingress_archive_dispatch_effect ON ingress_archive_dispatch (message_key, kind, semantic_identity_hash);
+CREATE INDEX ingress_archive_dispatch_pending ON ingress_archive_dispatch (archive_jid, pending_row_id) WHERE pending_row_id <> '';
+CREATE TRIGGER ingress_archive_dispatch_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_archive_dispatch
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_archive_dispatch_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_archive_dispatch
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_archive_dispatch ENABLE ALWAYS TRIGGER ingress_archive_dispatch_epoch_guard_dml;
+ALTER TABLE ingress_archive_dispatch ENABLE ALWAYS TRIGGER ingress_archive_dispatch_epoch_guard_truncate;
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_archive_dispatch');
+GRANT SELECT ON TABLE ingress_archive_dispatch TO pg_monitor;
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1171,6 +1222,12 @@ pub fn all() -> Vec<Migration> {
                 .to_string(),
             sql_sqlite: V1019_INGRESS_CUSTODY,
             sql_postgres: V1019_INGRESS_CUSTODY_POSTGRES,
+        },
+        Migration {
+            version: 1020,
+            description: "Persist archive dispatch predecessors and pending barriers".to_string(),
+            sql_sqlite: V1020_ARCHIVE_DISPATCH,
+            sql_postgres: V1020_ARCHIVE_DISPATCH_POSTGRES,
         },
     ]
 }

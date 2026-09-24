@@ -347,6 +347,7 @@ async fn commit_attempt(
     {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
+    super::reflection_dispatch::freeze(&mut plan, &recorded);
     let verdict = EffectIntentRepository::reconcile(
         &mut tx,
         key,
@@ -476,6 +477,7 @@ async fn commit_attempt(
     let all_progress =
         crate::ingress_uow::DeliveryProgressRepository::load_all(&mut tx, key).await?;
     super::recorded::prepare_attempt_reflections(&mut plan, &submission.sender);
+    super::reflection_dispatch::bind(&mut plan);
     let mut route_progress = Vec::new();
     let mut empty_muc = false;
     for intent in &intents {
@@ -484,6 +486,7 @@ async fn commit_attempt(
         else {
             continue;
         };
+        super::reflection_dispatch::classify_progress(&mut progress, &intents);
         if crate::ingress_uow::EffectReceiptRepository::contains(
             &mut tx,
             key,

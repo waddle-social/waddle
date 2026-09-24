@@ -52,7 +52,7 @@ impl UserActor {
             return BroadcastOutcome::NotConnected;
         };
         let delivered_kind = crate::telemetry::messages::delivered_message_kind(&outbound.stanza);
-        match entry.sender.try_send(outbound) {
+        match entry.try_send_archive_ordered(outbound) {
             Ok(()) => {
                 crate::telemetry::reliability::increment_broadcast_delivered();
                 if let Some(kind) = delivered_kind {

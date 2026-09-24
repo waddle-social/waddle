@@ -4937,6 +4937,21 @@ async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resour
         .protocol
         .connection_registry
         .register_with_carbons(sibling_jid.clone(), sibling_tx, true);
+    for resource in [&sender_jid, &sibling_jid] {
+        assert!(
+            crate::server::dual_registration::mirror_register(
+                &state.deps.protocol.user_registry,
+                resource.clone(),
+                state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .get_entry(resource)
+                    .unwrap(),
+            )
+            .await
+        );
+    }
 
     let responses = handle_message_through_ingress(
         state.as_ref(),

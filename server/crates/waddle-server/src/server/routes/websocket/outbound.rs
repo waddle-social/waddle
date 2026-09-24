@@ -69,7 +69,10 @@ where
                         .sm_state
                         .record_outbound(xml.clone(), SmEvictionPath::DirectOutbound),
                 };
-                request_ack_after = record_result.request_ack;
+                // Pending copies can hold archive-order barriers for other
+                // resources. Ask even on a quiet stream below the normal
+                // cadence; otherwise those resources may await an ack forever.
+                request_ack_after = record_result.request_ack || pending_row_id.is_some();
                 if let Some(obligation) = ingress_append {
                     conn.sm_state
                         .attach_ingress_append(conn.sm_state.outbound_count, obligation);
@@ -516,6 +519,8 @@ mod tests {
             xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient.clone())));
         message.from = Some("bob@example.test/phone".parse().expect("sender"));
         let obligation = SmRelayedAppendObligation {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             key: SmIngressAppendKey {
                 message_key: waddle_xmpp::ingress::MessageKey::new(),
                 kind: SmIngressReceiptKind::from_storage(
@@ -591,6 +596,8 @@ mod tests {
             .bodies
             .insert(xmpp_parsers::message::Lang::new(), "hi bob".to_owned());
         let obligation = SmRelayedAppendObligation {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             key: SmIngressAppendKey {
                 message_key: waddle_xmpp::ingress::MessageKey::new(),
                 kind: SmIngressReceiptKind::from_storage(

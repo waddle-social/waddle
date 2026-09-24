@@ -232,10 +232,22 @@ impl ConnectionRegistry {
         self.try_send_to_matching(jid, stanza, |_| true)
     }
 
-    /// Non-blocking direct-frame send restricted to a WebSocket hosted by
-    /// this process. Cluster owner mirrors are deliberately excluded.
-    pub fn try_send_to_locally_hosted(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
-        self.try_send_to_matching(jid, stanza, ConnectionEntry::is_locally_hosted)
+    /// Recovery may enqueue only on a real local socket, retaining its frozen
+    /// obligation so concurrent attempts share live acceptance deduplication.
+    pub fn try_send_outbound_to_locally_hosted(
+        &self,
+        jid: &FullJid,
+        outbound: OutboundStanza,
+    ) -> BroadcastOutcome {
+        let Some(entry) = self
+            .connections
+            .get(jid)
+            .filter(|entry| entry.is_locally_hosted())
+            .map(|entry| entry.clone())
+        else {
+            return BroadcastOutcome::NotConnected;
+        };
+        self.try_send_outbound_if_owner(jid, &entry.carbons_enabled, outbound)
     }
 
     fn try_send_to_matching(
@@ -302,9 +314,9 @@ impl ConnectionRegistry {
         owner: &Arc<AtomicBool>,
         outbound: OutboundStanza,
     ) -> BroadcastOutcome {
-        let sender = match self.connections.get(jid) {
+        let entry = match self.connections.get(jid) {
             Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
-                entry.value().sender.clone()
+                entry.value().clone()
             }
             _ => {
                 crate::telemetry::reliability::increment_broadcast_not_connected();
@@ -320,7 +332,7 @@ impl ConnectionRegistry {
         // frames on the socket node's Delivered acknowledgment in
         // `deliver_registered_remote_resource_with_registration`.
         // Counting here would double every cross-node delivery.
-        match sender.try_send(outbound) {
+        match entry.try_send_archive_ordered(outbound) {
             Ok(()) => {
                 crate::telemetry::reliability::increment_broadcast_delivered();
                 BroadcastOutcome::Delivered
@@ -331,7 +343,7 @@ impl ConnectionRegistry {
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 crate::telemetry::reliability::increment_broadcast_dropped_closed();
-                self.remove_if_sender_closed_owner(jid, &sender);
+                self.remove_if_sender_closed_owner(jid, &entry.sender);
                 BroadcastOutcome::DroppedClosed
             }
         }

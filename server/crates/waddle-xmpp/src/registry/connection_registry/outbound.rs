@@ -268,6 +268,8 @@ pub enum ForceDetachOutcome {
 /// by the registry (like carbons_enabled status for XEP-0280).
 #[derive(Debug, Clone)]
 pub struct ConnectionEntry {
+    pub(super) archive_dispatch:
+        Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
     /// Channel to send stanzas to this connection
     pub sender: mpsc::Sender<OutboundStanza>,
@@ -354,6 +356,7 @@ impl ConnectionEntry {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             hosting: ConnectionHosting::Local,
+            archive_dispatch: Arc::new(std::sync::Mutex::new(Default::default())),
             sender,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
             presence_available: Arc::new(AtomicBool::new(false)),

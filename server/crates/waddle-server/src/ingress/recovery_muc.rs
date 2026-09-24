@@ -26,6 +26,7 @@ pub(super) fn restore_muc_routes(
     plan: &mut IngressPlan,
     input: &RecoveryInput<'_>,
 ) -> Result<(), IngressUowError> {
+    restore_original_reflections(plan, input)?;
     for intent in input.unreceipted {
         if !matches!(
             intent,
@@ -80,6 +81,67 @@ pub(super) fn restore_muc_routes(
                 ExternalEffect::Delivery(delivery),
             )));
         }
+    }
+    Ok(())
+}
+
+/// An occupant route may be complete while its original sender's transport
+/// write was lost. Recover that frozen copy without rebuilding a current roster.
+fn restore_original_reflections(
+    plan: &mut IngressPlan,
+    input: &RecoveryInput<'_>,
+) -> Result<(), IngressUowError> {
+    for room_intent in input.recorded {
+        let Some(reflection_intent) =
+            crate::ingress::reflection_dispatch::original_intent(room_intent)
+        else {
+            continue;
+        };
+        if !input.unreceipted.contains(&reflection_intent) {
+            continue;
+        }
+        let source = match authorized_source(
+            input.envelope,
+            room_intent,
+            input.recorded,
+            input.unreceipted,
+        ) {
+            Ok(source) => source,
+            Err(_) => continue,
+        };
+        let IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            route_identity,
+        } = reflection_intent
+        else {
+            continue;
+        };
+        let [target] = fanout.as_slice() else {
+            continue;
+        };
+        let stanza = Box::new(Stanza::Message(room_canonical::occupant_copy_message(
+            source,
+            target,
+            input.recorded,
+        )));
+        let delivery = if input.host_owned_resources.contains(target) {
+            ExternalDeliveryEffect::HostOwnedCopy {
+                target: target.clone(),
+                stanza,
+            }
+        } else {
+            ExternalDeliveryEffect::QueueDetached {
+                route_identity: Some(route_identity),
+                call_setup: None,
+                bare: recipient,
+                resources: fanout,
+                stanza,
+            }
+        };
+        plan.plan.push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(delivery),
+        )));
     }
     Ok(())
 }
