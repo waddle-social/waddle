@@ -305,6 +305,7 @@ async fn handle_sans_io_iq_with_relay_override(
         }
         let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
         let deps = crate::server::routes::interpret::Deps {
+            dispatch_probe_budget: None,
             delivery_execution_context:
                 crate::server::routes::interpret::DeliveryExecutionContext::Live,
             connection_registry: &state.deps.protocol.connection_registry,

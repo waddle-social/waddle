@@ -370,6 +370,11 @@ pub async fn execute_effects(
     deps: &Deps<'_>,
     budget: Duration,
 ) -> ExecutionReport {
+    let mut scoped_deps = deps.clone();
+    scoped_deps
+        .dispatch_probe_budget
+        .get_or_insert_with(Default::default);
+    let deps = &scoped_deps;
     let mut report = ExecutionReport::new(deps.delivery_execution_context.into());
     if !decision.class.advances() {
         return report;

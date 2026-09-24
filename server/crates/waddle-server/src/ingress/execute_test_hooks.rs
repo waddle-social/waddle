@@ -89,7 +89,6 @@ pub(super) fn take_terminalization_timeout(key: MessageKey) -> bool {
     timeout
 }
 
-#[cfg(feature = "clustering")]
 pub(crate) fn pause_after_delivery_append(
     key: MessageKey,
     resource: jid::FullJid,
@@ -126,7 +125,6 @@ pub(crate) async fn after_delivery_append(key: MessageKey, resource: &jid::FullJ
     }
 }
 
-#[cfg(feature = "clustering")]
 pub(crate) fn pause_after_blocked_dispatch(key: MessageKey) -> Arc<TerminalizationGate> {
     let gate = Arc::new(TerminalizationGate::default());
     HOOKS

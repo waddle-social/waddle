@@ -654,7 +654,11 @@ by SM promotion. Retention cannot remove a canonical pending barrier while its
 pending row remains.
 
 A blocked executor briefly re-probes canonical predecessor receipts in fresh
-transactions, with at most four transaction-free backoffs (2, 4, 8, and 16 ms).
+transactions, sharing at most four transaction-free backoffs (2, 4, 8, and 16 ms)
+across the whole execution pass, including cloned effect and socket contexts.
+The allowance never resets for each recipient, so blocked fanout cannot multiply
+the extra delay ahead of an independently ready copy. Remote socket checks
+without an execution-pass budget probe once.
 This absorbs the race where a client replies to an enqueued copy before its
 delivery receipt commits. It never executes predecessor work or bypasses the
 ordering check, and the enclosing execution deadline still applies. Barriers

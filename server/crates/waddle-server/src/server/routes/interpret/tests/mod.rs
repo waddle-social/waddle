@@ -210,6 +210,7 @@ fn offline_pass_deps<'a>(
     dispatcher: &'a Arc<StanzaDispatcher>,
 ) -> Deps<'a> {
     Deps {
+        dispatch_probe_budget: None,
         delivery_execution_context: super::DeliveryExecutionContext::Live,
         connection_registry: registry,
         user_registry: None,

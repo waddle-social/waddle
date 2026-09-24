@@ -31,7 +31,7 @@ mod relay_copy;
 #[path = "execute_detached.rs"]
 mod detached;
 pub(in crate::ingress) use detached::record_delivery_progress;
-#[cfg(all(test, feature = "clustering"))]
+#[cfg(test)]
 pub(crate) use detached::CONTEND_DELIVERY_PROGRESS_ONCE;
 #[cfg(test)]
 pub(crate) use detached::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE};

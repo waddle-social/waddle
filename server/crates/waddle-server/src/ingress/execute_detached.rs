@@ -82,6 +82,7 @@ pub(super) async fn execute(
             &progress.receipt,
             Some(resource),
             dispatch_stream.as_ref(),
+            deps.dispatch_probe_budget.as_ref(),
         )
         .await
         {

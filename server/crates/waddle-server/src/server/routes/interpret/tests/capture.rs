@@ -511,6 +511,7 @@ async fn archived_offline_delivery_captures_without_immediate_storage() {
     let capture = IngressEffectCapture::new();
     let sink = crate::server::routes::interpret::effects::PlanSink::new();
     let deps = Deps {
+        dispatch_probe_budget: None,
         delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         effects: &sink,
         connection_registry: &registry,
@@ -585,6 +586,7 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
     let capture = IngressEffectCapture::new();
     let sink = crate::server::routes::interpret::effects::PlanSink::new();
     let deps = Deps {
+        dispatch_probe_budget: None,
         delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         effects: &sink,
         connection_registry: &registry,

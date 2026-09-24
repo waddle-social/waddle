@@ -434,6 +434,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         .expect("create room");
 
     let deps = Deps {
+        dispatch_probe_budget: None,
         delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         connection_registry: &registry,
         user_registry: None,
@@ -525,6 +526,7 @@ async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent
         .expect("create room");
     let capture = crate::ingress::IngressEffectCapture::new();
     let deps = Deps {
+        dispatch_probe_budget: None,
         delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
@@ -888,6 +890,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
     .await;
 
     let deps = Deps {
+        dispatch_probe_budget: None,
         delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         connection_registry: &state.deps.protocol.connection_registry,
         user_registry: Some(&state.deps.protocol.user_registry),
