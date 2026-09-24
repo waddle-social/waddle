@@ -107,8 +107,9 @@ access and read access to files the user picks.
    Notifications on `p4x.waddle.social`.
 2. **App record.** In App Store Connect, the Waddle app (bundle ID
    `p4x.waddle.social`) needs both the iOS and the macOS platform.
-3. **Workflow.** In Xcode, *Integrate → Manage Workflows…*, and create a
-   workflow on the Waddle product:
+3. **Workflow.** In Xcode, *Integrate → Create Workflow…* (the first time
+   Xcode Cloud is set up for Waddle) or *Integrate → Manage Workflows…*, and
+   create a workflow on the Waddle product:
    - Start condition: *Branch Changes* on `main`. Optionally restrict it to
      *Files and Folders* `apps/apple/`, `scripts/build-xcframework.sh`,
      `server/crates/`, `server/Cargo.lock` and `server/rust-toolchain.toml`,
@@ -123,3 +124,14 @@ access and read access to files the user picks.
      tester group that should receive every build.
 4. **Build number.** In App Store Connect, *Xcode Cloud → Settings → Build
    Number*, set the next build number above any build already uploaded.
+5. **Export compliance.** Neither target declares
+   `ITSAppUsesNonExemptEncryption`, so each build waits in *Missing
+   Compliance* until someone answers the encryption questions for it in App
+   Store Connect. The app uses TLS and XEP-0448 AES-GCM. Once the encryption
+   classification is settled, declare it with
+   `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption` in `project.yml` so builds go
+   straight to testers.
+
+`Waddle/PrivacyInfo.xcprivacy` declares the app's required-reason API use
+(`UserDefaults`, reason CA92.1). Update it when the app starts using another
+API on Apple's required-reason list.
