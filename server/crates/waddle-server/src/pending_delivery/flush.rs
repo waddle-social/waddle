@@ -1,5 +1,6 @@
 use super::*;
-use waddle_xmpp::pending_delivery::storage::PendingClaimToken;
+use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimToken};
+use waddle_xmpp::registry::{OutboundStanza, PendingFlushReservation};
 
 /// Bound on rows claimed and pushed per `claim_batch_for_session` iteration
 /// inside [`flush_for_resource`] (issue #1220). Deliberately « the 256-slot
@@ -28,7 +29,7 @@ pub trait PendingDispatchGate: Send + Sync {
 }
 
 /// Outcome of a flush attempt for one resource.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct FlushOutcome {
     /// Number of rows claimed from `pending_delivery`.
     pub claimed: u32,
@@ -64,6 +65,37 @@ pub struct FlushOutcome {
     // Owned retry work crosses the bounded terminal-flush handoff without
     // losing the exact claim token or allowing a copied outcome to fork it.
     failed_releases: Vec<DeferredClaimRelease>,
+    pending_offers: Vec<PendingOffer>,
+    unqueued_offers: Vec<PendingClaim>,
+}
+
+impl FlushOutcome {
+    pub(crate) fn has_retry_work(&self) -> bool {
+        !self.failed_releases.is_empty()
+            || !self.pending_offers.is_empty()
+            || !self.unqueued_offers.is_empty()
+    }
+
+    fn absorb(&mut self, mut next: Self) {
+        self.claimed += next.claimed;
+        self.batches += next.batches;
+        self.pushed += next.pushed;
+        self.unresolved += next.unresolved;
+        self.dropped_blocked += next.dropped_blocked;
+        self.deferred_transient = next.deferred_transient;
+        self.deferred_ordering = next.deferred_ordering;
+        self.failed_releases.append(&mut next.failed_releases);
+        self.pending_offers.append(&mut next.pending_offers);
+        self.unqueued_offers.append(&mut next.unqueued_offers);
+    }
+}
+
+#[derive(Debug)]
+struct PendingOffer {
+    claim: PendingClaim,
+    reservation: PendingFlushReservation,
+    outbound: OutboundStanza,
+    sm_enabled: bool,
 }
 
 /// Per-flush context bundling the optional / contextual parameters
@@ -138,8 +170,8 @@ where
 {
     let mut delay = std::time::Duration::from_millis(100);
     loop {
-        retry_ordering_releases(storage, &mut total.failed_releases).await;
-        if !total.failed_releases.is_empty() {
+        settle_retry_work(storage, registry, &mut total).await;
+        if total.has_retry_work() {
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(std::time::Duration::from_secs(5));
             continue;
@@ -148,12 +180,15 @@ where
             let Some(entry) = registry.entry_if_owner(resource, owner) else {
                 return total;
             };
+            if !entry.is_locally_hosted() {
+                return total;
+            }
             if !entry.is_presence_available() || entry.presence_priority() < 0 {
                 entry.reset_offline_flush();
                 return total;
             }
         }
-        let mut outcome = flush_for_resource(
+        let outcome = flush_for_resource(
             storage,
             registry,
             recipient,
@@ -168,18 +203,12 @@ where
             },
         )
         .await;
-        total.failed_releases.append(&mut outcome.failed_releases);
-        total.claimed += outcome.claimed;
-        total.batches += outcome.batches;
-        total.pushed += outcome.pushed;
-        total.unresolved += outcome.unresolved;
-        total.dropped_blocked += outcome.dropped_blocked;
-        total.deferred_transient = outcome.deferred_transient;
-        total.deferred_ordering = outcome.deferred_ordering;
-        if outcome.deferred_ordering == 0 {
+        let progressed = outcome.pushed > 0;
+        total.absorb(outcome);
+        if total.deferred_ordering == 0 {
             return total;
         }
-        if outcome.pushed > 0 {
+        if progressed {
             delay = std::time::Duration::from_millis(100);
         }
         tokio::time::sleep(delay).await;
@@ -218,6 +247,7 @@ where
         resource,
         ctx,
         &mut failed_releases,
+        false,
     )
     .await;
     outcome.failed_releases = failed_releases;
@@ -239,6 +269,7 @@ async fn flush_for_resource_inner<R>(
     resource: &FullJid,
     ctx: FlushContext<'_, R>,
     failed_releases: &mut Vec<DeferredClaimRelease>,
+    single_batch: bool,
 ) -> FlushOutcome
 where
     R: ArchiveResolver + ?Sized,
@@ -320,6 +351,11 @@ where
         };
         let batch = match claimed {
             Ok(rows) => rows,
+            Err(PendingStorageError::ClaimContended) => {
+                outcome.deferred_transient += 1;
+                outcome.deferred_ordering += 1;
+                break 'batches;
+            }
             Err(error) => {
                 warn!(error = %error, "claim_batch_for_session failed; ending flush");
                 outcome.deferred_transient += 1;
@@ -497,6 +533,77 @@ where
                 ReplayReason::OfflineStorage,
             );
             let stanza = Stanza::Message(replay);
+            if dispatch_gate.is_some() {
+                // Reserve capacity before committing the durable offer marker.
+                // Recovery never waits for a full receiver and never cancels a
+                // future between a committed offer and its synchronous enqueue.
+                let reservation = if single_batch {
+                    registry.try_reserve_pending_flush(resource, owner)
+                } else {
+                    registry.reserve_pending_flush(resource, owner).await
+                };
+                let sent = match reservation {
+                    Ok(reservation) => {
+                        let outbound = if sm_session.is_some() {
+                            OutboundStanza::for_pending_flush(
+                                stanza,
+                                row.id.clone(),
+                                row.original_receipt_at,
+                            )
+                        } else {
+                            OutboundStanza::new(stanza)
+                        };
+                        attempt_offer(
+                            storage,
+                            registry,
+                            PendingOffer {
+                                claim: PendingClaim {
+                                    row_id: row.id.clone(),
+                                    session: session_id_for_claim.clone(),
+                                    token: claim_token,
+                                },
+                                reservation,
+                                outbound,
+                                sm_enabled: sm_session.is_some(),
+                            },
+                            &mut outcome,
+                        )
+                        .await
+                    }
+                    Err(_) => {
+                        release_ordering_claim(
+                            storage,
+                            &row.id,
+                            session_id_for_claim,
+                            &claim_token,
+                            failed_releases,
+                        )
+                        .await;
+                        false
+                    }
+                };
+                if sent {
+                    continue;
+                }
+                // A stolen claim or unresolved offer aborts the entire suffix,
+                // including transient rows; the stale producer never skips A
+                // and queues B ahead of its replacement.
+                outcome.deferred_transient += 1;
+                outcome.deferred_ordering += 1;
+                for deferred in rows.by_ref() {
+                    outcome.deferred_transient += 1;
+                    outcome.deferred_ordering += 1;
+                    release_ordering_claim(
+                        storage,
+                        &deferred.id,
+                        session_id_for_claim,
+                        &claim_token,
+                        failed_releases,
+                    )
+                    .await;
+                }
+                break 'batches;
+            }
             // SM-enabled path: tag outbound with row id so the recipient's
             // main loop can stamp `outbound_sequence` post-`record_outbound`.
             // The row stays claimed for the SM-ack lifecycle.
@@ -586,12 +693,117 @@ where
             }
         }
         // A short batch means the unclaimed backlog is drained.
-        if batch_len < FLUSH_BATCH_SIZE {
+        if single_batch || batch_len < FLUSH_BATCH_SIZE {
             break 'batches;
         }
     }
 
     outcome
+}
+
+/// One bounded recovery step. Retry custody is returned to the fair janitor
+/// scheduler rather than creating another sleeping delivery pump.
+pub(crate) async fn flush_recovery_pass<R>(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    registry: &ConnectionRegistry,
+    recipient: &BareJid,
+    resource: &FullJid,
+    ctx: FlushContext<'_, R>,
+    mut outcome: FlushOutcome,
+) -> FlushOutcome
+where
+    R: ArchiveResolver + ?Sized,
+{
+    settle_retry_work(storage, registry, &mut outcome).await;
+    if outcome.has_retry_work() {
+        return outcome;
+    }
+    if let Some(owner) = ctx.owner {
+        let Some(entry) = registry.entry_if_owner(resource, owner) else {
+            return outcome;
+        };
+        if !entry.is_locally_hosted()
+            || !entry.is_presence_available()
+            || entry.presence_priority() < 0
+        {
+            return outcome;
+        }
+    }
+    let mut failed_releases = Vec::new();
+    let mut next = flush_for_resource_inner(
+        storage,
+        registry,
+        recipient,
+        resource,
+        ctx,
+        &mut failed_releases,
+        true,
+    )
+    .await;
+    next.failed_releases = failed_releases;
+    outcome.absorb(next);
+    outcome
+}
+
+async fn attempt_offer(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    registry: &ConnectionRegistry,
+    offer: PendingOffer,
+    outcome: &mut FlushOutcome,
+) -> bool {
+    match storage.mark_claim_offered(&offer.claim).await {
+        Err(error) => {
+            warn!(row_id = %offer.claim.row_id, %error, "offer reservation uncertain; retaining exact reconciliation custody");
+            outcome.pending_offers.push(offer);
+            return false;
+        }
+        Ok(false) => return false,
+        Ok(true) => {}
+    }
+    // Deliberately no await between observed ownership and guarded enqueue.
+    let PendingOffer {
+        claim,
+        reservation,
+        outbound,
+        sm_enabled,
+    } = offer;
+    if registry
+        .send_reserved_pending_flush(reservation, outbound)
+        .is_sent()
+    {
+        outcome.pushed += 1;
+        if !sm_enabled {
+            if let Err(error) = storage.delete_row(&claim.row_id).await {
+                warn!(row_id = %claim.row_id, %error, "non-SM offered pending row delete failed");
+            }
+        }
+        true
+    } else {
+        // The registry proved no enqueue occurred. Only this exact owner may
+        // abandon a possibly committed reservation; scanners cannot do so.
+        if let Err(error) = storage.release_unqueued_offer(&claim).await {
+            warn!(row_id = %claim.row_id, %error, "unqueued offer cleanup failed; retaining custody");
+            outcome.unqueued_offers.push(claim);
+        }
+        false
+    }
+}
+
+async fn settle_retry_work(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    registry: &ConnectionRegistry,
+    outcome: &mut FlushOutcome,
+) {
+    for offer in std::mem::take(&mut outcome.pending_offers) {
+        attempt_offer(storage, registry, offer, outcome).await;
+    }
+    for claim in std::mem::take(&mut outcome.unqueued_offers) {
+        if let Err(error) = storage.release_unqueued_offer(&claim).await {
+            warn!(row_id = %claim.row_id, %error, "unqueued offer cleanup still pending");
+            outcome.unqueued_offers.push(claim);
+        }
+    }
+    retry_ordering_releases(storage, &mut outcome.failed_releases).await;
 }
 
 async fn release_ordering_claim(

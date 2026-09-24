@@ -1,6 +1,118 @@
 use super::*;
 
+/// Capacity reserved for one pending-delivery frame on an exact connection.
+/// Dropping this value returns the capacity without publishing a frame.
+#[derive(Debug)]
+pub struct PendingFlushReservation {
+    jid: FullJid,
+    owner: Arc<AtomicBool>,
+    sender: mpsc::Sender<OutboundStanza>,
+    permit: mpsc::OwnedPermit<OutboundStanza>,
+}
+
+/// Why a pending-delivery producer could not reserve outbound capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingFlushReserveError {
+    Full,
+    Closed,
+    NotConnected,
+}
+
 impl ConnectionRegistry {
+    /// Wait for pending-delivery capacity before marking the row offered.
+    /// No durable offer exists while this operation awaits backpressure.
+    pub async fn reserve_pending_flush(
+        &self,
+        jid: &FullJid,
+        owner: Option<&Arc<AtomicBool>>,
+    ) -> Result<PendingFlushReservation, PendingFlushReserveError> {
+        let entry = self
+            .connections
+            .get(jid)
+            .filter(|entry| owner.is_none_or(|owner| Arc::ptr_eq(&entry.carbons_enabled, owner)))
+            .ok_or(PendingFlushReserveError::NotConnected)?;
+        let sender = entry.sender.clone();
+        let captured_owner = Arc::clone(&entry.carbons_enabled);
+        drop(entry);
+        match sender.clone().reserve_owned().await {
+            Ok(permit) => Ok(PendingFlushReservation {
+                jid: jid.clone(),
+                owner: captured_owner,
+                sender,
+                permit,
+            }),
+            Err(_) => {
+                self.remove_if_sender_closed_owner(jid, &sender);
+                Err(PendingFlushReserveError::Closed)
+            }
+        }
+    }
+
+    /// Reserve capacity without waiting before marking a pending row offered.
+    /// Even without a supplied owner, the reservation captures the current
+    /// connection identity and cannot later be committed to its replacement.
+    pub fn try_reserve_pending_flush(
+        &self,
+        jid: &FullJid,
+        owner: Option<&Arc<AtomicBool>>,
+    ) -> Result<PendingFlushReservation, PendingFlushReserveError> {
+        let entry = self
+            .connections
+            .get(jid)
+            .filter(|entry| owner.is_none_or(|owner| Arc::ptr_eq(&entry.carbons_enabled, owner)))
+            .ok_or(PendingFlushReserveError::NotConnected)?;
+        let sender = entry.sender.clone();
+        let captured_owner = Arc::clone(&entry.carbons_enabled);
+        drop(entry);
+        match sender.clone().try_reserve_owned() {
+            Ok(permit) => Ok(PendingFlushReservation {
+                jid: jid.clone(),
+                owner: captured_owner,
+                sender,
+                permit,
+            }),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(PendingFlushReserveError::Full),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.remove_if_sender_closed_owner(jid, &sender);
+                Err(PendingFlushReserveError::Closed)
+            }
+        }
+    }
+
+    /// Publish an already-authorized pending frame without another await.
+    /// The exclusive registry guard serializes eligibility checks and enqueue
+    /// against same-JID replacement and presence updates. The caller supplies
+    /// the pending row tag for SM delivery, or a direct frame without SM.
+    pub fn send_reserved_pending_flush(
+        &self,
+        reservation: PendingFlushReservation,
+        outbound: OutboundStanza,
+    ) -> SendResult {
+        let PendingFlushReservation {
+            jid,
+            owner,
+            sender,
+            permit,
+        } = reservation;
+        let Some(entry) = self.connections.get_mut(&jid).filter(|entry| {
+            Arc::ptr_eq(&entry.carbons_enabled, &owner)
+                && entry.sender.same_channel(&sender)
+                && entry.is_locally_hosted()
+                && entry.is_presence_available()
+                && entry.presence_priority() >= 0
+        }) else {
+            return SendResult::NotConnected;
+        };
+        if sender.is_closed() {
+            drop(entry);
+            self.remove_if_sender_closed_owner(&jid, &sender);
+            return SendResult::ChannelClosed;
+        }
+        permit.send(outbound);
+        drop(entry);
+        SendResult::Sent
+    }
+
     /// Enqueue a server-generated direct frame with a completion notifier that
     /// the destination connection resolves only after accepting the frame into
     /// its write/recovery-owning path.

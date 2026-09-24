@@ -270,7 +270,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         &terminal.session.jid.to_bare(),
                     )
                     .await
-                        == super::cleanup::TerminalRedriveOutcome::Aborted
+                    .blocks_promotion()
                     {
                         retain_overflow_for_retry = true;
                         redrive_aborted = true;
@@ -321,7 +321,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                             &terminal.session.jid.to_bare(),
                         )
                         .await
-                            == super::cleanup::TerminalRedriveOutcome::Aborted
+                        .blocks_promotion()
                         {
                             retain_overflow_for_retry = true;
                             redrive_aborted = true;

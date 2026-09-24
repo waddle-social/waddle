@@ -23,8 +23,9 @@ pub mod user_registry;
 
 pub use connection_registry::{
     BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOrigin,
-    ForceDetachOutcome, ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance, PresenceState,
-    SendResult,
+    ForceDetachOutcome, ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance,
+    PendingFlushReservation, PendingFlushReserveError, PresenceState, SendResult,
+    TerminalOrderingRetryLease,
 };
 pub use selection::{
     available_resources_for_user, get_resources_for_user, routing_resources_for_user,

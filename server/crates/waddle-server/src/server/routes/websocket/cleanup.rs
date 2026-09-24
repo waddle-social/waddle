@@ -1691,8 +1691,9 @@ async fn promote_terminal_recovery(
     // overtake the released earlier row. An aborted re-drive suppresses the
     // incremental path the same way ownership_unknown does.
     let released_redrive_aborted = row_release.released_rows
-        && redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await
-            == TerminalRedriveOutcome::Aborted;
+        && redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare())
+            .await
+            .blocks_promotion();
     // With row ownership unknown, neither the prefix nor the per-item
     // overflow promotion may run: unidentified row-backed replay copies
     // would be promoted as fresh work. The drain still releases channel
@@ -1764,7 +1765,10 @@ fn preferred_live_pending_flush_target(
             // Revalidate on the entry actually adopted, otherwise the
             // flush would owner-gate successfully against a resource
             // that RFC 6121/XEP-0160 exclude from offline delivery.
-            if !entry.is_presence_available() || entry.presence_priority() < 0 {
+            if !entry.is_locally_hosted()
+                || !entry.is_presence_available()
+                || entry.presence_priority() < 0
+            {
                 return None;
             }
             Some(LivePendingFlushTarget {
@@ -1796,9 +1800,22 @@ pub(crate) enum TerminalRedriveOutcome {
     /// No eligible live resource exists; later promotion also lands in
     /// durable storage behind the earlier rows, preserving order.
     NoLiveTarget,
-    /// A live target exists but unclaimed rows remain (flush aborted or
-    /// deferred) — promoting later traffic directly would overtake them.
+    /// Dispatch order is blocked or cannot yet be established, or an earlier
+    /// row awaits its writer. Missing ordering proof must retain the tail;
+    /// it is not a failed promotion attempt and must not consume its cap.
+    OrderingDeferred,
+    /// A live target exists but storage or another flush failure prevents
+    /// safely promoting later traffic.
     Aborted,
+}
+
+impl TerminalRedriveOutcome {
+    pub(crate) fn blocks_promotion(self) -> bool {
+        match self {
+            Self::Aborted | Self::OrderingDeferred => true,
+            Self::Settled | Self::NoLiveTarget => false,
+        }
+    }
 }
 
 pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
@@ -1812,13 +1829,59 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     // consumed its initial offline-flush CAS, which is exactly why terminal
     // recovery drives this path directly. The bound prevents cleanup from
     // chasing an unbounded stream of reconnects.
-    let mut last_attempt_left_rows = false;
+    let mut last_outcome = TerminalRedriveOutcome::Settled;
     for _ in 0..2 {
         let Some(target) = preferred_live_pending_flush_target(
             &state.deps.protocol.connection_registry,
             recipient,
         ) else {
-            return TerminalRedriveOutcome::NoLiveTarget;
+            // A remote mirror cannot carry this node's pending-row offer.
+            // Its host must flush the prefix before later terminal traffic
+            // may be promoted to that otherwise available resource.
+            let registry = &state.deps.protocol.connection_registry;
+            let remote_available = registry
+                .get_available_resources_for_user(recipient)
+                .into_iter()
+                .any(|(resource, _)| {
+                    registry.get_entry(&resource).is_some_and(|entry| {
+                        !entry.is_locally_hosted()
+                            && entry.is_presence_available()
+                            && entry.presence_priority() >= 0
+                    })
+                });
+            if !remote_available {
+                return TerminalRedriveOutcome::NoLiveTarget;
+            }
+            return match state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(recipient)
+                .await
+            {
+                Ok(rows) if rows.iter().any(|row| row.outbound_sequence.is_none()) => {
+                    TerminalRedriveOutcome::OrderingDeferred
+                }
+                Ok(_) => TerminalRedriveOutcome::Settled,
+                Err(error) => {
+                    warn!(%recipient, %error, "terminal cleanup cannot inspect pending prefix before remote promotion");
+                    TerminalRedriveOutcome::Aborted
+                }
+            };
+        };
+        let Some(entry) = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(&target.resource, &target.owner)
+        else {
+            last_outcome = TerminalRedriveOutcome::OrderingDeferred;
+            continue;
+        };
+        // Reserve retry custody before claiming rows. A concurrent terminal
+        // pass cannot create work that would require a second sleeping pump.
+        let Some(retry_lease) = entry.try_acquire_terminal_ordering_retry() else {
+            return TerminalRedriveOutcome::OrderingDeferred;
         };
         let resolver = crate::pending_delivery::MamArchiveResolver {
             mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
@@ -1844,20 +1907,29 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
             .connection_registry
             .entry_if_owner(&target.resource, &target.owner)
             .is_some();
+        let ordering_deferred = outcome.deferred_ordering > 0;
+        let retry_handoff = ordering_deferred;
         if !target_still_current && (outcome.claimed > 0 || outcome.pushed > 0) {
-            if outcome.deferred_ordering > 0 {
-                spawn_terminal_pending_ordering_retry(state, target, outcome);
+            if retry_handoff {
+                spawn_terminal_pending_ordering_retry(state, target, outcome, retry_lease);
             }
             // Rows were claimed/pushed into a session that has since been
             // superseded: they sit in that session's channel until ITS
             // cleanup releases and re-drives them. Reporting Settled here
             // would let the caller promote later traffic to the successor
             // ahead of those rows — treat the attempt as aborted instead.
-            return TerminalRedriveOutcome::Aborted;
+            return if ordering_deferred {
+                TerminalRedriveOutcome::OrderingDeferred
+            } else {
+                TerminalRedriveOutcome::Aborted
+            };
         }
-        last_attempt_left_rows = outcome.deferred_ordering > 0
-            || terminal_reflush_left_retryable_rows(state, recipient).await;
-        if target_still_current && last_attempt_left_rows {
+        last_outcome = if ordering_deferred {
+            TerminalRedriveOutcome::OrderingDeferred
+        } else {
+            terminal_reflush_outcome(state, recipient).await
+        };
+        if target_still_current && last_outcome.blocks_promotion() {
             if let Some(entry) = state
                 .deps
                 .protocol
@@ -1877,28 +1949,21 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
                 "terminal cleanup re-drove pending_delivery rows onto a live resource"
             );
         }
-        if outcome.deferred_ordering > 0 {
-            spawn_terminal_pending_ordering_retry(state, target, outcome);
+        if retry_handoff {
+            spawn_terminal_pending_ordering_retry(state, target, outcome, retry_lease);
         }
         if target_still_current {
-            return if last_attempt_left_rows {
-                TerminalRedriveOutcome::Aborted
-            } else {
-                TerminalRedriveOutcome::Settled
-            };
+            return last_outcome;
         }
     }
-    if last_attempt_left_rows {
-        TerminalRedriveOutcome::Aborted
-    } else {
-        TerminalRedriveOutcome::Settled
-    }
+    last_outcome
 }
 
 fn spawn_terminal_pending_ordering_retry(
     state: &WebSocketState,
     mut target: LivePendingFlushTarget,
     mut outcome: crate::pending_delivery::FlushOutcome,
+    retry_lease: waddle_xmpp::registry::TerminalOrderingRetryLease,
 ) {
     let storage = state.deps.protocol.pending_delivery_storage.clone();
     let registry = state.deps.protocol.connection_registry.clone();
@@ -1908,6 +1973,7 @@ fn spawn_terminal_pending_ordering_retry(
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let recipient = target.resource.to_bare();
     tokio::spawn(async move {
+        let mut retry_lease = retry_lease;
         let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
         // Release settlement is independent of resource ownership. Afterwards,
         // allow one fresh target selection: its initial presence may already
@@ -1930,17 +1996,31 @@ fn spawn_terminal_pending_ordering_retry(
             )
             .await;
             if let Some(entry) = registry.entry_if_owner(&target.resource, &target.owner) {
-                if entry.is_presence_available() && entry.presence_priority() >= 0 {
+                if entry.is_locally_hosted()
+                    && entry.is_presence_available()
+                    && entry.presence_priority() >= 0
+                {
                     if outcome.deferred_transient > 0 {
                         entry.reset_offline_flush();
                     }
                     return;
                 }
             }
+            // Old claim/offer work has settled before releasing its gate.
+            // A successor owns a distinct gate and may already have its own pump.
+            drop(retry_lease);
             let Some(replacement) = preferred_live_pending_flush_target(&registry, &recipient)
             else {
                 return;
             };
+            let Some(entry) = registry.entry_if_owner(&replacement.resource, &replacement.owner)
+            else {
+                return;
+            };
+            let Some(replacement_lease) = entry.try_acquire_terminal_ordering_retry() else {
+                return;
+            };
+            retry_lease = replacement_lease;
             target = replacement;
             outcome = crate::pending_delivery::FlushOutcome::default();
         }
@@ -1953,7 +2033,10 @@ fn spawn_terminal_pending_ordering_retry(
 /// before a row is ever claimed (e.g. blocklist/claim-storage failures), which
 /// otherwise leave a live replacement with a spent CAS and no janitor that can
 /// flush the bare-JID backlog.
-async fn terminal_reflush_left_retryable_rows(state: &WebSocketState, recipient: &BareJid) -> bool {
+async fn terminal_reflush_outcome(
+    state: &WebSocketState,
+    recipient: &BareJid,
+) -> TerminalRedriveOutcome {
     match state
         .deps
         .protocol
@@ -1964,14 +2047,22 @@ async fn terminal_reflush_left_retryable_rows(state: &WebSocketState, recipient:
         // Claimed but unsequenced rows can still belong to a failed-release
         // worker. A second terminal pass must not promote its later tail ahead
         // of those rows merely because it could not claim them itself.
-        Ok(rows) => rows.iter().any(|row| row.outbound_sequence.is_none()),
+        Ok(rows) => {
+            if rows.iter().any(|row| row.flushed_in_session.is_none()) {
+                TerminalRedriveOutcome::Aborted
+            } else if rows.iter().any(|row| row.outbound_sequence.is_none()) {
+                TerminalRedriveOutcome::OrderingDeferred
+            } else {
+                TerminalRedriveOutcome::Settled
+            }
+        }
         Err(error) => {
             warn!(
                 recipient = %recipient,
                 error = %error,
                 "terminal cleanup could not inspect pending_delivery after live reflush; rearming replacement flush conservatively"
             );
-            true
+            TerminalRedriveOutcome::Aborted
         }
     }
 }
@@ -2252,8 +2343,9 @@ async fn promote_terminal_recovery_prefix(
         }
         if summary.queued > 0 {
             queued_rows = true;
-            if redrive_terminal_pending_rows_to_live_resource(state, &detached.jid.to_bare()).await
-                == TerminalRedriveOutcome::Aborted
+            if redrive_terminal_pending_rows_to_live_resource(state, &detached.jid.to_bare())
+                .await
+                .blocks_promotion()
             {
                 // The queued row could not reach the live target; promoting
                 // later entries directly would overtake it — including via
@@ -2340,8 +2432,9 @@ async fn refuse_detach_without_principal(
         // before promotion can enqueue the tail. An abort means the earlier
         // row is still pending at a live replacement — promoting the tail
         // now would overtake it, so the session defers to the janitor.
-        redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await
-            == TerminalRedriveOutcome::Aborted
+        redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare())
+            .await
+            .blocks_promotion()
     } else {
         false
     };

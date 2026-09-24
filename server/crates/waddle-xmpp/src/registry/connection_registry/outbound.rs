@@ -271,6 +271,8 @@ pub struct ConnectionEntry {
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
+    /// Bounds terminal ordering retry tasks to one per connection generation.
+    terminal_ordering_retry: Arc<AtomicBool>,
     /// Channel to send stanzas to this connection
     pub sender: mpsc::Sender<OutboundStanza>,
     /// Whether XEP-0280 Message Carbons is enabled for this connection
@@ -356,6 +358,7 @@ impl ConnectionEntry {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             hosting: ConnectionHosting::Local,
+            terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
             archive_dispatch: Arc::new(std::sync::Mutex::new(Default::default())),
             sender,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
@@ -380,6 +383,17 @@ impl ConnectionEntry {
 
     pub fn is_locally_hosted(&self) -> bool {
         self.hosting == ConnectionHosting::Local
+    }
+
+    /// Acquire the sole terminal ordering retry slot for this connection.
+    /// This bounds sleeping retry tasks; durable claim fencing still decides
+    /// which task may deliver. Dropping the lease reopens the slot, including
+    /// when its owning task is cancelled.
+    pub fn try_acquire_terminal_ordering_retry(&self) -> Option<TerminalOrderingRetryLease> {
+        self.terminal_ordering_retry
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| TerminalOrderingRetryLease(Arc::clone(&self.terminal_ordering_retry)))
     }
 
     /// Clone of this entry's force-detach sender, for a caller (the
@@ -483,6 +497,17 @@ impl ConnectionEntry {
             .lock()
             .ok()
             .and_then(|g| g.as_ref().cloned())
+    }
+}
+
+/// Exclusive ownership of a connection's terminal ordering retry task slot.
+#[derive(Debug)]
+#[must_use = "hold the lease for the lifetime of the terminal ordering retry task"]
+pub struct TerminalOrderingRetryLease(Arc<AtomicBool>);
+
+impl Drop for TerminalOrderingRetryLease {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

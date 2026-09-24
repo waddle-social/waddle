@@ -29,6 +29,20 @@ impl PendingClaimToken {
     }
 }
 
+impl From<uuid::Uuid> for PendingClaimToken {
+    fn from(value: uuid::Uuid) -> Self {
+        Self(value)
+    }
+}
+
+/// Exact durable identity of one unsequenced pending-delivery claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingClaim {
+    pub row_id: PendingRowId,
+    pub session: SmSessionId,
+    pub token: PendingClaimToken,
+}
+
 impl std::fmt::Display for PendingClaimToken {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
@@ -50,8 +64,17 @@ pub enum PendingStorageError {
     #[error("pending delivery archive ordering is temporarily unavailable")]
     ArchiveOrderingUnavailable,
 
+    #[error("an earlier pending-delivery batch is still unsequenced")]
+    ClaimContended,
+
     #[error("pending delivery store does not support guarded unpushed claim release")]
     UnpushedReleaseUnsupported,
+
+    #[error("pending delivery store does not support durable offer reservations")]
+    OfferReservationUnsupported,
+
+    #[error("invalid pending-delivery claim token: {0}")]
+    InvalidClaimToken(#[from] uuid::Error),
 
     /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): a fenced
     /// `insert_fenced` call's own `SELECT ... FOR SHARE` fencing check
@@ -384,6 +407,38 @@ pub trait PendingDeliveryStorage: Send + Sync {
         Err(PendingStorageError::UnpushedReleaseUnsupported)
     }
 
+    /// Commit an offer reservation for this exact unsequenced claim. Repeating
+    /// with the same identity is idempotent after an ambiguous commit; zero
+    /// ownership must never permit enqueue. This is not proof of delivery.
+    async fn mark_claim_offered(&self, claim: &PendingClaim) -> Result<bool, PendingStorageError> {
+        let _ = claim;
+        Err(PendingStorageError::OfferReservationUnsupported)
+    }
+
+    /// The original reservation owner has proved it never enqueued this row.
+    /// Release its exact identity, including an ambiguously committed offer.
+    /// Recovery scanners MUST use release_unpushed_row_if_session instead.
+    async fn release_unqueued_offer(
+        &self,
+        claim: &PendingClaim,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = claim;
+        Err(PendingStorageError::OfferReservationUnsupported)
+    }
+
+    /// Keyset page of aged claims that have never committed an offer. Includes
+    /// live SM streams: ordering-deferred work can survive its producer process.
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<PendingClaim>, PendingStorageError> {
+        let _ = (recipient, after, claimed_before_ms, limit);
+        Err(PendingStorageError::OfferReservationUnsupported)
+    }
+
     /// Release only rows whose recorded outbound sequence belongs to a
     /// terminally-promoted SM queue. This is the inverse of
     /// [`Self::delete_acked_in_window`]: terminal recovery abandons replay,
@@ -653,6 +708,7 @@ pub struct InMemoryPendingDeliveryStorage {
     /// always release-eligible.
     claimed_at_ms: Mutex<HashMap<PendingRowId, i64>>,
     claim_tokens: Mutex<HashMap<PendingRowId, PendingClaimToken>>,
+    offered_claims: Mutex<HashSet<PendingRowId>>,
     quota: QuotaPolicy,
 }
 
@@ -664,6 +720,7 @@ impl InMemoryPendingDeliveryStorage {
             notification_outboxed: Mutex::new(HashSet::new()),
             claimed_at_ms: Mutex::new(HashMap::new()),
             claim_tokens: Mutex::new(HashMap::new()),
+            offered_claims: Mutex::new(HashSet::new()),
             quota,
         }
     }
@@ -681,7 +738,12 @@ impl InMemoryPendingDeliveryStorage {
             .claim_tokens
             .lock()
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let mut offered = self
+            .offered_claims
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         for id in ids {
+            offered.remove(id);
             stamps.insert(id.clone(), now_ms);
             tokens.remove(id);
         }
@@ -700,11 +762,52 @@ impl InMemoryPendingDeliveryStorage {
             .claim_tokens
             .lock()
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let mut offered = self
+            .offered_claims
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         for id in ids {
+            offered.remove(id);
             stamps.remove(id);
             tokens.remove(id);
         }
         Ok(())
+    }
+
+    fn release_exact_claim(
+        &self,
+        claim: &PendingClaim,
+        require_unoffered: bool,
+    ) -> Result<u64, PendingStorageError> {
+        let mut rows = self
+            .inner
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let matches_token = self
+            .claim_tokens
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .get(&claim.row_id)
+            == Some(&claim.token);
+        let offered = self
+            .offered_claims
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .contains(&claim.row_id);
+        if !matches_token || (require_unoffered && offered) {
+            return Ok(0);
+        }
+        for row in rows.values_mut().flat_map(|queue| queue.iter_mut()) {
+            if row.id == claim.row_id
+                && row.flushed_in_session.as_ref() == Some(&claim.session)
+                && row.outbound_sequence.is_none()
+            {
+                self.clear_claimed_at(std::slice::from_ref(&claim.row_id))?;
+                row.flushed_in_session = None;
+                return Ok(1);
+            }
+        }
+        Ok(0)
     }
 
     /// Build with the default count cap (locked Q9e default).
@@ -942,6 +1045,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         token: &PendingClaimToken,
         limit: usize,
     ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut guard = self
             .inner
             .lock()
@@ -949,6 +1055,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         let Some(queue) = guard.get_mut(recipient) else {
             return Ok(Vec::new());
         };
+        let contended = queue
+            .iter()
+            .any(|row| row.flushed_in_session.is_some() && row.outbound_sequence.is_none());
         let mut candidates: Vec<_> = queue
             .iter_mut()
             .filter(|row| row.flushed_in_session.is_none())
@@ -957,6 +1066,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         candidates.truncate(limit);
         if candidates.iter().any(|row| row.payload.is_archived()) {
             return Err(PendingStorageError::ArchiveOrderingUnsupported);
+        }
+        if contended {
+            return Err(PendingStorageError::ClaimContended);
         }
         let ids: Vec<_> = candidates.iter().map(|row| row.id.clone()).collect();
         self.stamp_claimed_at(&ids)?;
@@ -1096,32 +1208,97 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         expected_session: &SmSessionId,
         token: &PendingClaimToken,
     ) -> Result<u64, PendingStorageError> {
-        let mut guard = self
+        self.release_exact_claim(
+            &PendingClaim {
+                row_id: id.clone(),
+                session: expected_session.clone(),
+                token: *token,
+            },
+            true,
+        )
+    }
+
+    async fn mark_claim_offered(&self, claim: &PendingClaim) -> Result<bool, PendingStorageError> {
+        let rows = self
             .inner
             .lock()
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
-        let matches_token = self
+        let token_matches = self
             .claim_tokens
             .lock()
             .map_err(|error| PendingStorageError::Other(error.to_string()))?
-            .get(id)
-            == Some(token);
-        if !matches_token {
-            return Ok(0);
+            .get(&claim.row_id)
+            == Some(&claim.token);
+        let owned = token_matches
+            && rows.values().flat_map(|queue| queue.iter()).any(|row| {
+                row.id == claim.row_id
+                    && row.flushed_in_session.as_ref() == Some(&claim.session)
+                    && row.outbound_sequence.is_none()
+            });
+        if owned {
+            self.offered_claims
+                .lock()
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?
+                .insert(claim.row_id.clone());
         }
-        for row in guard.values_mut().flat_map(|queue| queue.iter_mut()) {
-            if &row.id == id
-                && row.flushed_in_session.as_ref() == Some(expected_session)
-                && row.outbound_sequence.is_none()
-            {
-                // Keep claim metadata cleanup within the row lock so it cannot
-                // erase a new claim's timestamp after an ambiguous release.
-                self.clear_claimed_at(std::slice::from_ref(id))?;
-                row.flushed_in_session = None;
-                return Ok(1);
+        Ok(owned)
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &PendingClaim,
+    ) -> Result<u64, PendingStorageError> {
+        self.release_exact_claim(claim, false)
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<PendingClaim>, PendingStorageError> {
+        let rows = self
+            .inner
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let stamps = self
+            .claimed_at_ms
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let tokens = self
+            .claim_tokens
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let offered = self
+            .offered_claims
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let mut claims = Vec::new();
+        if let Some(rows) = rows.get(recipient) {
+            for row in rows {
+                if row.outbound_sequence.is_some()
+                    || offered.contains(&row.id)
+                    || after.is_some_and(|after| row.id.as_str() <= after.as_str())
+                    || !stamps
+                        .get(&row.id)
+                        .is_some_and(|stamp| *stamp <= claimed_before_ms)
+                {
+                    continue;
+                }
+                if let (Some(session), Some(token)) = (&row.flushed_in_session, tokens.get(&row.id))
+                {
+                    claims.push(PendingClaim {
+                        row_id: row.id.clone(),
+                        session: session.clone(),
+                        token: *token,
+                    });
+                }
             }
         }
-        Ok(0)
+        claims.sort_by(|left, right| left.row_id.as_str().cmp(right.row_id.as_str()));
+        claims.truncate(limit);
+        Ok(claims)
     }
 
     async fn release_rows_for_outbound_sequences(

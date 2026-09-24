@@ -26,7 +26,9 @@ mod subscriptions;
 pub use outbound::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
     ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance, SendResult,
+    TerminalOrderingRetryLease,
 };
+pub use sending::{PendingFlushReservation, PendingFlushReserveError};
 pub use state::{LastActivityState, PresenceState};
 
 /// Registry for tracking active XMPP connections.

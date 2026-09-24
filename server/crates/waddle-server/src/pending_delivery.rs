@@ -49,6 +49,7 @@ use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 mod codec;
 pub(crate) mod database;
 mod flush;
+mod recovery;
 
 pub use database::DatabasePendingDeliveryStorage;
 pub(crate) use flush::resume_flush_for_resource_with_retry;
@@ -57,6 +58,7 @@ pub use flush::{
     FlushContext, FlushOutcome, MamArchiveResolver, NullArchiveResolver, PendingDispatchGate,
     PendingDispatchReadiness,
 };
+pub(crate) use recovery::PendingRecovery;
 // Crate-internal: an implementation constant the tests assert against, kept
 // out of the public API surface (Greptile review on PR #1234). Test-only, so
 // it never counts as an unused re-export in production builds.

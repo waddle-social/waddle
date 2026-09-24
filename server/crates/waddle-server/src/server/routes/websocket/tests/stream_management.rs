@@ -153,6 +153,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirs
             .await
     }
 
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
+            .await
+    }
+
     async fn delete_claimed(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -622,6 +651,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             .await
     }
 
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
+            .await
+    }
+
     async fn delete_claimed(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -809,6 +867,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
             .release_unpushed_row_if_session(id, session, token)
+            .await
+    }
+
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
     }
 
@@ -2709,6 +2796,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             .await
     }
 
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
+            .await
+    }
+
     async fn delete_claimed(
         &self,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -2938,6 +3054,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
             .release_unpushed_row_if_session(id, session, token)
+            .await
+    }
+
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
     }
 
@@ -3256,6 +3401,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
             .release_unpushed_row_if_session(id, session, token)
+            .await
+    }
+
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
     }
 
@@ -3791,6 +3965,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
             .release_unpushed_row_if_session(id, session, token)
+            .await
+    }
+
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
     }
 
@@ -4379,6 +4582,35 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
             .release_unpushed_row_if_session(id, session, token)
+            .await
+    }
+
+    async fn mark_claim_offered(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_claim_offered(claim).await
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.release_unqueued_offer(claim).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
             .await
     }
 
@@ -10599,14 +10831,31 @@ mod terminal_ordering_release_tests {
         storage::{PendingClaimToken, PendingDeliveryStorage, PendingStorageError},
         InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
     };
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
 
     struct HeldOrderingReleaseStorage {
         inner: std::sync::OnceLock<DatabasePendingDeliveryStorage>,
         fail_releases: std::sync::atomic::AtomicBool,
         failed: Notify,
+        claim_calls: std::sync::atomic::AtomicUsize,
+        pause_claim_at: std::sync::atomic::AtomicUsize,
+        claim_paused: Notify,
+        resume_claim: Semaphore,
     }
 
     impl HeldOrderingReleaseStorage {
+        fn new(fail_releases: bool) -> Self {
+            Self {
+                inner: std::sync::OnceLock::new(),
+                fail_releases: std::sync::atomic::AtomicBool::new(fail_releases),
+                failed: Notify::new(),
+                claim_calls: std::sync::atomic::AtomicUsize::new(0),
+                pause_claim_at: std::sync::atomic::AtomicUsize::new(0),
+                claim_paused: Notify::new(),
+                resume_claim: Semaphore::new(0),
+            }
+        }
+
         fn inner(&self) -> &DatabasePendingDeliveryStorage {
             self.inner
                 .get()
@@ -10650,6 +10899,22 @@ mod terminal_ordering_release_tests {
             token: &PendingClaimToken,
             limit: usize,
         ) -> Result<Vec<PendingRow>, PendingStorageError> {
+            let call = self
+                .claim_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if call
+                == self
+                    .pause_claim_at
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                self.claim_paused.notify_one();
+                self.resume_claim
+                    .acquire()
+                    .await
+                    .expect("release paused claim")
+                    .forget();
+            }
             self.inner()
                 .claim_archive_ordered_batch_for_session(recipient, session, token, limit)
                 .await
@@ -10670,6 +10935,35 @@ mod terminal_ordering_release_tests {
                 .release_unpushed_row_if_session(id, session, token)
                 .await
         }
+        async fn mark_claim_offered(
+            &self,
+            claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        ) -> Result<bool, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+            self.inner().mark_claim_offered(claim).await
+        }
+
+        async fn release_unqueued_offer(
+            &self,
+            claim: &waddle_xmpp::pending_delivery::storage::PendingClaim,
+        ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+            self.inner().release_unqueued_offer(claim).await
+        }
+
+        async fn list_unoffered_claims(
+            &self,
+            recipient: &BareJid,
+            after: Option<&waddle_xmpp::pending_delivery::PendingRowId>,
+            claimed_before_ms: i64,
+            limit: usize,
+        ) -> Result<
+            Vec<waddle_xmpp::pending_delivery::storage::PendingClaim>,
+            waddle_xmpp::pending_delivery::storage::PendingStorageError,
+        > {
+            self.inner()
+                .list_unoffered_claims(recipient, after, claimed_before_ms, limit)
+                .await
+        }
+
         async fn delete_claimed(
             &self,
             session: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -10809,12 +11103,19 @@ mod terminal_ordering_release_tests {
         use super::super::super::cleanup::{
             redrive_terminal_pending_rows_to_live_resource, TerminalRedriveOutcome,
         };
-        let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
-        let storage = Arc::new(HeldOrderingReleaseStorage {
-            inner: std::sync::OnceLock::new(),
-            fail_releases: std::sync::atomic::AtomicBool::new(true),
-            failed: Notify::new(),
-        });
+        let directory = tempfile::tempdir().expect("SM retry database directory");
+        let database_url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("retry.db").display()
+        );
+        let persistence = Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::open(Some(&database_url))
+                .await
+                .expect("persistent SM retry storage"),
+        );
+        let sm_registry =
+            Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+        let storage = Arc::new(HeldOrderingReleaseStorage::new(true));
         let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
             sm_registry.clone(),
             storage.clone(),
@@ -10870,6 +11171,49 @@ mod terminal_ordering_release_tests {
         let _ = old_conn
             .sm_state
             .record_outbound(stanza_to_xml(&Stanza::Message(tail)), SmEvictionPath::Batch);
+        // Model a previously detached/resumed stream whose captured prefix
+        // already has durable custody. Recording directly into this test's
+        // SM state does not itself write a session snapshot, and retry
+        // reinsertion intentionally never invents one after a failed write.
+        let snapshot = old_conn
+            .sm_state
+            .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
+                user_id: recipient.to_string(),
+                jid: jid.clone(),
+                occupancy_session: old_conn.occupancy_session,
+                carbons_enabled: old_conn.carbons_enabled,
+                roster_interested: old_conn.roster_interested,
+                blocklist_interested: old_conn.blocklist_interested,
+                presence_available: old_conn.presence_available,
+                presence_show: old_conn.presence_show.clone(),
+                presence_status: old_conn.presence_status.clone(),
+                presence_priority: old_conn.presence_priority,
+                presence_payloads: old_conn.presence_payloads.clone(),
+                pending_subscribes_flushed: old_conn.pending_subscribes_flushed,
+            })
+            .expect("recorded durable SM snapshot");
+        store_resumable_detached_session(
+            state.as_ref(),
+            old_conn
+                .authenticated_session
+                .as_ref()
+                .expect("authenticated owner"),
+            snapshot,
+        )
+        .await;
+        assert!(persistence
+            .get_session(&old_stream)
+            .await
+            .expect("persisted stream before cleanup")
+            .is_some());
+        assert_eq!(
+            persistence
+                .list_unacked(&old_stream)
+                .await
+                .expect("persisted prefix before cleanup")
+                .len(),
+            2
+        );
         old_conn.begin_terminal_sm_recovery();
 
         let (tablet_tx, mut tablet_rx) = mpsc::channel(8);
@@ -10927,20 +11271,67 @@ mod terminal_ordering_release_tests {
             )
             .await
             .expect("second terminal redrive returns promptly")
-                == TerminalRedriveOutcome::Aborted,
+                == TerminalRedriveOutcome::OrderingDeferred,
             "claimed but unsequenced B must not be mistaken for a settled prefix"
         );
         assert!(tablet_rx.try_recv().is_err());
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            crate::server::session_janitors::run_sm_expiry_sweep(&state),
-        )
-        .await
-        .expect("a subsequent promotion sweep must also return during the release outage");
-        assert!(
-            tablet_rx.try_recv().is_err(),
-            "janitor must not promote terminal tail past claimed unsequenced B"
+        // A prior genuine failure remains charged. Ordering-only sweeps
+        // must neither increment nor reset its durable counter.
+        assert_eq!(
+            sm_registry
+                .record_promotion_failure(old_stream.as_str())
+                .await
+                .expect("seed prior promotion failure"),
+            1
         );
+        let cap = std::env::var("WADDLE_SM_PROMOTION_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(5)
+            .clamp(2, 1024);
+        for _ in 0..cap + 2 {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                crate::server::session_janitors::run_sm_expiry_sweep(&state),
+            )
+            .await
+            .expect("ordering-only promotion sweep returns during the release outage");
+            assert!(
+                tablet_rx.try_recv().is_err(),
+                "janitor must not promote terminal tail past claimed unsequenced B"
+            );
+            let db = persistence.database();
+            let guard = db.guard().await.expect("SM retry inspection");
+            let mut rows = guard
+                .query(
+                    "SELECT promotion_attempts FROM sm_sessions WHERE stream_id = ?",
+                    crate::db_params![old_stream.as_str()],
+                )
+                .await
+                .expect("persistent promotion counter");
+            let row = rows
+                .next()
+                .await
+                .expect("counter row")
+                .expect("ordering wait must retain durable session beyond the failure cap");
+            assert_eq!(
+                row.get::<i64>(0).expect("attempt count"),
+                1,
+                "ordering waits preserve prior real failures without consuming the failure budget"
+            );
+            drop(rows);
+            drop(guard);
+            let unacked = persistence
+                .list_unacked(&old_stream)
+                .await
+                .expect("durable retained tail");
+            assert!(
+                unacked.iter().any(|stanza| matches!(stanza.stanza.as_ref(),
+                    Stanza::Message(message) if message.id.as_ref().is_some_and(|id| id.0 == "terminal-tail")
+                )),
+                "the durable terminal tail survives more ordering waits than the failure cap"
+            );
+        }
         let retained = sm_registry
             .drain_expired()
             .await
@@ -10987,7 +11378,7 @@ mod terminal_ordering_release_tests {
             assert!(entry.claim_offline_flush());
             assert!(
                 redrive_terminal_pending_rows_to_live_resource(state.as_ref(), &recipient).await
-                    == TerminalRedriveOutcome::Aborted
+                    == TerminalRedriveOutcome::OrderingDeferred
             );
             assert!(
                 entry.claim_offline_flush(),
@@ -11044,6 +11435,470 @@ mod terminal_ordering_release_tests {
             tail.id.as_ref().map(|id| id.0.as_str()),
             Some("terminal-tail")
         );
+    }
+
+    #[tokio::test]
+    async fn pending_claim_janitor_recovers_lost_retry_on_live_stream_without_duplicate_offer() {
+        let storage = Arc::new(HeldOrderingReleaseStorage::new(true));
+        let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+            Arc::new(InMemorySmSessionRegistry::new()),
+            storage.clone(),
+        )
+        .await;
+        assert!(storage
+            .inner
+            .set(
+                DatabasePendingDeliveryStorage::from_database(
+                    state.deps.app_state.db_pool.global().clone(),
+                    QuotaPolicy::Unlimited,
+                )
+                .await
+                .expect("shared pending database")
+            )
+            .is_ok());
+        let resource: FullJid = "alice@example.com/lost-retry"
+            .parse()
+            .expect("local resource");
+        let recipient = resource.to_bare();
+        let phone = SmSessionId::new("phone-predecessor");
+        seed_archive_row(state.as_ref(), &recipient, "lost-retry-a", &phone).await;
+        let b = seed_archive_row(
+            state.as_ref(),
+            &recipient,
+            "lost-retry-b",
+            &SmSessionId::new("seed-b"),
+        )
+        .await;
+        storage
+            .release_row(&b)
+            .await
+            .expect("B awaits initial flush");
+        let (tx, mut rx) = mpsc::channel(8);
+        let owner = register_test_connection(state.as_ref(), &resource, tx).await;
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&resource, true, 0);
+        let session = SmSessionId::new("same-live-sm-session");
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .set_sm_stream_id_if_owner(&resource, &owner, Some(session.clone())));
+        let entry = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(&resource, &owner)
+            .expect("live local entry");
+        assert!(
+            entry.claim_offline_flush(),
+            "initial presence has spent its flush opportunity"
+        );
+        let retry = {
+            let state = state.clone();
+            let resource = resource.clone();
+            let session = session.clone();
+            let owner = owner.clone();
+            tokio::spawn(async move {
+                let resolver = crate::pending_delivery::MamArchiveResolver {
+                    mam_storage: state.deps.protocol.mam_storage.clone(),
+                };
+                crate::pending_delivery::flush_for_resource_with_retry(
+                    &state.deps.protocol.pending_delivery_storage,
+                    &state.deps.protocol.connection_registry,
+                    &resource.to_bare(),
+                    &resource,
+                    crate::pending_delivery::FlushContext {
+                        server_domain: "example.com",
+                        sm_session: Some(&session),
+                        blocking_storage: Some(&state.deps.protocol.blocking_storage),
+                        owner: Some(&owner),
+                        archive_resolver: &resolver,
+                        dispatch_gate: Some(state.deps.protocol.ingress.as_ref()),
+                    },
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), storage.failed.notified())
+            .await
+            .expect("B was claimed and its ordering release failed");
+        retry.abort();
+        assert!(retry
+            .await
+            .expect_err("original retry future is gone")
+            .is_cancelled());
+        assert!(rx.try_recv().is_err());
+        let stranded = storage
+            .list(&recipient)
+            .await
+            .expect("stranded pending rows");
+        let stranded = stranded
+            .iter()
+            .find(|row| row.id == b)
+            .expect("B survives task loss");
+        assert_eq!(stranded.flushed_in_session.as_ref(), Some(&session));
+        assert!(stranded.outbound_sequence.is_none());
+        assert!(
+            !entry.claim_offline_flush(),
+            "no additional presence trigger is available"
+        );
+        assert_eq!(
+            storage
+                .delete_acked_in_window(&phone, 0, 1)
+                .await
+                .expect("predecessor ACK"),
+            1
+        );
+        storage
+            .fail_releases
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let db = storage.inner().database();
+        db.guard()
+            .await
+            .expect("pending inspection")
+            .execute(
+                "UPDATE pending_delivery SET claimed_at_ms = 0 WHERE row_id = ?",
+                crate::db_params![b.as_str()],
+            )
+            .await
+            .expect("age the interrupted claim without sleeping");
+        let unoffered = storage
+            .list_unoffered_claims(&recipient, None, i64::MAX, 8)
+            .await
+            .expect("durable recovery candidates");
+        assert_eq!(unoffered.len(), 1);
+        assert_eq!(unoffered[0].row_id, b);
+        // A higher-priority remote mirror must not steal local recovery
+        // work from the node hosting the surviving stream.
+        let remote: FullJid = "alice@example.com/remote-mirror"
+            .parse()
+            .expect("remote resource");
+        let (remote_tx, mut remote_rx) = mpsc::channel(8);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register_entry(remote.clone(), ConnectionEntry::remote_hosted(remote_tx));
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&remote, true, 10);
+        let mut recovery = crate::pending_delivery::PendingRecovery::default();
+        crate::server::session_janitors::run_pending_delivery_claim_sweep(&state, 1, &mut recovery)
+            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            recovery.finish_current_pass(),
+        )
+        .await
+        .expect("periodic recipient recovery completes");
+        assert!(
+            remote_rx.try_recv().is_err(),
+            "periodic recovery is local to the hosting node"
+        );
+        let offered = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("same live stream receives B without another presence")
+            .expect("B delivery");
+        assert_eq!(offered.pending_row_id.as_ref(), Some(&b));
+        let Stanza::Message(message) = offered.stanza else {
+            panic!("B is a message")
+        };
+        assert_eq!(
+            message.id.as_ref().map(|id| id.0.as_str()),
+            Some("lost-retry-b")
+        );
+
+        // Deliberately do not stamp the writer's sequence yet. A second
+        // periodic pass must distinguish already offered custody from the
+        // never-offered claim recovered above, even when both are old/unsequenced.
+        db.guard()
+            .await
+            .expect("pending inspection")
+            .execute(
+                "UPDATE pending_delivery SET claimed_at_ms = 0 WHERE row_id = ?",
+                crate::db_params![b.as_str()],
+            )
+            .await
+            .expect("age the offered claim too");
+        crate::server::session_janitors::run_pending_delivery_claim_sweep(&state, 1, &mut recovery)
+            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            recovery.finish_current_pass(),
+        )
+        .await
+        .expect("second periodic pass completes");
+        assert!(
+            rx.try_recv().is_err(),
+            "an offered but unsequenced stanza must not be duplicated"
+        );
+        let retained = storage
+            .list(&recipient)
+            .await
+            .expect("offered row retains custody");
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, b);
+        assert_eq!(retained[0].flushed_in_session.as_ref(), Some(&session));
+        assert!(retained[0].outbound_sequence.is_none());
+        assert!(storage
+            .list_unoffered_claims(&recipient, None, i64::MAX, 8)
+            .await
+            .expect("remaining unoffered candidates")
+            .is_empty());
+    }
+
+    async fn terminal_redrive_with_remote_mirror(local_available: bool) {
+        use super::super::super::cleanup::{
+            redrive_terminal_pending_rows_to_live_resource, TerminalRedriveOutcome,
+        };
+        let state = create_test_websocket_state().await;
+        let recipient: BareJid = "alice@example.com".parse().expect("recipient");
+        let seed = SmSessionId::new("terminal-locality-seed");
+        seed_claimed_pending_row(state.as_ref(), &recipient, seed.as_str(), 1).await;
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .release_claim(&seed)
+            .await
+            .expect("release pending prefix");
+        let remote: FullJid = "alice@example.com/remote".parse().expect("remote resource");
+        let (remote_tx, mut remote_rx) = mpsc::channel(8);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register_entry(remote.clone(), ConnectionEntry::remote_hosted(remote_tx));
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&remote, true, 10);
+        let local: FullJid = "alice@example.com/local".parse().expect("local resource");
+        let (local_tx, mut local_rx) = mpsc::channel(8);
+        let local_stream = SmSessionId::new("terminal-locality-local-stream");
+        if local_available {
+            let owner = state
+                .deps
+                .protocol
+                .connection_registry
+                .register(local.clone(), local_tx);
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .update_presence(&local, true, 0);
+            assert!(state
+                .deps
+                .protocol
+                .connection_registry
+                .set_sm_stream_id_if_owner(&local, &owner, Some(local_stream.clone())));
+        }
+        let outcome =
+            redrive_terminal_pending_rows_to_live_resource(state.as_ref(), &recipient).await;
+        assert!(outcome == TerminalRedriveOutcome::OrderingDeferred);
+        assert!(
+            outcome.blocks_promotion(),
+            "pending prefix blocks later terminal traffic"
+        );
+        assert!(
+            remote_rx.try_recv().is_err(),
+            "this node must never offer pending custody to a remote mirror"
+        );
+        let rows = state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&recipient)
+            .await
+            .expect("pending prefix retained");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].outbound_sequence.is_none());
+        if local_available {
+            let offered = local_rx
+                .try_recv()
+                .expect("lower-priority local resource receives the pending prefix");
+            assert_eq!(offered.pending_row_id.as_ref(), Some(&rows[0].id));
+            assert_eq!(rows[0].flushed_in_session.as_ref(), Some(&local_stream));
+            assert!(local_rx.try_recv().is_err());
+        } else {
+            assert!(
+                rows[0].flushed_in_session.is_none(),
+                "remote host retains responsibility for starting its local flush"
+            );
+            state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .delete_row(&rows[0].id)
+                .await
+                .expect("remote host settles the pending prefix");
+            let settled =
+                redrive_terminal_pending_rows_to_live_resource(state.as_ref(), &recipient).await;
+            assert!(settled == TerminalRedriveOutcome::Settled);
+            assert!(
+                !settled.blocks_promotion(),
+                "remote-only presence does not stall an unrelated tail after the prefix is gone"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_redrive_prefers_local_resource_over_higher_priority_remote_mirror() {
+        terminal_redrive_with_remote_mirror(true).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_redrive_with_only_remote_mirror_preserves_prefix_and_blocks_promotion() {
+        terminal_redrive_with_remote_mirror(false).await;
+    }
+
+    #[tokio::test]
+    async fn repeated_terminal_ordering_deferrals_share_one_retry_pump() {
+        use super::super::super::cleanup::{
+            redrive_terminal_pending_rows_to_live_resource, TerminalRedriveOutcome,
+        };
+        let storage = Arc::new(HeldOrderingReleaseStorage::new(false));
+        let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+            Arc::new(InMemorySmSessionRegistry::new()),
+            storage.clone(),
+        )
+        .await;
+        assert!(storage
+            .inner
+            .set(
+                DatabasePendingDeliveryStorage::from_database(
+                    state.deps.app_state.db_pool.global().clone(),
+                    QuotaPolicy::Unlimited,
+                )
+                .await
+                .expect("shared pending database")
+            )
+            .is_ok());
+        let resource: FullJid = "alice@example.com/single-terminal-pump"
+            .parse()
+            .expect("resource");
+        let recipient = resource.to_bare();
+        let phone = SmSessionId::new("single-pump-predecessor");
+        seed_archive_row(state.as_ref(), &recipient, "single-pump-a", &phone).await;
+        let b = seed_archive_row(
+            state.as_ref(),
+            &recipient,
+            "single-pump-b",
+            &SmSessionId::new("seed-b"),
+        )
+        .await;
+        storage.release_row(&b).await.expect("B waits behind A");
+        let (tx, mut rx) = mpsc::channel(8);
+        let owner = register_test_connection(state.as_ref(), &resource, tx).await;
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&resource, true, 0);
+        let session = SmSessionId::new("single-terminal-pump-stream");
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .set_sm_stream_id_if_owner(&resource, &owner, Some(session)));
+        let entry = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(&resource, &owner)
+            .expect("live entry");
+        assert!(entry.claim_offline_flush());
+        // The first bounded pass claims B, observes A, and SUCCESSFULLY
+        // releases B. Pause only the background pump's following claim,
+        // leaving B unclaimed so a missing lease would admit more pumps.
+        let paused_call = storage
+            .claim_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+            + 2;
+        storage
+            .pause_claim_at
+            .store(paused_call, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            redrive_terminal_pending_rows_to_live_resource(state.as_ref(), &recipient).await
+                == TerminalRedriveOutcome::OrderingDeferred
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            storage.claim_paused.notified(),
+        )
+        .await
+        .expect("single background retry reached the claim gate");
+        let pending = storage
+            .list(&recipient)
+            .await
+            .expect("successfully released B");
+        assert!(pending
+            .iter()
+            .find(|row| row.id == b)
+            .expect("B")
+            .flushed_in_session
+            .is_none());
+        for _ in 0..8 {
+            assert!(
+                redrive_terminal_pending_rows_to_live_resource(state.as_ref(), &recipient).await
+                    == TerminalRedriveOutcome::OrderingDeferred
+            );
+        }
+        assert_eq!(
+            storage
+                .claim_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            paused_call,
+            "repeated terminal passes must not claim rows or create additional retry pumps"
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            storage
+                .delete_acked_in_window(&phone, 0, 1)
+                .await
+                .expect("A acknowledged"),
+            1
+        );
+        storage.resume_claim.add_permits(1);
+        let offered = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("existing pump advances after A acknowledgement")
+            .expect("B delivery");
+        assert_eq!(offered.pending_row_id.as_ref(), Some(&b));
+        storage
+            .record_pushed_at(&b, 1)
+            .await
+            .expect("writer stamps B");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(lease) = entry.try_acquire_terminal_ordering_retry() {
+                    drop(lease);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed retry releases its per-entry lease");
+        assert!(
+            rx.try_recv().is_err(),
+            "only one B offer reaches the writer"
+        );
+    }
+
+    #[test]
+    fn terminal_ordering_wait_blocks_shutdown_and_replay_promotion() {
+        use super::super::super::cleanup::TerminalRedriveOutcome;
+        assert!(TerminalRedriveOutcome::OrderingDeferred.blocks_promotion());
+        assert!(TerminalRedriveOutcome::Aborted.blocks_promotion());
+        assert!(!TerminalRedriveOutcome::Settled.blocks_promotion());
+        assert!(!TerminalRedriveOutcome::NoLiveTarget.blocks_promotion());
     }
 
     #[tokio::test]
