@@ -545,6 +545,8 @@ schema.#Project & {
 			args: ["-c", #"""
 					set -euo pipefail
 
+					python3 -m unittest discover -s scripts -p 'test_cutover_*.py'
+
 					placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
 					sample_digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
 					sample_git_sha="1111111111111111111111111111111111111111"
@@ -860,6 +862,7 @@ schema.#Project & {
 					cp "${gitops_values}" "${published_values}"
 					MODULES_YAML="${modules_yaml}" SAMPLE_DIGEST="${sample_digest}" SAMPLE_GIT_SHA="${sample_git_sha}" yq -i '
 					  .image.digest = strenv(SAMPLE_DIGEST) |
+					  .cutoverGuard = {"enabled": true, "allowedRevisions": [strenv(SAMPLE_GIT_SHA)]} |
 					  .containerExtraEnv = ((.containerExtraEnv // []) | map(select(.name != "WADDLE_GIT_SHA"))) + [{"name": "WADDLE_GIT_SHA", "value": strenv(SAMPLE_GIT_SHA)}] |
 					  .extensions.enabled = true |
 					  .extensions.modules = load(strenv(MODULES_YAML))
@@ -890,7 +893,7 @@ schema.#Project & {
 					  *) echo "published GitOps render must set WADDLE_GIT_SHA, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
 					esac
 				"""#]
-			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs])
+			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/*cutover*.py"]])
 		}
 
 		buildContainerImage: schema.#Task & {
@@ -1067,6 +1070,15 @@ schema.#Project & {
 					  -t githubDigest="${github_digest:?missing github digest}" \
 					  -t stargateQuotesDigest="${stargate_quotes_digest:?missing stargate-quotes digest}" > "${modules_yaml}"
 
+					# The complete source history identifies the last Recreate window,
+					# even when its build was canceled before publishing any artifact.
+					if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+					  git fetch --unshallow origin
+					fi
+					cutover_revisions="$(mktemp)"
+					python3 scripts/cutover_revisions.py > "${cutover_revisions}"
+					CUTOVER_REVISIONS="${cutover_revisions}" yq -i '.spec.values.cutoverGuard = {"enabled": true, "allowedRevisions": load(strenv(CUTOVER_REVISIONS))}' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+
 					FULL_SHA="${FULL_SHA}" yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.containerExtraEnv = ((.spec.values.containerExtraEnv // []) | map(select(.name != \"WADDLE_GIT_SHA\"))) + [{\"name\": \"WADDLE_GIT_SHA\", \"value\": strenv(FULL_SHA)}] | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.image.tag == \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -e ".spec.values.image.digest == \"${digest}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
@@ -1125,7 +1137,7 @@ schema.#Project & {
 					  --source="$(git config --get remote.origin.url)" \
 					  --revision="${SHORT_SHA}"
 				"""#]
-			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs])
+			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/cutover_revisions.py"]])
 			outputs: ["target/digests/**"]
 			dependsOn: [
 				tasks.checkCiDrift,

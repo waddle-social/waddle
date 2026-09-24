@@ -278,16 +278,18 @@ impl OrderedRelayDeliveryBridge {
         jid: jid::FullJid,
         owner: Arc<AtomicBool>,
         user_owner: NodeId,
-    ) {
+    ) -> RemoteResourceRegistrationId {
+        let registration_id = RemoteResourceRegistrationId::fresh();
         self.remote_socket_resources.lock().await.insert(
             jid.clone(),
             RemoteSocketRegistration {
-                registration_id: RemoteResourceRegistrationId::fresh(),
+                registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
                 owner,
                 user_owner,
             },
         );
+        registration_id
     }
 
     #[cfg(test)]

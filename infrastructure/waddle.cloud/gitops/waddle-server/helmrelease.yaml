@@ -10,7 +10,7 @@ spec:
   chart:
     spec:
       chart: waddle-server
-      version: 0.4.x
+      version: ">=0.4.6 <0.5.0"
       sourceRef:
         kind: HelmRepository
         name: waddle-server
@@ -37,9 +37,11 @@ spec:
     # it must never change across upgrades or rollbacks.
     deployment:
       uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
-    # #1834's V1020 / relay wire cutover completed on every replica at 215ed6ff.
-    # Resume steady-state rolling updates; incompatible wire changes still need
-    # a verified Recreate cutover until #1804 is implemented.
+    # The publisher derives cutover revisions from git history; Helm checks live
+    # WADDLE_GIT_SHA before accepting the first rolling upgrade after a cutover.
+    # See docs/operations/relay-cutovers.md.
+    cutoverGuard:
+      enabled: true
     updateStrategy:
       type: RollingUpdate
       rollingUpdate:

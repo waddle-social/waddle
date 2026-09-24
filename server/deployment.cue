@@ -109,6 +109,10 @@ package cuenv
 }
 
 #PublishedValues: {
+	cutoverGuard: {
+		enabled: true
+		allowedRevisions: [...#GitSha]
+	}
 	image: {
 		digest: #ServerImageDigest
 		...

@@ -71,6 +71,9 @@ on:
     - server/rust-toolchain.toml/**
     - server/schema/**
     - server/scripts/**
+    - server/scripts/*cutover*.py
+    - server/scripts/cutover_revisions.py
+    - server/scripts/cutover_revisions.py/**
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml
