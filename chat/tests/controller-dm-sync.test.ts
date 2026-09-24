@@ -51,6 +51,7 @@ function makeHarness() {
   const selectChannel = mock(async () => {});
   const selectGroupDm = mock(async () => true);
   const clearPendingChannelRoomJidSelection = mock(() => {});
+  const cancelPendingRoute = mock(() => {});
 
   const waddles = {
     channels,
@@ -84,6 +85,8 @@ function makeHarness() {
       selfDomain: computed(() => "example.com"),
       activeExtensionRouteKey: ref<ExtensionRouteKey | null>(null),
       clearPendingChannelRoomJidSelection,
+      cancelPendingRoute,
+      updateUrl: () => {},
       selectGroupDm,
       selectChannel,
     }),
@@ -99,6 +102,7 @@ function makeHarness() {
     selectChannel,
     selectGroupDm,
     loadMessages,
+    cancelPendingRoute,
   };
 }
 
@@ -110,6 +114,7 @@ describe("useDmSync handleOpenDm / handleNewDm", () => {
     expect(h.selectGroupDm).not.toHaveBeenCalled();
     expect(h.openDm).toHaveBeenCalledWith("general@example.com");
     expect(h.loadMessages).toHaveBeenCalledWith("general@example.com", 0);
+    expect(h.cancelPendingRoute).toHaveBeenCalledTimes(1);
     h.scope.stop();
   });
 

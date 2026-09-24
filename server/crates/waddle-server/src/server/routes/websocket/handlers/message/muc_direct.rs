@@ -24,7 +24,29 @@ pub(super) async fn handle_muc_direct_message(
     if let Some(frames) = handle_muc_private_message(incoming, state, bound_jid, deps).await {
         return Some(frames);
     }
-    handle_muc_mediated_decline(incoming, state, bound_jid, deps).await
+    if let Some(frames) = handle_muc_mediated_decline(incoming, state, bound_jid, deps).await {
+        return Some(frames);
+    }
+
+    let target = incoming.to.as_ref()?;
+    if target.node().is_some()
+        && target.resource().is_none()
+        && target.domain().as_str() == state.deps.service_domains.muc
+        && matches!(incoming.type_, MessageType::Chat | MessageType::Normal)
+    {
+        // XEP-0045 message business rules permit bad-request for an improperly
+        // typed room message. Reject before the account archive/inbox pipeline;
+        // valid mediated invitations and declines have already been handled.
+        return Some(vec![message_error_frame(
+            incoming,
+            bound_jid,
+            deps,
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "Messages to a room must use type groupchat.",
+        )]);
+    }
+    None
 }
 
 async fn handle_muc_private_message(

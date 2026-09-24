@@ -3236,6 +3236,9 @@ export class BrowserXmppClient {
   private handleMessage(message: InboundWasmMessage) {
     const inboxPush = message.inboxPush ?? (message.inbox_push ? inboxEntryFromWasm(message.inbox_push) : undefined);
     if (inboxPush) { this.events.emit("inboxPush", inboxPush); return; }
+    // The marker is sender-controlled. Unknown room PM copies may be ignored
+    // (XEP-0280 §6.1); never use them to invent an account or occupant identity.
+    if (message.muc_pm && !this.mucPmOccupant(message)) return;
     if (message.carbon?.sent || message.carbon?.received) {
       // XEP-0280 (#1243): the WASM core unwrapped a verified carbon and
       // this IS the inner message.
@@ -3302,7 +3305,7 @@ export class BrowserXmppClient {
     if (message.chat_state && !message.body) {
       if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
       else {
-        // XEP-0045 §7.5 (#1256): a chat state from a joined room's
+        // XEP-0045 §7.5 (#1256): a chat state from a MUC
         // occupant JID belongs to that occupant's PM conversation, not
         // to a phantom DM keyed by the room bare JID.
         const occupant = this.mucPmOccupant(message);
@@ -3365,7 +3368,7 @@ export class BrowserXmppClient {
     const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, selfBare, "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
     if (converted) {
       // XEP-0045 §7.5 (#1256): a `type='chat'` message whose counterpart
-      // is `room@service/nick` for a known room is a MUC private message.
+      // is a recognized `room@service/nick` is a MUC private message.
       // Re-key the conversation to the occupant JID so it never misfiles
       // under the room bare JID (where a reply would broadcast).
       const occupant = this.mucPmOccupant(message);
@@ -3447,15 +3450,14 @@ export class BrowserXmppClient {
     return false;
   }
 
-  private isMucServiceOccupant(peerJid: string): boolean {
-    return Boolean(resourceOf(peerJid))
-      && jidDomain(peerJid).toLowerCase() === this.mucServiceJid.trim().toLowerCase();
+  private isMucServicePeer(peerJid: string): boolean {
+    return jidDomain(peerJid).toLowerCase() === this.mucServiceJid.trim().toLowerCase();
   }
 
   /**
    * XEP-0045 §7.5 (#1256): detect a MUC private message — a non-groupchat
-   * message whose conversation counterpart is `room@service/nick` for a
-   * known room. Returns the occupant JID (the conversation identity a
+   * message whose counterpart is a recognized `room@service/nick`, even
+   * before room discovery. Returns the occupant JID (the conversation identity a
    * reply must address) and the occupant nick, or `undefined` for a
    * normal 1:1 message.
    */
@@ -3468,23 +3470,25 @@ export class BrowserXmppClient {
     // contain '/', so split-once, never split-all.
     const slash = counterpart.indexOf("/");
     const nick = slash >= 0 ? counterpart.slice(slash + 1) : "";
-    if (!nick || !this.isKnownMucRoomBare(barePeerJid(counterpart))) return undefined;
+    if (!nick || !this.isMucPmPeer(counterpart)) return undefined;
     return { occupantJid: counterpart, nick };
   }
 
-  /** Public: whether `bareJid` is a MUC room this session knows about.
+  /** Public: whether `bareJid` belongs to the configured MUC service or
+   * is a room this session knows about.
    * Consumed by the DM conversations store to keep occupant-keyed MUC-PM
    * conversations from folding to (or being duplicated under) the room
    * bare JID (#1256). */
   isKnownMucRoom(bareJid: string): boolean {
-    return this.isKnownMucRoomBare(barePeerJid(bareJid));
+    return this.isMucServicePeer(bareJid)
+      || this.isKnownMucRoomBare(barePeerJid(bareJid));
   }
 
   /** Public: whether `peerJid` is a full occupant JID proven by the
    * configured MUC service, a discovered room, or persisted catch-up scope. */
   isMucPmPeer(peerJid: string): boolean {
     if (!resourceOf(peerJid)) return false;
-    return this.isMucServiceOccupant(peerJid)
+    return this.isMucServicePeer(peerJid)
       || this.isKnownMucRoomBare(barePeerJid(peerJid))
       || this.catchup.getDmScope(peerJid) === "muc-occupant";
   }

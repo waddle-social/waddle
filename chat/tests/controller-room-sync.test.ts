@@ -45,6 +45,7 @@ function makeHarness() {
   const reloadChannelMembers = mock(async () => {});
   const closeDm = mock(() => {});
   const updateUrl = mock(() => {});
+  const cancelPendingRoute = mock(() => {});
 
   const client = {
     ...handlerStubs(),
@@ -85,6 +86,7 @@ function makeHarness() {
       memberJidByNick,
       activeExtensionRouteKey,
       updateUrl,
+      cancelPendingRoute,
     }),
   )!;
 
@@ -105,6 +107,7 @@ function makeHarness() {
     reloadChannelMembers,
     closeDm,
     updateUrl,
+    cancelPendingRoute,
   };
 }
 
@@ -139,6 +142,7 @@ describe("useRoomSync selectChannel", () => {
       { intent: "explicit-navigation" },
     );
     expect(h.activeChannelId.value).toBe("general");
+    expect(h.cancelPendingRoute).toHaveBeenCalledTimes(1);
     h.scope.stop();
   });
 

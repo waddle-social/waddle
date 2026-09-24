@@ -15,6 +15,7 @@ interface PageNavigationDeps {
   activeThreadStack: Ref<string[]>;
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   clearPendingChannelRoomJidSelection: () => void;
+  cancelPendingRoute: () => void;
   updateUrl: () => void;
 }
 
@@ -34,10 +35,12 @@ export function usePageNavigation(deps: PageNavigationDeps) {
     activeThreadStack,
     activeExtensionRouteKey,
     clearPendingChannelRoomJidSelection,
+    cancelPendingRoute,
     updateUrl,
   } = deps;
 
   function openUserSettings() {
+    cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
@@ -50,6 +53,7 @@ export function usePageNavigation(deps: PageNavigationDeps) {
    * page refresh lands back on /threads.
    */
   function openThreads() {
+    cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
@@ -75,6 +79,7 @@ export function usePageNavigation(deps: PageNavigationDeps) {
    * ChatReadyShell wins, and syncs the URL so a refresh lands on /unread.
    */
   function openUnread() {
+    cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
@@ -98,6 +103,7 @@ export function usePageNavigation(deps: PageNavigationDeps) {
    * clicks need to mirror what `applyRouteTarget` would do.
    */
   function openCommunitySurface(surface: "feed" | "events") {
+    cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
@@ -123,6 +129,7 @@ export function usePageNavigation(deps: PageNavigationDeps) {
    * rather than re-entering the last channel.
    */
   function openHome() {
+    cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
@@ -144,6 +151,7 @@ export function usePageNavigation(deps: PageNavigationDeps) {
    * so refresh and back/forward land on the same place.
    */
   function openDmList() {
+    cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
@@ -159,6 +167,7 @@ export function usePageNavigation(deps: PageNavigationDeps) {
   }
 
   function closeUserSettings() {
+    cancelPendingRoute();
     const state = window.history.state as { waddleRouteId?: string; origin?: string } | null;
     if (
       window.location.pathname === "/settings"

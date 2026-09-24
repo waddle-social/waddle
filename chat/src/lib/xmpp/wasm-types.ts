@@ -140,6 +140,8 @@ export interface WasmMessage {
   reaction_emojis: string[];
   in_call?: { kind: "reaction"; sid: string; emoji: string };
   is_muc: boolean;
+  /** XEP-0045 §7.5 private-message marker; older senders may omit it. */
+  muc_pm?: boolean;
   thread?: string;
   parent_thread_id?: string;
   reply_to_id?: string;

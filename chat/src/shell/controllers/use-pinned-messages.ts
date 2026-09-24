@@ -26,7 +26,7 @@ interface PinnedMessagesDeps {
   dmMessaging: ReturnType<typeof useDirectMessages>;
   dmConversations: ReturnType<typeof useDirectMessageConversations>;
   isActiveDirectDmSurface: () => boolean;
-  activeTarget: ComputedRef<ReturnType<typeof useChannelMessages> | ReturnType<typeof useDirectMessages>>;
+  activeTarget: ComputedRef<ReturnType<typeof useChannelMessages> | ReturnType<typeof useDirectMessages> | null>;
   contentAreaRef: Ref<ContentAreaHandle | null>;
 }
 
@@ -102,7 +102,9 @@ export function usePinnedMessages(deps: PinnedMessagesDeps) {
    * `scrollToMessage(messageId)` accepts the wire id; we route the
    * stanza-id directly since `ensureMessageLoaded` resolves both. */
   async function jumpToPinnedMessage(stanzaId: string) {
-    await activeTarget.value.ensureMessageLoaded(stanzaId);
+    const target = activeTarget.value;
+    if (!target) return;
+    await target.ensureMessageLoaded(stanzaId);
     await contentAreaRef.value?.scrollToMessage(stanzaId);
   }
 
@@ -114,7 +116,7 @@ export function usePinnedMessages(deps: PinnedMessagesDeps) {
    * `message.stanza_id` upstream. Returns null when no archive id is
    * known yet (e.g., a queued send hasn't been reflected). */
   function resolvePinTargetStanzaId(messageId: string): string | null {
-    const message = activeTarget.value.messages.value.find((m) => m.id === messageId);
+    const message = activeTarget.value?.messages.value.find((m) => m.id === messageId);
     if (!message) return null;
     const m = message as TimelineMessage & {
       reactionTargetId?: string;
@@ -126,8 +128,7 @@ export function usePinnedMessages(deps: PinnedMessagesDeps) {
   // Waddle MAM stanza-id filter: on false → true transition, batch-fetch
   // any pinned stanza-ids not already in the loaded timeline or cache.
   watch(() => ui.showPinnedPanel.value, async (open) => {
-    if (!open) return;
-    if (isActiveDirectDmSurface()) return;
+    if (!open || activeTarget.value !== messaging) return;
     const client = xmppClient.value;
     const spaceId = waddles.currentChannel.value?.spaceId ?? "";
     const channelId = waddles.activeChannelId.value;

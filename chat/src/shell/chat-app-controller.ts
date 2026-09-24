@@ -100,6 +100,7 @@ export function useChatAppController() {
   const dmConversations = useDirectMessageConversations(
     session,
     xmppClient,
+    computed(() => waddles.channels.value.flatMap((channel) => channel.jid ? [channel.jid] : [])),
   );
 
   const channelUnread = useChannelInbox(xmppClient);
@@ -244,6 +245,7 @@ export function useChatAppController() {
     managedMucDomain,
     memberJidByNick,
     activeExtensionRouteKey,
+    cancelPendingRoute: () => routeSyncHandle?.cancelPendingRoute(),
     updateUrl,
   });
 
@@ -271,6 +273,8 @@ export function useChatAppController() {
     rosterContacts,
     selfDomain,
     activeExtensionRouteKey,
+    cancelPendingRoute: () => routeSyncHandle?.cancelPendingRoute(),
+    updateUrl,
     clearPendingChannelRoomJidSelection: roomSync.clearPendingChannelRoomJidSelection,
     selectGroupDm: roomSync.selectGroupDm,
     selectChannel: roomSync.selectChannel,
@@ -374,6 +378,7 @@ export function useChatAppController() {
     activeRightPanel,
     activeThreadStack,
     activeExtensionRouteKey,
+    cancelPendingRoute: () => routeSync.cancelPendingRoute(),
     clearPendingChannelRoomJidSelection: roomSync.clearPendingChannelRoomJidSelection,
     updateUrl,
   });
@@ -491,6 +496,7 @@ export function useChatAppController() {
     displayedMemberState: memberDirectory.displayedMemberState,
     memberCountLabel: memberDirectory.memberCountLabel,
     activeDmPeer: conversation.activeDmPeer,
+    activeRoomChannel: conversation.activeRoomChannel,
     computedChannelUnreadMap,
     groupDmConversations,
     totalTabUnreadCount,

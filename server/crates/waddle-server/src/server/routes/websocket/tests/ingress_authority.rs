@@ -773,13 +773,25 @@ async fn postgres_connection_reply_receipt_with_remote(
     )
     .await;
     connection_reply_receipt_after_transport_write_with_remote(
-        state,
+        state.clone(),
         transport_lost,
         false,
         nested_owner,
         remote_owner,
     )
     .await;
+    // Receipt retries can still query this schema after the assertions pass.
+    // Join them before schema teardown takes exclusive table locks.
+    assert!(
+        state
+            .deps
+            .protocol
+            .ingress
+            .drain_and_join(std::time::Duration::from_secs(5))
+            .await,
+        "ingress tasks must stop before dropping the PostgreSQL schema"
+    );
+    drop(state);
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await

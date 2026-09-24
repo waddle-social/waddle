@@ -23,7 +23,7 @@ export function useChatReadActivity(options: {
   dmConversations: ReturnType<typeof import("@/dms/conversations").useDirectMessageConversations>;
   messaging: ReturnType<typeof import("@/channels/messages").useChannelMessages>;
   dmMessaging: ReturnType<typeof import("@/dms/messages").useDirectMessages>;
-  activeTarget: ReadonlyRef<ActiveTarget>;
+  activeTarget: ReadonlyRef<ActiveTarget | null>;
   roomJidForChannelId: (session: WaddleSession, channels: ChannelSummary[], channelId: string) => string | null;
 }) {
   const computedChannelUnreadMap = computed(() => options.channelUnread.channelUnreadMap(options.channels.value));
@@ -44,7 +44,7 @@ export function useChatReadActivity(options: {
 
   const { isWindowFocused } = useChatWindowVisibility();
   const readReceiptsKind = computed<"channel" | "dm" | null>(() => {
-    if (options.activePage.value !== "chat") return null;
+    if (options.activePage.value !== "chat" || !options.activeTarget.value) return null;
     if (options.sidebarMode.value === "dms" && options.dmConversations.activePeerJid.value) return "dm";
     return options.activeChannelId.value ? "channel" : null;
   });
@@ -96,7 +96,7 @@ export function useChatReadActivity(options: {
     },
     markDmRead: (peer) => options.dmConversations.markRead(peer),
     markDisplayed: (id) => {
-      options.activeTarget.value.markDisplayed(id);
+      options.activeTarget.value?.markDisplayed(id);
       const roomJid = readReceiptsActiveRoomJid.value;
       if (readReceiptsKind.value === "channel" && roomJid && readReceiptsUnreadCount.value === 0) {
         options.messaging.clearChannelActivity(roomJid);

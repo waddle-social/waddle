@@ -333,7 +333,7 @@ export class MamPager {
     if (this.isMucPmPeer(options.peerJid ?? "", options.dmScope)) return [];
     const outcomeAnchors: ArchivedDmCallOutcome[] = [];
     for (const message of page?.messages ?? []) {
-      if (!message.call_event) continue;
+      if (!message.call_event || message.muc_pm) continue;
       const rawCounterpart = this.rawDmCounterpart(message);
       // The account archive tuple is authoritative before service discovery:
       // ordinary server DM rows use a bare remote endpoint; a full remote
@@ -398,7 +398,9 @@ export class MamPager {
       return fullJidIdentityKey(this.rawDmCounterpart(message)) === fullJidIdentityKey(peerJid);
     }
     const occupant = this.deps.classifyMucPm?.(message);
-    if (occupant) return false;
+    // A sender-controlled PM marker cannot establish a new conversation
+    // identity. Leave unverified rows out of account history as on live input.
+    if (message.muc_pm || occupant) return false;
     const rawPeer = this.rawDmCounterpart(message);
     // The persisted scope describes the requested conversation, not the raw
     // archive endpoint. Keep authoritative endpoint classification independent

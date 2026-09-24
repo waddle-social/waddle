@@ -45,6 +45,8 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
     let from = el.attr("from").map(String::from);
     let to = el.attr("to").map(String::from);
     let message_type = el.attr("type").unwrap_or("normal").to_string();
+    let muc_pm = matches!(message_type.as_str(), "chat" | "normal")
+        && el.get_child("x", NS_MUC_USER).is_some();
 
     let body = el.get_child("body", NS_CLIENT).map(|e| e.text());
     let subject = el.get_child("subject", NS_CLIENT).map(|e| e.text());
@@ -283,6 +285,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         from,
         to,
         message_type,
+        muc_pm,
         id,
         stanza_id,
         stanza_ids,

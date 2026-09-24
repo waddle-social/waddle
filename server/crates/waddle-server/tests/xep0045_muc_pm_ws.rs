@@ -23,6 +23,7 @@
 use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
+use waddle_xmpp::xep::xep0297::NS_FORWARD;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::minidom::Element;
 
@@ -148,6 +149,29 @@ async fn enable_carbons(client: &mut WsXmppClient, id: &str) {
         .recv_matching(|frame| frame.contains(id))
         .await
         .expect("carbons enable ack");
+}
+
+async fn inbox_response(client: &mut WsXmppClient, id: &str) -> Vec<Element> {
+    use waddle_xmpp::xep::xep0430::{build_inbox_query_iq, InboxQuery};
+
+    let query = build_inbox_query_iq(
+        &InboxQuery {
+            messages: false,
+            ..Default::default()
+        },
+        id,
+    );
+    client
+        .send(&element_to_xml(query.into()))
+        .await
+        .expect("query inbox");
+    client
+        .recv_until(|frame| frame.contains("<fin") && frame.contains(id))
+        .await
+        .expect("inbox query completes")
+        .into_iter()
+        .map(|frame| frame.parse().expect("inbox response XML"))
+        .collect()
 }
 
 fn data_form_field(var: &str, field_type: Option<&str>, value: &str) -> Element {
@@ -290,7 +314,8 @@ async fn muc_pm_delivered_to_all_sessions_of_target_nick_with_canonical_shape() 
 }
 
 /// XEP-0280 MUC rule (#1257): the sender's other carbon-enabled
-/// resource receives a `<sent/>` carbon of the outbound PM.
+/// resource receives a `<sent/>` carbon with the full occupant target,
+/// including slashes in the nickname, before it has joined the room.
 #[tokio::test]
 async fn muc_pm_sent_carbon_reaches_senders_other_resource() {
     let _guard = TEST_SERIAL.lock().await;
@@ -305,11 +330,12 @@ async fn muc_pm_sent_carbon_reaches_senders_other_resource() {
 
     let room = format!("pm-carbon-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin_room, &room, ADMIN).await;
-    join_room(&mut alice, &room, ALICE).await;
+    let target_nick = "alice/phone";
+    join_room(&mut alice, &room, target_nick).await;
 
     let body = format!("carbon-proof-{}", uuid::Uuid::new_v4());
     admin_room
-        .send(&pm_xml(&room, ALICE, "pm-carbon-1", &body))
+        .send(&pm_xml(&room, target_nick, "pm-carbon-1", &body))
         .await
         .expect("send PM");
 
@@ -320,14 +346,146 @@ async fn muc_pm_sent_carbon_reaches_senders_other_resource() {
     let element = carbon
         .parse::<Element>()
         .unwrap_or_else(|err| panic!("carbon must parse as XML: {err}; frame={carbon}"));
-    assert!(
-        find_descendant(&element, "sent", NS_CARBONS).is_some(),
-        "outbound MUC PM must be wrapped in <sent xmlns='{NS_CARBONS}'>: {carbon}"
+    let forwarded = element
+        .get_child("sent", NS_CARBONS)
+        .and_then(|sent| sent.get_child("forwarded", NS_FORWARD))
+        .and_then(|forwarded| forwarded.get_child("message", NS_CLIENT))
+        .expect("sent carbon must contain the original message");
+    let message = xmpp_parsers::message::Message::try_from(forwarded.clone())
+        .expect("forwarded PM must be a typed message");
+    assert_eq!(message.type_, xmpp_parsers::message::MessageType::Chat);
+    assert_eq!(
+        message.to,
+        Some(
+            format!("{room}/{target_nick}")
+                .parse()
+                .expect("occupant JID")
+        ),
+        "sent carbon must preserve the full occupant target before room discovery"
     );
 
     let _ = admin_room.close().await;
     let _ = admin_other.close().await;
     let _ = alice.close().await;
+}
+
+/// XEP-0045 message business rules: improperly typed room messages must not become account DMs.
+#[tokio::test]
+async fn bare_room_chat_is_rejected_without_direct_side_effects() {
+    use waddle_xmpp::inbox::ConversationKind;
+    use waddle_xmpp::xep::xep0430::{parse_inbox_entry_with_metadata, NS_INBOX, NS_WADDLE_INBOX};
+    use xmpp_parsers::message::{Id, Message, MessageType};
+
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let password = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &password, "bare-room-sender").await;
+    let mut other = connect(&server, ADMIN, &password, "bare-room-other").await;
+    enable_carbons(&mut other, "bare-room-enable").await;
+
+    for seeded in [false, true] {
+        for message_type in [MessageType::Chat, MessageType::Normal] {
+            let room: jid::BareJid = format!("bare-room-{}@muc.{DOMAIN}", uuid::Uuid::new_v4())
+                .parse()
+                .expect("room JID");
+            join_room(&mut admin, &room.to_string(), ADMIN).await;
+            let mut message = Message::new(Some(room.clone().into()));
+            message.type_ = MessageType::Groupchat;
+            message.id = Some(Id("bare-room-seed".into()));
+            message
+                .bodies
+                .insert(Default::default(), "channel baseline".into());
+            if seeded {
+                admin
+                    .send(&element_to_xml(message.clone().into()))
+                    .await
+                    .expect("send channel message");
+                admin
+                    .recv_matching(|frame| frame.contains("bare-room-seed"))
+                    .await
+                    .expect("channel reflection");
+            }
+            message.type_ = message_type;
+            message.id = Some(Id("bare-room-invalid".into()));
+            message
+                .bodies
+                .insert(Default::default(), "misaddressed private reply".into());
+            admin
+                .send(&element_to_xml(message.into()))
+                .await
+                .expect("send invalid room chat");
+
+            // The following IQ also orders this check after message processing.
+            let response = inbox_response(&mut admin, "bare-room-inbox").await;
+            let entry = response
+                .iter()
+                .filter_map(|frame| {
+                    frame.get_child("entry", NS_INBOX).map(|entry| {
+                        parse_inbox_entry_with_metadata(
+                            entry,
+                            frame.get_child("metadata", NS_WADDLE_INBOX),
+                        )
+                        .expect("typed inbox entry")
+                    })
+                })
+                .find(|entry| entry.partner == room);
+            if seeded {
+                let entry = entry.expect("existing channel entry");
+                assert_eq!(
+                    entry.kind,
+                    ConversationKind::MucRoom,
+                    "invalid chat must not change the room's inbox identity"
+                );
+                assert_eq!(entry.preview.as_deref(), Some("channel baseline"));
+            } else {
+                assert!(
+                    entry.is_none(),
+                    "invalid chat must not create a direct inbox entry: {entry:?}"
+                );
+            }
+            let error = response
+                .iter()
+                .find(|frame| {
+                    frame.name() == "message" && frame.attr("id") == Some("bare-room-invalid")
+                })
+                .and_then(|message| message.get_child("error", NS_CLIENT))
+                .expect("bare room chat must receive an error");
+            assert_eq!(error.attr("type"), Some("modify"));
+            assert!(error.get_child("bad-request", NS_XMPP_STANZAS).is_some());
+
+            admin
+                .send(&mam_with_query_xml(
+                    &format!("{ADMIN}@{DOMAIN}"),
+                    "bare-room-mam",
+                    &room.to_string(),
+                    10,
+                    None,
+                ))
+                .await
+                .expect("query personal room history");
+            let history = admin
+                .recv_until(|frame| frame.contains("<fin") && frame.contains("bare-room-mam"))
+                .await
+                .expect("MAM query completes");
+            assert!(
+                history.iter().all(|frame| frame
+                    .parse::<Element>()
+                    .expect("MAM XML")
+                    .get_child("result", NS_MAM)
+                    .is_none()),
+                "invalid room chat must not enter the personal archive"
+            );
+        }
+    }
+    let other_frames = inbox_response(&mut other, "bare-room-other-inbox").await;
+    assert!(
+        other_frames
+            .iter()
+            .all(|frame| frame.get_child("sent", NS_CARBONS).is_none()),
+        "invalid room chat must not be carbon copied"
+    );
+    let _ = admin.close().await;
+    let _ = other.close().await;
 }
 
 /// XEP-0198 (#1257 core): a PM to an occupant whose only session is
