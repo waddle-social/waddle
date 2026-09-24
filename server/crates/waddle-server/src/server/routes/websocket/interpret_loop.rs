@@ -22,6 +22,7 @@ pub(crate) fn build_interpret_deps<'a>(
     authenticated_principal: Option<super::ResolvedPrincipal<'a>>,
 ) -> crate::server::routes::interpret::Deps<'a> {
     crate::server::routes::interpret::Deps {
+        dispatch_probe_budget: None,
         delivery_execution_context:
             crate::server::routes::interpret::DeliveryExecutionContext::Live,
         connection_registry: &state.deps.protocol.connection_registry,

@@ -1,6 +1,12 @@
 //! Tie dispatch to the archive position committed with its frozen obligations.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use jid::{BareJid, FullJid};
 use waddle_xmpp::{
@@ -18,6 +24,28 @@ use crate::{
 
 use super::{EffectReceiptKey, IngressDecision};
 
+/// One bounded allowance shared by every effect and socket probe in a pass.
+#[derive(Clone, Default)]
+pub(crate) struct DispatchProbeBudget {
+    used: Arc<AtomicU8>,
+}
+
+impl DispatchProbeBudget {
+    fn next_backoff(&self) -> Option<Duration> {
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used < 4).then_some(used + 1)
+            })
+            .ok()
+            .map(|used| Duration::from_millis(2 << used))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn consumed_backoffs(&self) -> u8 {
+        self.used.load(Ordering::Relaxed)
+    }
+}
+
 impl super::IngressAuthority {
     /// Recheck at the socket after network or actor delay. The caller retains
     /// the exact connection owner across this read and the queue acceptance.
@@ -26,6 +54,7 @@ impl super::IngressAuthority {
         context: &crate::server::routes::interpret::SmIngressAppendContext,
         resource: &FullJid,
         stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
+        budget: Option<&DispatchProbeBudget>,
     ) -> Result<DispatchReadiness, IngressUowError> {
         resource_ready(
             &self.uow,
@@ -33,6 +62,7 @@ impl super::IngressAuthority {
             &context.receipt,
             Some(resource),
             stream,
+            budget,
         )
         .await
     }
@@ -154,9 +184,33 @@ fn identity_matches(
     }
 }
 
-/// A failed probe preserves the obligation. No predecessor work or waiting is
-/// performed on the connection loop; maintenance replays the same frozen plan.
+/// Give in-flight predecessor receipts a brief chance to finish, without
+/// retaining a transaction or executing predecessor work. Persistent barriers
+/// still defer to maintenance; the enclosing execution deadline also applies.
 pub(super) async fn resource_ready(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    receipt: &EffectReceiptKey,
+    resource: Option<&FullJid>,
+    stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
+    budget: Option<&DispatchProbeBudget>,
+) -> Result<DispatchReadiness, IngressUowError> {
+    loop {
+        let readiness = resource_ready_once(uow, key, receipt, resource, stream).await?;
+        // An empty predecessor list denotes an independent pending-delivery
+        // barrier, which can require client acknowledgement rather than an
+        // in-flight canonical receipt. Do not delay that connection's loop.
+        if matches!(&readiness, DispatchReadiness::Blocked(keys) if !keys.is_empty()) {
+            if let Some(delay) = budget.and_then(DispatchProbeBudget::next_backoff) {
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        }
+        return Ok(readiness);
+    }
+}
+
+async fn resource_ready_once(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     receipt: &EffectReceiptKey,
@@ -169,6 +223,10 @@ pub(super) async fn resource_ready(
     let readiness =
         ArchiveDispatchRepository::readiness(&mut tx, key, receipt, resource, stream).await?;
     tx.commit().await?;
+    #[cfg(test)]
+    if matches!(&readiness, DispatchReadiness::Blocked(_)) {
+        super::execute::test_hooks::after_blocked_dispatch(key).await;
+    }
     Ok(readiness)
 }
 
@@ -230,7 +288,16 @@ pub(super) async fn effect_ready(
             continue;
         }
         checked = true;
-        match resource_ready(uow, key, receipt, target, stream.as_ref()).await? {
+        match resource_ready(
+            uow,
+            key,
+            receipt,
+            target,
+            stream.as_ref(),
+            deps.dispatch_probe_budget.as_ref(),
+        )
+        .await?
+        {
             blocked @ DispatchReadiness::Blocked(_) => return Ok((blocked, None)),
             DispatchReadiness::Ready => readiness = DispatchReadiness::Ready,
             DispatchReadiness::Completed => {}
