@@ -3,18 +3,23 @@ import WaddleKit
 
 /// The message text: paragraphs with XEP-0394 styling, XEP-0372 mention
 /// highlights and detected links; quotes with a leading bar; code blocks
-/// in monospace. Selectable.
+/// in monospace. A XEP-0245 `/me` body renders as an action line,
+/// "* Author action". Selectable.
 struct MessageRichBody: View {
     let item: TimelineItem
     let account: AccountIdentity
     /// Compact rows show "(edited)" inline since they have no header.
     let showsEditedMark: Bool
+    /// The name the row header shows, used for `/me` action lines.
+    let authorName: String
 
     var body: some View {
-        let blocks = RichTextLayout.blocks(
-            for: MentionHighlight.input(for: item, account: account),
+        let hidden = MeAction.hiddenScalarCount(ofBody: item.body)
+        let rendered = RichTextLayout.blocks(
+            for: MentionHighlight.input(for: item, account: account, hiddenPrefix: hidden),
             detectLinks: MessageLinkDetector.links(in:)
         )
+        let blocks = hidden > 0 ? MeActionLine.blocks(rendered, actor: authorName) : rendered
         VStack(alignment: .leading, spacing: Theme.Spacing.s - 2) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 blockView(block, isLast: index == blocks.count - 1)

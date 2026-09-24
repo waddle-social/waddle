@@ -41,7 +41,12 @@ struct EncryptedAttachmentView: View {
             }
         case let .decrypted(attachment):
             if let image = attachment.image {
-                DecryptedImageAttachment(file: model.file, image: image, isSticker: isSticker) {
+                DecryptedImageAttachment(
+                    file: model.file,
+                    image: image,
+                    animatedData: GifMedia.isGIF(data: attachment.data) ? attachment.data : nil,
+                    isSticker: isSticker
+                ) {
                     model.openPreview()
                 }
             } else {

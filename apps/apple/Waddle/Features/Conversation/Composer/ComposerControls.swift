@@ -1,138 +1,6 @@
 import SwiftUI
 import WaddleKit
 
-/// Multi-line field. On Mac, Return sends, Shift or Option with Return
-/// adds a line, Tab or Return accepts the first mention suggestion. Escape
-/// cancels an edit or reply everywhere a hardware keyboard is attached.
-struct ComposerTextField: View {
-    @Binding var text: String
-    let placeholder: String
-    var isFocused: FocusState<Bool>.Binding
-    let onSubmit: () -> Void
-    /// Returns true when a suggestion was inserted.
-    let onAcceptSuggestion: () -> Bool
-    /// Returns true when an edit or reply was cancelled.
-    let onCancel: () -> Bool
-
-    var body: some View {
-        TextField(placeholder, text: $text, axis: .vertical)
-            .textFieldStyle(.plain)
-            .lineLimit(1...8)
-            .font(.body)
-            .focused(isFocused)
-            .padding(.vertical, Theme.Spacing.xs + 2)
-            #if os(macOS)
-            .onKeyPress(.return, phases: .down) { press in
-                handleReturn(press)
-            }
-            .onKeyPress(.tab, phases: .down) { _ in
-                onAcceptSuggestion() ? .handled : .ignored
-            }
-            #endif
-            .onKeyPress(.escape) {
-                onCancel() ? .handled : .ignored
-            }
-    }
-
-    #if os(macOS)
-    private func handleReturn(_ press: KeyPress) -> KeyPress.Result {
-        // Option-Return is the text system's own newline, inserted at the
-        // caret; let it through.
-        if press.modifiers.contains(.option) {
-            return .ignored
-        }
-        if press.modifiers.contains(.shift) {
-            text += "\n"
-            return .handled
-        }
-        if onAcceptSuggestion() {
-            return .handled
-        }
-        onSubmit()
-        return .handled
-    }
-    #endif
-}
-
-/// Send (or save, while editing). Command-Return sends on every platform.
-struct ComposerSendButton: View {
-    let isEditing: Bool
-    let isEnabled: Bool
-    let action: () -> Void
-
-    var body: some View {
-        #if os(iOS)
-        Button(action: action) {
-            Image(systemName: isEditing ? "checkmark" : "arrow.up")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(isEnabled ? Color.white : Color.secondary)
-                .frame(width: 44, height: 44)
-                .background(
-                    isEnabled ? Color.accentColor : Color.secondary.opacity(0.12),
-                    in: Circle()
-                )
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
-        .keyboardShortcut(.return, modifiers: .command)
-        .help(isEditing ? "Save edit" : "Send")
-        .accessibilityLabel(Text(isEditing ? "Save edit" : "Send"))
-        #else
-        Button(action: action) {
-            Image(systemName: isEditing ? "checkmark.circle.fill" : "arrow.up.circle.fill")
-                .font(.system(size: 26))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary)
-        }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
-        .keyboardShortcut(.return, modifiers: .command)
-        .help(isEditing ? "Save edit" : "Send")
-        .accessibilityLabel(Text(isEditing ? "Save edit" : "Send"))
-        #endif
-    }
-}
-
-/// The "+" menu: photos and files.
-struct ComposerAttachmentMenu: View {
-    let isDisabled: Bool
-    let onPhoto: () -> Void
-    let onFile: () -> Void
-
-    var body: some View {
-        Menu {
-            Button(action: onPhoto) {
-                Label("Photo", systemImage: "photo.on.rectangle")
-            }
-            Button(action: onFile) {
-                Label("File", systemImage: "doc")
-            }
-        } label: {
-            #if os(iOS)
-            Image(systemName: "plus")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(Color.secondary)
-                .frame(width: 44, height: 44)
-                .background(Color.secondary.opacity(0.12), in: Circle())
-                .contentShape(Circle())
-            #else
-            Image(systemName: "plus.circle.fill")
-                .font(.system(size: 26))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(Color.secondary)
-            #endif
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .disabled(isDisabled)
-        .help("Attach")
-        .accessibilityLabel(Text("Attach"))
-    }
-}
-
 /// "Replying to bob" or "Editing message", with cancel.
 struct ComposerContextBanner: View {
     let model: ComposerModel
@@ -174,6 +42,7 @@ struct ComposerContextBanner: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .help("Cancel")
             .accessibilityLabel(Text("Cancel"))
         }
         .padding(.horizontal, Theme.Spacing.s + 2)
@@ -199,6 +68,7 @@ struct ComposerErrorLine: View {
                     .font(.caption)
             }
             .buttonStyle(.plain)
+            .help("Dismiss")
             .accessibilityLabel(Text("Dismiss"))
         }
         .foregroundStyle(Color.red)

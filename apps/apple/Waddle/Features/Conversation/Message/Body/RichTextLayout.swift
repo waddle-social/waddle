@@ -19,6 +19,9 @@ struct RichTextInput {
     let ownNick: String
     /// Classifies a reference as a mention; nil for non-mentions.
     let mentionKind: (Reference) -> RichMentionKind?
+    /// Leading displayed-body scalars not rendered: the XEP-0245 "/me "
+    /// prefix of an action line. Offsets still count over the full body.
+    let hiddenPrefix: Int
 }
 
 /// Turns a displayed body plus its XEP-0394 spans and XEP-0372 references
@@ -30,14 +33,16 @@ enum RichTextLayout {
     ) -> [RichBlock] {
         let scalars = Array(input.displayedBody.unicodeScalars)
         let styled = styledRanges(for: input, detectLinks: detectLinks)
+        let hidden = min(max(input.hiddenPrefix, 0), scalars.count)
         var blocks: [RichBlock] = []
-        var cursor = 0
+        var cursor = hidden
         for block in nonOverlapping(styled.blocks) {
-            if block.range.lowerBound > cursor {
-                blocks += paragraph(scalars, cursor..<block.range.lowerBound, inline: styled.inline, detectLinks: detectLinks)
+            guard let range = MeAction.visibleRange(block.range, hiding: hidden) else { continue }
+            if range.lowerBound > cursor {
+                blocks += paragraph(scalars, cursor..<range.lowerBound, inline: styled.inline, detectLinks: detectLinks)
             }
-            blocks += render(block, scalars: scalars, inline: styled.inline, detectLinks: detectLinks)
-            cursor = block.range.upperBound
+            blocks += render(BlockRange(kind: block.kind, range: range), scalars: scalars, inline: styled.inline, detectLinks: detectLinks)
+            cursor = range.upperBound
         }
         if cursor < scalars.count {
             blocks += paragraph(scalars, cursor..<scalars.count, inline: styled.inline, detectLinks: detectLinks)

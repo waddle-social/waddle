@@ -17,7 +17,8 @@ extension SessionCoordinator {
         )
         timelines.insertLocalEcho(localEcho(of: message), in: conversation)
         if conversation.kind == .direct {
-            directory.touchDirect(conversation.jid, at: Date(), preview: draft.text)
+            let preview = MeAction.presentation(ofBody: draft.text, actor: account.jid.localpart ?? account.jid.domain)
+            directory.touchDirect(conversation.jid, at: Date(), preview: preview ?? draft.text)
         }
         stopTyping(in: conversation)
         enqueue(message)

@@ -19,8 +19,12 @@ enum MessageReplySummary {
         if parent.tombstone != nil {
             return "Deleted message"
         }
+        if let imageURL = MessageContent.inlineImageURL(of: parent) {
+            return MessageContent.inlineImageNoun(imageURL)
+        }
         if let body = MessageContent.visibleBody(of: parent) {
-            let line = body.split(whereSeparator: \.isNewline).first.map(String.init) ?? body
+            let shown = MeAction.presentation(ofBody: body, actor: MessageAuthor.resolve(parent, occupant: nil).name) ?? body
+            let line = shown.split(whereSeparator: \.isNewline).first.map(String.init) ?? shown
             return line.trimmingCharacters(in: .whitespaces)
         }
         if let file = parent.message.sharedFiles.first {

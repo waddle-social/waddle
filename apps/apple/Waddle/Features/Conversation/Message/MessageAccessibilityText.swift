@@ -33,8 +33,11 @@ enum MessageAccessibilityText {
             break
         }
         var parts: [String] = []
-        if let body = MessageContent.visibleBody(of: item) {
-            parts.append(body)
+        if let imageURL = MessageContent.inlineImageURL(of: item) {
+            parts.append(MessageContent.inlineImageNoun(imageURL))
+        } else if let body = MessageContent.visibleBody(of: item) {
+            let author = MessageAuthor.resolve(item, occupant: nil).name
+            parts.append(MeAction.presentation(ofBody: body, actor: author) ?? body)
         }
         for file in item.message.sharedFiles {
             let kind = MessageAttachmentKind(file)
