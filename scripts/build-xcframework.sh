@@ -37,7 +37,9 @@ PLATFORM="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug) PROFILE="debug"; CARGO_FLAG=""; shift ;;
-    --platform) PLATFORM="${2:-}"; shift 2 ;;
+    --platform)
+      [[ $# -ge 2 ]] || { echo "--platform needs a value (all, ios or macos)" >&2; exit 64; }
+      PLATFORM="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done

@@ -24,6 +24,7 @@ if [[ "${CI_XCODEBUILD_ACTION:-}" == "archive" ]]; then
   case "${CI_PRODUCT_PLATFORM:-}" in
     iOS) PLATFORM="ios" ;;
     macOS) PLATFORM="macos" ;;
+    *) PLATFORM="all" ;;
   esac
 fi
 
