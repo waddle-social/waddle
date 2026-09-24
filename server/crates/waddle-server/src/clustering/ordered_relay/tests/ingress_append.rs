@@ -79,6 +79,46 @@ fn processed_direct_payload_preserves_bare_address_but_binds_frozen_full_target(
 }
 
 #[test]
+fn receiver_reserves_processed_archived_headlines_for_frozen_full_targets() {
+    for address in ["juliet@example.test", "juliet@example.test/phone"] {
+        let mut envelope = obligation_envelope();
+        let OrderedRelayPayload::Message {
+            recipient,
+            mut stanza,
+            ingress_append,
+        } = envelope.payload
+        else {
+            panic!("message fixture");
+        };
+        let waddle_xmpp::Stanza::Message(message) = &mut stanza.0 else {
+            panic!("message fixture");
+        };
+        message.type_ = xmpp_parsers::message::MessageType::Headline;
+        message.to = Some(address.parse().expect("address"));
+        message.payloads.push(
+            minidom::Element::builder(
+                waddle_xmpp::xep::xep0334::Hint::Store.element_name(),
+                waddle_xmpp::xep::xep0334::NS_HINTS,
+            )
+            .build(),
+        );
+        envelope.payload = OrderedRelayPayload::ProcessedDirectMessage {
+            recipient,
+            stanza,
+            ingress_append,
+        };
+        let mut receiver = OrderedRelayReceiverState::default();
+        assert!(
+            matches!(
+                receiver.reserve(envelope),
+                OrderedRelayReservation::Reserved(_)
+            ),
+            "stored headline to {address} must reach its frozen resource"
+        );
+    }
+}
+
+#[test]
 fn processed_copy_cannot_discard_its_canonical_obligation() {
     let mut envelope = obligation_envelope();
     let OrderedRelayPayload::Message {

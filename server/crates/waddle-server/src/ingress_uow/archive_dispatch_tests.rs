@@ -212,7 +212,7 @@ async fn wildcard_and_pending(fixture: IngressFixture) {
     );
     let mut tx = fixture.uow.begin().await.unwrap();
     assert_eq!(
-        ArchiveDispatchRepository::readiness_pending(&mut tx, &resource.to_bare(), &pending, None)
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &resource, &pending, None)
             .await
             .unwrap(),
         DispatchReadiness::Blocked(vec![a])
@@ -254,7 +254,7 @@ async fn wildcard_and_pending(fixture: IngressFixture) {
     );
     let mut tx = fixture.uow.begin().await.unwrap();
     assert_eq!(
-        ArchiveDispatchRepository::readiness_pending(&mut tx, &resource.to_bare(), &pending, None)
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &resource, &pending, None)
             .await
             .unwrap(),
         DispatchReadiness::Ready,
@@ -295,6 +295,89 @@ async fn wildcard_and_pending(fixture: IngressFixture) {
         readiness(&fixture, c, &cr, Some(&resource)).await,
         DispatchReadiness::Ready
     );
+    fixture.close().await;
+}
+
+async fn pending_resource_order(fixture: IngressFixture) {
+    let old: FullJid = "juliet@example.com/old".parse().unwrap();
+    let new: FullJid = "juliet@example.com/new".parse().unwrap();
+    let archive = new.to_bare();
+    let (a, ar) = message(&fixture, "earlier old resource", std::slice::from_ref(&old)).await;
+    let (b, br) = message(&fixture, "pending flush", &[]).await;
+    let (c, cr) = message(&fixture, "later pending flush", &[]).await;
+    let pending = PendingRowId::fresh();
+    let later = PendingRowId::fresh();
+    register(
+        &fixture,
+        a,
+        &ar,
+        1,
+        &[DispatchTarget::Resource(old.clone())],
+    )
+    .await;
+    register(
+        &fixture,
+        b,
+        &br,
+        2,
+        &[DispatchTarget::Pending(pending.clone())],
+    )
+    .await;
+    register(
+        &fixture,
+        c,
+        &cr,
+        3,
+        &[DispatchTarget::Pending(later.clone())],
+    )
+    .await;
+    let store = crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+        fixture.db.clone(),
+        waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+    )
+    .await
+    .unwrap();
+    let conn = fixture.db.guard().await.unwrap();
+    for (row, stamp) in [(&pending, "pending-resource"), (&later, "later-resource")] {
+        conn.execute("INSERT INTO pending_delivery (row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id) VALUES (?, ?, ?, ?, ?, ?)", crate::db_params![row.as_str(), archive.to_string(), 1_i64, "archived", archive.to_string(), stamp]).await.unwrap();
+    }
+    drop(conn);
+    finish(&fixture, b, &br).await;
+    finish(&fixture, c, &cr).await;
+    let mut tx = fixture.uow.begin().await.unwrap();
+    assert_eq!(
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &new, &pending, None)
+            .await
+            .unwrap(),
+        DispatchReadiness::Ready,
+        "an earlier live copy owed only to /old cannot block a pending flush to /new"
+    );
+    assert_eq!(
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &old, &pending, None)
+            .await
+            .unwrap(),
+        DispatchReadiness::Blocked(vec![a]),
+        "the earlier live copy still blocks a pending flush to its own resource"
+    );
+    assert_eq!(
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &new, &later, None)
+            .await
+            .unwrap(),
+        DispatchReadiness::Blocked(vec![b]),
+        "an earlier pending row remains a barrier for every resource"
+    );
+    tx.commit().await.unwrap();
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    store.delete_row(&pending).await.unwrap();
+    let mut tx = fixture.uow.begin().await.unwrap();
+    assert_eq!(
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &new, &later, None)
+            .await
+            .unwrap(),
+        DispatchReadiness::Ready,
+        "removing the pending predecessor releases /new while /old remains unfinished"
+    );
+    tx.commit().await.unwrap();
     fixture.close().await;
 }
 
@@ -354,13 +437,13 @@ async fn independent_pending(fixture: IngressFixture) {
     );
     let mut tx = fixture.uow.begin().await.unwrap();
     assert_eq!(
-        ArchiveDispatchRepository::readiness_pending(&mut tx, &archive, &earlier, None)
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &resource, &earlier, None)
             .await
             .unwrap(),
         DispatchReadiness::Ready
     );
     assert_eq!(
-        ArchiveDispatchRepository::readiness_pending(&mut tx, &archive, &later, None)
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &resource, &later, None)
             .await
             .unwrap(),
         DispatchReadiness::Blocked(vec![])
@@ -374,7 +457,7 @@ async fn independent_pending(fixture: IngressFixture) {
     );
     let mut tx = fixture.uow.begin().await.unwrap();
     assert_eq!(
-        ArchiveDispatchRepository::readiness_pending(&mut tx, &archive, &later, None)
+        ArchiveDispatchRepository::readiness_pending(&mut tx, &resource, &later, None)
             .await
             .unwrap(),
         DispatchReadiness::Ready
@@ -433,5 +516,17 @@ async fn sqlite_archive_dispatch_promoted_pending() {
 async fn postgres_archive_dispatch_promoted_pending() {
     if let Some(fixture) = IngressFixture::postgres("promoted").await {
         independent_pending(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_archive_dispatch_pending_resource_order() {
+    pending_resource_order(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_archive_dispatch_pending_resource_order() {
+    if let Some(fixture) = IngressFixture::postgres("pending_resource").await {
+        pending_resource_order(fixture).await;
     }
 }

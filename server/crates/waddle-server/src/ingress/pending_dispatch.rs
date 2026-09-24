@@ -26,13 +26,9 @@ impl PendingDispatchGate for super::IngressAuthority {
                 .uow
                 .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
                 .await?;
-            let readiness = ArchiveDispatchRepository::readiness_pending(
-                &mut tx,
-                &row.recipient,
-                &row.id,
-                stream,
-            )
-            .await?;
+            let readiness =
+                ArchiveDispatchRepository::readiness_pending(&mut tx, resource, &row.id, stream)
+                    .await?;
             tx.commit().await?;
             Ok::<_, IngressUowError>(readiness)
         }

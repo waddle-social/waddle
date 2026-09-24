@@ -292,6 +292,7 @@ impl OrderedRelayPayload {
                         message.type_,
                         xmpp_parsers::message::MessageType::Chat
                             | xmpp_parsers::message::MessageType::Normal
+                            | xmpp_parsers::message::MessageType::Headline
                     )
             }
             (

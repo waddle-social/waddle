@@ -174,10 +174,11 @@ impl ArchiveDispatchRepository {
     /// earlier archive positions. Its own row is never its predecessor.
     pub(crate) async fn readiness_pending(
         tx: &mut IngressUowTransaction<'_>,
-        recipient: &BareJid,
+        resource: &FullJid,
         row_id: &PendingRowId,
         stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
     ) -> Result<DispatchReadiness, IngressUowError> {
+        let recipient = resource.to_bare();
         let mut rows = tx.transaction_mut().query(
             "SELECT DISTINCT archive_jid, archive_seq, resource FROM ingress_archive_dispatch WHERE archive_jid = ? AND pending_row_id = ?",
             crate::db_params![recipient.to_string(), row_id.as_str()],
@@ -201,6 +202,12 @@ impl ArchiveDispatchRepository {
             if let Some(row) = rows.next().await? {
                 positions.push(decode_position(&row)?);
             }
+        }
+        // The flush has selected its actual destination. Copies owed only to
+        // another resource are outside this ordering chain; earlier pending
+        // rows retain their wildcard registrations and still block this copy.
+        for position in &mut positions {
+            position.resource = Some(resource.clone());
         }
         positions_ready(tx, positions, stream).await
     }

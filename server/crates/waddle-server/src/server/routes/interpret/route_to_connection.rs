@@ -294,8 +294,8 @@ async fn route_planned_direct_message(
         if bare.domain().as_str() != deps.local_domain {
             return Vec::new();
         }
-        if !local_account_exists_for(deps, &bare).await {
-            return plan::bounce_nonexistent(deps, &stanza);
+        if let Some(reply) = reject_unknown_local_account(deps, &bare, &stanza).await {
+            return reply;
         }
         if archived_headline && requested.is_full() {
             return Vec::new();
