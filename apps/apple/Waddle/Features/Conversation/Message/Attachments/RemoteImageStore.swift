@@ -29,11 +29,26 @@ final class RemoteImageStore: @unchecked Sendable {
         if let data = cached(url) {
             return data
         }
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let data = try await Self.download(url)
+        cache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
+        return data
+    }
+
+    /// Streams the body and stops at `sizeLimit`, so an oversized or
+    /// endless response is never held in memory.
+    private static func download(_ url: URL) async throws -> Data {
+        let (bytes, response) = try await URLSession.shared.bytes(from: url)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw RemoteImageLoadError.rejected(status: status) }
-        guard data.count <= Self.sizeLimit else { throw RemoteImageLoadError.tooLarge }
-        cache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
+        guard response.expectedContentLength <= Int64(sizeLimit) else { throw RemoteImageLoadError.tooLarge }
+        var data = Data()
+        if response.expectedContentLength > 0 {
+            data.reserveCapacity(Int(response.expectedContentLength))
+        }
+        for try await byte in bytes {
+            guard data.count < sizeLimit else { throw RemoteImageLoadError.tooLarge }
+            data.append(byte)
+        }
         return data
     }
 }

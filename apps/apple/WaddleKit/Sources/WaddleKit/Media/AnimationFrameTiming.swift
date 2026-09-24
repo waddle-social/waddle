@@ -6,6 +6,10 @@ public enum AnimationFrameTiming {
     /// Browsers play a missing, zero or near-zero GIF delay at 100 ms.
     public static let fallbackDelay = 0.1
     public static let minimumDelay = 0.02
+    /// GIF delays run to 655 s; longer than this is held for this long.
+    public static let maximumDelay = 10.0
+    /// The most slots a playback holds, however its delays divide.
+    public static let maximumSlots = 1000
 
     /// Uniform playback: slot `i` shows frame `i`'s image `repeats[i]`
     /// times, each slot lasting `unit` seconds.
@@ -19,7 +23,7 @@ public enum AnimationFrameTiming {
     /// The delay a frame plays for, in seconds.
     public static func normalized(_ delay: Double?) -> Double {
         guard let delay, delay.isFinite, delay >= minimumDelay else { return fallbackDelay }
-        return delay
+        return min(delay, maximumDelay)
     }
 
     /// Keep every `step`-th frame so at most `maxFrames` frames decode.
@@ -38,12 +42,20 @@ public enum AnimationFrameTiming {
     }
 
     /// Frames of differing delays as equal slots: the slot is the greatest
-    /// common divisor of the delays in centiseconds, GIF's time unit.
-    public static func playback(_ delays: [Double]) -> Playback {
+    /// common divisor of the delays in centiseconds, GIF's time unit. When
+    /// that would take more than `maxSlots` slots, the slot grows to fit
+    /// and each frame's delay rounds to it (at least one slot per frame).
+    public static func playback(_ delays: [Double], maxSlots: Int = maximumSlots) -> Playback {
         let centiseconds = delays.map { max(1, Int(($0 * 100).rounded())) }
-        let unit = centiseconds.reduce(0, greatestCommonDivisor)
-        guard unit > 0 else { return Playback(unit: fallbackDelay, repeats: []) }
-        return Playback(unit: Double(unit) / 100, repeats: centiseconds.map { $0 / unit })
+        let divisor = centiseconds.reduce(0, greatestCommonDivisor)
+        guard divisor > 0 else { return Playback(unit: fallbackDelay, repeats: []) }
+        let total = centiseconds.reduce(0, +)
+        let limit = max(maxSlots, 1)
+        let unit = total / divisor <= limit ? divisor : (total + limit - 1) / limit
+        return Playback(
+            unit: Double(unit) / 100,
+            repeats: centiseconds.map { max(1, ($0 + unit / 2) / unit) }
+        )
     }
 
     private static func greatestCommonDivisor(_ lhs: Int, _ rhs: Int) -> Int {

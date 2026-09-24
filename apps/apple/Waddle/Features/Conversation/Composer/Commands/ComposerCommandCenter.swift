@@ -36,7 +36,7 @@ final class ComposerCommandCenter {
         defer { running = nil }
         do {
             let result = try await start(command, invocation: invocation, room: room, session: session)
-            show(result, for: command, room: room)
+            show(result, for: command, room: room, session: session)
         } catch {
             let message = ActionErrorCopy.message(for: error, fallback: "Couldn't run \(command.name).")
             notice = ComposerNotice(severity: .error, text: message)
@@ -73,20 +73,12 @@ final class ComposerCommandCenter {
     }
 
     /// Closes the sheet; a stage still awaiting input is cancelled on the
-    /// service (XEP-0050: `cancel` is always allowed).
+    /// service.
     func dismiss(session: SessionCoordinator) {
         guard let current = stage else { return }
         stage = nil
         formError = nil
-        guard current.isPending, current.result.sessionID != nil else { return }
-        Task {
-            _ = try? await session.submitExtensionCommand(
-                current.command,
-                continuing: current.result,
-                action: .cancel,
-                room: current.room
-            )
-        }
+        cancelOnService(current, session: session)
     }
 
     func dismissNotice() {
@@ -116,12 +108,35 @@ final class ComposerCommandCenter {
         }
     }
 
-    private func show(_ result: ExtensionCommandResult, for command: ExtensionCommand, room: BareJID?) {
+    private func show(
+        _ result: ExtensionCommandResult,
+        for command: ExtensionCommand,
+        room: BareJID?,
+        session: SessionCoordinator
+    ) {
         if ExtensionCommandStage.needsSheet(result) {
             formError = nil
+            // A second command replacing a pending stage ends the first.
+            if let replaced = stage {
+                cancelOnService(replaced, session: session)
+            }
             stage = ExtensionCommandStage(command: command, room: room, result: result)
         } else {
             notice = ComposerNotice.outcome(of: result, command: command)
+        }
+    }
+
+    /// XEP-0050: a session still awaiting input is cancelled (`cancel` is
+    /// always allowed) so the service does not hold it until it times out.
+    private func cancelOnService(_ stage: ExtensionCommandStage, session: SessionCoordinator) {
+        guard stage.isPending, stage.result.sessionID != nil else { return }
+        Task {
+            _ = try? await session.submitExtensionCommand(
+                stage.command,
+                continuing: stage.result,
+                action: .cancel,
+                room: stage.room
+            )
         }
     }
 

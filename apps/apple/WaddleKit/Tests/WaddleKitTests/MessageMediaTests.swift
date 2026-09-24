@@ -113,6 +113,7 @@ struct AnimationFrameTimingTests {
         #expect(AnimationFrameTiming.normalized(.nan) == 0.1)
         #expect(AnimationFrameTiming.normalized(0.02) == 0.02)
         #expect(AnimationFrameTiming.normalized(0.5) == 0.5)
+        #expect(AnimationFrameTiming.normalized(655.35) == 10)
     }
 
     @Test func stepKeepsFramesWithinTheLimit() {
@@ -132,6 +133,22 @@ struct AnimationFrameTimingTests {
         #expect(abs(merged.reduce(0, +) - 1.5) < 1e-9)
         #expect(abs(merged[2] - 0.5) < 1e-9)
         #expect(AnimationFrameTiming.mergedDelays([], step: 3).isEmpty)
+    }
+
+    @Test func playbackSlotsStayBoundedForAdversarialDelays() {
+        // 10,000 frames at GIF's longest delay plus one 20 ms frame: the
+        // common unit is 1 cs, which would need hundreds of millions of slots.
+        let delays = Array(repeating: AnimationFrameTiming.normalized(655.35), count: 10_000) + [0.02]
+        let step = AnimationFrameTiming.step(frameCount: delays.count, maxFrames: 200)
+        let merged = AnimationFrameTiming.mergedDelays(delays, step: step)
+        let playback = AnimationFrameTiming.playback(merged)
+        let slots = playback.repeats.reduce(0, +)
+        #expect(playback.repeats.count == merged.count)
+        #expect(slots <= AnimationFrameTiming.maximumSlots + merged.count)
+        #expect(playback.repeats.allSatisfy { $0 >= 1 })
+        // Rounding moves each frame by at most half a slot.
+        let length = merged.reduce(0, +)
+        #expect(abs(playback.duration - length) <= playback.unit / 2 * Double(merged.count))
     }
 
     @Test func playbackUsesTheCommonCentisecondUnit() {
