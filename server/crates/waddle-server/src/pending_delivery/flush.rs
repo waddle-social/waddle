@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::pending_delivery::storage::PendingClaimToken;
 
 /// Bound on rows claimed and pushed per `claim_batch_for_session` iteration
 /// inside [`flush_for_resource`] (issue #1220). Deliberately « the 256-slot
@@ -174,6 +175,46 @@ pub async fn flush_for_resource<R>(
 where
     R: ArchiveResolver + ?Sized,
 {
+    let mut failed_releases = Vec::new();
+    let outcome = flush_for_resource_inner(
+        storage,
+        registry,
+        recipient,
+        resource,
+        ctx,
+        &mut failed_releases,
+    )
+    .await;
+    // Terminal cleanup also invokes this single-pass entry point before
+    // handing ordering contention to a pump. It must not drop release work.
+    let mut delay = std::time::Duration::from_millis(100);
+    while !failed_releases.is_empty() {
+        tokio::time::sleep(delay).await;
+        retry_ordering_releases(storage, &mut failed_releases).await;
+        delay = (delay * 2).min(std::time::Duration::from_secs(5));
+    }
+    outcome
+}
+
+/// Failed ordering releases remain owned by the retry pump until storage
+/// confirms release or reports that the original unpushed claim is gone.
+struct DeferredClaimRelease {
+    row_id: PendingRowId,
+    session: SmSessionId,
+    token: PendingClaimToken,
+}
+
+async fn flush_for_resource_inner<R>(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    registry: &ConnectionRegistry,
+    recipient: &BareJid,
+    resource: &FullJid,
+    ctx: FlushContext<'_, R>,
+    failed_releases: &mut Vec<DeferredClaimRelease>,
+) -> FlushOutcome
+where
+    R: ArchiveResolver + ?Sized,
+{
     let FlushContext {
         server_domain,
         sm_session,
@@ -229,11 +270,13 @@ where
     // `PendingDeliveryStorage::claim_batch_for_session`).
     let mut cursor: Option<PendingRowId> = None;
     'batches: loop {
+        let claim_token = PendingClaimToken::fresh();
         let claimed = if dispatch_gate.is_some() {
             storage
                 .claim_archive_ordered_batch_for_session(
                     recipient,
                     session_id_for_claim,
+                    &claim_token,
                     FLUSH_BATCH_SIZE,
                 )
                 .await
@@ -395,15 +438,23 @@ where
                     if !ready {
                         outcome.deferred_transient += 1;
                         outcome.deferred_ordering += 1;
-                        release_row_or_warn(storage, &row.id, "archive predecessor outstanding")
-                            .await;
+                        release_ordering_claim(
+                            storage,
+                            &row.id,
+                            session_id_for_claim,
+                            &claim_token,
+                            failed_releases,
+                        )
+                        .await;
                         for deferred in rows.by_ref() {
                             outcome.deferred_transient += 1;
                             outcome.deferred_ordering += 1;
-                            release_row_or_warn(
+                            release_ordering_claim(
                                 storage,
                                 &deferred.id,
-                                "archive predecessor outstanding (batch abort)",
+                                session_id_for_claim,
+                                &claim_token,
+                                failed_releases,
                             )
                             .await;
                         }
@@ -513,6 +564,42 @@ where
     }
 
     outcome
+}
+
+async fn release_ordering_claim(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    row_id: &PendingRowId,
+    session: &SmSessionId,
+    token: &PendingClaimToken,
+    failed_releases: &mut Vec<DeferredClaimRelease>,
+) {
+    if let Err(error) = storage
+        .release_unpushed_row_if_session(row_id, session, token)
+        .await
+    {
+        warn!(%row_id, %error, "ordering-deferred claim release failed; retaining for retry");
+        failed_releases.push(DeferredClaimRelease {
+            row_id: row_id.clone(),
+            session: session.clone(),
+            token: *token,
+        });
+    }
+}
+
+async fn retry_ordering_releases(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    failed_releases: &mut Vec<DeferredClaimRelease>,
+) {
+    for claim in std::mem::take(failed_releases) {
+        release_ordering_claim(
+            storage,
+            &claim.row_id,
+            &claim.session,
+            &claim.token,
+            failed_releases,
+        )
+        .await;
+    }
 }
 
 /// Release a row's flush claim, downgrading a release failure to a

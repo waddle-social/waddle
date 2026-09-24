@@ -17,6 +17,24 @@ use super::{
     InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId, TombstoneScrubbedPendingRows,
 };
 
+/// Identifies one pending-delivery claim attempt independently of the SM
+/// stream. A resumed stream can acquire new claims on another node, so its
+/// stream ID alone cannot fence a retry of an ambiguous release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingClaimToken(uuid::Uuid);
+
+impl PendingClaimToken {
+    pub fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for PendingClaimToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Errors returned by [`PendingDeliveryStorage`] implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum PendingStorageError {
@@ -31,6 +49,9 @@ pub enum PendingStorageError {
 
     #[error("pending delivery archive ordering is temporarily unavailable")]
     ArchiveOrderingUnavailable,
+
+    #[error("pending delivery store does not support guarded unpushed claim release")]
+    UnpushedReleaseUnsupported,
 
     /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): a fenced
     /// `insert_fenced` call's own `SELECT ... FOR SHARE` fencing check
@@ -281,26 +302,20 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// order precedence when clock skew makes the orders conflict.
     /// Already claimed rows are excluded, so this operation needs no row-id
     /// cursor (a later archive ordinal may have an earlier pending row id).
+    /// The caller supplies a fresh token for each batch; implementations store
+    /// it atomically with the claim so release retries cannot affect a later
+    /// claim, including one on another node resuming the same SM stream.
     /// Implementations without access to canonical archive positions fail
     /// closed rather than silently weakening the dispatch ordering guarantee.
     async fn claim_archive_ordered_batch_for_session(
         &self,
         recipient: &BareJid,
         session: &SmSessionId,
+        token: &PendingClaimToken,
         limit: usize,
     ) -> Result<Vec<PendingRow>, PendingStorageError> {
-        let rows = self
-            .claim_batch_for_session(recipient, session, None, limit)
-            .await?;
-        if rows.iter().any(|row| row.payload.is_archived()) {
-            // Stores without a MAM authority can still handle transient-only
-            // traffic, but must never emit archived rows in a guessed order.
-            for row in &rows {
-                self.release_row(&row.id).await?;
-            }
-            return Err(PendingStorageError::ArchiveOrderingUnsupported);
-        }
-        Ok(rows)
+        let _ = (recipient, session, token, limit);
+        Err(PendingStorageError::ArchiveOrderingUnsupported)
     }
 
     /// Delete every row previously claimed by `session`. Used by paths
@@ -351,6 +366,22 @@ pub trait PendingDeliveryStorage: Send + Sync {
     ) -> Result<u64, PendingStorageError> {
         let _ = expected_session;
         self.release_row(id).await
+    }
+
+    /// Release an ordering-deferred row only while it belongs to the expected
+    /// session and exact claim token, and has no recorded outbound sequence.
+    /// The check and update must be atomic: retrying an ambiguous storage failure must never clear
+    /// a new claim on the same resumed stream, a replacement session's claim,
+    /// or an already pushed row's SM binding.
+    /// Returns zero when the original unpushed claim no longer exists.
+    async fn release_unpushed_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+        token: &PendingClaimToken,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = (id, expected_session, token);
+        Err(PendingStorageError::UnpushedReleaseUnsupported)
     }
 
     /// Release only rows whose recorded outbound sequence belongs to a
@@ -621,6 +652,7 @@ pub struct InMemoryPendingDeliveryStorage {
     /// missing entry means "no recency information" and the claim is
     /// always release-eligible.
     claimed_at_ms: Mutex<HashMap<PendingRowId, i64>>,
+    claim_tokens: Mutex<HashMap<PendingRowId, PendingClaimToken>>,
     quota: QuotaPolicy,
 }
 
@@ -631,6 +663,7 @@ impl InMemoryPendingDeliveryStorage {
             inner: Mutex::new(HashMap::new()),
             notification_outboxed: Mutex::new(HashSet::new()),
             claimed_at_ms: Mutex::new(HashMap::new()),
+            claim_tokens: Mutex::new(HashMap::new()),
             quota,
         }
     }
@@ -644,8 +677,13 @@ impl InMemoryPendingDeliveryStorage {
             .claimed_at_ms
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut tokens = self
+            .claim_tokens
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         for id in ids {
             stamps.insert(id.clone(), now_ms);
+            tokens.remove(id);
         }
         Ok(())
     }
@@ -658,8 +696,13 @@ impl InMemoryPendingDeliveryStorage {
             .claimed_at_ms
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut tokens = self
+            .claim_tokens
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         for id in ids {
             stamps.remove(id);
+            tokens.remove(id);
         }
         Ok(())
     }
@@ -840,9 +883,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 claimed.push(row.clone());
             }
         }
-        drop(guard);
         let claimed_ids: Vec<PendingRowId> = claimed.iter().map(|row| row.id.clone()).collect();
         self.stamp_claimed_at(&claimed_ids)?;
+        drop(guard);
         Ok(claimed)
     }
 
@@ -886,9 +929,48 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             row.outbound_sequence = None;
             claimed.push(row.clone());
         }
-        drop(guard);
         let claimed_ids: Vec<PendingRowId> = claimed.iter().map(|row| row.id.clone()).collect();
         self.stamp_claimed_at(&claimed_ids)?;
+        drop(guard);
+        Ok(claimed)
+    }
+
+    async fn claim_archive_ordered_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        token: &PendingClaimToken,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let Some(queue) = guard.get_mut(recipient) else {
+            return Ok(Vec::new());
+        };
+        let mut candidates: Vec<_> = queue
+            .iter_mut()
+            .filter(|row| row.flushed_in_session.is_none())
+            .collect();
+        candidates.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        candidates.truncate(limit);
+        if candidates.iter().any(|row| row.payload.is_archived()) {
+            return Err(PendingStorageError::ArchiveOrderingUnsupported);
+        }
+        let ids: Vec<_> = candidates.iter().map(|row| row.id.clone()).collect();
+        self.stamp_claimed_at(&ids)?;
+        let mut tokens = self
+            .claim_tokens
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let mut claimed = Vec::with_capacity(candidates.len());
+        for row in candidates {
+            row.flushed_in_session = Some(session.clone());
+            row.outbound_sequence = None;
+            tokens.insert(row.id.clone(), *token);
+            claimed.push(row.clone());
+        }
         Ok(claimed)
     }
 
@@ -912,9 +994,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
-        drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
+        drop(guard);
         Ok(removed)
     }
 
@@ -930,7 +1012,6 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             removed += (before - queue.len()) as u64;
         }
         guard.retain(|_, q| !q.is_empty());
-        drop(guard);
         if removed > 0 {
             self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
             self.clear_claimed_at(std::slice::from_ref(id))?;
@@ -959,8 +1040,8 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 }
             }
         }
-        drop(guard);
         self.clear_claimed_at(&released_ids)?;
+        drop(guard);
         Ok(released)
     }
 
@@ -974,8 +1055,8 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 if &row.id == id {
                     row.flushed_in_session = None;
                     row.outbound_sequence = None;
-                    drop(guard);
                     self.clear_claimed_at(std::slice::from_ref(id))?;
+                    drop(guard);
                     return Ok(1);
                 }
             }
@@ -1000,10 +1081,44 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                     }
                     row.flushed_in_session = None;
                     row.outbound_sequence = None;
-                    drop(guard);
                     self.clear_claimed_at(std::slice::from_ref(id))?;
+                    drop(guard);
                     return Ok(1);
                 }
+            }
+        }
+        Ok(0)
+    }
+
+    async fn release_unpushed_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+        token: &PendingClaimToken,
+    ) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let matches_token = self
+            .claim_tokens
+            .lock()
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .get(id)
+            == Some(token);
+        if !matches_token {
+            return Ok(0);
+        }
+        for row in guard.values_mut().flat_map(|queue| queue.iter_mut()) {
+            if &row.id == id
+                && row.flushed_in_session.as_ref() == Some(expected_session)
+                && row.outbound_sequence.is_none()
+            {
+                // Keep claim metadata cleanup within the row lock so it cannot
+                // erase a new claim's timestamp after an ambiguous release.
+                self.clear_claimed_at(std::slice::from_ref(id))?;
+                row.flushed_in_session = None;
+                return Ok(1);
             }
         }
         Ok(0)
@@ -1045,7 +1160,6 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 row.outbound_sequence = None;
             }
         }
-        drop(guard);
         if let Err(error) = self.clear_claimed_at(&released_ids) {
             return ReleaseRowsForOutboundSequencesOutcome::partial(released_sequences, error);
         }
@@ -1102,9 +1216,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
-        drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
+        drop(guard);
         Ok(removed)
     }
 
@@ -1201,9 +1315,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
-        drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
+        drop(guard);
         Ok(removed)
     }
 
@@ -1254,9 +1368,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             *queue = kept;
         }
         guard.retain(|_, q| !q.is_empty());
-        drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
+        drop(guard);
         Ok(TombstoneScrubbedPendingRows {
             removed_count: removed_ids.len() as u64,
             row_ids: removed_ids,

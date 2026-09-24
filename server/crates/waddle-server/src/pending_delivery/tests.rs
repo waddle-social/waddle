@@ -2,7 +2,7 @@ use super::*;
 use chrono::Utc;
 use kameo::actor::{ActorRef, Spawn};
 use std::collections::HashSet;
-use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::storage::{InMemoryPendingDeliveryStorage, PendingClaimToken};
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
 use waddle_xmpp::registry::UserRegistryActor;
 use xmpp_parsers::message::{Message, MessageType};
@@ -954,19 +954,34 @@ async fn assert_archive_ordered_pending_batches(storage: &DatabasePendingDeliver
     let recipient = bare("alice@example.com");
     let session = SmSessionId::new("ordered-pending");
     let first = storage
-        .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
+        .claim_archive_ordered_batch_for_session(
+            &recipient,
+            &session,
+            &PendingClaimToken::fresh(),
+            1,
+        )
         .await
         .expect("claim first archive-ordered batch");
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].id.as_str(), "z-later-pending-id");
     let second = storage
-        .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
+        .claim_archive_ordered_batch_for_session(
+            &recipient,
+            &session,
+            &PendingClaimToken::fresh(),
+            1,
+        )
         .await
         .expect("claim second archive-ordered batch");
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].id.as_str(), "a-earlier-pending-id");
     assert!(storage
-        .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
+        .claim_archive_ordered_batch_for_session(
+            &recipient,
+            &session,
+            &PendingClaimToken::fresh(),
+            1
+        )
         .await
         .expect("claim exhausted archive-ordered batch")
         .is_empty());
@@ -988,7 +1003,12 @@ async fn assert_archive_ordered_pending_batches(storage: &DatabasePendingDeliver
         .await
         .expect("insert newer matching archive position");
     let resolved_order = storage
-        .claim_archive_ordered_batch_for_session(&recipient, &session, 2)
+        .claim_archive_ordered_batch_for_session(
+            &recipient,
+            &session,
+            &PendingClaimToken::fresh(),
+            2,
+        )
         .await
         .expect("claim batch with resolved archive ordering");
     assert_eq!(
@@ -1078,14 +1098,24 @@ async fn assert_mixed_claim_batches(
 ) {
     for limit in [1, 2, expected.len()] {
         assert!(storage
-            .claim_archive_ordered_batch_for_session(recipient, session, 0)
+            .claim_archive_ordered_batch_for_session(
+                recipient,
+                session,
+                &PendingClaimToken::fresh(),
+                0
+            )
             .await
             .expect("claim zero-sized archive-ordered batch")
             .is_empty());
         let mut claimed = Vec::new();
         loop {
             let batch = storage
-                .claim_archive_ordered_batch_for_session(recipient, session, limit)
+                .claim_archive_ordered_batch_for_session(
+                    recipient,
+                    session,
+                    &PendingClaimToken::fresh(),
+                    limit,
+                )
                 .await
                 .expect("claim archive-ordered pending batch");
             assert!(batch.len() <= limit);
@@ -1282,6 +1312,145 @@ async fn ordered_pending_resolver() -> MamArchiveResolver {
     }
 }
 
+struct OrderingReleaseFails {
+    inner: DatabasePendingDeliveryStorage,
+    attempts: std::sync::atomic::AtomicUsize,
+    failed: tokio::sync::Notify,
+    ambiguous_release: Option<Arc<tokio::sync::Notify>>,
+}
+
+#[async_trait]
+impl PendingDeliveryStorage for OrderingReleaseFails {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
+    async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+        self.inner.insert(row).await
+    }
+    async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
+        self.inner.list(recipient).await
+    }
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        self.inner.claim_for_session(recipient, session).await
+    }
+    async fn claim_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        after: Option<&PendingRowId>,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        self.inner
+            .claim_batch_for_session(recipient, session, after, limit)
+            .await
+    }
+    async fn claim_archive_ordered_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        token: &PendingClaimToken,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        self.inner
+            .claim_archive_ordered_batch_for_session(recipient, session, token, limit)
+            .await
+    }
+    async fn release_unpushed_row_if_session(
+        &self,
+        id: &PendingRowId,
+        session: &SmSessionId,
+        token: &PendingClaimToken,
+    ) -> Result<u64, PendingStorageError> {
+        let attempt = self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt < 2 {
+            if let Some(resume) = &self.ambiguous_release {
+                self.inner
+                    .release_unpushed_row_if_session(id, session, token)
+                    .await?;
+                self.failed.notify_one();
+                if attempt == 0 {
+                    resume.notified().await;
+                }
+            } else {
+                self.failed.notify_one();
+            }
+            return Err(PendingStorageError::Other(
+                "injected release failure".into(),
+            ));
+        }
+        self.inner
+            .release_unpushed_row_if_session(id, session, token)
+            .await
+    }
+    async fn delete_claimed(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.delete_claimed(session).await
+    }
+    async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.inner.delete_row(id).await
+    }
+    async fn release_claim(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.release_claim(session).await
+    }
+    async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.inner.release_row(id).await
+    }
+    async fn record_pushed_at(
+        &self,
+        id: &PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.record_pushed_at(id, sequence).await
+    }
+    async fn delete_acked_in_window(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+        from_exclusive: u32,
+        to_inclusive: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner
+            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .await
+    }
+    async fn list_orphaned_claims(
+        &self,
+        live: &[waddle_xmpp::pending_delivery::SmSessionId],
+        claimed_before_ms: i64,
+    ) -> Result<Vec<(PendingRowId, waddle_xmpp::pending_delivery::SmSessionId)>, PendingStorageError>
+    {
+        self.inner
+            .list_orphaned_claims(live, claimed_before_ms)
+            .await
+    }
+    async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
+        self.inner.count(recipient).await
+    }
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.delete_older_than(cutoff).await
+    }
+    async fn scrub_for_tombstone(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+    ) -> Result<u64, PendingStorageError> {
+        self.inner.scrub_for_tombstone(target).await
+    }
+}
+
 #[tokio::test]
 async fn ordered_pending_pump_resumes_after_ack_without_new_presence() {
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(ordered_pending_fixture(None).await);
@@ -1360,6 +1529,136 @@ async fn ordered_pending_pump_resumes_after_ack_without_new_presence() {
     assert_eq!(outcome.deferred_ordering, 0);
 }
 
+#[tokio::test]
+async fn ordered_pending_pump_retries_failed_release_without_new_presence() {
+    let fault = Arc::new(OrderingReleaseFails {
+        inner: ordered_pending_fixture(None).await,
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        failed: tokio::sync::Notify::new(),
+        ambiguous_release: None,
+    });
+    let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
+    let registry = Arc::new(ConnectionRegistry::new());
+    let resource = full("alice@example.com/phone");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let owner = registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
+    let session = SmSessionId::new("pending-ack-pump");
+    let deferred = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let storage = storage.clone();
+        let registry = registry.clone();
+        let resource = resource.clone();
+        let session = session.clone();
+        let deferred = deferred.clone();
+        tokio::spawn(async move {
+            let resolver = ordered_pending_resolver().await;
+            let gate = PendingAckDispatchGate {
+                storage: storage.clone(),
+                deferred,
+            };
+            flush_for_resource_with_retry(
+                &storage,
+                &registry,
+                &resource.to_bare(),
+                &resource,
+                FlushContext {
+                    server_domain: "example.com",
+                    sm_session: Some(&session),
+                    blocking_storage: None,
+                    owner: Some(&owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(&gate),
+                },
+            )
+            .await
+        })
+    };
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("receive first pending delivery before timeout")
+        .expect("pending delivery channel remains open for first row");
+    let first_id = first
+        .pending_row_id
+        .expect("first delivery has a pending row ID");
+    assert_eq!(first_id.as_str(), "z-later-pending-id");
+    assert!(rx.try_recv().is_err());
+    tokio::time::timeout(std::time::Duration::from_secs(2), deferred.notified())
+        .await
+        .expect("observe deferred ordering before timeout");
+    tokio::time::timeout(std::time::Duration::from_secs(2), fault.failed.notified())
+        .await
+        .expect("observe failed deferred claim release");
+    let stranded = storage
+        .list(&resource.to_bare())
+        .await
+        .expect("list claimed rows");
+    assert_eq!(stranded.len(), 2);
+    assert!(stranded
+        .iter()
+        .all(|row| row.flushed_in_session.as_ref() == Some(&session)));
+    assert!(
+        !task.is_finished(),
+        "pump retains failed releases while session is live"
+    );
+    storage
+        .record_pushed_at(&first_id, 1)
+        .await
+        .expect("record first pending row stream position");
+    storage
+        .delete_acked_in_window(&session, 0, 1)
+        .await
+        .expect("delete acknowledged first pending row");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("receive second pending delivery before timeout")
+        .expect("pending delivery channel remains open for second row");
+    assert_eq!(
+        second
+            .pending_row_id
+            .expect("second delivery has a pending row ID")
+            .as_str(),
+        "a-earlier-pending-id"
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("pending delivery flush finishes before timeout")
+        .expect("pending delivery flush task succeeds");
+    assert_eq!(outcome.pushed, 2);
+    assert_eq!(outcome.deferred_ordering, 0);
+    assert!(fault.attempts.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    assert!(rx.try_recv().is_err(), "neither row is delivered twice");
+    let remaining = storage
+        .list(&resource.to_bare())
+        .await
+        .expect("list final claim");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the unacknowledged second row remains"
+    );
+    assert_eq!(remaining[0].id.as_str(), "a-earlier-pending-id");
+    assert_eq!(remaining[0].flushed_in_session.as_ref(), Some(&session));
+    storage
+        .record_pushed_at(&remaining[0].id, 2)
+        .await
+        .expect("stamp second row");
+    assert_eq!(
+        storage
+            .delete_acked_in_window(&session, 1, 2)
+            .await
+            .expect("ack second row"),
+        1
+    );
+    assert_eq!(
+        storage
+            .count(&resource.to_bare())
+            .await
+            .expect("count final rows"),
+        0
+    );
+}
+
 struct NotifyDeferredPendingGate(Arc<tokio::sync::Notify>);
 
 #[async_trait]
@@ -1431,6 +1730,71 @@ async fn ordered_pending_pump_stops_when_resource_owner_is_replaced() {
 }
 
 #[tokio::test]
+async fn ordered_pending_pump_settles_failed_releases_after_owner_replacement() {
+    let fault = Arc::new(OrderingReleaseFails {
+        inner: ordered_pending_fixture(None).await,
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        failed: tokio::sync::Notify::new(),
+        ambiguous_release: None,
+    });
+    let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
+    let registry = Arc::new(ConnectionRegistry::new());
+    let resource = full("alice@example.com/phone");
+    let (tx, mut old_rx) = tokio::sync::mpsc::channel(8);
+    let owner = registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let storage = storage.clone();
+        let registry = registry.clone();
+        let resource = resource.clone();
+        let entered = entered.clone();
+        tokio::spawn(async move {
+            let resolver = ordered_pending_resolver().await;
+            let gate = NotifyDeferredPendingGate(entered);
+            flush_for_resource_with_retry(
+                &storage,
+                &registry,
+                &resource.to_bare(),
+                &resource,
+                FlushContext {
+                    server_domain: "example.com",
+                    sm_session: None,
+                    blocking_storage: None,
+                    owner: Some(&owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(&gate),
+                },
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("dispatch gate is entered before timeout");
+    tokio::time::timeout(std::time::Duration::from_secs(2), fault.failed.notified())
+        .await
+        .expect("observe failed release before replacement");
+    let (tx, mut replacement_rx) = tokio::sync::mpsc::channel(8);
+    registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("pending delivery flush finishes before timeout")
+        .expect("pending delivery flush task succeeds");
+    assert_eq!(outcome.pushed, 0);
+    assert!(fault.attempts.load(std::sync::atomic::Ordering::SeqCst) >= 4);
+    assert!(old_rx.try_recv().is_err());
+    assert!(replacement_rx.try_recv().is_err());
+    assert!(storage
+        .list(&resource.to_bare())
+        .await
+        .expect("list pending delivery rows")
+        .iter()
+        .all(|row| row.flushed_in_session.is_none()));
+}
+
+#[tokio::test]
 async fn transient_only_fake_supports_ordered_claims_but_archived_rows_fail_closed() {
     let storage = InMemoryPendingDeliveryStorage::unlimited();
     let recipient = bare("alice@example.com");
@@ -1441,7 +1805,12 @@ async fn transient_only_fake_supports_ordered_claims_but_archived_rows_fail_clos
         .expect("insert transient pending row");
     assert_eq!(
         storage
-            .claim_archive_ordered_batch_for_session(&recipient, &session, 8)
+            .claim_archive_ordered_batch_for_session(
+                &recipient,
+                &session,
+                &PendingClaimToken::fresh(),
+                8
+            )
             .await
             .expect("claim archive-ordered pending batch")
             .len(),
@@ -1453,7 +1822,12 @@ async fn transient_only_fake_supports_ordered_claims_but_archived_rows_fail_clos
         .expect("insert archived pending row");
     assert!(matches!(
         storage
-            .claim_archive_ordered_batch_for_session(&recipient, &session, 8)
+            .claim_archive_ordered_batch_for_session(
+                &recipient,
+                &session,
+                &PendingClaimToken::fresh(),
+                8
+            )
             .await,
         Err(PendingStorageError::ArchiveOrderingUnsupported)
     ));
@@ -4589,4 +4963,400 @@ async fn database_scrub_for_tombstone_with_row_ids_returns_exact_removed_rows() 
         .expect("claim");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].id, kept_id);
+}
+
+#[tokio::test]
+async fn ordering_release_retry_preserves_replacement_and_pushed_claims() {
+    let database = ordered_pending_fixture(None).await;
+    database
+        .delete_row(&PendingRowId::new("a-earlier-pending-id"))
+        .await
+        .expect("clear fixture row");
+    database
+        .delete_row(&PendingRowId::new("z-later-pending-id"))
+        .await
+        .expect("clear fixture row");
+    let stores: Vec<Arc<dyn PendingDeliveryStorage>> = vec![
+        Arc::new(database),
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited()),
+    ];
+    for storage in stores {
+        let row = transient_row("alice@example.com", "guarded release");
+        let recipient = row.recipient.clone();
+        let id = row.id.clone();
+        let original = SmSessionId::new("original-session");
+        let original_token = PendingClaimToken::fresh();
+        let replacement_token = PendingClaimToken::fresh();
+        let replacement = SmSessionId::new("replacement-session");
+        storage.insert(row).await.expect("insert row");
+        storage
+            .claim_archive_ordered_batch_for_session(&recipient, &original, &original_token, 1)
+            .await
+            .expect("claim original");
+        assert_eq!(
+            storage
+                .release_unpushed_row_if_session(&id, &original, &original_token)
+                .await
+                .expect("first release commits"),
+            1
+        );
+        storage
+            .claim_archive_ordered_batch_for_session(
+                &recipient,
+                &replacement,
+                &replacement_token,
+                1,
+            )
+            .await
+            .expect("replacement claims after ambiguous release");
+        assert_eq!(
+            storage
+                .release_unpushed_row_if_session(&id, &original, &original_token)
+                .await
+                .expect("retry stale release"),
+            0
+        );
+        storage
+            .record_pushed_at(&id, 7)
+            .await
+            .expect("record delivery");
+        assert_eq!(
+            storage
+                .release_unpushed_row_if_session(&id, &replacement, &replacement_token)
+                .await
+                .expect("retry cannot clear pushed claim"),
+            0
+        );
+        let remaining = storage.list(&recipient).await.expect("list guarded row");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].flushed_in_session.as_ref(), Some(&replacement));
+        assert_eq!(remaining[0].outbound_sequence, Some(7));
+        assert_eq!(
+            storage
+                .delete_acked_in_window(&replacement, 6, 7)
+                .await
+                .expect("preserved binding acknowledges"),
+            1
+        );
+        assert_eq!(
+            storage
+                .release_unpushed_row_if_session(&id, &original, &original_token)
+                .await
+                .expect("deleted row is already settled"),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_pass_ordering_flush_settles_failed_releases_before_handoff() {
+    let fault = Arc::new(OrderingReleaseFails {
+        inner: ordered_pending_fixture(None).await,
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        failed: tokio::sync::Notify::new(),
+        ambiguous_release: None,
+    });
+    let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/phone");
+    let session = SmSessionId::new("single-pass-failed-release");
+    let resolver = ordered_pending_resolver().await;
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        flush_for_resource(
+            &storage,
+            &registry,
+            &resource.to_bare(),
+            &resource,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&session),
+                blocking_storage: None,
+                owner: None,
+                archive_resolver: &resolver,
+                dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Deferred)),
+            },
+        ),
+    )
+    .await
+    .expect("single pass settles release work before handoff");
+    assert_eq!(outcome.deferred_ordering, 2);
+    assert_eq!(outcome.pushed, 0);
+    assert_eq!(fault.attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
+    let remaining = storage
+        .list(&resource.to_bare())
+        .await
+        .expect("list released rows");
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().all(|row| row.flushed_in_session.is_none()));
+}
+
+#[tokio::test]
+async fn ambiguous_ordering_release_preserves_new_same_session_claim() {
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let fault = Arc::new(OrderingReleaseFails {
+        inner: ordered_pending_fixture(None).await,
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        failed: tokio::sync::Notify::new(),
+        ambiguous_release: Some(resume.clone()),
+    });
+    let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
+    let registry = Arc::new(ConnectionRegistry::new());
+    let resource = full("alice@example.com/phone");
+    let session = SmSessionId::new("ambiguous-ordering-release");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let owner = registry.register(resource.clone(), tx);
+    registry.update_presence(&resource, true, 0);
+    let first = {
+        let storage = storage.clone();
+        let registry = registry.clone();
+        let resource = resource.clone();
+        let session = session.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move {
+            let resolver = ordered_pending_resolver().await;
+            flush_for_resource(
+                &storage,
+                &registry,
+                &resource.to_bare(),
+                &resource,
+                FlushContext {
+                    server_domain: "example.com",
+                    sm_session: Some(&session),
+                    blocking_storage: None,
+                    owner: Some(&owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Deferred)),
+                },
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), fault.failed.notified())
+        .await
+        .expect("first release committed before simulated error");
+    let second = {
+        let storage = storage.clone();
+        let registry = registry.clone();
+        let resource = resource.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            let resolver = ordered_pending_resolver().await;
+            flush_for_resource(
+                &storage,
+                &registry,
+                &resource.to_bare(),
+                &resource,
+                FlushContext {
+                    server_domain: "example.com",
+                    sm_session: Some(&session),
+                    blocking_storage: None,
+                    owner: Some(&owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Ready)),
+                },
+            )
+            .await
+        })
+    };
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), second)
+        .await
+        .expect("independent caller reclaims committed release")
+        .expect("second flush succeeds");
+    assert_eq!(second.pushed, 1);
+    let delivered = rx.try_recv().expect("new claim queued before old retry");
+    let delivered_id = delivered.pending_row_id.expect("delivered row id");
+    assert_eq!(delivered_id.as_str(), "z-later-pending-id");
+    resume.notify_one();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), first)
+        .await
+        .expect("release settlement finishes")
+        .expect("first flush succeeds");
+    assert_eq!(first.pushed, 0);
+    let remaining = storage
+        .list(&resource.to_bare())
+        .await
+        .expect("list after stale retry");
+    let new_claim = remaining
+        .iter()
+        .find(|row| row.id == delivered_id)
+        .expect("new claim retained");
+    assert_eq!(new_claim.flushed_in_session.as_ref(), Some(&session));
+    assert_eq!(
+        new_claim.outbound_sequence, None,
+        "new queued claim has not been stamped yet"
+    );
+    storage
+        .record_pushed_at(&delivered_id, 1)
+        .await
+        .expect("stamp protected claim");
+    let resolver = ordered_pending_resolver().await;
+    let final_pass = flush_for_resource(
+        &storage,
+        &registry,
+        &resource.to_bare(),
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: Some(&session),
+            blocking_storage: None,
+            owner: None,
+            archive_resolver: &resolver,
+            dispatch_gate: Some(&FixedPendingDispatch(PendingDispatchReadiness::Ready)),
+        },
+    )
+    .await;
+    assert_eq!(final_pass.pushed, 1);
+    let row_id = rx
+        .try_recv()
+        .expect("second row delivered")
+        .pending_row_id
+        .expect("row id");
+    assert_eq!(row_id.as_str(), "a-earlier-pending-id");
+    storage
+        .record_pushed_at(&row_id, 2)
+        .await
+        .expect("bind second delivered row");
+    assert!(rx.try_recv().is_err(), "no duplicate delivery");
+    assert_eq!(
+        storage
+            .delete_acked_in_window(&session, 0, 2)
+            .await
+            .expect("ack both deliveries"),
+        2
+    );
+}
+
+async fn assert_ambiguous_release_across_storage_handles(storage: DatabasePendingDeliveryStorage) {
+    // Reopening an existing pre-token schema must add the nullable fence.
+    storage
+        .database()
+        .guard()
+        .await
+        .expect("bootstrap fixture connection")
+        .execute("ALTER TABLE pending_delivery DROP COLUMN claim_token", ())
+        .await
+        .expect("model the pre-token schema");
+    // Separate storage objects have independent process-local coordination.
+    // Safety must come from the durable token predicate on the shared row.
+    let successor =
+        DatabasePendingDeliveryStorage::from_database(storage.database(), QuotaPolicy::Unlimited)
+            .await
+            .expect("open independent successor storage handle");
+    let recipient = bare("alice@example.com");
+    let session = SmSessionId::new("same-resumed-stream");
+    let original_token = PendingClaimToken::fresh();
+    let successor_token = PendingClaimToken::fresh();
+    let original = storage
+        .claim_archive_ordered_batch_for_session(&recipient, &session, &original_token, 1)
+        .await
+        .expect("original node claims first row");
+    let id = &original[0].id;
+    assert_eq!(
+        storage
+            .release_unpushed_row_if_session(id, &session, &original_token)
+            .await
+            .expect("release commits but caller loses response"),
+        1
+    );
+    let replacement = successor
+        .claim_archive_ordered_batch_for_session(&recipient, &session, &successor_token, 1)
+        .await
+        .expect("resumed stream reclaims on successor node");
+    assert_eq!(&replacement[0].id, id);
+    assert_eq!(replacement[0].outbound_sequence, None);
+    assert_eq!(
+        storage
+            .release_unpushed_row_if_session(id, &session, &original_token)
+            .await
+            .expect("old node retries ambiguous release"),
+        0
+    );
+    let current = successor
+        .list(&recipient)
+        .await
+        .expect("list successor claim");
+    assert_eq!(
+        current
+            .iter()
+            .find(|row| &row.id == id)
+            .expect("preserved row")
+            .flushed_in_session
+            .as_ref(),
+        Some(&session)
+    );
+    successor
+        .record_pushed_at(id, 1)
+        .await
+        .expect("stamp successor delivery");
+    assert_eq!(
+        successor
+            .delete_acked_in_window(&session, 0, 1)
+            .await
+            .expect("ack preserved claim"),
+        1
+    );
+
+    // Ordinary claims invalidate a preceding ordered claim token as well.
+    let last = storage
+        .claim_archive_ordered_batch_for_session(&recipient, &session, &original_token, 1)
+        .await
+        .expect("claim remaining row");
+    let last_id = &last[0].id;
+    storage
+        .release_row(last_id)
+        .await
+        .expect("release ordered claim");
+    successor
+        .claim_batch_for_session(&recipient, &session, None, 1)
+        .await
+        .expect("ordinary batch reclaims");
+    assert_eq!(
+        storage
+            .release_unpushed_row_if_session(last_id, &session, &original_token)
+            .await
+            .expect("old token cannot release ordinary batch"),
+        0
+    );
+    successor
+        .release_claim(&session)
+        .await
+        .expect("clear ordinary batch");
+    storage
+        .claim_archive_ordered_batch_for_session(&recipient, &session, &original_token, 1)
+        .await
+        .expect("ordered claim before whole-session reclaim");
+    storage
+        .release_row(last_id)
+        .await
+        .expect("release ordered claim again");
+    successor
+        .claim_for_session(&recipient, &session)
+        .await
+        .expect("ordinary whole-session claim");
+    assert_eq!(
+        storage
+            .release_unpushed_row_if_session(last_id, &session, &original_token)
+            .await
+            .expect("old token cannot release whole-session claim"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn sqlite_ambiguous_release_preserves_same_stream_claim_across_storage_handles() {
+    assert_ambiguous_release_across_storage_handles(ordered_pending_fixture(None).await).await;
+}
+
+#[tokio::test]
+async fn postgres_ambiguous_release_preserves_same_stream_claim_across_storage_handles() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let (schema, scoped_url) = create_postgres_test_schema(&database_url, "pending_token").await;
+    assert_ambiguous_release_across_storage_handles(
+        ordered_pending_fixture(Some(&scoped_url)).await,
+    )
+    .await;
+    drop_postgres_test_schema(&database_url, &schema).await;
 }

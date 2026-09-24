@@ -33,7 +33,8 @@ pub(super) async fn initialize(
             flushed_in_session TEXT,
             outbound_sequence INTEGER,
             notification_outboxed_at_ms {bigint},
-            claimed_at_ms {bigint}
+            claimed_at_ms {bigint},
+            claim_token TEXT
         )
         "#
             ),
@@ -134,6 +135,18 @@ pub(super) async fn initialize(
         if msg.contains("duplicate column") || msg.contains("already exists") {
             debug!("pending_delivery.claimed_at_ms column already present");
         } else {
+            return Err(error);
+        }
+    }
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS claim_token TEXT"
+        }
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery ADD COLUMN claim_token TEXT",
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let message = error.to_string().to_lowercase();
+        if !message.contains("duplicate column") && !message.contains("already exists") {
             return Err(error);
         }
     }
