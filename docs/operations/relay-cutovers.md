@@ -11,6 +11,8 @@ The server publisher and Helm chart enforce the return to rolling updates:
    It locates the most recent Recreate window and its last server source change,
    then emits that revision and its first-parent descendants. A canceled build,
    a PR description, and a YAML comment do not establish that an image rolled.
+   A flip commit that also changes server/build inputs is rejected: those
+   changes must first ship in a separate Recreate commit.
 2. Publication writes these revisions to `cutoverGuard.allowedRevisions` in the
    generated Flux artifact. It also pins the image digest and sets
    `WADDLE_GIT_SHA`, using the same checkout as the image build. Checked-in values

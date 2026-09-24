@@ -86,6 +86,16 @@ class CutoverRevisionTests(unittest.TestCase):
         self.assertEqual(revisions, [cutover, flip])
         self.assertNotIn(old, revisions)
 
+    def test_server_change_in_flip_commit_fails_closed(self):
+        self.commit('Recreate', 'v2')
+        self.commit('RollingUpdate', 'v3')
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), '--repository', str(self.root)],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('server changes in the RollingUpdate flip', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

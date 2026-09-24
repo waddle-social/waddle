@@ -13,7 +13,7 @@ import sys
 MANIFEST = 'infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml'
 # These inputs all trigger the server publisher. Including the whole server tree
 # conservatively requires the last server build during the Recreate window.
-SERVER_INPUTS = ['server', 'flake.nix', 'flake.lock', MANIFEST]
+SERVER_INPUTS = ['server', 'flake.nix', 'flake.lock']
 
 
 def revisions(repository: Path) -> list[str]:
@@ -37,10 +37,14 @@ def revisions(repository: Path) -> list[str]:
     rolling = None
     for revision in git('log', '--first-parent', '--format=%H', 'HEAD', '--', MANIFEST).splitlines():
         if strategy(revision) == 'Recreate':
+            if git('diff', '--name-only', f'{rolling}^', rolling, '--', *SERVER_INPUTS):
+                raise ValueError(
+                    'server changes in the RollingUpdate flip must deploy under Recreate first'
+                )
             # Any further server changes made while Recreate remained set also
             # need to have reached the fleet before the flip is safe.
             tip = git('rev-parse', f'{rolling}^')
-            cutover = git('log', '-1', '--first-parent', '--format=%H', tip, '--', *SERVER_INPUTS)
+            cutover = git('log', '-1', '--first-parent', '--format=%H', tip, '--', *SERVER_INPUTS, MANIFEST)
             history = git('rev-list', '--first-parent', '--reverse', 'HEAD').splitlines()
             return history[history.index(cutover):]
         rolling = revision
