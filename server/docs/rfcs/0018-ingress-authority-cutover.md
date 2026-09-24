@@ -653,7 +653,13 @@ so other resources do not wait indefinitely on a quiet client. The gate also con
 by SM promotion. Retention cannot remove a canonical pending barrier while its
 pending row remains.
 
-A blocked executor returns without waiting for its predecessor. An ordering
+A blocked executor briefly re-probes canonical predecessor receipts in fresh
+transactions, with at most four transaction-free backoffs (2, 4, 8, and 16 ms).
+This absorbs the race where a client replies to an enqueued copy before its
+delivery receipt commits. It never executes predecessor work or bypasses the
+ordering check, and the enclosing execution deadline still applies. Barriers
+without a canonical predecessor receive no backoff. A persistent barrier still returns
+to maintenance rather than waiting indefinitely on the connection loop. An ordering
 deferral does not accrue a stalled-row cooldown; predecessor progress can release
 it on the next maintenance pass. The existing maintenance pump replays frozen effects off the connection loop, preserving
 SM acknowledgement progress and avoiding the carbon/backpressure cycle. Partial

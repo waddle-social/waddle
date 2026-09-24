@@ -14,6 +14,8 @@ use waddle_xmpp::ingress::MessageKey;
 struct Hooks {
     pause: Option<Arc<TerminalizationGate>>,
     recovery_freeze: Option<Arc<TerminalizationGate>>,
+    delivery_append: Option<(jid::FullJid, Arc<TerminalizationGate>)>,
+    blocked_dispatch: Option<Arc<TerminalizationGate>>,
     timeout: AtomicBool,
     receipt_failure: Option<super::EffectReceiptKey>,
 }
@@ -76,10 +78,76 @@ pub(super) fn take_terminalization_timeout(key: MessageKey) -> bool {
         return false;
     };
     let timeout = entry.timeout.swap(false, Ordering::SeqCst);
-    if entry.pause.is_none() && entry.recovery_freeze.is_none() && entry.receipt_failure.is_none() {
+    if entry.pause.is_none()
+        && entry.recovery_freeze.is_none()
+        && entry.delivery_append.is_none()
+        && entry.blocked_dispatch.is_none()
+        && entry.receipt_failure.is_none()
+    {
         hooks.remove(&key);
     }
     timeout
+}
+
+#[cfg(feature = "clustering")]
+pub(crate) fn pause_after_delivery_append(
+    key: MessageKey,
+    resource: jid::FullJid,
+) -> Arc<TerminalizationGate> {
+    let gate = Arc::new(TerminalizationGate::default());
+    HOOKS
+        .lock()
+        .expect("delivery hooks")
+        .entry(key)
+        .or_default()
+        .delivery_append = Some((resource, Arc::clone(&gate)));
+    gate
+}
+
+pub(crate) async fn after_delivery_append(key: MessageKey, resource: &jid::FullJid) {
+    let pause = HOOKS
+        .lock()
+        .expect("delivery hooks")
+        .get_mut(&key)
+        .and_then(|hooks| {
+            if hooks
+                .delivery_append
+                .as_ref()
+                .is_some_and(|(target, _)| target == resource)
+            {
+                hooks.delivery_append.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        });
+    if let Some(gate) = pause {
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+pub(crate) fn pause_after_blocked_dispatch(key: MessageKey) -> Arc<TerminalizationGate> {
+    let gate = Arc::new(TerminalizationGate::default());
+    HOOKS
+        .lock()
+        .expect("dispatch hooks")
+        .entry(key)
+        .or_default()
+        .blocked_dispatch = Some(Arc::clone(&gate));
+    gate
+}
+
+pub(crate) async fn after_blocked_dispatch(key: MessageKey) {
+    let pause = HOOKS
+        .lock()
+        .expect("dispatch hooks")
+        .get_mut(&key)
+        .and_then(|hooks| hooks.blocked_dispatch.take());
+    if let Some(gate) = pause {
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
 }
 
 pub(crate) fn pause_after_recovery_freeze(key: MessageKey) -> Arc<TerminalizationGate> {

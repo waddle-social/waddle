@@ -154,9 +154,33 @@ fn identity_matches(
     }
 }
 
-/// A failed probe preserves the obligation. No predecessor work or waiting is
-/// performed on the connection loop; maintenance replays the same frozen plan.
+/// Give in-flight predecessor receipts a brief chance to finish, without
+/// retaining a transaction or executing predecessor work. Persistent barriers
+/// still defer to maintenance; the enclosing execution deadline also applies.
 pub(super) async fn resource_ready(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    receipt: &EffectReceiptKey,
+    resource: Option<&FullJid>,
+    stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
+) -> Result<DispatchReadiness, IngressUowError> {
+    let mut backoffs = [2, 4, 8, 16].into_iter();
+    loop {
+        let readiness = resource_ready_once(uow, key, receipt, resource, stream).await?;
+        // An empty predecessor list denotes an independent pending-delivery
+        // barrier, which can require client acknowledgement rather than an
+        // in-flight canonical receipt. Do not delay that connection's loop.
+        if matches!(&readiness, DispatchReadiness::Blocked(keys) if !keys.is_empty()) {
+            if let Some(delay_ms) = backoffs.next() {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                continue;
+            }
+        }
+        return Ok(readiness);
+    }
+}
+
+async fn resource_ready_once(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     receipt: &EffectReceiptKey,
@@ -169,6 +193,10 @@ pub(super) async fn resource_ready(
     let readiness =
         ArchiveDispatchRepository::readiness(&mut tx, key, receipt, resource, stream).await?;
     tx.commit().await?;
+    #[cfg(test)]
+    if matches!(&readiness, DispatchReadiness::Blocked(_)) {
+        super::execute::test_hooks::after_blocked_dispatch(key).await;
+    }
     Ok(readiness)
 }
 

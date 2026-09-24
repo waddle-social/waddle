@@ -68,6 +68,22 @@ fn body(outbound: waddle_xmpp::registry::OutboundStanza) -> String {
     message.bodies.values().next().expect("body").clone()
 }
 
+async fn shared_state(
+    fixture: &IngressFixture,
+) -> std::sync::Arc<crate::server::routes::websocket::WebSocketState> {
+    let pool = crate::db::DatabasePool::new(
+        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("shared database");
+    socket_tests::create_test_websocket_state_with_db_pool_and_ingress(
+        std::sync::Arc::new(pool),
+        std::sync::Arc::new(fixture.authority().await),
+    )
+    .await
+}
+
 async fn queued_copy_before_relayed_reflection(mut fixture: IngressFixture, full: bool) {
     let state = socket_tests::create_test_websocket_state().await;
     let room: jid::BareJid = "reflection-order@muc.example.com".parse().expect("room");
@@ -278,7 +294,7 @@ async fn sqlite_xep0045_progress_contention_retries_without_repeating_live_deliv
     };
 
     let fixture = IngressFixture::sqlite().await;
-    let state = socket_tests::create_test_websocket_state().await;
+    let state = shared_state(&fixture).await;
     let room: jid::BareJid = "progress-contention@muc.example.com".parse().expect("room");
     let sender = fixture.submission(None, "").sender;
     let other: jid::FullJid = "juliet@example.com/phone".parse().expect("other occupant");
@@ -378,4 +394,188 @@ async fn sqlite_xep0045_progress_contention_retries_without_repeating_live_deliv
         }
     }
     fixture.close().await;
+}
+
+async fn reply_during_in_flight_reflection(release_predecessor: bool) {
+    use crate::ingress::execute::test_hooks;
+
+    let fixture = IngressFixture::sqlite().await;
+    let state = shared_state(&fixture).await;
+    let room: jid::BareJid = "in-flight-reflection@muc.example.com"
+        .parse()
+        .expect("room");
+    let sender = fixture.submission(None, "").sender;
+    let other: jid::FullJid = "juliet@example.com/phone".parse().expect("other occupant");
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "in-flight-reflection".into(),
+            channel_id: "in-flight-reflection".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    let mut receivers = Vec::new();
+    for (resource, nick) in [(&sender, "sender"), (&other, "other")] {
+        let (tx, receiver) = tokio::sync::mpsc::channel(4);
+        socket_tests::register_test_connection(&state, resource, tx).await;
+        receivers.push(receiver);
+        actor
+            .ask(Join {
+                nick: nick.into(),
+                real_jid: resource.clone(),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+    let mut deps = build_interpret_deps(&state, None);
+    deps.inbox_storage = None;
+    let mut decisions = Vec::new();
+    for (author, text) in [(&sender, "A"), (&other, "B")] {
+        let mut submission = groupchat_submission(&fixture, &room, author, text, text);
+        let message = submission.plan.sanitized_message.clone();
+        plan_broadcast(&mut submission, &room, &message, &deps).await;
+        // Finish the other occupant's copy before pausing A's reflection receipt.
+        submission.plan.plan.sort_by_key(|planned| matches!(&planned.effect,
+            Effect::External(effect) if crate::ingress::recorded::single_target(effect) == Some(&sender)));
+        decisions.push(
+            commit_submission(&fixture.uow, &submission, 1)
+                .await
+                .expect("commit room message"),
+        );
+    }
+    let older = &decisions[0];
+    let newer = &decisions[1];
+    assert!(!older.archive_ids.is_empty());
+    assert!(!newer.archive_ids.is_empty());
+    let append =
+        test_hooks::pause_after_delivery_append(older.message_key.expect("A key"), sender.clone());
+    let blocked = test_hooks::pause_after_blocked_dispatch(newer.message_key.expect("B key"));
+    let completed = tokio::sync::Notify::new();
+    let older_execution = async {
+        let report = execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            older,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        )
+        .await;
+        completed.notify_one();
+        report
+    };
+    let newer_execution = async {
+        append.wait_until_reached().await;
+        let execute = execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            newer,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        );
+        let finish_predecessor = async {
+            blocked.wait_until_reached().await;
+            if release_predecessor {
+                append.release();
+                completed.notified().await;
+            }
+            blocked.release();
+        };
+        let (report, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(execute, finish_predecessor)
+        })
+        .await
+        .expect("predecessor probes finish before the five-second execution deadline");
+        if !release_predecessor {
+            append.release();
+        }
+        report
+    };
+    let (older_report, newer_report) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(older_execution, newer_execution)
+    })
+    .await
+    .expect("both live executions finish without maintenance");
+    for report in [&older_report, &newer_report] {
+        assert!(report.receipt_failures.is_empty(), "{report:?}");
+        assert!(report.frame_obligations.is_empty(), "{report:?}");
+    }
+    assert!(older_report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
+    let reply_outcome = newer_report
+        .outcomes
+        .iter()
+        .find(|(effect, _)| crate::ingress::recorded::single_target(effect) == Some(&sender))
+        .map(|(_, outcome)| *outcome)
+        .expect("reply to predecessor's sender");
+    assert_eq!(
+        reply_outcome,
+        if release_predecessor {
+            ExternalOutcome::Done
+        } else {
+            ExternalOutcome::AwaitingPredecessor
+        },
+        "only a completed predecessor releases its successor"
+    );
+    assert!(
+        newer_report
+            .outcomes
+            .iter()
+            .filter(|(effect, _)| crate::ingress::recorded::single_target(effect) != Some(&sender))
+            .all(|(_, outcome)| *outcome == ExternalOutcome::Done),
+        "ready sibling still completes"
+    );
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        assert_eq!(body(receiver.try_recv().expect("older copy")), "A");
+        if release_predecessor || index == 1 {
+            assert_eq!(body(receiver.try_recv().expect("prompt reply")), "B");
+        }
+        assert!(receiver.try_recv().is_err(), "exactly one copy per message");
+    }
+    let mut tx = fixture.uow.begin().await.expect("inspect receipts");
+    for (index, decision) in decisions.iter().enumerate() {
+        assert_eq!(
+            EffectReceiptRepository::receipts_complete(&mut tx, decision.message_key.expect("key"))
+                .await
+                .expect("complete receipts"),
+            index == 0 || release_predecessor
+        );
+    }
+    for progress in &newer.route_progress {
+        let accepted = DeliveryProgressRepository::load(
+            &mut tx,
+            newer.message_key.expect("B key"),
+            &progress.receipt,
+        )
+        .await
+        .expect("B progress");
+        for resource in &progress.fanout {
+            assert_eq!(
+                accepted.contains(resource),
+                release_predecessor || resource != &sender,
+                "a blocked copy cannot receive false delivery progress"
+            );
+        }
+    }
+    tx.commit().await.expect("inspection commit");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_xep0045_reply_follows_in_flight_reflection_without_recovery_grace() {
+    reply_during_in_flight_reflection(true).await;
+}
+
+#[tokio::test]
+async fn sqlite_xep0045_persistent_predecessor_wait_is_bounded_and_preserves_ready_sibling() {
+    reply_during_in_flight_reflection(false).await;
 }

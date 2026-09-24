@@ -153,6 +153,8 @@ pub(super) async fn execute(
             completion = SettledCompletion::Uncertain;
         }
         if accepted(outcome) {
+            #[cfg(test)]
+            crate::ingress::execute::test_hooks::after_delivery_append(key, resource).await;
             // Retry only the progress transaction after proven database contention.
             // The socket already accepted this copy: retrying the append would
             // duplicate delivery. The enclosing execution deadline still applies.
