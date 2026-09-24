@@ -29,6 +29,34 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
                         .await
                 }
             };
+            // TODO(#1831 Phase 2): fire-and-forget enqueue into
+            // `message_judgment_outbox::enqueue_pending` here, gated on
+            // `MessageJudgmentOutboxConfig::enabled` and on `outcome` being
+            // `Ok(StoreOutcome::Stored { stanza_id, .. })` (never on a
+            // fenced-ownership-lost or storage-error outcome). This is the
+            // correct seam — not `groupchat_archive.rs`'s
+            // `finish_archive_groupchat_message_with_effects` — because
+            // that function also runs during the two-phase *planning* pass
+            // (`deps.effects.is_planning() == true`), where `deps.effects
+            // .execute(...)` only records an assumed outcome and never
+            // touches `storage`; enqueueing there would fire for plans that
+            // are later rejected and never actually committed. This
+            // `execute_durable` arm is the single place a groupchat archive
+            // write is ever really performed (both for a directly-executed
+            // `ImmediateSink` message and for a previously-planned effect
+            // replayed for real by the ingress commit path), so it is the
+            // only site that reliably fires exactly once per real archive.
+            // `message.body` (`Option<String>`) is already the RFC 6121
+            // §5.2.3-aware body extraction done upstream in
+            // `groupchat_archive.rs`'s `prototype_body` — reuse it directly
+            // rather than re-deriving a body extractor. Left as a TODO: a
+            // fire-and-forget `tokio::spawn` needs a `Database` handle and
+            // the config flag, and neither reaches `Deps` today without a
+            // new field threaded through `Deps`/`WebSocketState::deps` and
+            // every one of their ~51 literal construction sites — out of
+            // scope to force safely in this PR. The real Jev client +
+            // startup wiring for `run_drain_loop` lands in the same
+            // follow-up.
             EffectOutcome::Archive(outcome)
         }
         DurableRoomEffect::ProjectGroupchatInbox {

@@ -1292,15 +1292,9 @@ impl LinkPreviewConfig {
 /// lands in a follow-up PR, and startup wiring (`run_drain_loop`) lands
 /// alongside it. Until then this struct only documents the shape a future
 /// `from_env` will populate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MessageJudgmentOutboxConfig {
     pub enabled: bool,
-}
-
-impl Default for MessageJudgmentOutboxConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
