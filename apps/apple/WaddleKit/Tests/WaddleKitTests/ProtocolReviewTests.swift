@@ -147,7 +147,7 @@ struct StaleConnectionTests {
         coordinator.start()
         await coordinator.stop()
         let disconnectsAtStop = port.disconnectCount
-        try await Task.sleep(nanoseconds: 300_000_000)
+        await eventually { port.disconnectCount == disconnectsAtStop + 1 }
         #expect(port.disconnectCount == disconnectsAtStop + 1)
         #expect(coordinator.connection == .signedOut)
     }
