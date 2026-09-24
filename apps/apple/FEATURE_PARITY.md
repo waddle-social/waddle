@@ -49,7 +49,9 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications |
 | Inbox / unread counts | 0430 | ❌ | ✅ | Server-authoritative with read-clear barrier; mention badges; app badge. Baseline: unread counts were hardcoded to 0 |
 | Room create | 0045 | ❌ | ✅ | Baseline: `createChannel` was a stub returning nil |
-| Slash commands | 0050 | ❌ | ❌ | Not in this PR |
+| Slash commands | 0050, 0004 | ❌ | ✅ | Built-ins (`/me`, `/shrug`, `/giphy`, `/away`, `/active`, `/dnd`) plus server extension commands discovered over XEP-0050 at session start; popover completion, inline single-field execution, XEP-0004 form sheet for multi-step commands |
+| Composer | 0394, 0372 | 🟡 | ✅ | Slack-style card: `+` menu (photo, file, GIF), `Aa` formatting bar (bold, italic, strikethrough, code, code block, quote as XEP-0394 markup; links inserted as bare URLs), emoji, `@` and `/` buttons, send |
+| Paste images / files / GIFs | 0363, 0447 | ❌ | ✅ | Pasted files, animated GIFs (bytes kept) and still images upload as attachments; text and rich-text selections paste as text |
 
 ## Presence & profile
 

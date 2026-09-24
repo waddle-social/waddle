@@ -71,6 +71,15 @@ final class ComposerModel {
         stashedMentions = []
     }
 
+    // MARK: - Draft text
+
+    /// Empties the text and the mentions recorded in it, keeping the
+    /// reply target and attachments (a slash command consumed the text).
+    func clearText() {
+        text = ""
+        mentions = []
+    }
+
     // MARK: - Mentions
 
     func insertMention(_ candidate: MentionCandidate, replacing query: MentionQuery) {
@@ -172,6 +181,15 @@ final class ComposerModel {
             attachments: attachments.compactMap(\.sharedFile)
         )
         clearDraft()
+        return .send(draft)
+    }
+
+    /// A message whose body is just `url` (a picked GIF), in reply to the
+    /// current reply target and in `thread`. The draft text and pending
+    /// attachments stay in the composer.
+    func takeLinkSubmission(_ url: URL, thread: String?) -> ComposerSubmission {
+        let draft = Draft(text: url.absoluteString, reply: reply, thread: thread)
+        reply = nil
         return .send(draft)
     }
 
