@@ -194,19 +194,20 @@ mod tests {
         db
     }
 
-    /// Canned [`MessageJudge`] that re-invokes a responder closure on every
-    /// call. A closure (rather than a canned `Vec` of responses) sidesteps
-    /// `JudgeError` not implementing `Clone` — the fixed contract in
-    /// `judge.rs` is not ours to change — while still letting each test
-    /// pick fresh `Ok`/`Err` values per call.
+    /// Canned [`MessageJudge`] that re-invokes a responder closure (given
+    /// the row's body) on every call. A closure keyed on the body — rather
+    /// than a canned `Vec` of responses — sidesteps `JudgeError` not
+    /// implementing `Clone` (the fixed contract in `judge.rs` is not ours
+    /// to change) while still letting a single judge instance answer
+    /// differently for different rows in the same batch.
     struct FakeJudge {
-        responder: Box<dyn Fn() -> Result<IsQuestionJudgment, JudgeError> + Send + Sync>,
+        responder: Box<dyn Fn(&str) -> Result<IsQuestionJudgment, JudgeError> + Send + Sync>,
         calls: Mutex<usize>,
     }
 
     impl FakeJudge {
         fn new(
-            responder: impl Fn() -> Result<IsQuestionJudgment, JudgeError> + Send + Sync + 'static,
+            responder: impl Fn(&str) -> Result<IsQuestionJudgment, JudgeError> + Send + Sync + 'static,
         ) -> Self {
             Self {
                 responder: Box::new(responder),
@@ -221,9 +222,9 @@ mod tests {
 
     #[async_trait]
     impl MessageJudge for FakeJudge {
-        async fn is_question(&self, _body: &str) -> Result<IsQuestionJudgment, JudgeError> {
+        async fn is_question(&self, body: &str) -> Result<IsQuestionJudgment, JudgeError> {
             *self.calls.lock().expect("calls mutex") += 1;
-            (self.responder)()
+            (self.responder)(body)
         }
     }
 
@@ -255,7 +256,7 @@ mod tests {
         .await
         .expect("enqueue");
 
-        let judge = FakeJudge::new(ok_judgment);
+        let judge = FakeJudge::new(|_body| ok_judgment());
         let outcome = drain_once(&db, &judge, 1_000, 10).await;
 
         assert_eq!(outcome.fetched, 1);
@@ -300,7 +301,7 @@ mod tests {
         .await
         .expect("enqueue");
 
-        let judge = FakeJudge::new(err_judgment);
+        let judge = FakeJudge::new(|_body| err_judgment());
         let outcome = drain_once(&db, &judge, 1_000, 10).await;
 
         assert_eq!(outcome.fetched, 1);
@@ -325,6 +326,25 @@ mod tests {
         );
     }
 
+    /// Fails only for one specific message body, succeeds for every other —
+    /// so a single drain pass can exercise a permanently-failing row and a
+    /// healthy sibling row at the same time, distinguished by body text
+    /// rather than by artificially staggering when each becomes due.
+    struct BodyKeyedFakeJudge {
+        fail_body: &'static str,
+    }
+
+    #[async_trait]
+    impl MessageJudge for BodyKeyedFakeJudge {
+        async fn is_question(&self, body: &str) -> Result<IsQuestionJudgment, JudgeError> {
+            if body == self.fail_body {
+                err_judgment()
+            } else {
+                ok_judgment()
+            }
+        }
+    }
+
     #[tokio::test]
     async fn drain_once_dead_letters_after_max_attempts_without_blocking_the_queue() {
         let db = test_db().await;
@@ -333,34 +353,45 @@ mod tests {
             PendingJudgmentInput {
                 waddle_id: waddle_id(),
                 stanza_id: stanza("stanza-dead-letter"),
-                body: "body".to_string(),
+                body: "body-fails".to_string(),
                 now_ms: 0,
             },
         )
         .await
         .expect("enqueue");
         // A second, healthy row must keep draining even while the first
-        // row is permanently failing.
+        // row is permanently failing — both are due from the same instant,
+        // so the very first pass fetches both together.
         enqueue_pending(
             &db,
             PendingJudgmentInput {
                 waddle_id: waddle_id(),
                 stanza_id: stanza("stanza-healthy"),
-                body: "body".to_string(),
+                body: "body-healthy".to_string(),
                 now_ms: 0,
             },
         )
         .await
         .expect("enqueue");
 
-        let judge = FakeJudge::new(err_judgment);
+        let judge = BodyKeyedFakeJudge {
+            fail_body: "body-fails",
+        };
         let mut now_ms = 0_i64;
         for attempt in 1..=MAX_ATTEMPTS {
             let outcome = drain_once(&db, &judge, now_ms, 10).await;
-            assert_eq!(
-                outcome.fetched, 1,
-                "attempt {attempt}: only the due row is fetched"
-            );
+            if attempt == 1 {
+                // Both rows are due together on the first pass: the
+                // healthy one is judged and marked done immediately, the
+                // other starts its failure/backoff trajectory.
+                assert_eq!(outcome.fetched, 2, "attempt 1: both rows are due");
+                assert_eq!(outcome.judged, 1, "attempt 1: the healthy row succeeds");
+            } else {
+                assert_eq!(
+                    outcome.fetched, 1,
+                    "attempt {attempt}: only the still-failing row remains due"
+                );
+            }
             if attempt < MAX_ATTEMPTS {
                 assert_eq!(
                     outcome.dead_lettered, 0,
@@ -390,10 +421,17 @@ mod tests {
         let row = rows.next().await.expect("row").expect("row present");
         assert!(row.get::<bool>(0).expect("done"));
 
-        // The healthy row was never touched by the other row's failures
-        // and is still (independently) judgeable.
-        let healthy_judge = FakeJudge::new(ok_judgment);
-        let outcome = drain_once(&db, &healthy_judge, 0, 10).await;
-        assert_eq!(outcome.judged, 1);
+        // The healthy row was judged successfully on the very first pass,
+        // was never dead-lettered, and never blocked (or was blocked by)
+        // the other row's ongoing failures.
+        let mut rows = connection
+            .query(
+                "SELECT probability FROM message_judgments WHERE stanza_id = ?",
+                crate::db_params!["stanza-healthy"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row present");
+        assert_eq!(row.get::<f64>(0).expect("probability"), 0.75);
     }
 }
