@@ -6,15 +6,27 @@ public struct PastePlan: Hashable, Sendable {
     /// Per pasteboard item, the representation to load; nil loads nothing.
     public let loads: [PasteRepresentation?]
 
-    public init(loads: [PasteRepresentation?]) {
+    public init(loads: [PasteRepresentation?], textItems: [Int] = []) {
         self.loads = loads
+        self.textItems = textItems
     }
 
     /// No item offers a file or image: let the text field paste text.
     public var isTextPaste: Bool { loads.allSatisfy { $0 == nil } }
 
+    /// Items to paste as text next to the attachments: those that offer
+    /// plain text and nothing to attach, like a caption copied with an
+    /// image. (A copied file's name rides on the file's own item, so it
+    /// is never pasted.) Empty for a text paste, which the field handles.
+    public let textItems: [Int]
+
     public static func plan(items: [PasteboardItem]) -> PastePlan {
-        PastePlan(loads: items.map(representation))
+        let loads = items.map(representation)
+        guard loads.contains(where: { $0 != nil }) else { return PastePlan(loads: loads) }
+        let textItems = items.indices.filter { index in
+            loads[index] == nil && !Set(items[index].types).isDisjoint(with: plainTextTypes)
+        }
+        return PastePlan(loads: loads, textItems: textItems)
     }
 
     /// A file URL wins (it is the real file), then a GIF (keeps the

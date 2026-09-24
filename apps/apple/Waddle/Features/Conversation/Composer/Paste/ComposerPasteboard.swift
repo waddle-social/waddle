@@ -20,7 +20,8 @@ enum ComposerPasteboard {
     static func read() -> ComposerPasteResult {
         let plan = plan()
         guard !plan.isTextPaste else { return .text(plainText()) }
-        return .attachments(contents(for: plan))
+        let text = plan.textItems.compactMap(plainText(itemAt:)).joined(separator: "\n")
+        return .attachments(contents(for: plan), text: text.isEmpty ? nil : text)
     }
 
     private static func plan() -> PastePlan {
@@ -59,6 +60,11 @@ enum ComposerPasteboard {
         NSPasteboard.general.string(forType: .string)
     }
 
+    private static func plainText(itemAt index: Int) -> String? {
+        guard let items = NSPasteboard.general.pasteboardItems, items.indices.contains(index) else { return nil }
+        return items[index].string(forType: .string)
+    }
+
     /// Read as URL objects so the sandbox grants access to the files.
     private static func copiedFileURLs() -> [URL] {
         let objects = NSPasteboard.general.readObjects(
@@ -79,6 +85,15 @@ enum ComposerPasteboard {
 
     private static func plainText() -> String? {
         UIPasteboard.general.string
+    }
+
+    private static func plainText(itemAt index: Int) -> String? {
+        let items = UIPasteboard.general.items
+        guard items.indices.contains(index) else { return nil }
+        let item = items[index]
+        return [UTType.utf8PlainText.identifier, UTType.plainText.identifier].lazy
+            .compactMap { item[$0] as? String }
+            .first
     }
 
     private static func copiedFileURLs() -> [URL] {

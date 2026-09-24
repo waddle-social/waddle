@@ -10,9 +10,10 @@ struct ExtensionCommandStage: Identifiable {
     let room: BareJID?
     var result: ExtensionCommandResult
 
-    /// The command awaits input; otherwise this is a finished command's
-    /// result form, shown read-only.
-    var isPending: Bool { result.pendingForm != nil }
+    /// The command awaits the next action (with or without fields to
+    /// fill); otherwise this is a finished command's result form, shown
+    /// read-only.
+    var isPending: Bool { result.awaitsAction }
 
     /// Fields the sheet renders: never blocked (secret) or hidden ones.
     var visibleFields: [ExtensionCommandField] {
@@ -30,10 +31,11 @@ struct ExtensionCommandStage: Identifiable {
         return order.filter { allowed.contains($0) }
     }
 
-    /// Whether a response needs the sheet: a stage awaiting input, or a
-    /// completed command whose form carries results to read.
+    /// Whether a response needs the sheet: a stage awaiting an action
+    /// (even one with only notes and buttons), or a completed command
+    /// whose form carries results to read.
     static func needsSheet(_ result: ExtensionCommandResult) -> Bool {
-        if result.pendingForm != nil { return true }
+        if result.awaitsAction { return true }
         return result.status == .completed && !visibleFields(of: result.form).isEmpty
     }
 

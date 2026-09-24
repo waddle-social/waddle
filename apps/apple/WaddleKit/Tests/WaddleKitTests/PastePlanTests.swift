@@ -14,6 +14,16 @@ struct PastePlanTests {
         #expect(plan().isTextPaste)
     }
 
+    @Test func textItemsNextToAttachmentsPasteToo() {
+        let captioned = plan(["public.png"], ["public.utf8-plain-text"], ["public.html"])
+        #expect(captioned.loads == [.image(.png), nil, nil])
+        #expect(captioned.textItems == [1])
+        // A copied file's name is on the file's own item and is not pasted.
+        #expect(plan(["public.file-url", "public.utf8-plain-text"]).textItems.isEmpty)
+        // A plain text paste leaves the text to the field.
+        #expect(plan(["public.utf8-plain-text"]).textItems.isEmpty)
+    }
+
     @Test func gifKeepsAnimation() {
         #expect(plan(["public.png", "com.compuserve.gif", "public.tiff"]).loads == [.gif])
     }

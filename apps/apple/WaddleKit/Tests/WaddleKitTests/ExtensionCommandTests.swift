@@ -352,4 +352,11 @@ struct ExtensionCommandTests {
         #expect(stage([]).pendingForm == nil)
         #expect(done.pendingForm == nil)
     }
+
+    @Test func anExecutingSessionAwaitsActionEvenWithoutFields() {
+        #expect(stage([]).awaitsAction)
+        #expect(stage([field("question")]).awaitsAction)
+        #expect(!stage([], sessionID: nil).awaitsAction)
+        #expect(!done.awaitsAction)
+    }
 }

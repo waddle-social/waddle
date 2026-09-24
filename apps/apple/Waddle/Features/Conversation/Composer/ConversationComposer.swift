@@ -334,12 +334,15 @@ struct ConversationComposer: View {
         case let .text(string):
             guard let string, !string.isEmpty else { return }
             apply(ComposerInsertion.replacingSelection(with: string, in: model.text, selection: selection))
-        case let .attachments(contents):
+        case let .attachments(contents, text):
             guard !model.isEditing else {
                 model.errorMessage = "Attachments can't be added while editing a message."
                 return
             }
             intake.attachPasted(contents)
+            if let text {
+                apply(ComposerInsertion.replacingSelection(with: text, in: model.text, selection: selection))
+            }
         }
     }
 

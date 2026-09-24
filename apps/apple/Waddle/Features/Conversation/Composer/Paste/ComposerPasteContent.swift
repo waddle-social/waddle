@@ -8,8 +8,9 @@ enum ComposerPasteContent {
     case image(Data, mediaType: String?, fileExtension: String?)
 }
 
-/// What a paste should do: insert text, or attach files and images.
+/// What a paste should do: insert text, or attach files and images
+/// (with any text copied alongside them, like a caption).
 enum ComposerPasteResult {
     case text(String?)
-    case attachments([ComposerPasteContent])
+    case attachments([ComposerPasteContent], text: String?)
 }

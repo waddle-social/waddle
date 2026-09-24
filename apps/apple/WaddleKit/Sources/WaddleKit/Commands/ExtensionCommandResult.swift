@@ -27,6 +27,12 @@ public struct ExtensionCommandResult: Sendable, Equatable, Hashable {
 
     /// The form of a stage that still awaits input: an executing session
     /// whose form has fields to show.
+    /// The service holds the session open for the next action, with or
+    /// without a form to fill (XEP-0050 `status='executing'`).
+    public var awaitsAction: Bool {
+        status == .executing && sessionID != nil
+    }
+
     public var pendingForm: ExtensionCommandForm? {
         guard status == .executing, sessionID != nil, let form, !form.fields.isEmpty else { return nil }
         return form
