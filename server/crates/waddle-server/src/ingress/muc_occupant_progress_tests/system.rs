@@ -141,7 +141,7 @@ async fn partial_pin_broadcast(fixture: IngressFixture) {
         frozen, &archived_message,
         "frozen source is the exact archived system payload"
     );
-    let copy = crate::ingress::room_canonical::occupant_copy_message(frozen, &b, &intents);
+    let copy = crate::ingress::room_canonical::occupant_copy_message(frozen, &b);
     assert_eq!(copy.from, Some(room.clone().into()));
     assert_eq!(copy.to, Some(b.clone().into()));
     assert_eq!(copy.bodies, frozen.bodies);

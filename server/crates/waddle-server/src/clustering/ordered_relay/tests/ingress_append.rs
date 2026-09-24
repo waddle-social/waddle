@@ -54,24 +54,35 @@ fn processed_direct_payload_preserves_bare_address_but_binds_frozen_full_target(
     let waddle_xmpp::Stanza::Message(message) = &mut stanza.0 else {
         panic!("message");
     };
-    message.to = Some("juliet@example.test".parse().unwrap());
+    message.to = Some(
+        "juliet@example.test"
+            .parse()
+            .expect("valid bare recipient JID"),
+    );
     envelope.payload = OrderedRelayPayload::ProcessedDirectMessage {
         recipient,
         stanza,
         ingress_append,
     };
     assert!(envelope_is_consistent(&envelope));
-    let encoded = serde_json::to_vec(&envelope).unwrap();
-    let decoded: RemoteStanzaEnvelope = serde_json::from_slice(&encoded).unwrap();
+    let encoded = serde_json::to_vec(&envelope).expect("serialize relay envelope");
+    let decoded: RemoteStanzaEnvelope =
+        serde_json::from_slice(&encoded).expect("deserialize relay envelope");
     assert_eq!(
-        envelope.signing_bytes().unwrap(),
-        decoded.signing_bytes().unwrap()
+        envelope
+            .signing_bytes()
+            .expect("encode original envelope signing bytes"),
+        decoded
+            .signing_bytes()
+            .expect("encode decoded envelope signing bytes")
     );
     let OrderedRelayPayload::ProcessedDirectMessage { recipient, .. } = &mut envelope.payload
     else {
         unreachable!()
     };
-    *recipient = "juliet@example.test/other".parse().unwrap();
+    *recipient = "juliet@example.test/other"
+        .parse()
+        .expect("valid alternate recipient JID");
     assert!(
         !envelope_is_consistent(&envelope),
         "channel freezes the exact resource"
@@ -154,8 +165,11 @@ fn changing_raw_to_processed_changes_signed_bytes_and_replay_fingerprint() {
     };
     assert!(envelope_is_consistent(&processed));
     assert_ne!(
-        raw.signing_bytes().unwrap(),
-        processed.signing_bytes().unwrap()
+        raw.signing_bytes()
+            .expect("encode raw envelope signing bytes"),
+        processed
+            .signing_bytes()
+            .expect("encode processed envelope signing bytes")
     );
     assert_ne!(raw.payload.fingerprint(), processed.payload.fingerprint());
 }

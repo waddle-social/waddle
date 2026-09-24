@@ -16,7 +16,7 @@ use super::{decision::IngressDecision, recorded::RouteProgress};
 #[path = "execute_offline.rs"]
 mod offline;
 #[cfg(test)]
-pub(crate) use offline::fail_before_offline_settlement;
+pub(crate) use offline::{fail_before_offline_settlement, retry_before_offline_settlement};
 
 #[path = "execute_archive.rs"]
 mod archive;

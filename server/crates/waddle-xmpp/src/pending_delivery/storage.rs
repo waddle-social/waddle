@@ -275,8 +275,10 @@ pub trait PendingDeliveryStorage: Send + Sync {
         limit: usize,
     ) -> Result<Vec<PendingRow>, PendingStorageError>;
 
-    /// Claim a bounded batch in canonical MAM archive order. Archived rows
-    /// precede transient rows; transient rows retain their row-id order.
+    /// Claim a bounded merge of archive-ordered and transient FIFO rows.
+    /// Archived rows retain canonical MAM order; transient rows retain row-id
+    /// order. Compare the heads of those two streams by row id, giving archive
+    /// order precedence when clock skew makes the orders conflict.
     /// Already claimed rows are excluded, so this operation needs no row-id
     /// cursor (a later archive ordinal may have an earlier pending row id).
     /// Implementations without access to canonical archive positions fail

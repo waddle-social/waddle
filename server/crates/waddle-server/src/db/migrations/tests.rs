@@ -1468,12 +1468,101 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         }
     }
 
+    assert_pending_archive_reference_monitoring(&query_pool, &mut monitor_conn, &queries).await;
     assert_populated_nonterminal_monitoring(&query_pool, &mut monitor_conn, &queries).await;
 
     drop(monitor_conn);
     query_pool.close().await;
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+async fn assert_pending_archive_reference_monitoring(
+    pool: &sqlx::PgPool,
+    monitor: &mut sqlx::PgConnection,
+    queries: &[MonitoringQuery],
+) {
+    // Both rows are expired, fully receipted, and inside the configured cohort.
+    // Only the first dispatch still points to an extant pending delivery.
+    sqlx::raw_sql(
+        "INSERT INTO ingress_messages (message_key, digest_version, digest, created_at, terminal_at)
+         VALUES
+           ('00000000-0000-0000-0000-000000000011', 1, decode(repeat('11', 32), 'hex'), '1970-01-01T01:00:00Z', '1970-01-01T02:00:00Z'),
+           ('00000000-0000-0000-0000-000000000012', 1, decode(repeat('12', 32), 'hex'), '1970-01-01T01:00:00Z', '1970-01-01T02:00:00Z');
+         INSERT INTO ingress_effect_intents
+           (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload)
+         SELECT message_key, 0, 22, digest, 1, '{}'::bytea FROM ingress_messages;
+         INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+         SELECT message_key, kind, semantic_identity_hash FROM ingress_effect_intents;
+         INSERT INTO ingress_archive_dispatch
+           (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id)
+         SELECT 'juliet@example.com', 1, message_key, 22, digest, '', message_key::text
+         FROM ingress_messages;
+         INSERT INTO pending_delivery
+           (row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id)
+         VALUES ('00000000-0000-0000-0000-000000000011', 'juliet@example.com', 3600000, 'archived', 'juliet@example.com', 'monitoring-archive');",
+    )
+    .execute(pool)
+    .await
+    .expect("insert pending archive monitoring fixture");
+
+    for retained in [true, false] {
+        let referenced = i64::from(retained);
+        let unreferenced = 2 - referenced;
+        for name in ["waddle_ingress_messages", "waddle_ingress_cohort"] {
+            let query = queries
+                .iter()
+                .find(|query| query.name == name)
+                .expect("lifecycle monitoring query");
+            let rows = sqlx::query(&query.sql)
+                .fetch_all(&mut *monitor)
+                .await
+                .expect("query pending archive lifecycle as pg_monitor");
+            let counts: std::collections::BTreeMap<String, i64> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.try_get("state").expect("lifecycle state"),
+                        row.try_get("count").expect("lifecycle count"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                counts.get("terminal_referenced").copied().unwrap_or(0),
+                referenced,
+                "{name}: only extant pending rows retain a terminal reference"
+            );
+            assert_eq!(
+                counts.get("terminal_unreferenced"),
+                Some(&unreferenced),
+                "{name}: dangling dispatch references must not retain messages"
+            );
+        }
+        let gc = queries
+            .iter()
+            .find(|query| query.name == "waddle_ingress_gc")
+            .expect("GC monitoring query");
+        let row = sqlx::query(&gc.sql)
+            .fetch_one(&mut *monitor)
+            .await
+            .expect("query pending archive GC as pg_monitor");
+        assert_eq!(
+            row.try_get::<i64, _>("eligible_messages")
+                .expect("eligible count"),
+            unreferenced
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("retained_referenced_messages")
+                .expect("retained count"),
+            referenced
+        );
+        if retained {
+            sqlx::query("DELETE FROM pending_delivery")
+                .execute(pool)
+                .await
+                .expect("release pending archive reference");
+        }
+    }
 }
 
 async fn assert_populated_nonterminal_monitoring(

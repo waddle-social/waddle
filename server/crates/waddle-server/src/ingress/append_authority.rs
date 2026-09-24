@@ -221,7 +221,7 @@ async fn authorize_room_route(
             _ => continue,
         };
         if let Ok(source) = super::room_canonical::source(&envelope, source_intent) {
-            let expected = super::room_canonical::occupant_copy_message(source, target, &intents);
+            let expected = super::room_canonical::occupant_copy_message(source, target);
             if *room == obligation.sender_bare && occupants.contains(target) && expected == *message
             {
                 return Ok(());

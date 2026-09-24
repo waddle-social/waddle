@@ -113,6 +113,11 @@ data:
             WHEN message.terminal_at IS NULL THEN 'live'
             WHEN message.message_key IN (SELECT ref.message_key FROM ingress_sm_refs ref)
               OR message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery)
+              OR message.message_key IN (
+                SELECT dispatch.message_key FROM ingress_archive_dispatch dispatch
+                JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
+                WHERE dispatch.pending_row_id <> ''
+              )
               THEN 'terminal_referenced'
             ELSE 'terminal_unreferenced'
           END AS state,
@@ -148,6 +153,11 @@ data:
               WHEN message.terminal_at IS NULL THEN 'live'
               WHEN message.message_key IN (SELECT ref.message_key FROM ingress_sm_refs ref)
                 OR message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery)
+                OR message.message_key IN (
+                  SELECT dispatch.message_key FROM ingress_archive_dispatch dispatch
+                  JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
+                  WHERE dispatch.pending_row_id <> ''
+                )
                 THEN 'terminal_referenced'
               ELSE 'terminal_unreferenced'
             END AS state

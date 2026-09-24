@@ -4947,7 +4947,7 @@ async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resour
                     .protocol
                     .connection_registry
                     .get_entry(resource)
-                    .unwrap(),
+                    .expect("registered test resource"),
             )
             .await
         );

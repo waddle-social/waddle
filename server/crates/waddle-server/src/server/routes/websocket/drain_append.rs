@@ -281,7 +281,9 @@ pub(super) async fn claim(
         .await
     {
         Ok(SmKeyedAppendOutcome::Appended { .. }) => Claim::RecordedInDetachedStream,
-        Ok(SmKeyedAppendOutcome::AlreadyAppended { .. }) => Claim::AlreadyAllocated,
+        Ok(SmKeyedAppendOutcome::AlreadyAppended { .. } | SmKeyedAppendOutcome::Suppressed) => {
+            Claim::AlreadyAllocated
+        }
         Ok(SmKeyedAppendOutcome::NoSession) => Claim::Unkeyed,
         Err(error) => {
             warn!(stream_id, %error, "keyed detach-drain record failed; draining unkeyed");

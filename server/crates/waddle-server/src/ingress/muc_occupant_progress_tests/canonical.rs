@@ -461,7 +461,6 @@ async fn system_sources_keep_separate_payloads(fixture: IngressFixture) {
                 let copy = occupant_copy_message(
                     source(&envelope, intent).expect("frozen source"),
                     &occupant,
-                    &recorded,
                 );
                 assert_eq!(copy.from, Some(room.clone().into()));
                 assert_eq!(copy.to, Some(occupant.clone().into()));

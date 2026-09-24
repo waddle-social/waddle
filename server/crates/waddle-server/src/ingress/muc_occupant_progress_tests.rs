@@ -445,3 +445,7 @@ mod host_owned;
 #[cfg(feature = "clustering")]
 #[path = "muc_occupant_progress_tests/relayed_sibling.rs"]
 mod relayed_sibling;
+
+#[cfg(feature = "clustering")]
+#[path = "muc_occupant_progress_tests/ordered_reflection.rs"]
+mod ordered_reflection;

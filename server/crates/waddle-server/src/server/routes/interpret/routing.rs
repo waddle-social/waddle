@@ -6,6 +6,16 @@ pub(super) async fn run_headless_recipient_pass(
     stanza: Stanza,
     depth: u8,
 ) {
+    run_selected_headless_recipient_pass(deps, recipient_bare, None, stanza, depth).await;
+}
+
+pub(super) async fn run_selected_headless_recipient_pass(
+    deps: &Deps<'_>,
+    recipient_bare: &jid::BareJid,
+    carbon_recipients: Option<&[FullJid]>,
+    stanza: Stanza,
+    depth: u8,
+) {
     let Some(dispatcher) = deps.message_dispatcher else {
         debug!(
             bare_jid = %recipient_bare,
@@ -72,6 +82,21 @@ pub(super) async fn run_headless_recipient_pass(
     let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
     for event in events {
         match event {
+            OutboundEvent::SendCarbons {
+                owner,
+                message,
+                kind,
+                exclude,
+            } if deps.effects.is_planning() && carbon_recipients.is_some() => {
+                super::carbons::plan_carbon_resources(
+                    deps,
+                    owner,
+                    message,
+                    kind,
+                    exclude,
+                    carbon_recipients.unwrap_or_default().to_vec(),
+                );
+            }
             OutboundEvent::SendStanza(_) if deps.effects.is_planning() => {}
             OutboundEvent::RouteToConnection { .. } => side_routes.push(event),
             other => remaining.push(other),
@@ -929,7 +954,13 @@ pub(super) async fn append_detached(
                 context.for_resource(target),
             )
             .await
-            .map(|outcome| outcome.is_allocated()),
+            .map(|outcome| {
+                outcome.is_allocated()
+                    || matches!(
+                        outcome,
+                        waddle_xmpp::stream_management::SmKeyedAppendOutcome::Suppressed
+                    )
+            }),
         None => {
             sm.record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
                 .await

@@ -813,26 +813,44 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // Match the archive resolver's newest row for either UID or stanza-id.
         // Missing pointers are still claimed so materialization can discard them.
         const ORDINAL: &str = "(SELECT MAX(archive_seq) FROM mam_messages m WHERE m.room_jid = pending_delivery.archive_stanza_by AND (m.id = pending_delivery.archive_stanza_id OR m.stanza_id = pending_delivery.archive_stanza_id))";
+        // Merge archive-ordered and transient FIFO streams by their row-id
+        // heads. A running maximum delays a skewed archived row behind its
+        // canonical predecessors instead of giving all archived mail priority.
+        // Conflicting UUID order cannot override canonical archive order.
+        // Materialize the bounded candidates so RETURNING uses the exact same
+        // order even as UPDATE removes rows from the unclaimed set.
         let sql = format!(
-            "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, claimed_at_ms = ? \
-             WHERE flushed_in_session IS NULL AND row_id IN ( \
-                 SELECT row_id FROM pending_delivery \
+            "WITH eligible AS ( \
+                 SELECT row_id, payload_kind, {ORDINAL} AS ordinal FROM pending_delivery \
                  WHERE recipient_jid = ? AND flushed_in_session IS NULL \
-                 ORDER BY CASE WHEN payload_kind = 'archived' THEN 0 ELSE 1 END, \
-                          {ORDINAL} ASC NULLS FIRST, row_id ASC LIMIT ? \
+             ), merged AS ( \
+                 SELECT row_id, ordinal, \
+                     MAX(row_id) OVER (PARTITION BY payload_kind \
+                         ORDER BY ordinal ASC NULLS FIRST, row_id ASC \
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS fifo_key \
+                 FROM eligible \
+             ), candidates AS MATERIALIZED ( \
+                 SELECT row_id, ordinal, ROW_NUMBER() OVER ( \
+                     ORDER BY fifo_key ASC, ordinal ASC NULLS FIRST, row_id ASC) AS claim_order \
+                 FROM merged \
+                 ORDER BY fifo_key ASC, ordinal ASC NULLS FIRST, row_id ASC LIMIT ? \
              ) \
+             UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, claimed_at_ms = ? \
+             WHERE flushed_in_session IS NULL AND row_id IN (SELECT row_id FROM candidates) \
              RETURNING row_id, recipient_jid, original_receipt_at, payload_kind, \
                        archive_stanza_by, archive_stanza_id, transient_xml, \
-                       flushed_in_session, outbound_sequence, {ORDINAL}"
+                       flushed_in_session, outbound_sequence, \
+                       (SELECT ordinal FROM candidates WHERE candidates.row_id = pending_delivery.row_id), \
+                       (SELECT claim_order FROM candidates WHERE candidates.row_id = pending_delivery.row_id)"
         );
         let mut rows = self
             .query(
                 &sql,
                 crate::db_params![
-                    session.as_str().to_string(),
-                    chrono::Utc::now().timestamp_millis(),
                     recipient.to_string(),
                     limit as i64,
+                    session.as_str().to_string(),
+                    chrono::Utc::now().timestamp_millis(),
                 ],
             )
             .await?;
@@ -845,20 +863,17 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             let ordinal: Option<i64> = row
                 .get(9)
                 .map_err(|error| PendingStorageError::Other(error.to_string()))?;
-            let ordinal = ordinal
+            ordinal
                 .map(waddle_xmpp::mam::ArchiveOrdinal::from_storage)
                 .transpose()
                 .map_err(|error| PendingStorageError::Other(error.to_string()))?;
-            claimed.push((decode_row(&row)?, ordinal));
+            let claim_order: i64 = row
+                .get(10)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            claimed.push((decode_row(&row)?, claim_order));
         }
         // UPDATE RETURNING has no ordering guarantee on either backend.
-        claimed.sort_by(|(left, left_ordinal), (right, right_ordinal)| {
-            left.payload
-                .is_transient()
-                .cmp(&right.payload.is_transient())
-                .then_with(|| left_ordinal.cmp(right_ordinal))
-                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
-        });
+        claimed.sort_by_key(|(_, claim_order)| *claim_order);
         Ok(claimed.into_iter().map(|(row, _)| row).collect())
     }
 

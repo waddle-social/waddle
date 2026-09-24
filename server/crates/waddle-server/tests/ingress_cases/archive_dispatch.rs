@@ -469,7 +469,7 @@ async fn pending_stream_progress(fixture: IngressFixture) {
             QuotaPolicy::Unlimited,
         )
         .await
-        .unwrap(),
+        .expect("open pending delivery storage"),
     );
     for id in ["dispatch-a", "dispatch-b"] {
         let mut offline = submission(&fixture, &fixture.principal, id, targets, false);
@@ -498,7 +498,9 @@ async fn pending_stream_progress(fixture: IngressFixture) {
                 }
             }
         }
-        commit_submission(&fixture.uow, &offline, 5).await.unwrap();
+        commit_submission(&fixture.uow, &offline, 5)
+            .await
+            .expect("commit offline submission");
         store
             .insert(PendingRow {
                 id: PendingRowId::fresh(),
@@ -509,12 +511,14 @@ async fn pending_stream_progress(fixture: IngressFixture) {
                 outbound_sequence: None,
             })
             .await
-            .unwrap();
+            .expect("insert archived pending row");
     }
     let registry = Arc::new(ConnectionRegistry::new());
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
     registry.register(target.clone(), sender);
-    let entry = registry.get_entry(&target).unwrap();
+    let entry = registry
+        .get_entry(&target)
+        .expect("registered recipient resource");
     let stream = SmSessionId::new("ordered-pending-stream");
     entry.set_sm_stream_id(Some(stream.clone()));
     entry
@@ -527,12 +531,12 @@ async fn pending_stream_progress(fixture: IngressFixture) {
             entry: entry.clone(),
         })
         .await
-        .unwrap();
+        .expect("register recipient with user actor");
     let authority = Arc::new(fixture.authority().await);
     let mam: Arc<dyn waddle_xmpp::mam::MamStorage> = Arc::new(
         waddle_xmpp::mam::SqlxMamStorage::open(fixture.db.database_url())
             .await
-            .unwrap(),
+            .expect("open message archive storage"),
     );
     let task = tokio::spawn({
         let store = store.clone();
@@ -562,8 +566,8 @@ async fn pending_stream_progress(fixture: IngressFixture) {
     for sequence in [1, 2] {
         let outbound = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("receive pending delivery before timeout")
+            .expect("pending delivery channel remains open");
         let Stanza::Message(message) = outbound.stanza else {
             panic!("message")
         };
@@ -571,31 +575,44 @@ async fn pending_stream_progress(fixture: IngressFixture) {
             extract_stanza_ids(&message)
                 .into_iter()
                 .find(|id| id.by == target.to_bare())
-                .unwrap()
+                .expect("pending delivery has recipient archive stanza ID")
                 .id,
         );
         // This is the real socket's SM-counted write boundary, deliberately
         // withholding the client's delete_acked_in_window acknowledgement.
         store
-            .record_pushed_at(outbound.pending_row_id.as_ref().unwrap(), sequence)
+            .record_pushed_at(
+                outbound
+                    .pending_row_id
+                    .as_ref()
+                    .expect("pending delivery has a row ID"),
+                sequence,
+            )
             .await
-            .unwrap();
+            .expect("record pending row stream position");
     }
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), task)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("pending delivery flush finishes before timeout")
+            .expect("pending delivery flush task succeeds")
             .pushed,
         2
     );
     assert_eq!(
-        store.count(&target.to_bare()).await.unwrap(),
+        store
+            .count(&target.to_bare())
+            .await
+            .expect("count unacknowledged pending rows"),
         2,
         "both rows remain unacknowledged"
     );
     let mut live = submission(&fixture, &fixture.principal, "dispatch-c", targets, true);
-    live.plan.plan.last_mut().unwrap().effect = Effect::External(ExternalEffect::Delivery(
+    live.plan
+        .plan
+        .last_mut()
+        .expect("live submission has a planned effect")
+        .effect = Effect::External(ExternalEffect::Delivery(
         ExternalDeliveryEffect::RouteToPeer {
             route_identity: Some(waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(0)),
             jid: target.clone(),
@@ -604,7 +621,9 @@ async fn pending_stream_progress(fixture: IngressFixture) {
             call_setup: None,
         },
     ));
-    let live = commit_submission(&fixture.uow, &live, 5).await.unwrap();
+    let live = commit_submission(&fixture.uow, &live, 5)
+        .await
+        .expect("commit live submission");
     let mut deps = Deps::new(&registry, "example.com");
     deps.user_registry = Some(&users);
     execute_effects(
@@ -618,8 +637,8 @@ async fn pending_stream_progress(fixture: IngressFixture) {
     .await;
     let outbound = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("receive live delivery before timeout")
+        .expect("live delivery channel remains open");
     let Stanza::Message(message) = outbound.stanza else {
         panic!("live message")
     };
@@ -627,7 +646,7 @@ async fn pending_stream_progress(fixture: IngressFixture) {
         extract_stanza_ids(&message)
             .into_iter()
             .find(|id| id.by == target.to_bare())
-            .unwrap()
+            .expect("live delivery has recipient archive stanza ID")
             .id,
     );
     assert_eq!(observed, ["dispatch-a", "dispatch-b", "dispatch-c"]);
@@ -691,7 +710,7 @@ fn make_stored_headline(submission: &mut IngressSubmission) {
             stanza_lang: None,
         },
     )
-    .unwrap();
+    .expect("compute submission semantic digest");
 }
 
 #[tokio::test]

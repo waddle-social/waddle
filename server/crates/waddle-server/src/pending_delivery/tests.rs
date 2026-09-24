@@ -923,24 +923,30 @@ async fn db_storage_claim_batch_returns_fifo_prefix_and_continues_by_cursor() {
 async fn ordered_pending_fixture(database_url: Option<&str>) -> DatabasePendingDeliveryStorage {
     let storage = DatabasePendingDeliveryStorage::open(database_url, QuotaPolicy::Unlimited)
         .await
-        .unwrap();
-    storage.database().guard().await.unwrap().execute(
+        .expect("open ordered pending delivery storage");
+    storage.database().guard().await.expect("acquire fixture database connection").execute(
         "CREATE TABLE mam_messages (id TEXT PRIMARY KEY, room_jid TEXT NOT NULL, stanza_id TEXT, archive_seq BIGINT NOT NULL)",
         (),
-    ).await.unwrap();
+    ).await.expect("create message archive fixture table");
     for (id, ordinal) in [("first", 1_i64), ("second", 2_i64)] {
-        storage.database().guard().await.unwrap().execute(
+        storage.database().guard().await.expect("acquire fixture database connection").execute(
             "INSERT INTO mam_messages (id, room_jid, stanza_id, archive_seq) VALUES (?, ?, ?, ?)",
             crate::db_params![id, "alice@example.com", id, ordinal],
-        ).await.unwrap();
+        ).await.expect("insert archive ordering fixture");
     }
     // Receipt creation and pending insertion both disagree with archive order.
     let mut second = archived_row("alice@example.com", "second");
     second.id = PendingRowId::new("a-earlier-pending-id");
     let mut first = archived_row("alice@example.com", "first");
     first.id = PendingRowId::new("z-later-pending-id");
-    storage.insert(second).await.unwrap();
-    storage.insert(first).await.unwrap();
+    storage
+        .insert(second)
+        .await
+        .expect("insert second archived pending row");
+    storage
+        .insert(first)
+        .await
+        .expect("insert first archived pending row");
     storage
 }
 
@@ -950,38 +956,41 @@ async fn assert_archive_ordered_pending_batches(storage: &DatabasePendingDeliver
     let first = storage
         .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
         .await
-        .unwrap();
+        .expect("claim first archive-ordered batch");
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].id.as_str(), "z-later-pending-id");
     let second = storage
         .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
         .await
-        .unwrap();
+        .expect("claim second archive-ordered batch");
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].id.as_str(), "a-earlier-pending-id");
     assert!(storage
         .claim_archive_ordered_batch_for_session(&recipient, &session, 1)
         .await
-        .unwrap()
+        .expect("claim exhausted archive-ordered batch")
         .is_empty());
-    storage.release_claim(&session).await.unwrap();
+    storage
+        .release_claim(&session)
+        .await
+        .expect("release pending delivery claims");
     // The MAM resolver selects the newest archive position matching either
     // UID or stanza-id. An older exact UID cannot override that choice.
     storage
         .database()
         .guard()
         .await
-        .unwrap()
+        .expect("acquire fixture database connection")
         .execute(
             "INSERT INTO mam_messages (id, room_jid, stanza_id, archive_seq) VALUES (?, ?, ?, ?)",
             crate::db_params!["newer-match", "alice@example.com", "first", 3_i64],
         )
         .await
-        .unwrap();
+        .expect("insert newer matching archive position");
     let resolved_order = storage
         .claim_archive_ordered_batch_for_session(&recipient, &session, 2)
         .await
-        .unwrap();
+        .expect("claim batch with resolved archive ordering");
     assert_eq!(
         resolved_order
             .iter()
@@ -1007,6 +1016,114 @@ async fn postgres_archive_ordered_pending_batches_follow_mam_positions_without_r
     let (schema, scoped_url) = create_postgres_test_schema(&database_url, "pending_order").await;
     let storage = ordered_pending_fixture(Some(&scoped_url)).await;
     assert_archive_ordered_pending_batches(&storage).await;
+    drop(storage);
+    drop_postgres_test_schema(&database_url, &schema).await;
+}
+
+async fn assert_mixed_pending_order(storage: &DatabasePendingDeliveryStorage) {
+    let recipient = bare("alice@example.com");
+    let session = SmSessionId::new("mixed-pending");
+    for id in [
+        "0-first-transient",
+        "m-middle-transient",
+        "zz-last-transient",
+    ] {
+        let mut row = transient_row("alice@example.com", id);
+        row.id = PendingRowId::new(id);
+        storage
+            .insert(row)
+            .await
+            .expect("insert transient pending row");
+    }
+    // The fixture has archive sequence 1 at row id z and sequence 2 at a.
+    // Merge stream heads: transient m precedes archive head z, even though
+    // its successor a has an earlier UUID. Canonical order wins that conflict.
+    let skewed = [
+        "0-first-transient",
+        "m-middle-transient",
+        "z-later-pending-id",
+        "a-earlier-pending-id",
+        "zz-last-transient",
+    ];
+    assert_mixed_claim_batches(storage, &recipient, &session, &skewed).await;
+
+    // Without skew, preserve the mixed queue's FIFO positions across payload
+    // kinds, including a transient between two archived rows.
+    storage
+        .database()
+        .guard()
+        .await
+        .expect("acquire fixture database connection")
+        .execute(
+            "UPDATE mam_messages SET archive_seq = CASE id WHEN 'first' THEN 2 ELSE 1 END",
+            (),
+        )
+        .await
+        .expect("update fixture archive ordering");
+    let fifo = [
+        "0-first-transient",
+        "a-earlier-pending-id",
+        "m-middle-transient",
+        "z-later-pending-id",
+        "zz-last-transient",
+    ];
+    assert_mixed_claim_batches(storage, &recipient, &session, &fifo).await;
+}
+
+async fn assert_mixed_claim_batches(
+    storage: &DatabasePendingDeliveryStorage,
+    recipient: &BareJid,
+    session: &SmSessionId,
+    expected: &[&str],
+) {
+    for limit in [1, 2, expected.len()] {
+        assert!(storage
+            .claim_archive_ordered_batch_for_session(recipient, session, 0)
+            .await
+            .expect("claim zero-sized archive-ordered batch")
+            .is_empty());
+        let mut claimed = Vec::new();
+        loop {
+            let batch = storage
+                .claim_archive_ordered_batch_for_session(recipient, session, limit)
+                .await
+                .expect("claim archive-ordered pending batch");
+            assert!(batch.len() <= limit);
+            if batch.is_empty() {
+                break;
+            }
+            claimed.extend(batch.into_iter().map(|row| row.id.as_str().to_owned()));
+            assert!(
+                claimed.len() <= expected.len(),
+                "claimed rows cannot repeat"
+            );
+        }
+        assert_eq!(
+            claimed, expected,
+            "mixed order must not depend on batch size"
+        );
+        storage
+            .release_claim(session)
+            .await
+            .expect("release pending delivery claims");
+    }
+}
+
+#[tokio::test]
+async fn archive_ordered_pending_batches_preserve_mixed_fifo() {
+    let storage = ordered_pending_fixture(None).await;
+    assert_mixed_pending_order(&storage).await;
+}
+
+#[tokio::test]
+async fn postgres_archive_ordered_pending_batches_preserve_mixed_fifo() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (mixed pending order)");
+        return;
+    };
+    let (schema, scoped_url) = create_postgres_test_schema(&database_url, "pending_mixed").await;
+    let storage = ordered_pending_fixture(Some(&scoped_url)).await;
+    assert_mixed_pending_order(&storage).await;
     drop(storage);
     drop_postgres_test_schema(&database_url, &schema).await;
 }
@@ -1064,7 +1181,10 @@ async fn archived_pending_dispatch_deferral_releases_whole_batch_without_enqueui
     assert_eq!(result.pushed, 0);
     assert_eq!(result.deferred_transient, 2);
     assert!(rx.try_recv().is_err());
-    let pending = storage.list(&resource.to_bare()).await.unwrap();
+    let pending = storage
+        .list(&resource.to_bare())
+        .await
+        .expect("list pending delivery rows");
     assert_eq!(pending.len(), 2);
     assert!(pending.iter().all(|row| row.flushed_in_session.is_none()));
 }
@@ -1203,31 +1323,39 @@ async fn ordered_pending_pump_resumes_after_ack_without_new_presence() {
     };
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
-        .unwrap()
-        .unwrap();
-    let first_id = first.pending_row_id.unwrap();
+        .expect("receive first pending delivery before timeout")
+        .expect("pending delivery channel remains open for first row");
+    let first_id = first
+        .pending_row_id
+        .expect("first delivery has a pending row ID");
     assert_eq!(first_id.as_str(), "z-later-pending-id");
     assert!(rx.try_recv().is_err());
     tokio::time::timeout(std::time::Duration::from_secs(2), deferred.notified())
         .await
-        .unwrap();
-    storage.record_pushed_at(&first_id, 1).await.unwrap();
+        .expect("observe deferred ordering before timeout");
+    storage
+        .record_pushed_at(&first_id, 1)
+        .await
+        .expect("record first pending row stream position");
     storage
         .delete_acked_in_window(&session, 0, 1)
         .await
-        .unwrap();
+        .expect("delete acknowledged first pending row");
     let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("receive second pending delivery before timeout")
+        .expect("pending delivery channel remains open for second row");
     assert_eq!(
-        second.pending_row_id.unwrap().as_str(),
+        second
+            .pending_row_id
+            .expect("second delivery has a pending row ID")
+            .as_str(),
         "a-earlier-pending-id"
     );
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("pending delivery flush finishes before timeout")
+        .expect("pending delivery flush task succeeds");
     assert_eq!(outcome.pushed, 2);
     assert_eq!(outcome.deferred_ordering, 0);
 }
@@ -1283,21 +1411,21 @@ async fn ordered_pending_pump_stops_when_resource_owner_is_replaced() {
     };
     tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
         .await
-        .unwrap();
+        .expect("dispatch gate is entered before timeout");
     let (tx, mut replacement_rx) = tokio::sync::mpsc::channel(8);
     registry.register(resource.clone(), tx);
     registry.update_presence(&resource, true, 0);
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("pending delivery flush finishes before timeout")
+        .expect("pending delivery flush task succeeds");
     assert_eq!(outcome.pushed, 0);
     assert!(old_rx.try_recv().is_err());
     assert!(replacement_rx.try_recv().is_err());
     assert!(storage
         .list(&resource.to_bare())
         .await
-        .unwrap()
+        .expect("list pending delivery rows")
         .iter()
         .all(|row| row.flushed_in_session.is_none()));
 }
@@ -1310,19 +1438,19 @@ async fn transient_only_fake_supports_ordered_claims_but_archived_rows_fail_clos
     storage
         .insert(transient_row("alice@example.com", "transient"))
         .await
-        .unwrap();
+        .expect("insert transient pending row");
     assert_eq!(
         storage
             .claim_archive_ordered_batch_for_session(&recipient, &session, 8)
             .await
-            .unwrap()
+            .expect("claim archive-ordered pending batch")
             .len(),
         1
     );
     storage
         .insert(archived_row("alice@example.com", "archive-1"))
         .await
-        .unwrap();
+        .expect("insert archived pending row");
     assert!(matches!(
         storage
             .claim_archive_ordered_batch_for_session(&recipient, &session, 8)
@@ -1332,10 +1460,10 @@ async fn transient_only_fake_supports_ordered_claims_but_archived_rows_fail_clos
     assert!(storage
         .list(&recipient)
         .await
-        .unwrap()
+        .expect("list pending delivery rows")
         .iter()
         .find(|row| row.payload.is_archived())
-        .unwrap()
+        .expect("archived pending row remains stored")
         .flushed_in_session
         .is_none());
 }

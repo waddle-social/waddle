@@ -300,7 +300,14 @@ async fn route_planned_direct_message(
         if archived_headline && requested.is_full() {
             return Vec::new();
         }
-        run_headless_recipient_pass(deps, &bare, stanza, depth + 1).await;
+        super::routing::run_selected_headless_recipient_pass(
+            deps,
+            &bare,
+            Some(&selection.carbons),
+            stanza,
+            depth + 1,
+        )
+        .await;
         return Vec::new();
     }
     match super::routing::run_selected_recipient_pass(

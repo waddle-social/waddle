@@ -59,9 +59,7 @@ pub(super) fn restore_muc_routes(
             !progress.completed.contains(occupant) && !input.departed_occupants.contains(occupant)
         }) {
             let stanza = Box::new(Stanza::Message(room_canonical::occupant_copy_message(
-                source,
-                occupant,
-                input.recorded,
+                source, occupant,
             )));
             let delivery = if input.host_owned_resources.contains(occupant) {
                 ExternalDeliveryEffect::HostOwnedCopy {
@@ -121,9 +119,7 @@ fn restore_original_reflections(
             continue;
         };
         let stanza = Box::new(Stanza::Message(room_canonical::occupant_copy_message(
-            source,
-            target,
-            input.recorded,
+            source, target,
         )));
         let delivery = if input.host_owned_resources.contains(target) {
             ExternalDeliveryEffect::HostOwnedCopy {

@@ -149,7 +149,9 @@ async fn live_full_dm_plans_recipient_effects_and_processed_copy_without_sending
 #[tokio::test]
 async fn stored_full_headline_plans_recipient_archive_before_processed_delivery() {
     let registry = test_registry();
-    let target: jid::FullJid = "bob@example.com/phone".parse().unwrap();
+    let target: jid::FullJid = "bob@example.com/phone"
+        .parse()
+        .expect("valid recipient resource JID");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let users = waddle_xmpp::registry::UserRegistryActor::spawn(
         waddle_xmpp::registry::UserRegistryActor::new(),

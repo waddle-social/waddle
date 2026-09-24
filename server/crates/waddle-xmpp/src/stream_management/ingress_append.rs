@@ -119,6 +119,9 @@ pub enum SmKeyedAppendOutcome {
     /// stream than the one currently bound for the resource. That is still valid proof:
     /// the obligation was allocated once, which is exactly what must not happen twice.
     AlreadyAppended { accepting_stream: SmSessionId },
+    /// The current detached session disabled this carbon obligation. The
+    /// obligation is satisfied without allocating custody or advancing SM.
+    Suppressed,
     /// No unexpired session for the resource. Nothing was appended and the obligation
     /// remains unresolved for its recorded route to retry or degrade.
     NoSession,
@@ -130,7 +133,7 @@ impl SmKeyedAppendOutcome {
     pub fn is_allocated(&self) -> bool {
         match self {
             Self::Appended { .. } | Self::AlreadyAppended { .. } => true,
-            Self::NoSession => false,
+            Self::Suppressed | Self::NoSession => false,
         }
     }
 
@@ -140,7 +143,7 @@ impl SmKeyedAppendOutcome {
             Self::Appended { accepting_stream } | Self::AlreadyAppended { accepting_stream } => {
                 Some(accepting_stream)
             }
-            Self::NoSession => None,
+            Self::Suppressed | Self::NoSession => None,
         }
     }
 }

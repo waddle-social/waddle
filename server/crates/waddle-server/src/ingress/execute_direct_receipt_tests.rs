@@ -232,7 +232,9 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
         stream_management::ArchiveDispatchPosition,
     };
     let state = socket_tests::create_test_websocket_state().await;
-    let target: jid::FullJid = "juliet@example.com/phone".parse().unwrap();
+    let target: jid::FullJid = "juliet@example.com/phone"
+        .parse()
+        .expect("valid recipient resource JID");
     let (old_sender, old_receiver) = tokio::sync::mpsc::channel(8);
     socket_tests::register_test_connection(&state, &target, old_sender).await;
     let key = MessageKey::new();
@@ -241,26 +243,34 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
         fanout: vec![target.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),
     };
-    let receipt = crate::ingress::receipt_key(&intent).unwrap();
+    let receipt = crate::ingress::receipt_key(&intent).expect("direct route has a receipt key");
     let mut message = xmpp_parsers::message::Message::new(Some(target.clone().into()));
-    message.from = Some("romeo@example.com/phone".parse().unwrap());
+    message.from = Some(
+        "romeo@example.com/phone"
+            .parse()
+            .expect("valid sender resource JID"),
+    );
     message.type_ = xmpp_parsers::message::MessageType::Chat;
     message
         .bodies
         .insert(Default::default(), "older copy".into());
     let authority = &state.deps.protocol.ingress;
-    let mut tx = authority.uow.begin().await.unwrap();
+    let mut tx = authority
+        .uow
+        .begin()
+        .await
+        .expect("begin ingress transaction");
     CanonicalMessageRepository::record_message(
         &mut tx,
         key,
-        &SemanticDigest::from_storage(1, [7; 32]).unwrap(),
+        &SemanticDigest::from_storage(1, [7; 32]).expect("valid semantic digest fixture"),
         Some(&MessageEnvelope::new(message.clone())),
     )
     .await
-    .unwrap();
+    .expect("record canonical message");
     EffectIntentRepository::reconcile(&mut tx, key, std::slice::from_ref(&intent), false)
         .await
-        .unwrap();
+        .expect("reconcile direct route intent");
     ArchiveDispatchRepository::record(
         &mut tx,
         key,
@@ -272,8 +282,8 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
         }],
     )
     .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    .expect("record archive dispatch obligation");
+    tx.commit().await.expect("commit ingress transaction");
     let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.web_socket_state = Some(&state);
@@ -292,7 +302,11 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
         deliver_direct_to_full_with_registered_remote(&deps, &target, &stanza).await,
         FullJidDeliveryOutcome::Delivered
     );
-    let mut tx = authority.uow.begin().await.unwrap();
+    let mut tx = authority
+        .uow
+        .begin()
+        .await
+        .expect("begin ingress transaction");
     EffectReceiptRepository::record_receipt(
         &mut tx,
         key,
@@ -300,8 +314,8 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
         &receipt.semantic_identity_hash,
     )
     .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    .expect("record completed delivery receipt");
+    tx.commit().await.expect("commit ingress transaction");
     // The old socket and its process-local acceptance frontier disappear.
     // A replacement must use durable completion to reject the delayed attempt.
     drop(old_receiver);

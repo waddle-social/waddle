@@ -21,6 +21,21 @@ impl ConnectionEntry {
         &self,
         outbound: OutboundStanza,
     ) -> Result<(), TrySendError<()>> {
+        if outbound.ingress_append.as_ref().is_some_and(|obligation| {
+            [
+                crate::ingress::IngressEffectKind::Carbons,
+                crate::ingress::IngressEffectKind::RelayCarbons,
+            ]
+            .iter()
+            .any(|kind| kind.storage_tag() == obligation.key.kind.to_storage())
+        }) && !self.is_carbons_enabled()
+        {
+            // A frozen audience is only an upper bound. Check current opt-in
+            // at queue acceptance, after any relay/database await and against
+            // this exact connection entry. Like duplicate suppression below,
+            // success settles the obligation without a new wire copy.
+            return Ok(());
+        }
         let Some(obligation) = outbound
             .ingress_append
             .as_ref()
@@ -119,24 +134,77 @@ mod tests {
                     semantic_identity_hash: [1; 32],
                     resource: resource.clone(),
                 },
-                sender_bare: "alice@example.test".parse().unwrap(),
+                sender_bare: "alice@example.test".parse().expect("valid sender bare JID"),
                 received_at: None,
                 archive_positions: vec![ArchiveDispatchPosition {
                     archive: resource.to_bare(),
-                    ordinal: ArchiveOrdinal::from_storage(ordinal).unwrap(),
+                    ordinal: ArchiveOrdinal::from_storage(ordinal)
+                        .expect("valid archive ordinal fixture"),
                 }],
                 dispatch_stream: None,
             },
         )
     }
 
+    #[test]
+    fn carbon_dispatch_checks_current_opt_in_with_or_without_archive_positions() {
+        for kind in [
+            crate::ingress::IngressEffectKind::Carbons,
+            crate::ingress::IngressEffectKind::RelayCarbons,
+        ] {
+            for archived in [true, false] {
+                let registry = ConnectionRegistry::new();
+                let resource: jid::FullJid = "bob@example.test/phone"
+                    .parse()
+                    .expect("valid recipient resource JID");
+                let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+                registry.register_with_carbons(resource.clone(), sender, true);
+                let entry = registry
+                    .get_entry(&resource)
+                    .expect("registered recipient resource");
+                let mut outbound = copy(&resource, MessageKey::new(), 1);
+                let obligation = outbound
+                    .ingress_append
+                    .as_mut()
+                    .expect("outbound fixture has an ingress append obligation");
+                obligation.key.kind = SmIngressReceiptKind::from_storage(kind.storage_tag());
+                if !archived {
+                    obligation.archive_positions.clear();
+                }
+                registry.set_carbons_enabled(&resource, false);
+                assert!(
+                    entry.try_send_archive_ordered(outbound).is_ok(),
+                    "confirmed opt-out settles the carbon"
+                );
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "opted-out resource gets no carbon copy"
+                );
+                assert!(
+                    entry
+                        .archive_dispatch
+                        .lock()
+                        .expect("archive dispatch mutex is not poisoned")
+                        .archives
+                        .is_empty(),
+                    "suppression must not fabricate queue acceptance"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn late_retry_cannot_enqueue_behind_a_newer_archive_position() {
         let registry = ConnectionRegistry::new();
-        let resource: jid::FullJid = "bob@example.test/phone".parse().unwrap();
+        let resource: jid::FullJid = "bob@example.test/phone"
+            .parse()
+            .expect("valid recipient resource JID");
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         registry.register(resource.clone(), sender);
-        let owner = registry.get_entry(&resource).unwrap().carbons_enabled;
+        let owner = registry
+            .get_entry(&resource)
+            .expect("registered recipient resource")
+            .carbons_enabled;
         let a = copy(&resource, MessageKey::new(), 1);
         let b = copy(&resource, MessageKey::new(), 2);
         for outbound in [a.clone(), b, a] {
@@ -146,7 +214,12 @@ mod tests {
             );
         }
         for expected in ["1", "2"] {
-            let Stanza::Message(message) = receiver.recv().await.unwrap().stanza else {
+            let Stanza::Message(message) = receiver
+                .recv()
+                .await
+                .expect("receive accepted archive delivery")
+                .stanza
+            else {
                 panic!("message")
             };
             assert_eq!(message.id.as_ref().map(|id| id.0.as_str()), Some(expected));
@@ -160,10 +233,15 @@ mod tests {
     #[tokio::test]
     async fn full_channel_does_not_publish_a_false_acceptance_frontier() {
         let registry = ConnectionRegistry::new();
-        let resource: jid::FullJid = "bob@example.test/phone".parse().unwrap();
+        let resource: jid::FullJid = "bob@example.test/phone"
+            .parse()
+            .expect("valid recipient resource JID");
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         registry.register(resource.clone(), sender);
-        let owner = registry.get_entry(&resource).unwrap().carbons_enabled;
+        let owner = registry
+            .get_entry(&resource)
+            .expect("registered recipient resource")
+            .carbons_enabled;
         let a = copy(&resource, MessageKey::new(), 1);
         let b = copy(&resource, MessageKey::new(), 2);
         assert_eq!(
@@ -174,7 +252,10 @@ mod tests {
             registry.try_send_outbound_if_owner(&resource, &owner, b.clone()),
             BroadcastOutcome::DroppedFull
         );
-        receiver.recv().await.unwrap();
+        receiver
+            .recv()
+            .await
+            .expect("receive first queued archive delivery");
         assert_eq!(
             registry.try_send_outbound_if_owner(&resource, &owner, b),
             BroadcastOutcome::Delivered
@@ -186,17 +267,21 @@ mod tests {
     async fn distinct_receipts_at_one_position_are_each_deliverable_once() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
         let entry = ConnectionEntry::new(sender);
-        let resource = "bob@example.test/phone".parse().unwrap();
+        let resource = "bob@example.test/phone"
+            .parse()
+            .expect("valid recipient resource JID");
         let a = copy(&resource, MessageKey::new(), 1);
         let mut other_receipt = a.clone();
         other_receipt
             .ingress_append
             .as_mut()
-            .unwrap()
+            .expect("outbound fixture has an ingress append obligation")
             .key
             .semantic_identity_hash = [2; 32];
         for outbound in [a.clone(), other_receipt.clone(), a, other_receipt] {
-            entry.try_send_archive_ordered(outbound).unwrap();
+            entry
+                .try_send_archive_ordered(outbound)
+                .expect("enqueue archive-ordered receipt");
         }
         assert!(receiver.recv().await.is_some());
         assert!(receiver.recv().await.is_some());
@@ -211,9 +296,15 @@ mod tests {
         entry.set_sm_stream_id(Some(crate::pending_delivery::SmSessionId::new(
             "replacement",
         )));
-        let resource = "bob@example.test/phone".parse().unwrap();
+        let resource = "bob@example.test/phone"
+            .parse()
+            .expect("valid recipient resource JID");
         let mut outbound = copy(&resource, MessageKey::new(), 2);
-        outbound.ingress_append.as_mut().unwrap().dispatch_stream = Some(old_stream);
+        outbound
+            .ingress_append
+            .as_mut()
+            .expect("outbound fixture has an ingress append obligation")
+            .dispatch_stream = Some(old_stream);
         assert!(matches!(
             entry.try_send_archive_ordered(outbound),
             Err(TrySendError::Full(_))

@@ -146,7 +146,9 @@ mod tests {
 
     fn resource(name: &str, priority: i8) -> ResourceRoutingState {
         ResourceRoutingState {
-            jid: format!("bob@example.com/{name}").parse().unwrap(),
+            jid: format!("bob@example.com/{name}")
+                .parse()
+                .expect("valid recipient resource JID"),
             available: true,
             priority,
             carbons_enabled: true,
@@ -164,11 +166,16 @@ mod tests {
             live: vec![low.clone(), high.clone(), negative.clone(), unavailable],
             ..Default::default()
         };
-        let selected = inventory.select_headline(&"bob@example.com".parse().unwrap());
+        let selected = inventory
+            .select_headline(&"bob@example.com".parse().expect("valid bare recipient JID"));
         assert_eq!(selected.originals, vec![high.jid, low.jid]);
         assert!(selected.carbons.is_empty());
         assert!(inventory
-            .select_headline(&"bob@example.com/missing".parse().unwrap())
+            .select_headline(
+                &"bob@example.com/missing"
+                    .parse()
+                    .expect("valid missing recipient resource JID")
+            )
             .originals
             .is_empty());
         assert_eq!(
@@ -190,7 +197,11 @@ mod tests {
         let full = inventory.select(&phone.jid.clone().into());
         assert_eq!(full.originals, vec![phone.jid.clone()]);
         assert_eq!(full.carbons, vec![desktop.jid.clone()]);
-        let fallback = inventory.select(&"bob@example.com/gone".parse().unwrap());
+        let fallback = inventory.select(
+            &"bob@example.com/gone"
+                .parse()
+                .expect("valid unavailable recipient resource JID"),
+        );
         assert_eq!(fallback.originals, vec![desktop.jid]);
         assert_eq!(fallback.carbons, vec![phone.jid]);
     }
@@ -203,7 +214,8 @@ mod tests {
             detached_carbons: vec![phone.jid.clone()],
             ..Default::default()
         };
-        let selection = inventory.select(&"bob@example.com".parse().unwrap());
+        let selection =
+            inventory.select(&"bob@example.com".parse().expect("valid bare recipient JID"));
         assert_eq!(selection.originals, vec![phone.jid]);
         assert!(selection.carbons.is_empty());
     }

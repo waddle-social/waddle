@@ -657,11 +657,15 @@ A blocked executor returns without waiting for its predecessor. An ordering
 deferral does not accrue a stalled-row cooldown; predecessor progress can release
 it on the next maintenance pass. The existing maintenance pump replays frozen effects off the connection loop, preserving
 SM acknowledgement progress and avoiding the carbon/backpressure cycle. Partial
-fanout advances each resource independently. Original room reflections have a
-separate recorded delivery receipt, completed at the transport write boundary;
-the occupant aggregate cannot discharge a reflection that has not been written.
+fanout advances each resource independently. Archived original room reflections
+have a separate recorded delivery receipt and use the exact-resource outbound
+FIFO, including on relayed room owners. Their receipt completes at FIFO or
+durable detached acceptance, as for other occupant copies; the occupant aggregate
+cannot discharge that independent reflection obligation. Literal returned frames
+(including errors and transient reflections) retain transport-write completion.
 Generated pin messages register dispatch authority in their deferred archive
-transaction before broadcast.
+transaction before broadcast and use the resource FIFO for every copy, including
+the initiating occupant's copy.
 
 Archive positions accompany the exact append obligation through local actors,
 remote owners and registered sockets. The receiver validates them against

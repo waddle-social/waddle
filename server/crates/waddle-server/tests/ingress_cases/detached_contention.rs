@@ -75,9 +75,26 @@ async fn progress_lock_contention(fixture: IngressFixture) {
             ExternalOutcome::Failed | ExternalOutcome::Uncertain
         )
     }));
-    receivers[0]
-        .try_recv()
-        .expect("append precedes progress lock");
+    match fixture.db.driver() {
+        waddle_server::db::DatabaseDriver::Sqlite => {
+            // Readiness uses BEGIN IMMEDIATE, so the competing writer blocks
+            // the ordering probe before either resource can be appended.
+            for receiver in &mut receivers {
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
+            }
+        }
+        waddle_server::db::DatabaseDriver::Postgres => {
+            receivers[0]
+                .try_recv()
+                .expect("append precedes progress lock");
+            // The second resource may append before its progress write also
+            // times out. Neither append has durable progress.
+            while receivers[1].try_recv().is_ok() {}
+        }
+    }
     blocker.commit().await.expect("release competing lock");
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
     assert_eq!(
@@ -86,9 +103,6 @@ async fn progress_lock_contention(fixture: IngressFixture) {
             .await,
         0,
     );
-    // Depending on the dialect's lock timeout, B may also have appended before
-    // its transaction failed. Drain it: neither append has durable progress.
-    while receivers[1].try_recv().is_ok() {}
     let retry = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("ordinary duplicate after contention");

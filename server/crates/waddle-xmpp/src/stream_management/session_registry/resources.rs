@@ -463,6 +463,18 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
+        if [
+            crate::ingress::IngressEffectKind::Carbons,
+            crate::ingress::IngressEffectKind::RelayCarbons,
+        ]
+        .iter()
+        .any(|kind| kind.storage_tag() == key.kind.to_storage())
+            && !updated.carbons_enabled
+        {
+            // Evaluate opt-in under the stream shard after reconciliation,
+            // against the exact session that would receive the append.
+            return Ok(SmKeyedAppendOutcome::Suppressed);
+        }
         let Some(sequence) = record(&mut updated) else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };

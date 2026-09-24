@@ -60,7 +60,6 @@ pub(in crate::ingress) fn prepare_attempt_reflections(plan: &mut IngressPlan, se
 pub(super) fn historical_repair(
     reflection: &PlannedEffect,
     envelope: &MessageEnvelope,
-    intents: &[IngressEffectIntent],
     progress: &[RouteProgress],
 ) -> Option<PlannedEffect> {
     let Effect::External(effect) = &reflection.effect else {
@@ -97,7 +96,7 @@ pub(super) fn historical_repair(
     let (identity, stanza) = delivery_payload(&mut repair)?;
     *identity = Some(progress.route_identity.clone());
     **stanza = waddle_xmpp::Stanza::Message(crate::ingress::room_canonical::occupant_copy_message(
-        source, target, intents,
+        source, target,
     ));
     repair.suppression = PlanSuppressionPolicy::SenderOnly;
     Some(repair)
@@ -253,10 +252,9 @@ mod tests {
             let mut reflection =
                 PlannedEffect::new(Effect::External(ExternalEffect::Frame(stanza.clone())));
             reflection.reflection_delivery = Some(Box::new(delivery));
-            let intents = std::slice::from_ref(&intent);
             let pending = std::slice::from_ref(&progress);
-            let mut repair = historical_repair(&reflection, &envelope, intents, pending)
-                .expect("frozen sibling repair");
+            let mut repair =
+                historical_repair(&reflection, &envelope, pending).expect("frozen sibling repair");
             let Effect::External(ExternalEffect::Delivery(delivery)) = &repair.effect else {
                 panic!("repair is delivery")
             };
@@ -285,11 +283,10 @@ mod tests {
             );
             let mut completed = progress.clone();
             completed.completed.push(sibling.clone());
-            assert!(historical_repair(&reflection, &envelope, intents, &[completed]).is_none());
+            assert!(historical_repair(&reflection, &envelope, &[completed]).is_none());
             assert!(historical_repair(
                 &reflection,
                 &MessageEnvelope::new(Message::new(None)),
-                intents,
                 pending
             )
             .is_none());

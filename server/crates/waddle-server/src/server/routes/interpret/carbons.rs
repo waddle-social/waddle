@@ -445,6 +445,8 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
 }
 
 /// Execute exactly one frozen destination, retaining its independent receipt.
+/// Current opt-out is enforced at socket acceptance and keyed detached append,
+/// so a disable or rebind during delivery cannot inherit the frozen opt-in.
 pub(super) async fn send_carbon_to_resource(
     deps: &Deps<'_>,
     owner: &BareJid,

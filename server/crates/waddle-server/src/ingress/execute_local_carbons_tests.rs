@@ -295,3 +295,105 @@ async fn postgres_partial_carbons_recovery_delivers_only_missing_frozen_resource
         local_carbons_receipts(fixture, 3, true, true, true).await;
     }
 }
+
+async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
+    let registry = ConnectionRegistry::new();
+    let users = UserRegistryActor::spawn(UserRegistryActor::new());
+    let mut submission = fixture.submission(Some("carbon-opt-out"), "frozen carbon");
+    let target = submission
+        .sender
+        .to_bare()
+        .with_resource_str("other")
+        .expect("valid sibling resource JID");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    registry.register_with_carbons(target.clone(), sender, true);
+    users
+        .ask(RegisterUserResource {
+            jid: target.clone(),
+            entry: registry
+                .get_entry(&target)
+                .expect("registered carbon recipient"),
+        })
+        .await
+        .expect("register carbon recipient with user actor");
+    plan_carbons(&mut submission, &registry, &users, false).await;
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit carbon submission");
+    assert_eq!(decision.external_receipts.len(), 1);
+    if rebind {
+        let (sender, replacement) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(target.clone(), sender, false);
+        users
+            .ask(RegisterUserResource {
+                jid: target.clone(),
+                entry: registry
+                    .get_entry(&target)
+                    .expect("registered replacement recipient"),
+            })
+            .await
+            .expect("register replacement with user actor");
+        receiver = replacement;
+    } else {
+        assert!(registry.set_carbons_enabled(&target, false));
+    }
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.user_registry = Some(&users);
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        receiver.try_recv().is_err(),
+        "a frozen audience does not override current carbon opt-out"
+    );
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
+    assert!(report.receipt_failures.is_empty());
+    assert_eq!(
+        fixture.count("ingress_effect_receipts").await,
+        1,
+        "confirmed opt-out completes the obligation without sending a copy"
+    );
+    assert!(terminalize_if_complete(
+        &fixture.uow,
+        decision
+            .message_key
+            .expect("committed carbon submission has a message key"),
+        DeliveryExecutionContext::Live.into(),
+    )
+    .await
+    .expect("terminalize completed carbon obligation"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_frozen_carbon_honors_disable_before_execution() {
+    opted_out_carbon_receipt(IngressFixture::sqlite().await, false).await;
+}
+
+#[tokio::test]
+async fn sqlite_frozen_carbon_honors_rebound_session_default_opt_out() {
+    opted_out_carbon_receipt(IngressFixture::sqlite().await, true).await;
+}
+
+#[tokio::test]
+async fn postgres_frozen_carbon_honors_disable_before_execution() {
+    if let Some(fixture) = IngressFixture::postgres("carbon_disabled").await {
+        opted_out_carbon_receipt(fixture, false).await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_frozen_carbon_honors_rebound_session_default_opt_out() {
+    if let Some(fixture) = IngressFixture::postgres("carbon_rebound").await {
+        opted_out_carbon_receipt(fixture, true).await;
+    }
+}

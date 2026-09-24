@@ -43,6 +43,61 @@ fn assert_snapshot_unchanged(before: &DetachedSession, after: &DetachedSession) 
 }
 
 #[tokio::test]
+async fn keyed_carbon_append_honors_current_detached_opt_out() {
+    for kind in [
+        crate::ingress::IngressEffectKind::Carbons,
+        crate::ingress::IngressEffectKind::RelayCarbons,
+    ] {
+        let storage = Arc::new(InMemorySmPersistence::new());
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+        let jid = make_test_jid();
+        let key = SmIngressAppendKey {
+            kind: SmIngressReceiptKind::from_storage(kind.storage_tag()),
+            ..obligation(&jid)
+        };
+        let mut session = realistic_test_session("carbon-disabled");
+        session.carbons_enabled = false;
+        registry
+            .store_session(session)
+            .await
+            .expect("store carbon-disabled session");
+        let before = snapshot(&registry, "carbon-disabled");
+        let outcome = registry
+            .record_keyed_stanza_for_detached_bound_resource(
+                &jid,
+                &stanza(),
+                Utc::now(),
+                key.clone(),
+            )
+            .await
+            .expect("attempt detached carbon append");
+        assert_eq!(outcome, SmKeyedAppendOutcome::Suppressed);
+        assert!(
+            !outcome.is_allocated(),
+            "opt-out does not fabricate durable queue custody"
+        );
+        assert!(storage
+            .get_ingress_append(&key)
+            .await
+            .expect("read durable ingress append")
+            .is_none());
+        assert_snapshot_unchanged(&before, &snapshot(&registry, "carbon-disabled"));
+        registry
+            .take_session("carbon-disabled")
+            .await
+            .expect("remove carbon-disabled session");
+        assert_eq!(
+            registry
+                .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key,)
+                .await
+                .expect("check carbon append after session removal"),
+            SmKeyedAppendOutcome::NoSession,
+            "absence is not proof of opt-out"
+        );
+    }
+}
+
+#[tokio::test]
 async fn keyed_append_older_proof_precedes_missing_session_lookup() {
     let storage = Arc::new(InMemorySmPersistence::new());
     let registry =
