@@ -176,6 +176,34 @@ impl ReqwestJevTransport {
     }
 }
 
+#[cfg(test)]
+impl ReqwestJevTransport {
+    /// Test-only: builds a transport against a local (`http://`) mock
+    /// server, bypassing the HTTPS-only check `new` enforces for real
+    /// deployments — `Client::https_only(true)` would otherwise refuse the
+    /// loopback connection outright. Real callers only ever reach
+    /// `JevClient::new`, which never allows this; this exists so the
+    /// *real* transport (`send`'s request building, header handling,
+    /// status/size handling) gets exercised against real HTTP, not only
+    /// against the [`MockTransport`] used by the parsing/error-mapping
+    /// tests below.
+    fn new_for_test(endpoint: &str, api_key: &str, max_response_bytes: usize) -> Self {
+        let endpoint = Url::parse(endpoint).expect("test endpoint must parse");
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(redirect::Policy::none())
+            .build()
+            .expect("test http client must build");
+        Self {
+            client,
+            endpoint,
+            api_key: api_key.to_string(),
+            max_response_bytes,
+        }
+    }
+}
+
 #[async_trait]
 impl JevTransport for ReqwestJevTransport {
     async fn send(&self, request_body: Value) -> Result<JevHttpResponse, JudgeError> {
@@ -686,5 +714,145 @@ mod tests {
             error,
             JevClientConfigError::MissingApiKey | JevClientConfigError::InvalidEndpoint
         ));
+    }
+
+    // The tests above exercise `build_request_body`/`parse_response` and
+    // `JevClient::is_question`'s error-mapping logic entirely through
+    // `MockTransport`, which bypasses `ReqwestJevTransport` completely.
+    // These tests instead run the real transport (request building, the
+    // bearer-auth header, status handling, and the response byte cap)
+    // against a real HTTP server, so a regression in `ReqwestJevTransport`
+    // itself — e.g. dropping `redirect::Policy::none()`, or "simplifying"
+    // the streaming byte-cap loop into an unbounded `.bytes().await` — has
+    // a test to fail. Mirrors the pattern already used for the same
+    // safety properties in `link_preview_resolver.rs`.
+    mod real_transport {
+        use super::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn client_against(server: &MockServer, max_response_bytes: usize) -> JevClient {
+            JevClient::with_transport(
+                "jev-test-model",
+                ReqwestJevTransport::new_for_test(
+                    &server.uri(),
+                    "test-api-key",
+                    max_response_bytes,
+                ),
+            )
+        }
+
+        #[tokio::test]
+        async fn real_transport_round_trips_a_successful_response() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(header("authorization", "Bearer test-api-key"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "answers": {
+                        "is_question": {
+                            "probability": 0.9,
+                            "confidence": 0.7,
+                            "taxonomy_version": "tax-1",
+                            "model_version": "jev-real-1",
+                        }
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let client = client_against(&server, DEFAULT_MAX_RESPONSE_BYTES);
+            let judgment = client
+                .is_question("are we there yet?")
+                .await
+                .expect("well-formed response over real HTTP must parse");
+
+            assert_eq!(judgment.probability, 0.9);
+            assert_eq!(judgment.model_version, "jev-real-1");
+        }
+
+        #[tokio::test]
+        async fn real_transport_maps_non_2xx_status_to_transport_error() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/"))
+                .respond_with(
+                    ResponseTemplate::new(503)
+                        .set_body_string("{\"error\":\"upstream overloaded\"}"),
+                )
+                .mount(&server)
+                .await;
+
+            let client = client_against(&server, DEFAULT_MAX_RESPONSE_BYTES);
+            let error = client
+                .is_question("body")
+                .await
+                .expect_err("non-2xx status over real HTTP must be a transport error");
+
+            match error {
+                JudgeError::Transport(message) => {
+                    assert!(message.contains("503"));
+                    assert!(message.contains("upstream overloaded"));
+                }
+                other => panic!("expected Transport error, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn real_transport_does_not_follow_redirects() {
+            let server = MockServer::start().await;
+            // No mock is registered for the redirect target: if the
+            // transport ever started following redirects again, this
+            // request would fail with a 404 from wiremock's default
+            // "no matching mock" response instead of surfacing the 302
+            // itself, making a silent regression here detectable.
+            Mock::given(method("POST"))
+                .and(path("/"))
+                .respond_with(
+                    ResponseTemplate::new(302).insert_header("location", "/redirect-target"),
+                )
+                .mount(&server)
+                .await;
+
+            let client = client_against(&server, DEFAULT_MAX_RESPONSE_BYTES);
+            let error = client
+                .is_question("body")
+                .await
+                .expect_err("a 3xx must not be silently followed and swallowed");
+
+            match error {
+                JudgeError::Transport(message) => assert!(
+                    message.contains("302"),
+                    "expected the 302 itself to surface, got: {message}"
+                ),
+                other => panic!("expected Transport error carrying the 302, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn real_transport_enforces_response_size_cap() {
+            let server = MockServer::start().await;
+            let oversized_body = "a".repeat(256);
+            Mock::given(method("POST"))
+                .and(path("/"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(oversized_body))
+                .mount(&server)
+                .await;
+
+            // Cap smaller than the response body: must be rejected rather
+            // than buffered in full, whether or not the server advertised
+            // an accurate Content-Length.
+            let client = client_against(&server, 16);
+            let error = client
+                .is_question("body")
+                .await
+                .expect_err("oversized response over real HTTP must be rejected");
+
+            match error {
+                JudgeError::Transport(message) => {
+                    assert!(message.contains("byte cap"), "got: {message}")
+                }
+                other => panic!("expected Transport error, got {other:?}"),
+            }
+        }
     }
 }
