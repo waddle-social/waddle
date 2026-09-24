@@ -3236,6 +3236,9 @@ export class BrowserXmppClient {
   private handleMessage(message: InboundWasmMessage) {
     const inboxPush = message.inboxPush ?? (message.inbox_push ? inboxEntryFromWasm(message.inbox_push) : undefined);
     if (inboxPush) { this.events.emit("inboxPush", inboxPush); return; }
+    // The marker is sender-controlled. Unknown room PM copies may be ignored
+    // (XEP-0280 §6.1); never use them to invent an account or occupant identity.
+    if (message.muc_pm && !this.mucPmOccupant(message)) return;
     if (message.carbon?.sent || message.carbon?.received) {
       // XEP-0280 (#1243): the WASM core unwrapped a verified carbon and
       // this IS the inner message.
@@ -3467,7 +3470,7 @@ export class BrowserXmppClient {
     // contain '/', so split-once, never split-all.
     const slash = counterpart.indexOf("/");
     const nick = slash >= 0 ? counterpart.slice(slash + 1) : "";
-    if (!nick || !(message.muc_pm || this.isMucPmPeer(counterpart))) return undefined;
+    if (!nick || !this.isMucPmPeer(counterpart)) return undefined;
     return { occupantJid: counterpart, nick };
   }
 

@@ -22,10 +22,9 @@ interface ActiveConversationDeps {
 }
 
 /**
- * Fan-out over the active conversation surface: every `active*` computed
- * resolves to either the channel messaging composable or the DM messaging
- * composable depending on which surface (channels vs DMs) is showing, and
- * the ContentArea template ref is wired to whichever timeline is live.
+ * View state comes from the selected room or direct-message conversation.
+ * Without a conversation, the view is idle and neither timeline is bound
+ * to the ContentArea template ref.
  */
 export function useActiveConversation(deps: ActiveConversationDeps) {
   const { ui, waddles, messaging, dmMessaging, dmConversations, isApplyingRoute } = deps;
@@ -44,77 +43,72 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
     const channel = waddles.currentChannel.value;
     return ui.sidebarMode.value === "channels" || channel?.isGroupDm ? channel : null;
   });
+  const activeTarget = computed(() =>
+    isActiveDirectDmSurface() ? dmMessaging : activeRoomChannel.value ? messaging : null,
+  );
 
   watchEffect(() => {
     const timeline = contentAreaRef.value?.messagesContainer ?? null;
     const edgeScroller = contentAreaRef.value?.scrollToPinnedEdge ?? null;
-    if (isActiveDirectDmSurface()) {
-      dmMessaging.timelineEl.value = timeline;
-      dmMessaging.timelineEdgeScroller.value = edgeScroller;
-      messaging.timelineEl.value = null;
-      messaging.timelineEdgeScroller.value = null;
-    } else {
-      messaging.timelineEl.value = timeline;
-      messaging.timelineEdgeScroller.value = edgeScroller;
-      dmMessaging.timelineEl.value = null;
-      dmMessaging.timelineEdgeScroller.value = null;
+    for (const target of [messaging, dmMessaging]) {
+      const active = target === activeTarget.value;
+      target.timelineEl.value = active ? timeline : null;
+      target.timelineEdgeScroller.value = active ? edgeScroller : null;
     }
   });
 
   const activeMessages = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.messages.value : activeRoomChannel.value ? messaging.messages.value : [],
+    activeTarget.value?.messages.value ?? [],
   );
   const activeFirstUnseenId = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.firstUnseenId.value : messaging.firstUnseenId.value,
+    activeTarget.value?.firstUnseenId.value ?? null,
   );
 
   const activeDraft = computed({
-    get: () => (isActiveDirectDmSurface() ? dmMessaging.draft.value : messaging.draft.value),
+    get: () => activeTarget.value?.draft.value ?? "",
     set: (value: string) => {
-      if (isActiveDirectDmSurface()) dmMessaging.draft.value = value;
-      else messaging.draft.value = value;
+      if (activeTarget.value) activeTarget.value.draft.value = value;
     },
   });
   const activeForumTitle = computed({
-    get: () => (isActiveDirectDmSurface() ? "" : messaging.forumPostTitle.value),
+    get: () => activeRoomChannel.value ? messaging.forumPostTitle.value : "",
     set: (value: string) => {
-      if (!isActiveDirectDmSurface()) {
+      if (activeRoomChannel.value) {
         messaging.forumPostTitle.value = value;
       }
     },
   });
   const activeTypingUsers = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.typingUsers.value : activeRoomChannel.value ? messaging.typingUsers.value : [],
+    activeTarget.value?.typingUsers.value ?? [],
   );
   const activeIsLoadingMessages = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.isLoadingMessages.value : messaging.isLoadingMessages.value,
+    activeTarget.value?.isLoadingMessages.value ?? false,
   );
   const isResolvingActiveConversation = computed(() =>
     ui.activePage.value === "chat"
-    && !waddles.currentChannel.value
-    && !activeDmPeer.value
-    && (isApplyingRoute.value || waddles.isLoadingStructure.value),
+    && !activeTarget.value
+    && isApplyingRoute.value,
   );
   const contentAreaIsLoadingMessages = computed(() =>
     activeIsLoadingMessages.value || isResolvingActiveConversation.value,
   );
   const activeIsLoadingOlderMessages = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.isLoadingOlderMessages.value : messaging.isLoadingOlderMessages.value,
+    activeTarget.value?.isLoadingOlderMessages.value ?? false,
   );
   const activeHasOlderMessages = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.hasOlderMessages.value : messaging.hasOlderMessages.value,
+    activeTarget.value?.hasOlderMessages.value ?? false,
   );
   const activeIsSending = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.isSending.value : messaging.isSending.value,
+    activeTarget.value?.isSending.value ?? false,
   );
   const activeSearchResults = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.searchResults.value : messaging.searchResults.value,
+    activeTarget.value?.searchResults.value ?? [],
   );
   const activeIsSearching = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.isSearching.value : messaging.isSearching.value,
+    activeTarget.value?.isSearching.value ?? false,
   );
   const activeUploadProgress = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
+    activeTarget.value?.uploadProgress.value ?? { uploading: false, progress: 0, filename: "" },
   );
 
   const activeDmPeer = computed(() => {
@@ -129,10 +123,6 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
       presenceIdleSince: conversation.presenceIdleSince,
     };
   });
-
-  const activeTarget = computed(() =>
-    isActiveDirectDmSurface() ? dmMessaging : messaging,
-  );
 
   const activeRoomAccessRequirement = computed(() =>
     activeRoomChannel.value ? messaging.currentRoomAccessRequirement.value : null,

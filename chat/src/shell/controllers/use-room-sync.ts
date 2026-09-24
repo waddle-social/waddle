@@ -195,6 +195,14 @@ export function useRoomSync(deps: RoomSyncDeps) {
     );
     if (!channelId) {
       if (options.intent !== "automatic" && !options.fromRoute) cancelPendingRoute();
+      clearPendingChannelRoomJidSelection();
+      ui.activePage.value = "chat";
+      ui.activeCommunitySurface.value = null;
+      ui.sidebarMode.value = "dms";
+      ui.showPinnedPanel.value = false;
+      activeExtensionRouteKey.value = null;
+      dmConversations.closeDm();
+      waddles.activeChannelId.value = null;
       ui.actionError.value = "Group message is not available yet.";
       navigate({ id: "dmList" }, { replace: true });
       return false;

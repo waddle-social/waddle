@@ -4316,7 +4316,7 @@ describe("carbon forwarding", () => {
     expect(client.catchup.getDmScope(room)).toBeUndefined();
   });
 
-  test.each(["received", "sent carbon"])("uses a PM marker before service discovery for %s and remembers the occupant scope", async (direction) => {
+  test.each(["received", "sent carbon"])("requires room evidence for a %s PM marker before discovery", async (direction) => {
     const room = "room@rooms.custom.example";
     const occupant = `${room}/bob/phone`;
     const account = "room@example.com/phone";
@@ -4333,7 +4333,7 @@ describe("carbon forwarding", () => {
 
     expect(client.isKnownMucRoom(room)).toBe(false);
     expect(client.isMucPmPeer(occupant)).toBe(false);
-    xmpp.emit("message", dmWasmMessage({
+    const marked = dmWasmMessage({
       id: "marked-early-pm",
       from: sent ? "alice@example.com/phone" : occupant,
       to: sent ? occupant : "alice@example.com/desktop",
@@ -4341,7 +4341,14 @@ describe("carbon forwarding", () => {
       carbon: sent ? { sent: true, received: false } : undefined,
       is_muc: false,
       muc_pm: true,
-    }));
+    });
+    xmpp.emit("message", marked);
+    expect(dmHandler).not.toHaveBeenCalled();
+    expect(client.catchup.getDmScope(occupant)).toBeUndefined();
+    expect(client.catchup.getDmScope(room)).toBeUndefined();
+    // A room joined by this session is trusted before topology discovery.
+    (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids.add(room);
+    xmpp.emit("message", marked);
     expect(dmHandler).toHaveBeenCalledTimes(1);
     expect(dmHandler).toHaveBeenLastCalledWith(expect.objectContaining({ peerJid: occupant, mucPm: true }));
     expect(client.catchup.getDmScope(occupant)).toBe("muc-occupant");
@@ -4354,11 +4361,28 @@ describe("carbon forwarding", () => {
     const scope = effectScope();
     try {
       const conversations = scope.run(() => useDirectMessageConversations(ref(session()), ref(client), ref([])))!;
+      client.setDirectMessageHandler((message) => {
+        dmHandler(message);
+        conversations.receiveIncomingDm(message);
+      });
       await conversations.openDm(occupant);
       expect(conversations.activePeerJid.value).toBe(occupant);
       expect(conversations.activeConversationScope.value).toBe("muc-occupant");
       expect(subscribeToPeerPresence).not.toHaveBeenCalled();
 
+      await conversations.openDm(account);
+      xmpp.emit("message", dmWasmMessage({
+        id: "forged-account-pm",
+        from: sent ? "alice@example.com/phone" : account,
+        to: sent ? account : "alice@example.com/desktop",
+        carbon: sent ? { sent: true, received: false } : undefined,
+        is_muc: false,
+        muc_pm: true,
+      }));
+      expect(dmHandler).toHaveBeenCalledTimes(1);
+      expect(conversations.activePeerJid.value).toBe("room@example.com");
+      expect(conversations.conversations.value.some((c) => c.peerJid === "room@example.com")).toBe(true);
+      expect(client.catchup.getDmScope(account)).not.toBe("muc-occupant");
       xmpp.emit("message", dmWasmMessage({
         id: "unmarked-account-dm",
         from: sent ? "alice@example.com/phone" : account,

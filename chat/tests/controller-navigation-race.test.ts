@@ -8,6 +8,8 @@ import { useConnectionLifecycle } from "../src/shell/controllers/use-connection-
 import { useDmSync } from "../src/shell/controllers/use-dm-sync";
 import { useRoomSync } from "../src/shell/controllers/use-room-sync";
 import { useThreadPanels } from "../src/shell/controllers/use-thread-panels";
+import { useActiveConversation } from "../src/shell/controllers/use-active-conversation";
+import { useSendOrchestration } from "../src/shell/controllers/use-send-orchestration";
 import { useDirectMessageConversations } from "../src/dms/conversations";
 import { buildHref, matchLocation } from "../src/router";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
@@ -105,8 +107,12 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
     const messaging = {
       xmppStatus, loadMessages: mock(done), clearMessages: noop, backfillThread: mock(done),
       rememberChannelRoomJid: noop, clearChannelActivity: noop,
+      sendMessage: mock(done), timelineEl: ref(null), timelineEdgeScroller: ref(null),
     };
-    const dmMessaging = { loadMessages: mock(done), clearMessages: noop, backfillThread: mock(done) };
+    const dmMessaging = {
+      loadMessages: mock(done), clearMessages: noop, backfillThread: mock(done),
+      sendMessage: mock(done), timelineEl: ref(null), timelineEdgeScroller: ref(null),
+    };
     const dmConversations = useDirectMessageConversations(
       session, xmppClient,
       computed(() => waddles.channels.value.flatMap((channel) => channel.jid ? [channel.jid] : [])),
@@ -118,6 +124,8 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
       activeDmPeer: computed(() => dmConversations.conversations.value.find((peer) => peer.peerJid === dmConversations.activePeerJid.value) ?? null),
       dmConversations, dmMessaging, messaging,
     };
+    const conversation = useActiveConversation(shared as never);
+    const send = useSendOrchestration({ ...shared, ...conversation } as never);
     let lifecycle: ReturnType<typeof useConnectionLifecycle>;
     let routeSync: ReturnType<typeof useRouteSync>;
     const updateUrl = () => routeSync?.updateUrl();
@@ -154,7 +162,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
       notificationOrchestration: { setupPushSubscription: done },
       refreshExtensionRoutes, showFirstRunSetupIfNeeded: noop, resetSetupPrompt: noop,
     } as never);
-    return { ...shared, page, routeSync, dmSync, roomSync, connectionStore, discoverTopology, discoveredTopology, refreshExtensionRoutes, subscribeToPeerPresence, location, history, historyEntries, xmppStatus };
+    return { ...shared, conversation, send, page, routeSync, dmSync, roomSync, connectionStore, discoverTopology, discoveredTopology, refreshExtensionRoutes, subscribeToPeerPresence, location, history, historyEntries, xmppStatus };
   })!;
 }
 
@@ -166,6 +174,61 @@ function delayDiscovery(h: ReturnType<typeof harness>) {
 }
 
 describe("navigation during connection discovery", () => {
+  test.each([false, true])("Back to a removed group clears panels and cannot send to the previous channel (pinned: %s)", async (pinned) => {
+    const group = { id: "crew", name: "Crew", jid: "crew@muc.example.com", channelType: "text" as const, isGroupDm: true };
+    const initialPath = buildHref({
+      id: "groupDmRoom", params: { roomJid: group.jid }, search: { thread: ["group-thread"], pinned },
+    });
+    const h = harness(initialPath, { ...topology, rooms: [...topology.rooms, group] });
+    h.connectionStore.appState = "ready";
+    await flush();
+    expect(h.activeThreadStack.value).toEqual(["group-thread"]);
+
+    await h.roomSync.selectChannel("general");
+    await flush();
+    h.discoverTopology.mockImplementation(async () => topology);
+    await h.waddles.loadStructure("general");
+    await flush();
+    expect(h.historyEntries).toEqual([initialPath, "/r/general"]);
+    expect(h.waddles.groupDms.value).toEqual([]);
+    h.messaging.backfillThread.mockClear();
+
+    h.history.back();
+    const requestId = h.routeSync.beginRouteRequest();
+    h.isApplyingRoute.value = true;
+    await h.routeSync.applyRouteTarget(matchLocation(h.location.pathname, h.location.search), requestId, {
+      intent: "explicit-navigation",
+    });
+    h.isApplyingRoute.value = false;
+    await flush();
+
+    await h.send.sendThreadMessage("must not go to General", [], [], undefined, undefined, { threadId: "group-thread" });
+    expect(h.messaging.sendMessage).not.toHaveBeenCalled();
+    expect(h.dmMessaging.sendMessage).not.toHaveBeenCalled();
+    expect(h.waddles.activeChannelId.value).toBeNull();
+    expect(h.conversation.activeTarget.value).toBeNull();
+    expect(h.activeThreadStack.value).toEqual([]);
+    expect(h.activeThreadTargetMessageId.value).toBeNull();
+    expect(h.activeRightPanel.value).toBeNull();
+    expect(h.ui.showPinnedPanel.value).toBe(false);
+    expect(h.messaging.backfillThread).not.toHaveBeenCalled();
+    expect(h.location.pathname + h.location.search).toBe("/dm");
+  });
+
+  test("explicit selection of a missing group leaves no old channel selected", async () => {
+    const h = harness();
+    h.connectionStore.appState = "ready";
+    await flush();
+    expect(h.waddles.activeChannelId.value).toBe("general");
+
+    expect(await h.roomSync.selectGroupDm("missing@muc.example.com")).toBe(false);
+    await flush();
+    expect(h.waddles.activeChannelId.value).toBeNull();
+    expect(h.dmConversations.activePeerJid.value).toBeNull();
+    expect(h.ui.sidebarMode.value).toBe("dms");
+    expect(h.location.pathname).toBe("/dm");
+  });
+
   test.each(["dm", "channel"])("selecting a %s writes one clean history entry and Back restores the previous thread", async (target) => {
     const initialPath = buildHref({
       id: "channel", params: { channelId: "general" }, search: { thread: ["general-thread"], pinned: true },

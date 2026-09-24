@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { computed, effectScope, ref } from "vue";
+import { usePinnedMessages } from "../src/shell/controllers/use-pinned-messages";
+import { useChatShellState } from "../src/shell/state";
 
 // Regression: pin/unpin in the chat-app controller must work for
 // standalone MUCs (channels without a parent Waddle space). The earlier
@@ -48,12 +51,39 @@ describe("pin/unpin handlers for standalone channels", () => {
     expect(unpinRegion).not.toContain("currentSpace");
   });
 
-  test("pin target lookup uses the active timeline for DMs and channels", () => {
-    expect(controllerSource).toContain(
-      "activeTarget.value.messages.value.find((m) => m.id === messageId)",
-    );
-    expect(controllerSource).not.toContain(
-      "messaging.messages.value.find((m) => m.id === messageId)",
-    );
+  test.each(["channel", "dm", "empty"])("pin actions use only the selected conversation (%s)", async (surface) => {
+    const pinMessage = mock(async () => {});
+    const pinDirectMessage = mock(async () => {});
+    const ensureMessageLoaded = mock(async () => true);
+    const scrollToMessage = mock(async () => {});
+    const scope = effectScope();
+    try {
+      const actions = scope.run(() => {
+        const ui = useChatShellState();
+        ui.sidebarMode.value = surface === "channel" ? "channels" : "dms";
+        const messaging = { messages: ref([{ id: "message", reactionTargetId: "room-stanza" }]), ensureMessageLoaded };
+        const dmMessaging = { messages: ref([{ id: "message", replyableId: "dm-stanza" }]), ensureMessageLoaded };
+        return usePinnedMessages({
+          ui,
+          xmppClient: computed(() => ({ pinMessage, pinDirectMessage })),
+          session: computed(() => null),
+          waddles: { currentChannel: ref({ id: "general" }) },
+          messaging,
+          dmMessaging,
+          dmConversations: { activePeerJid: ref(surface === "dm" ? "bob@example.com" : null) },
+          isActiveDirectDmSurface: () => surface === "dm",
+          activeTarget: computed(() => surface === "empty" ? null : surface === "dm" ? dmMessaging : messaging),
+          contentAreaRef: ref({ scrollToMessage }),
+        } as never);
+      })!;
+      actions.pinActiveMessage("message");
+      await actions.jumpToPinnedMessage("stanza");
+      expect(pinMessage.mock.calls).toEqual(surface === "channel" ? [["", "general", "room-stanza"]] : []);
+      expect(pinDirectMessage.mock.calls).toEqual(surface === "dm" ? [["bob@example.com", "dm-stanza"]] : []);
+      expect(ensureMessageLoaded.mock.calls).toEqual(surface === "empty" ? [] : [["stanza"]]);
+      expect(scrollToMessage.mock.calls).toEqual(surface === "empty" ? [] : [["stanza"]]);
+    } finally {
+      scope.stop();
+    }
   });
 });

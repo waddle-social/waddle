@@ -7,6 +7,32 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
+test("an empty conversation cannot send, edit, or load the previous channel", async () => {
+  const actions = useSendOrchestration({
+    ui: {} as never,
+    xmppClient: computed(() => null),
+    waddles: {} as never,
+    messaging: {} as never,
+    dmMessaging: {} as never,
+    isActiveDirectDmSurface: () => false,
+    activeTarget: computed(() => null),
+    activeDmPeer: computed(() => null),
+  });
+
+  await actions.sendActiveMessage("must not send");
+  await actions.sendThreadMessage("must not send", [], [], undefined, undefined, { threadId: "old-thread" });
+  actions.editActiveMessage("old-message", "must not edit");
+  actions.retractActiveMessage("old-message");
+  actions.reactActiveMessage("old-message", "👍");
+  actions.markActiveDisplayed("old-message");
+  actions.notifyActiveComposing();
+  actions.searchActiveMessages("old-message");
+  actions.clearActiveSearch();
+  actions.loadOlderActiveMessages();
+  actions.loadOlderThreadMessages("old-thread");
+  expect(await actions.ensureActiveMessageLoaded("old-message")).toBe(false);
+});
+
 describe("retryActiveLoad", () => {
   test("explicit DM retry recovers a superseded session before reloading", async () => {
     const calls: string[] = [];

@@ -14,7 +14,7 @@ interface SendOrchestrationDeps {
   messaging: ReturnType<typeof useChannelMessages>;
   dmMessaging: ReturnType<typeof useDirectMessages>;
   isActiveDirectDmSurface: () => boolean;
-  activeTarget: ComputedRef<ReturnType<typeof useChannelMessages> | ReturnType<typeof useDirectMessages>>;
+  activeTarget: ComputedRef<ReturnType<typeof useChannelMessages> | ReturnType<typeof useDirectMessages> | null>;
   activeDmPeer: ComputedRef<{ peerJid: string } | null>;
 }
 
@@ -35,6 +35,7 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
     forumTitle?: string,
     linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
+    if (!activeTarget.value) return;
     if (isActiveDirectDmSurface()) {
       await dmMessaging.sendMessage(body, markup, references, files, replyTo, linkPreview);
       return;
@@ -43,7 +44,7 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
   }
 
   async function sendPublicChannelMessage(body: string) {
-    if (ui.sidebarMode.value !== "channels" || !xmppClient.value || !waddles.activeChannelId.value) {
+    if (activeTarget.value !== messaging || ui.sidebarMode.value !== "channels" || !xmppClient.value || !waddles.activeChannelId.value) {
       throw new Error("Public AI prompts require an active channel.");
     }
     ui.clearActionError();
@@ -62,6 +63,7 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
     threadOverride: { threadId: string; parentThreadId?: string },
     linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
+    if (!activeTarget.value) return;
     if (isActiveDirectDmSurface()) {
       await dmMessaging.sendMessage(body, markup, references, files, replyTo, linkPreview, threadOverride);
       return;
@@ -107,31 +109,27 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
         ? { id: threadOverride.threadId, parent: threadOverride.parentThreadId }
         : { id: threadOverride.threadId }
       : undefined;
-    activeTarget.value.notifyComposing(thread);
+    activeTarget.value?.notifyComposing(thread);
   }
 
   function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload) {
-    if (isActiveDirectDmSurface()) {
-      void dmMessaging.editMessage(messageId, newBody, markup, references, linkPreview);
-      return;
-    }
-    void messaging.editMessage(messageId, newBody, markup, references, linkPreview);
+    void activeTarget.value?.editMessage(messageId, newBody, markup, references, linkPreview);
   }
 
   function retractActiveMessage(messageId: string) {
-    void activeTarget.value.retractMessage(messageId);
+    void activeTarget.value?.retractMessage(messageId);
   }
 
   function reactActiveMessage(messageId: string, emoji: string) {
-    void activeTarget.value.toggleReaction(messageId, emoji);
+    void activeTarget.value?.toggleReaction(messageId, emoji);
   }
 
   function markActiveDisplayed(messageId: string, options?: { syncMds?: boolean }) {
-    activeTarget.value.markDisplayed(messageId, options);
+    activeTarget.value?.markDisplayed(messageId, options);
   }
 
   async function invokeActiveExtensionAction(action: ExtensionAnnotationAction) {
-    return await activeTarget.value.invokeExtensionAction(action);
+    return await activeTarget.value?.invokeExtensionAction(action);
   }
 
   async function invokeExtensionRouteAction(action: ExtensionAnnotationAction) {
@@ -139,15 +137,15 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
   }
 
   function searchActiveMessages(query: string) {
-    void activeTarget.value.searchMessages(query);
+    void activeTarget.value?.searchMessages(query);
   }
 
   function clearActiveSearch() {
-    activeTarget.value.clearSearch();
+    activeTarget.value?.clearSearch();
   }
 
   function loadOlderActiveMessages() {
-    void activeTarget.value.loadOlderMessages();
+    void activeTarget.value?.loadOlderMessages();
   }
 
   function retryActiveLoad() {
@@ -162,15 +160,11 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
   }
 
   function ensureActiveMessageLoaded(messageId: string) {
-    return activeTarget.value.ensureMessageLoaded(messageId);
+    return activeTarget.value?.ensureMessageLoaded(messageId) ?? Promise.resolve(false);
   }
 
   function loadOlderThreadMessages(threadId: string) {
-    if (isActiveDirectDmSurface()) {
-      void dmMessaging.loadOlderThreadMessages(threadId);
-      return;
-    }
-    void messaging.loadOlderThreadMessages(threadId);
+    void activeTarget.value?.loadOlderThreadMessages(threadId);
   }
 
   return {

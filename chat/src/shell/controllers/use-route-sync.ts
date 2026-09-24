@@ -341,12 +341,16 @@ export function useRouteSync(deps: RouteSyncDeps) {
     if (match.id === "groupDmRoom") {
       activeExtensionRouteKey.value = null;
       dmConversations.closeDm();
-      await selectGroupDm(match.params.roomJid, {
+      const selected = await selectGroupDm(match.params.roomJid, {
         updateUrl: false,
         fromRoute: true,
         intent: options.intent ?? "automatic",
       });
       if (requestId !== routeRequestId) return;
+      if (!selected) {
+        await applyRouteTarget({ id: "dmList" }, requestId, options);
+        return;
+      }
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
       ui.showPinnedPanel.value = match.search.pinned;
@@ -410,12 +414,16 @@ export function useRouteSync(deps: RouteSyncDeps) {
         params: { roomJid: ch.jid },
         search: match.search,
       }, { replace: true });
-      await selectGroupDm(ch.jid, {
+      const selected = await selectGroupDm(ch.jid, {
         updateUrl: false,
         fromRoute: true,
         intent: options.intent ?? "automatic",
       });
       if (!isCurrentRouteRequest(requestId)) return;
+      if (!selected) {
+        await applyRouteTarget({ id: "dmList" }, requestId, options);
+        return;
+      }
       ui.showPinnedPanel.value = match.search.pinned;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;

@@ -294,6 +294,32 @@ describe("MamPager reconnect catch-up cursor handling", () => {
 });
 
 describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
+  test("unverified PM markers cannot create or replace account history or catch-up scope", async () => {
+    const forged = {
+      ...archivedDm("forged", "unverified", "2026-07-01T10:00:01.000Z", `${PEER}/phone`),
+      to: SELF,
+      muc_pm: true,
+    };
+    const valid = archivedDm("valid", "ordinary", "2026-07-01T10:00:00.000Z");
+    const mixed = page([valid, forged], { complete: true });
+    const xmpp: MamWasmClient = {
+      fetch_dm_history_page: async () => mixed,
+      fetch_dm_history_by_thread: async () => mixed,
+      search_dm_history: async () => mixed,
+    };
+    const { pager, events, catchup } = createPager(xmpp);
+    const delivered: LiveDmMessage[] = [];
+    events.on("directMessage", (message) => delivered.push(message));
+
+    expect((await pager.queryPersonalMamPage(PEER)).messages.map((m) => m.body)).toEqual(["ordinary"]);
+    expect((await pager.queryPersonalMamThreadPage(PEER, "thread")).messages.map((m) => m.body)).toEqual(["ordinary"]);
+    expect((await pager.searchDmMessages(PEER, "ordinary")).map((m) => m.body)).toEqual(["ordinary"]);
+    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, scope: "account", after: "before-gap" }], "fresh");
+    expect(delivered.map((m) => m.body)).toEqual(["ordinary"]);
+    expect(catchup.getDmLastSeen(PEER)).toBe("2026-07-01T10:00:00.000Z");
+    expect(catchup.getDmScope(`${PEER}/phone`)).not.toBe("muc-occupant");
+  });
+
   test("custom MUC service scopes page, thread, search, and reconnect by full occupant", async () => {
     const mixed = page([
       archivedMucPm("custom-bob", CUSTOM_MUC_PM_BOB, "matching bob", "2026-07-01T10:00:00.000Z"),

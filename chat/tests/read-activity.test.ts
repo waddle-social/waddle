@@ -7,6 +7,7 @@ function makeReadActivityHarness(options: {
   latestId: string | null;
   sidebarMode?: "channels" | "dms";
   activePeerJid?: string | null;
+  emptyConversation?: boolean;
 }) {
   const roomJid = "general@conference.example.com";
   const unread = ref(options.unread);
@@ -48,7 +49,7 @@ function makeReadActivityHarness(options: {
         isPinnedAtEdge: ref(true),
         latestRemoteMessageId: ref(null),
       } as never,
-      activeTarget: ref({ markDisplayed }),
+      activeTarget: ref(options.emptyConversation ? null : { markDisplayed }),
       roomJidForChannelId: () => roomJid,
     });
   });
@@ -63,6 +64,20 @@ function makeReadActivityHarness(options: {
 }
 
 describe("useChatReadActivity", () => {
+  test("an empty DM view does not mark the previous channel as read", async () => {
+    const h = makeReadActivityHarness({
+      unread: 2, latestId: "remote-1", sidebarMode: "dms", emptyConversation: true,
+    });
+    try {
+      await Promise.resolve();
+      expect(h.markDisplayed).not.toHaveBeenCalled();
+      expect(h.markRead).not.toHaveBeenCalled();
+      expect(h.clearChannelActivity).not.toHaveBeenCalled();
+    } finally {
+      h.stop();
+    }
+  });
+
   test("clears live channel activity when the active room is marked read", async () => {
     const h = makeReadActivityHarness({ unread: 2, latestId: "remote-1" });
 
