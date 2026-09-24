@@ -54,10 +54,9 @@ public final class SessionCoordinator {
     @ObservationIgnored var failedOutbound: [String: OutboundMessage] = [:]
     @ObservationIgnored var sentOutbound: [String: OutboundMessage] = [:]
     @ObservationIgnored var sentOrder: [String] = []
-    /// Bounded correlation window for a recipient bounce that arrives after
-    /// the server already acknowledged the stanza.
+    /// Keep confirmed sends for this session: SM acknowledgement does not
+    /// impose a deadline on a later recipient rejection.
     @ObservationIgnored var recentlyAcknowledgedOutbound: [String: OutboundMessage] = [:]
-    @ObservationIgnored var recentlyAcknowledgedOrder: [String] = []
     /// IDs explicitly retried while a previous send continuation may still
     /// be suspended. Its eventual result must not settle the retry.
     @ObservationIgnored var retryingOutboundIDs: Set<String> = []
@@ -317,7 +316,6 @@ public final class SessionCoordinator {
         sentOutbound.removeAll()
         sentOrder.removeAll()
         recentlyAcknowledgedOutbound.removeAll()
-        recentlyAcknowledgedOrder.removeAll()
         retryingOutboundIDs.removeAll()
         resetBeforeRetryIDs.removeAll()
         isOutboxLoaded = false

@@ -758,6 +758,25 @@ describe("ResumeStateStore", () => {
 });
 
 describe("message stanza rejection", () => {
+  test("unrelated acknowledged traffic cannot discard a delayed rejection", () => {
+    const { queue, events } = createQueue();
+    const failures: string[] = [];
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    queue.persistPendingDirectSend("chat@example.com", "oldest", { id: "oldest" });
+    queue.handleAck("oldest");
+    for (let index = 0; index < 2100; index += 1) {
+      const id = `newer-${index}`;
+      queue.recordSentRecipient(id, "bob@example.com", "account");
+      queue.handleAck(id);
+    }
+    queue.handleRejected({ stanza_id: "oldest", from: "chat@example.com", to: SCOPE });
+    queue.handleAck("oldest");
+    expect(failures).toEqual(["oldest"]);
+    expect(queue.wasRejected("oldest")).toBe(true);
+    queue.dispose();
+    expect(queue.wasRejected("oldest")).toBe(false);
+  });
+
   test.each([false, true])("rejects a matching send with prior SM ack=%s and never retries it", async (ackFirst) => {
     const sent: string[] = [];
     const { queue, events } = createQueue({ sendDirect: async (_peer, _body, opts) => {

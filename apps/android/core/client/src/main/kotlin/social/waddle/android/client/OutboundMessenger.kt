@@ -25,8 +25,11 @@ internal class OutboundMessenger(
     private val sendMutex = Mutex()
 
     // Only acknowledged sends need a second index; pending sends are durable.
+    // Keep actual sends for the session: a recipient error can follow any ack.
     // Bind entries to the login generation so same-account relogin is isolated.
-    private val acknowledged = linkedMapOf<String, Pair<ActiveSession.OwnerLease, QueuedOutboundMessage>>()
+    private val acknowledged = mutableMapOf<String, Pair<ActiveSession.OwnerLease, QueuedOutboundMessage>>()
+
+    suspend fun clearAcknowledged() = sendMutex.withLock { acknowledged.clear() }
 
     /**
      * One manager-level send. The typed semantic intent is persisted
@@ -185,7 +188,6 @@ internal class OutboundMessenger(
             activeSession.runIfCurrent(lease) {
                 pendingDelivery(lease.ownerBareJid, clientStanzaId)?.let { message ->
                     acknowledged[clientStanzaId] = lease to message
-                    while (acknowledged.size > MAX_ACKNOWLEDGED_SENDS) acknowledged.remove(acknowledged.keys.first())
                 }
                 outboundQueue.acknowledge(lease.ownerBareJid, clientStanzaId)
             }
@@ -272,6 +274,5 @@ internal class OutboundMessenger(
 
     private companion object {
         const val DROP_REASON_UNKNOWN = "rejected"
-        const val MAX_ACKNOWLEDGED_SENDS = 256
     }
 }

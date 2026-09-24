@@ -163,7 +163,7 @@ extension SessionCoordinator {
     /// Keeps every unconfirmed written message so disconnect replay and
     /// outbox persistence cannot drop one before an ack or server echo.
     private func rememberSent(_ message: OutboundMessage) {
-        removeRecentlyAcknowledged(message.clientID)
+        recentlyAcknowledgedOutbound[message.clientID] = nil
         sentOutbound[message.clientID] = message
         sentOrder.removeAll { $0 == message.clientID }
         sentOrder.append(message.clientID)
@@ -182,7 +182,7 @@ extension SessionCoordinator {
         retryingOutboundIDs.remove(clientID)
         resetBeforeRetryIDs.remove(clientID)
         if let message {
-            rememberRecentlyAcknowledged(message)
+            recentlyAcknowledgedOutbound[message.clientID] = message
         }
     }
 
@@ -242,28 +242,9 @@ extension SessionCoordinator {
             failedOutbound[clientID] = message
         } else if deliveries.state(of: clientID) == .acknowledged, let message {
             failedOutbound[clientID] = nil
-            rememberRecentlyAcknowledged(message)
+            recentlyAcknowledgedOutbound[message.clientID] = message
         }
         persistOutbox()
-    }
-
-    private func rememberRecentlyAcknowledged(_ message: OutboundMessage) {
-        let clientID = message.clientID
-        recentlyAcknowledgedOutbound[clientID] = message
-        recentlyAcknowledgedOrder.removeAll { $0 == clientID }
-        recentlyAcknowledgedOrder.append(clientID)
-        if recentlyAcknowledgedOrder.count > 200 {
-            let expired = recentlyAcknowledgedOrder.removeFirst()
-            recentlyAcknowledgedOutbound[expired] = nil
-            if deliveries.state(of: expired) == .acknowledged {
-                deliveries.forget(expired)
-            }
-        }
-    }
-
-    private func removeRecentlyAcknowledged(_ clientID: String) {
-        recentlyAcknowledgedOutbound[clientID] = nil
-        recentlyAcknowledgedOrder.removeAll { $0 == clientID }
     }
 
     /// The optimistic row: our occupant JID in a room (so the reflection

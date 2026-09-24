@@ -548,7 +548,8 @@ export class OfflineSendQueue {
   private readonly resumeReplayQueuedIds = new Set<string>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
   // Keep identity after an SM ack: the server can reject routing afterwards.
-  // Bound retained entries independently of the durable retry queue.
+  // Keep this small identity record for the client session: SM supplies no
+  // deadline after which a later routing error becomes impossible.
   private readonly sentRecipients = new Map<string, { jid: string; scope: "account" | "room" | "occupant"; rejected: boolean }>();
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
@@ -588,7 +589,6 @@ export class OfflineSendQueue {
   recordSentRecipient(id: string, jid: string, scope: "account" | "room" | "occupant"): void {
     if (this.sentRecipients.has(id)) return;
     this.sentRecipients.set(id, { jid, scope, rejected: false });
-    if (this.sentRecipients.size > 2048) this.sentRecipients.delete(this.sentRecipients.keys().next().value!);
   }
 
   wasRejected(id: string): boolean {

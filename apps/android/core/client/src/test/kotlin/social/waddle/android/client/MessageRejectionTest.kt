@@ -70,6 +70,38 @@ class MessageRejectionTest {
     }
 
     @Test
+    fun `delayed rejection survives more than 256 unrelated acknowledged sends`() = runTest {
+        val h = Harness(this)
+        h.manager.login(testSessionInfo())
+        runCurrent()
+        h.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        val id = checkNotNull(h.manager.sendChatMessage("alice@waddle.test", "first").queuedId)
+        h.factory.emit(WaddleClientEvent.DeliveryAcked(id))
+        runCurrent()
+        repeat(300) {
+            val other = checkNotNull(h.manager.sendChatMessage("bob@waddle.test", "later").queuedId)
+            h.factory.emit(WaddleClientEvent.DeliveryAcked(other))
+            runCurrent()
+        }
+        h.manager.events.test {
+            h.factory.emit(WaddleClientEvent.MessageRejected(id, "eve@waddle.test", null))
+            runCurrent()
+            expectNoEvents()
+            assertFalse(h.manager.timelineStore.timeline("alice@waddle.test").value.single().rejected)
+            h.factory.emit(WaddleClientEvent.MessageRejected(id, "alice@waddle.test", null))
+            runCurrent()
+            assertEquals(XmppEvent.MessageRejected(id, "alice@waddle.test", null), awaitItem())
+            h.factory.emit(WaddleClientEvent.DeliveryAcked(id))
+            runCurrent()
+            assertEquals(XmppEvent.DeliveryAcked(id), awaitItem())
+            assertTrue(h.manager.timelineStore.timeline("alice@waddle.test").value.single().rejected)
+            assertTrue(h.prefs.outboundQueue.first().isEmpty())
+        }
+        h.manager.logout()
+    }
+
+    @Test
     fun `forged rejection cannot remove intent or reach app consumers`() = runTest {
         val h = Harness(this)
         h.manager.login(testSessionInfo())

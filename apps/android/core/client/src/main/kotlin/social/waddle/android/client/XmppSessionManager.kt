@@ -592,7 +592,8 @@ class XmppSessionManager(
         }
     }
 
-    private fun clearSessionState() {
+    private suspend fun clearSessionState() {
+        messenger.clearAcknowledged()
         stores.clear()
         readState.clearPending()
         resume.clear()

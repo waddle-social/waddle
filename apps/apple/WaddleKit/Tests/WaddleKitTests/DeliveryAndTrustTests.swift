@@ -171,6 +171,28 @@ struct MessageRejectionTests {
         #expect(coordinator.failedOutbound[id] != nil)
     }
 
+    @Test func delayedRejectionSurvivesMoreThan200OtherAcknowledgedSends() async throws {
+        let (coordinator, port, store) = online()
+        let id = try #require(await coordinator.send(Draft(text: "first"), in: bobConversation))
+        coordinator.handle(.deliveryAcked(stanzaID: id))
+        for _ in 0..<250 {
+            let other = try #require(await coordinator.send(Draft(text: "later"), in: roomConversation))
+            coordinator.handle(.deliveryAcked(stanzaID: other))
+        }
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid("eve@waddle.test"), to: nil))
+        #expect(coordinator.deliveries.state(of: id) == .acknowledged)
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid("bob@waddle.test"), to: nil))
+        coordinator.handle(.deliveryAcked(stanzaID: id))
+        #expect(coordinator.deliveries.state(of: id) == .failed)
+        #expect(coordinator.timelines.timeline(for: bobConversation).items.count == 1)
+        #expect(store.entries.map(\.state) == [.failed])
+        coordinator.requeueUnconfirmedSendsForFreshStream()
+        await coordinator.flushOutboundQueue()
+        #expect(port.sent.count == 251)
+        await coordinator.stop()
+        #expect(coordinator.recentlyAcknowledgedOutbound.isEmpty)
+    }
+
     @Test(arguments: ["eve@waddle.test", "waddle.test/forged", "other.test", "alice@waddle.test", "alice@waddle.test/other-device"])
     func wrongSenderCannotRejectKnownSend(sender: String) async throws {
         let (coordinator, _, _) = online()

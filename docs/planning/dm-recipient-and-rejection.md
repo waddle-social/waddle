@@ -53,6 +53,9 @@ account API is required.
 - Native clients correlate the same typed rejection with their outbound sends.
   Android stores rejection on the shared timeline, so retry, screen recreation,
   and message merging cannot restore a rejected echo as a successful message.
+- Confirmed-send identity records last for the client session and are cleared
+  at logout. Later traffic cannot evict the evidence for a delayed rejection.
+  Unknown notification events remain bounded separately from known replies.
 - Rejected sends leave the browser retry queue. Native stream state retains
   their sequence positions and rejection flags across persistence, excludes
   them from fresh-stream retries, and does not report them as delivered.
