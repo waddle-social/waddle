@@ -27,5 +27,7 @@ if [[ "${CI_XCODEBUILD_ACTION:-}" == "archive" ]]; then
     *) PLATFORM="all" ;;
   esac
 fi
+echo "ci_post_clone: action=${CI_XCODEBUILD_ACTION:-<unset>} scheme=${CI_XCODE_SCHEME:-<unset>}" \
+  "platform=${CI_PRODUCT_PLATFORM:-<unset>} -> --platform $PLATFORM"
 
 bash "$REPO_ROOT/scripts/build-xcframework.sh" --platform "$PLATFORM"

@@ -95,12 +95,11 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient"
         MODULEMAP_FILE: "$(SRCROOT)/Waddle/RustClient/module.modulemap"
+# One scheme per app, and no combined scheme: an archive must build a single
+# app for a single platform. Xcode Cloud's ci_post_clone.sh builds only the
+# archived platform's XCFramework slice, so a scheme archiving both apps
+# fails linking the other one.
 schemes:
-  Waddle:
-    build:
-      targets:
-        Waddle-iOS: all
-        Waddle-macOS: all
   Waddle-iOS:
     build:
       targets:
