@@ -325,6 +325,17 @@ struct ExtensionCommandTests {
         #expect(form.missingRequiredFields.map(\.variable) == ["jid"])
     }
 
+    @Test func blankJidMultiLinesAreNotSubmitted() throws {
+        let form = ExtensionCommandForm(title: nil, instructions: nil, fields: [
+            field("invitees", .jidMulti, values: ["a@b", "", " ", "c@d"]),
+            field("body", .textMulti, values: ["line", "", "line"]),
+        ])
+        #expect(try form.submission(for: .complete) == [
+            ExtensionFormValue(variable: "invitees", values: ["a@b", "c@d"]),
+            ExtensionFormValue(variable: "body", values: ["line", "", "line"]),
+        ])
+    }
+
     @Test func settingSkipsFixedAndBlockedFields() {
         let form = ExtensionCommandForm(title: nil, instructions: nil, fields: [
             field("label", .fixed, values: ["Heading"]),

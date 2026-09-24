@@ -15,12 +15,15 @@ extension ExtensionCommandField {
     }
 
     /// The field as submitted: single-valued types send their first
-    /// value; `fixed` fields are display-only and send nothing.
+    /// value; `fixed` fields are display-only and send nothing. Blank
+    /// `jid-multi` lines are dropped, since an empty value is not a JID.
     var submittedValue: ExtensionFormValue? {
         switch type {
         case .fixed:
             return nil
-        case .hidden, .jidMulti, .listMulti, .textMulti:
+        case .jidMulti:
+            return ExtensionFormValue(variable: variable, values: values.filter(Self.isFilled))
+        case .hidden, .listMulti, .textMulti:
             return ExtensionFormValue(variable: variable, values: values)
         case .boolean, .jidSingle, .listSingle, .textPrivate, .textSingle:
             return ExtensionFormValue(variable: variable, values: Array(values.prefix(1)))

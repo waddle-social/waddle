@@ -57,8 +57,10 @@ private struct ExtensionCommandFormContent: View {
                 Button(stage.isPending ? "Cancel" : "Done") {
                     center.dismiss(session: session)
                 }
+                .disabled(center.isSubmitting)
             }
         }
+        .interactiveDismissDisabled(center.isSubmitting)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ExtensionCommandActionBar(actions: stage.stepActions, isBusy: center.isSubmitting) { action in
                 Task { await center.submit(action, session: session) }
