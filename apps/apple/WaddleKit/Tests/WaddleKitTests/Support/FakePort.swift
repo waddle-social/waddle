@@ -39,9 +39,20 @@ final class FakePort: XmppPort {
 
     var connectDelay: UInt64 = 0
     var disconnectCount = 0
+    var holdsConnects = false
+    private(set) var heldConnects: [CheckedContinuation<Void, Never>] = []
+
+    func releaseConnects() {
+        let held = heldConnects
+        heldConnects = []
+        held.forEach { $0.resume() }
+    }
 
     func connect() async {
         connectCount += 1
+        if holdsConnects {
+            await withCheckedContinuation { heldConnects.append($0) }
+        }
         if connectDelay > 0 {
             try? await Task.sleep(nanoseconds: connectDelay)
         }

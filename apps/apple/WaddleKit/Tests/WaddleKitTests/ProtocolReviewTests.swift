@@ -142,11 +142,18 @@ struct ProtocolReviewTests {
 struct StaleConnectionTests {
     @Test func connectFinishingAfterSignOutIsTornDown() async throws {
         let port = FakePort()
-        port.connectDelay = 100_000_000
+        port.holdsConnects = true
+        defer {
+            port.holdsConnects = false
+            port.releaseConnects()
+        }
         let coordinator = SessionCoordinator(account: me, port: port)
         coordinator.start()
+        await eventually { port.heldConnects.count == 1 }
+        try #require(port.heldConnects.count == 1)
         await coordinator.stop()
         let disconnectsAtStop = port.disconnectCount
+        port.releaseConnects()
         await eventually { port.disconnectCount == disconnectsAtStop + 1 }
         #expect(port.disconnectCount == disconnectsAtStop + 1)
         #expect(coordinator.connection == .signedOut)
@@ -181,10 +188,16 @@ struct SerializedConnectTests {
     /// until the first returns; then the retry runs.
     @Test func timedOutAttemptIsNotRacedBySecondConnect() async throws {
         let port = FakePort()
-        // Slower than the watchdog (0.05 s) plus the first backoff (1 s).
-        port.connectDelay = 1_500_000_000
+        // Keep the first attempt suspended beyond the watchdog and first backoff.
+        port.holdsConnects = true
+        defer {
+            port.holdsConnects = false
+            port.releaseConnects()
+        }
         let coordinator = SessionCoordinator(account: me, port: port, connectBudget: 0.05)
         coordinator.start()
+        await eventually { port.heldConnects.count == 1 }
+        try #require(port.heldConnects.count == 1)
         try await Task.sleep(nanoseconds: 1_300_000_000)
         #expect(port.connectCount == 1)
         guard case .offline = coordinator.connection else {
@@ -194,7 +207,9 @@ struct SerializedConnectTests {
         }
         // The slow attempt returns without connecting; the deferred retry
         // (1 s backoff) then starts the second attempt.
-        try await Task.sleep(nanoseconds: 1_600_000_000)
+        port.holdsConnects = false
+        port.releaseConnects()
+        await eventually { port.connectCount >= 2 }
         #expect(port.connectCount == 2)
         await coordinator.stop()
     }
