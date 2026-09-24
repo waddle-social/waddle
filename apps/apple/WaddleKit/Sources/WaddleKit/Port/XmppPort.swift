@@ -130,5 +130,21 @@ public extension PushPort {
     func enablePush(_ registration: PushRegistration) async -> Bool { false }
 }
 
+/// XEP-0050 ad-hoc commands of the server's extension service. In a
+/// room, `room` travels as the `waddle#room_jid` submit field.
+public protocol CommandPort: AnyObject, Sendable {
+    func discoverExtensionCommands() async throws -> [ExtensionCommand]
+    /// XEP-0050 §2.4: starts `command` with `execute`.
+    func invokeExtensionCommand(_ command: ExtensionCommand, room: BareJID?) async throws -> ExtensionCommandResult
+    /// XEP-0050 §3: advances the session with `action`.
+    func submitExtensionCommandForm(
+        _ command: ExtensionCommand,
+        sessionID: String?,
+        values: [ExtensionFormValue],
+        action: ExtensionCommandAction,
+        room: BareJID?
+    ) async throws -> ExtensionCommandResult
+}
+
 /// The full surface the session coordinator drives.
-public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort
+public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort

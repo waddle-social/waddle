@@ -32,6 +32,8 @@ public final class SessionCoordinator {
     public let history: HistoryStore
     @ObservationIgnored let inbox: InboxStore
     @ObservationIgnored let readCursors: ReadCursorStore
+    /// XEP-0050 extension commands, discovered once the session is ready.
+    public internal(set) var extensionCommands: [ExtensionCommand] = []
 
     /// Called for each message that should notify. The platform layer
     /// applies app-state policy (foreground, focus) on top.
@@ -326,6 +328,7 @@ public final class SessionCoordinator {
         typingPauseTasks.removeAll()
         pendingDisplayed.removeAll()
         onDemandRooms.removeAll()
+        extensionCommands.removeAll()
     }
 
     // MARK: - Events
@@ -420,9 +423,10 @@ public final class SessionCoordinator {
         await reloadActiveConversation()
         // Only a session that got all the way through resets the backoff,
         // so a stream that drops right after binding keeps backing off.
-        if !Task.isCancelled {
-            reconnectAttempt = 0
-        }
+        guard !Task.isCancelled else { return }
+        reconnectAttempt = 0
+        // Last: discovery is several round-trips and nothing above needs it.
+        await refreshExtensionCommands()
     }
 
     // MARK: - Message routing
@@ -538,6 +542,7 @@ public final class SessionCoordinator {
 
     func preview(of item: TimelineItem) -> String? {
         if item.tombstone != nil { return nil }
+        if let action = MeAction.presentation(ofBody: item.body, actor: item.authorName) { return action }
         let text = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty, !item.message.sharedFiles.contains(where: { $0.url.absoluteString == text }) {
             return text

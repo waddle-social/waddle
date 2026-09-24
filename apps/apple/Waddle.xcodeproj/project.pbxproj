@@ -245,6 +245,7 @@
 		B6FA7A0D0880626FB61A1770 /* PinnedMessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 463B2FA03157B7332CE180CB /* PinnedMessagesView.swift */; };
 		B746CAED385A5933D9F3EA21 /* TimelineRevealBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD6A53E725684F6C50C5169A /* TimelineRevealBanner.swift */; };
 		B76FA7BB73FDF7B63119C590 /* MessageLinkDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCE28B7F154186590B772FC3 /* MessageLinkDetector.swift */; };
+		B7B0453D59244126B71A44C3 /* FFIXmppPort+Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */; };
 		B92D8577885DB6EF57D70947 /* ProfileAvailabilityOption.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB8BD216820ED9BAEB871364 /* ProfileAvailabilityOption.swift */; };
 		B93419865916DB1E5C937A2F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = FE8ACEF477622BE73C019935 /* PrivacyInfo.xcprivacy */; };
 		B973856979D1C525495F1345 /* MessageEmojiPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 066F30A056D21DE5AE470B9F /* MessageEmojiPicker.swift */; };
@@ -266,6 +267,7 @@
 		C521691A686F452F8FE7A6EC /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 079CAAA4C12136A21EC6B831 /* Preferences.swift */; };
 		C567AD660ED4E217DBAD4D3A /* AttachmentLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27ACBD9D98C0C8D658496DCA /* AttachmentLoader.swift */; };
 		C66EABE79654CE25384DBFDA /* ThreadScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75D6A32C54D89A2B02F909 /* ThreadScreen.swift */; };
+		C76968A921D4D393D54F1A2F /* FFIXmppPort+Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */; };
 		C7F79204165298E5179374B9 /* EncryptedAttachmentStatusCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79EA3909819BAAAA3BAC4042 /* EncryptedAttachmentStatusCards.swift */; };
 		C9833A182130F5B789C4EBA1 /* EncryptedFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68718ABC269E7FE0832170C /* EncryptedFileDownloader.swift */; };
 		CA5B7C430658157869D10090 /* BridgeLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745E4D7A386971E4AA451053 /* BridgeLog.swift */; };
@@ -351,6 +353,7 @@
 		2ACF126A87B69DBEE632B1E1 /* SidebarAccountBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarAccountBar.swift; sourceTree = "<group>"; };
 		2C4C5589906A2053A7CA1626 /* ServerSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSettings.swift; sourceTree = "<group>"; };
 		2D57D4986811AD186C88D991 /* ConversationRowTrailing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRowTrailing.swift; sourceTree = "<group>"; };
+		2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Commands.swift"; sourceTree = "<group>"; };
 		2DE2907041A875E132FBDE57 /* MessageRichBody.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRichBody.swift; sourceTree = "<group>"; };
 		2F9B6166199D282F6AAEDD0C /* HomeList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeList.swift; sourceTree = "<group>"; };
 		3027197695AD04C246A4D2C3 /* AccountSignOutButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSignOutButton.swift; sourceTree = "<group>"; };
@@ -594,6 +597,7 @@
 				62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */,
 				BA3FAC89DAB41E26A3E53397 /* FFISessionSignals.swift */,
 				E0331D56B66C8F49E37D436C /* FFIXmppPort.swift */,
+				2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */,
 				D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */,
 				6FAF9D1EF92D4E9E28ECE577 /* FFIXmppPort+Messaging.swift */,
 				74DC91F2EF32ECBD7BC25238 /* FFIXmppPort+Notify.swift */,
@@ -1224,6 +1228,7 @@
 				09836B94B95F7A6A3009EDE7 /* FFIOutbound.swift in Sources */,
 				237686D6632D2EF5CCC21266 /* FFIRFC3339.swift in Sources */,
 				909661C228C254D296DCD120 /* FFISessionSignals.swift in Sources */,
+				C76968A921D4D393D54F1A2F /* FFIXmppPort+Commands.swift in Sources */,
 				97EA83659EDC249D123EBA04 /* FFIXmppPort+Directory.swift in Sources */,
 				8AC1D9BC64BFCCD6AED35DC8 /* FFIXmppPort+Messaging.swift in Sources */,
 				D5B7118690B54736F98C480D /* FFIXmppPort+Notify.swift in Sources */,
@@ -1384,6 +1389,7 @@
 				6E28C165381D38973ED24039 /* FFIOutbound.swift in Sources */,
 				A765C5988165F46A7D0D5CD5 /* FFIRFC3339.swift in Sources */,
 				A11359C8F42776D8A130CD28 /* FFISessionSignals.swift in Sources */,
+				B7B0453D59244126B71A44C3 /* FFIXmppPort+Commands.swift in Sources */,
 				88F2CD9DE93781F62A736BAC /* FFIXmppPort+Directory.swift in Sources */,
 				D9FACFA4B9D89DC4DA464CAA /* FFIXmppPort+Messaging.swift in Sources */,
 				0C149AF2A76DF725C4FA5616 /* FFIXmppPort+Notify.swift in Sources */,

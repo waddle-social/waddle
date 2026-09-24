@@ -175,4 +175,53 @@ final class FakePort: XmppPort {
     func requestUploadSlot(filename: String, size: Int, mediaType: String) async -> UploadSlot? { nil }
     func registerPush(deviceToken: String, environment: PushEnvironment, appID: String) async -> PushRegistration? { nil }
     func disablePush(_ registration: PushRegistration) async -> Bool { true }
+
+    var extensionCommandDiscovery: Result<[ExtensionCommand], PortError> = .success([])
+    var extensionDiscoveryCount = 0
+    var invokeResult: Result<ExtensionCommandResult, PortError> = .failure(.failed)
+    var invocations: [(command: ExtensionCommand, room: BareJID?)] = []
+    var submitResult: Result<ExtensionCommandResult, PortError> = .failure(.failed)
+    var submissions: [ExtensionSubmission] = []
+
+    struct ExtensionSubmission: Equatable {
+        let command: ExtensionCommand
+        let sessionID: String?
+        let values: [ExtensionFormValue]
+        let action: ExtensionCommandAction
+        let room: BareJID?
+    }
+
+    /// While set, discovery suspends until `releaseExtensionDiscovery()`.
+    var holdsExtensionDiscovery = false
+    private var heldExtensionDiscovery: [CheckedContinuation<Void, Never>] = []
+
+    func releaseExtensionDiscovery() {
+        let held = heldExtensionDiscovery
+        heldExtensionDiscovery = []
+        held.forEach { $0.resume() }
+    }
+
+    func discoverExtensionCommands() async throws -> [ExtensionCommand] {
+        extensionDiscoveryCount += 1
+        if holdsExtensionDiscovery {
+            await withCheckedContinuation { heldExtensionDiscovery.append($0) }
+        }
+        return try extensionCommandDiscovery.get()
+    }
+
+    func invokeExtensionCommand(_ command: ExtensionCommand, room: BareJID?) async throws -> ExtensionCommandResult {
+        invocations.append((command, room))
+        return try invokeResult.get()
+    }
+
+    func submitExtensionCommandForm(
+        _ command: ExtensionCommand,
+        sessionID: String?,
+        values: [ExtensionFormValue],
+        action: ExtensionCommandAction,
+        room: BareJID?
+    ) async throws -> ExtensionCommandResult {
+        submissions.append(ExtensionSubmission(command: command, sessionID: sessionID, values: values, action: action, room: room))
+        return try submitResult.get()
+    }
 }
