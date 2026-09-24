@@ -1103,6 +1103,10 @@ pub struct ServerConfig {
     pub extensions: ExtensionConfig,
     /// Operator controls for server-side link-preview enrichment.
     pub link_preview: LinkPreviewConfig,
+    /// Operator control for the `is_question` community-enrichment
+    /// judgment outbox (#1831 Phase 1). Not yet wired to an env var or to
+    /// startup drain-loop spawning; see [`MessageJudgmentOutboxConfig`].
+    pub message_judgment_outbox: MessageJudgmentOutboxConfig,
     /// RFC 7395 §3.8 WebSocket keepalive knobs (issue #1090), parsed
     /// from `WADDLE_WS_KEEPALIVE_*` by [`ws_keepalive_from_vars`].
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
@@ -1275,6 +1279,27 @@ impl LinkPreviewConfig {
             fetch_timeout,
             video_enabled: parse_bool_var(&vars, "WADDLE_LINK_PREVIEW_VIDEO_ENABLED", true)?,
         })
+    }
+}
+
+/// Operator control for the `is_question` community-enrichment judgment
+/// outbox (#1831 Phase 1). Measurement-only: when disabled (the default),
+/// nothing is enqueued and the drain worker is never started.
+///
+/// Unlike [`LinkPreviewConfig`] this is intentionally NOT yet wired to an
+/// env-var loader, and [`ServerConfig`] does not yet start the drain loop
+/// from this flag — the Jev HTTP client (`message_judgment_outbox::judge`)
+/// lands in a follow-up PR, and startup wiring (`run_drain_loop`) lands
+/// alongside it. Until then this struct only documents the shape a future
+/// `from_env` will populate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageJudgmentOutboxConfig {
+    pub enabled: bool,
+}
+
+impl Default for MessageJudgmentOutboxConfig {
+    fn default() -> Self {
+        Self { enabled: false }
     }
 }
 
@@ -1580,6 +1605,7 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
+            message_judgment_outbox: MessageJudgmentOutboxConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
@@ -1604,6 +1630,9 @@ impl ServerConfig {
         let extensions =
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
         let link_preview = LinkPreviewConfig::from_env()?;
+        // Not yet read from the environment (#1831 Phase 1): see
+        // `MessageJudgmentOutboxConfig`'s doc comment.
+        let message_judgment_outbox = MessageJudgmentOutboxConfig::default();
         // `ServerConfig::from_env` predates the typed-error rule and
         // still aggregates `String` diagnostics; render the typed
         // keepalive error at this boundary.
@@ -1625,6 +1654,7 @@ impl ServerConfig {
             auth,
             extensions,
             link_preview,
+            message_judgment_outbox,
             ws_keepalive,
             spicedb,
             occupant_id_secret,
@@ -1661,6 +1691,7 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
+            message_judgment_outbox: MessageJudgmentOutboxConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
@@ -1679,6 +1710,7 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
+            message_judgment_outbox: MessageJudgmentOutboxConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
