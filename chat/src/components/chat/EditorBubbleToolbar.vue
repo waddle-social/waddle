@@ -7,6 +7,10 @@ import { useEditorLinkInput } from "./composables/use-editor-link-input";
 
 const props = defineProps<{
   editor: Editor;
+  /** Hide the bubble while a fixed formatting bar is showing. The menu stays
+   * mounted: TipTap reparents its element, so unmounting it via `v-if`
+   * would leave Vue patching a detached anchor. */
+  suppressed?: boolean;
 }>();
 
 const { linkUrl, editingLink, linkInputRef, openLinkInput, applyLink, cancelLinkInput } =
@@ -23,6 +27,7 @@ function runAction(action: EditorFormatAction) {
 <template>
   <BubbleMenu :editor="editor">
     <div
+      v-show="!suppressed"
       class="z-popover flex items-center gap-1.5 p-1.5 glass-panel border border-border rounded-lg shadow-xl animate-fade-in"
     >
       <button

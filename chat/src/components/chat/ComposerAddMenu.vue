@@ -89,7 +89,7 @@ onBeforeUnmount(() => {
     ref="menuEl"
     role="menu"
     aria-label="Add to message"
-    class="chat-composer-add-menu z-popover absolute left-0 glass-panel border border-border rounded-lg shadow-2xl animate-fade-in"
+    class="chat-composer-add-menu z-popover absolute left-0 bg-popover text-popover-foreground border border-border rounded-lg shadow-2xl animate-fade-in"
     :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     @keydown="onKeydown"
   >
