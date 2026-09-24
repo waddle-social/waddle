@@ -20,6 +20,7 @@
 //! archiving a message — it never blocks or delays delivery.
 
 mod drain;
+mod jev_client;
 mod judge;
 mod schema;
 mod store;
@@ -28,6 +29,7 @@ pub use drain::{
     drain_once, retry_delay_ms, run_drain_loop, DrainOutcome, BASE_RETRY_DELAY_MS, MAX_ATTEMPTS,
     MAX_RETRY_DELAY_MS,
 };
+pub use jev_client::{JevClient, JevClientConfig, JevClientConfigError};
 pub use judge::{IsQuestionJudgment, JudgeError, MessageJudge};
 pub use store::{
     enqueue_pending, fetch_due_batch, insert_judgment, mark_done, record_failure, JudgmentRecord,

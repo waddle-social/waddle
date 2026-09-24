@@ -12,7 +12,6 @@ pub mod dnd_reader;
 pub mod inbox;
 /// Transactional ingress authority and bounded post-commit execution.
 pub mod ingress;
-// TEMPORARY local-verification-only declaration; reverted before task end.
 /// Durable ingress authority for message identity, effects, and SM frontiers.
 /// Dark Postgres-only ingress identity substrate (#1653), consumed by tests
 /// now and by #1654 repositories later.
