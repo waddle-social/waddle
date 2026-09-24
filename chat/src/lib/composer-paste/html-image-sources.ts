@@ -41,32 +41,35 @@ export function parseImageSourcesWithDom(html: string, parser: DOMParser): strin
 }
 
 export function scanHtmlImageSources(html: string): string[] {
+  const lowerHtml = html.toLowerCase();
   const sources: string[] = [];
   let cursor = 0;
   while (cursor < html.length) {
-    const open = html.indexOf("<", cursor);
-    if (open < 0) break;
-    if (html.startsWith("<!--", open)) {
-      const close = html.indexOf("-->", open + 4);
-      if (close < 0) break;
-      cursor = close + 3;
-      continue;
-    }
-    const tag = scanTag(html, open);
-    if (!tag) {
-      cursor = open + 1;
-      continue;
-    }
-    cursor = tag.end;
-    if (tag.closing) continue;
-    if (RAW_TEXT_ELEMENTS.has(tag.name)) {
-      cursor = indexOfClosingTag(html, tag.name, cursor);
-      continue;
-    }
-    const src = tag.name === "img" ? tag.attributes.get("src") : undefined;
-    if (src !== undefined) sources.push(decodeCharacterReferences(src).trim());
+    const step = scanNextMarkup(html, lowerHtml, cursor);
+    if (!step) break;
+    if (step.src !== undefined) sources.push(decodeCharacterReferences(step.src).trim());
+    cursor = step.end;
   }
   return sources;
+}
+
+/** Advance past the next comment or tag after `from`, reporting an `<img>` src. */
+function scanNextMarkup(
+  html: string,
+  lowerHtml: string,
+  from: number,
+): { end: number; src?: string } | null {
+  const open = html.indexOf("<", from);
+  if (open < 0) return null;
+  if (html.startsWith("<!--", open)) {
+    const close = html.indexOf("-->", open + 4);
+    return close < 0 ? null : { end: close + 3 };
+  }
+  const tag = scanTag(html, open);
+  if (!tag) return { end: open + 1 };
+  if (tag.closing) return { end: tag.end };
+  if (RAW_TEXT_ELEMENTS.has(tag.name)) return { end: indexOfClosingTag(lowerHtml, tag.name, tag.end) };
+  return { end: tag.end, src: tag.name === "img" ? tag.attributes.get("src") : undefined };
 }
 
 function scanTag(html: string, open: number): ScannedTag | null {
@@ -106,9 +109,9 @@ function scanAttribute(html: string, start: number): { name: string; value: stri
   return { name, value: html.slice(valueStart, end), end };
 }
 
-function indexOfClosingTag(html: string, name: string, from: number): number {
-  const close = html.toLowerCase().indexOf(`</${name}`, from);
-  return close < 0 ? html.length : close;
+function indexOfClosingTag(lowerHtml: string, name: string, from: number): number {
+  const close = lowerHtml.indexOf(`</${name}`, from);
+  return close < 0 ? lowerHtml.length : close;
 }
 
 function decodeCharacterReferences(value: string): string {
@@ -136,7 +139,7 @@ function decodeCharacterReference(reference: string): string | null {
 }
 
 function codePointToString(digits: string, radix: 10 | 16): string | null {
-  const pattern = radix === 16 ? /^[0-9a-f]+$/i : /^[0-9]+$/;
+  const pattern = radix === 16 ? /^[0-9a-f]+$/i : /^\d+$/;
   if (!pattern.test(digits)) return null;
   const codePoint = Number.parseInt(digits, radix);
   if (codePoint === 0 || codePoint > 0x10ffff) return null;

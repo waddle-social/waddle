@@ -248,19 +248,21 @@ export function useComposerAutocomplete(input: {
     showSlash.value = true;
   }
 
-  function runBuiltinResolution(outcome: BuiltinSlashOutcome): boolean {
+  function runBuiltinResolution(outcome: BuiltinSlashOutcome): void {
     // Sending built-ins honour the forum-title gate like any other send.
-    if (outcome.kind === "send" && input.slashSubmitBlocked()) return true;
+    if (outcome.kind === "send" && input.slashSubmitBlocked()) return;
     showSlash.value = false;
     triggerRange.value = null;
     input.runBuiltinSlash(outcome);
-    return true;
   }
 
   function dispatchSlashResolution(): boolean {
     const resolution = slashResolution.value;
     if (!resolution) return false;
-    if (resolution.kind === "builtin") return runBuiltinResolution(resolution.outcome);
+    if (resolution.kind === "builtin") {
+      runBuiltinResolution(resolution.outcome);
+      return true;
+    }
     const command = resolution.command;
     // Forum channels demand a title; don't smuggle a slash dispatch past that gate.
     if (input.slashSubmitBlocked()) return true;

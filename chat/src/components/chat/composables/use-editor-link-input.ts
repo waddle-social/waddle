@@ -1,7 +1,7 @@
 import { nextTick, ref } from "vue";
 import type { Editor } from "@tiptap/core";
 
-const ALLOWED_LINK_PROTOCOLS = ["http:", "https:", "mailto:"];
+const ALLOWED_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
 /** Normalise a typed link target, or `null` when it is empty or unsafe. */
 export function sanitizeLinkUrl(url: string): string | null {
@@ -9,7 +9,7 @@ export function sanitizeLinkUrl(url: string): string | null {
   if (!trimmed) return null;
   try {
     const parsed = new URL(trimmed);
-    if (!ALLOWED_LINK_PROTOCOLS.includes(parsed.protocol)) return null;
+    if (!ALLOWED_LINK_PROTOCOLS.has(parsed.protocol)) return null;
     return parsed.toString();
   } catch {
     return null;

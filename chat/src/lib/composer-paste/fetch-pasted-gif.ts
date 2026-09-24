@@ -60,13 +60,20 @@ async function readGifBody(response: Response, maxBytes: number): Promise<Uint8A
 }
 
 function pastedGifFileName(url: URL): string {
-  const segment = url.pathname.split("/").filter(Boolean).pop() ?? "";
-  const stem = safeDecode(segment).replace(/\.[^.]*$/, "");
-  const sanitized = stem
-    .replace(/[^A-Za-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, MAX_BASENAME_LENGTH);
+  const segment = url.pathname.split("/").findLast(Boolean) ?? "";
+  const decoded = safeDecode(segment);
+  const dot = decoded.lastIndexOf(".");
+  const stem = dot < 0 ? decoded : decoded.slice(0, dot);
+  const sanitized = trimDashes(stem.replace(/[^A-Za-z0-9_-]+/g, "-")).slice(0, MAX_BASENAME_LENGTH);
   return `${sanitized || "pasted"}.gif`;
+}
+
+function trimDashes(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === "-") start += 1;
+  while (end > start && value[end - 1] === "-") end -= 1;
+  return value.slice(start, end);
 }
 
 function parseHttpsUrl(url: string): URL | null {
