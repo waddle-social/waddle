@@ -51,7 +51,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Room create | 0045 | ❌ | ✅ | Baseline: `createChannel` was a stub returning nil |
 | Slash commands | 0050, 0004 | ❌ | ✅ | Built-ins (`/me`, `/shrug`, `/giphy`, `/away`, `/active`, `/dnd`) plus server extension commands discovered over XEP-0050 at session start; popover completion, inline single-field execution, XEP-0004 form sheet for multi-step commands |
 | Composer | 0394, 0372 | 🟡 | ✅ | Slack-style card: `+` menu (photo, file, GIF), `Aa` formatting bar (bold, italic, strikethrough, code, code block, quote as XEP-0394 markup; links inserted as bare URLs), emoji, `@` and `/` buttons, send |
-| Paste images / files / GIFs | 0363, 0447 | ❌ | ✅ | Pasted files, animated GIFs (bytes kept) and still images upload as attachments; text and rich-text selections paste as text |
+| Paste images / files / GIFs | 0363, 0447 | ❌ | ✅ | Pasted files, animated GIFs (bytes kept) and still images upload as attachments; text and rich-text selections paste as text. Mac: Cmd-V in the composer. iOS: the `+` menu's Paste (the system text field only pastes text) |
 
 ## Presence & profile
 

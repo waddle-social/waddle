@@ -2,15 +2,15 @@ import Foundation
 
 /// Applies formatting-bar styles to a plain-text draft as the markdown
 /// markers `ComposerMarkdown` understands. Selections are Unicode-scalar
-/// ranges; a nil selection means the caret is unknown and acts as a caret
-/// at the end of the draft.
+/// ranges; a nil selection means the field reports none (before iOS 18 /
+/// macOS 15) and the style applies to the whole draft.
 public enum ComposerFormatting {
     /// Wraps the selection in the style's markers, keeping the wrapped
     /// text selected. An empty selection inserts an empty marker pair with
     /// the caret between the markers.
     public static func apply(_ format: ComposerFormat, to text: String, selection: Range<Int>?) -> ComposerTextEdit {
         let scalars = Array(text.unicodeScalars)
-        let range = ComposerScalars.clamp(selection, count: scalars.count)
+        let range = ComposerScalars.clamp(selection ?? contentRange(scalars), count: scalars.count)
         switch format {
         case .bold: return wrap(scalars, range, marker: "**")
         case .italic: return wrap(scalars, range, marker: "*")
@@ -19,6 +19,16 @@ public enum ComposerFormatting {
         case .codeBlock: return fence(scalars, range)
         case .quote: return quote(scalars, range)
         }
+    }
+
+    /// The draft without its surrounding whitespace, so markers sit
+    /// against text; a blank draft is a caret at its end.
+    private static func contentRange(_ scalars: [Unicode.Scalar]) -> Range<Int> {
+        let isBlank: (Unicode.Scalar) -> Bool = { $0.properties.isWhitespace }
+        guard let first = scalars.firstIndex(where: { !isBlank($0) }),
+              let last = scalars.lastIndex(where: { !isBlank($0) })
+        else { return scalars.count..<scalars.count }
+        return first..<(last + 1)
     }
 
     private static func wrap(_ scalars: [Unicode.Scalar], _ range: Range<Int>, marker text: String) -> ComposerTextEdit {

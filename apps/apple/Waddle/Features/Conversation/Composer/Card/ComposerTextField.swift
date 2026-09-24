@@ -14,8 +14,7 @@ enum ComposerSuggestionKey {
 ///
 /// On iOS 18 and macOS 15 the field reports its selection (as Unicode
 /// scalar offsets) so formatting wraps the selected text; on earlier
-/// systems `selection` stays nil and formatting applies at the end of the
-/// draft.
+/// systems `selection` stays nil and formatting wraps the whole draft.
 struct ComposerTextField: View {
     @Binding var text: String
     @Binding var selection: Range<Int>?
@@ -43,9 +42,7 @@ struct ComposerTextField: View {
             .onKeyPress(.tab, phases: .down) { _ in
                 onAcceptSuggestion(.tab) ? .handled : .ignored
             }
-            .onPasteCommand(of: ComposerPasteboard.attachmentTypes) { _ in
-                onPaste()
-            }
+            .modifier(ComposerPasteKeyMonitor(isFocused: isFocused.wrappedValue, onPaste: onPaste))
             #endif
             .onKeyPress(.escape) {
                 onCancel() ? .handled : .ignored

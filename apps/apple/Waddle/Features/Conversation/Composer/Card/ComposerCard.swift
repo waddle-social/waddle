@@ -18,7 +18,11 @@ struct ComposerCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if showsFormatting {
-                ComposerFormattingBar(onFormat: actions.format, onLink: actions.requestLink)
+                ComposerFormattingBar(
+                    canFormat: ComposerSelectionSupport.isAvailable || !text.isEmpty,
+                    onFormat: actions.format,
+                    onLink: actions.requestLink
+                )
                     .padding(.horizontal, Theme.Spacing.xs)
                 Divider()
                     .padding(.horizontal, Theme.Spacing.s)

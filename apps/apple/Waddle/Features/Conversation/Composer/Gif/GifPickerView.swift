@@ -26,6 +26,13 @@ struct GifPickerView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                #if os(macOS)
+                // `.searchable` puts its field in the window toolbar, which a
+                // macOS sheet does not show reliably; search sits in the sheet.
+                TextField("Search GIPHY", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(Theme.Spacing.m)
+                #endif
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 GifPickerFooter(isSearching: isSearching && result != nil)
@@ -34,8 +41,6 @@ struct GifPickerView: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("Search GIPHY"))
-            #else
-            .searchable(text: $query, prompt: Text("Search GIPHY"))
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

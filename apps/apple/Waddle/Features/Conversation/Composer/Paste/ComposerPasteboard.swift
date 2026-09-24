@@ -12,14 +12,19 @@ import UIKit
 /// text.
 @MainActor
 enum ComposerPasteboard {
-    /// Types the Mac field's paste command claims.
-    static let attachmentTypes: [UTType] = [.fileURL, .gif, .png, .jpeg, .tiff, .heic, .image]
+    /// Whether a paste now would attach something rather than paste text.
+    static var holdsAttachments: Bool {
+        !plan().isTextPaste
+    }
 
     static func read() -> ComposerPasteResult {
-        let items = itemTypes().map { PasteboardItem(types: $0) }
-        let plan = PastePlan.plan(items: items)
+        let plan = plan()
         guard !plan.isTextPaste else { return .text(plainText()) }
         return .attachments(contents(for: plan))
+    }
+
+    private static func plan() -> PastePlan {
+        PastePlan.plan(items: itemTypes().map { PasteboardItem(types: $0) })
     }
 
     private static func contents(for plan: PastePlan) -> [ComposerPasteContent] {

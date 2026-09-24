@@ -18,8 +18,8 @@ struct ComposerFormattingTests {
         #expect(apply(.bold, "ab", 1..<1) == ComposerTextEdit(text: "a****b", selection: 3..<3))
     }
 
-    @Test func unknownSelectionAppendsAtTheEnd() {
-        #expect(apply(.bold, "hello ", nil) == ComposerTextEdit(text: "hello ****", selection: 8..<8))
+    @Test func unknownSelectionWrapsTheDraftWithoutItsSurroundingWhitespace() {
+        #expect(apply(.bold, "hello ", nil) == ComposerTextEdit(text: "**hello** ", selection: 2..<7))
         #expect(apply(.code, "", nil) == ComposerTextEdit(text: "``", selection: 1..<1))
     }
 
@@ -59,8 +59,8 @@ struct ComposerFormattingTests {
         #expect(apply(.quote, "a\nb", 0..<2) == ComposerTextEdit(text: "> a\nb", selection: 2..<4))
     }
 
-    @Test func quoteWithoutSelectionQuotesTheLastLine() {
-        #expect(apply(.quote, "one\ntwo", nil) == ComposerTextEdit(text: "one\n> two", selection: 9..<9))
+    @Test func quoteWithoutSelectionQuotesEveryLine() {
+        #expect(apply(.quote, "one\ntwo", nil) == ComposerTextEdit(text: "> one\n> two", selection: 2..<11))
         #expect(apply(.quote, "", nil) == ComposerTextEdit(text: "> ", selection: 2..<2))
     }
 }
