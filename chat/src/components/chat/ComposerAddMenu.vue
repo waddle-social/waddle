@@ -17,7 +17,8 @@ const emit = defineEmits<{
   upload: [];
   gif: [];
   extensions: [];
-  close: [];
+  /** `outside` = dismissed by a pointer elsewhere, which already moves focus. */
+  close: [reason: "escape" | "tab" | "outside"];
 }>();
 
 type AddMenuItem = { id: "upload" | "gif" | "extensions"; label: string; hint: string; icon: Component };
@@ -60,9 +61,9 @@ function onKeydown(event: KeyboardEvent) {
   } else if (event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
-    emit("close");
+    emit("close", "escape");
   } else if (event.key === "Tab") {
-    emit("close");
+    emit("close", "tab");
   }
 }
 
@@ -71,7 +72,7 @@ function onWindowPointer(event: PointerEvent) {
   if (!target) return;
   if (menuEl.value?.contains(target)) return;
   if (props.anchorEl?.contains(target)) return;
-  emit("close");
+  emit("close", "outside");
 }
 
 onMounted(() => {

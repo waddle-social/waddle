@@ -25,7 +25,7 @@ function runAction(action: EditorFormatAction) {
   action.run(props.editor);
 }
 
-function onLinkMousedown() {
+function onLinkClick() {
   if (props.disabled) return;
   openLinkInput();
 }
@@ -45,7 +45,8 @@ function onLinkMousedown() {
         :aria-label="action.title"
         :aria-pressed="action.isActive(editor)"
         :disabled="disabled"
-        @mousedown.prevent="runAction(action)"
+        @mousedown.prevent
+        @click="runAction(action)"
       >
         <component :is="action.icon" class="h-4 w-4" aria-hidden="true" />
       </button>
@@ -58,7 +59,8 @@ function onLinkMousedown() {
         aria-label="Link"
         :aria-pressed="editor.isActive('link')"
         :disabled="disabled"
-        @mousedown.prevent="onLinkMousedown"
+        @mousedown.prevent
+        @click="onLinkClick"
       >
         <Link class="h-4 w-4" aria-hidden="true" />
       </button>

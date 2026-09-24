@@ -22,7 +22,8 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   select: [emoji: string];
-  close: [];
+  /** `outside` = dismissed by a pointer elsewhere, which already moves focus. */
+  close: [reason: "escape" | "outside" | "button"];
 }>();
 
 const RECENT_KEY = "waddle:recent-emojis";
@@ -131,11 +132,11 @@ function onWindowPointer(event: PointerEvent | MouseEvent) {
   if (!target) return;
   if (panelEl.value.contains(target)) return;
   if (props.anchorEl?.contains(target)) return;
-  emit("close");
+  emit("close", "outside");
 }
 
 function onKey(event: KeyboardEvent) {
-  if (event.key === "Escape") emit("close");
+  if (event.key === "Escape") emit("close", "escape");
 }
 
 function attachWindowListeners() {
@@ -220,7 +221,7 @@ onBeforeUnmount(detachWindowListeners);
             type="button"
             class="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             aria-label="Close emoji picker"
-            @click="emit('close')"
+            @click="emit('close', 'button')"
           >
             <X class="w-3.5 h-3.5" aria-hidden="true" />
           </button>

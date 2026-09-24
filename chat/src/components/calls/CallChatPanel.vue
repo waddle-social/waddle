@@ -136,6 +136,7 @@ onMounted(() => void nextTick(scrollToBottom));
       :show-extensions="false"
       @update:draft="emit('update:draft', $event)"
       @send="(body, markup, references, files, linkPreview) => emit('send', body, markup, references, files, linkPreview)"
+      @select-gif="(url) => emit('send', url, [], [], undefined)"
     />
   </div>
 </template>

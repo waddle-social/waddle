@@ -386,9 +386,15 @@ function onEmojiPicked(emoji: string) {
   getTiptapEditor()?.chain().focus().insertContent(emoji).run();
 }
 
-function onEmojiPickerClose() {
+function onEmojiPickerClose(reason: "escape" | "outside" | "button") {
   showEmojiPicker.value = false;
-  focus();
+  if (reason !== "outside") focus();
+}
+
+/** Escape returns focus to the `+` trigger, like a native menu button. */
+function onAddMenuClose(reason: "escape" | "tab" | "outside") {
+  showAddMenu.value = false;
+  if (reason === "escape") addButtonRef.value?.focus();
 }
 
 /** Insert `@` at the caret (space-separated from a preceding word) so the
@@ -662,7 +668,7 @@ watch(isPreparingSend, (preparing) => {
         @upload="onAddMenuUpload"
         @gif="openGifPicker()"
         @extensions="onAddMenuExtensions"
-        @close="showAddMenu = false"
+        @close="onAddMenuClose"
       />
       <div class="chat-composer-toolbar">
         <button
