@@ -249,9 +249,9 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool
             "retry delivers to the newly available occupant"
         );
         assert!(
-            terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
                 .await
-                .expect("settled room fanout")
+                .expect("original reflection remains owed to its unavailable sender")
         );
     }
     let mut tx = fixture.uow.begin().await.expect("inspect retry");
@@ -461,7 +461,6 @@ async fn system_sources_keep_separate_payloads(fixture: IngressFixture) {
                 let copy = occupant_copy_message(
                     source(&envelope, intent).expect("frozen source"),
                     &occupant,
-                    &recorded,
                 );
                 assert_eq!(copy.from, Some(room.clone().into()));
                 assert_eq!(copy.to, Some(occupant.clone().into()));

@@ -48,25 +48,8 @@ pub(super) fn source<'a>(
 }
 
 /// Personalize only the destination; the frozen source owns sender and content.
-pub(super) fn occupant_copy_message(
-    source: &Message,
-    occupant: &FullJid,
-    intents: &[IngressEffectIntent],
-) -> Message {
+pub(super) fn occupant_copy_message(source: &Message, occupant: &FullJid) -> Message {
     let mut message = source.clone();
     message.to = Some(occupant.clone().into());
-    let stamps = waddle_xmpp::xep::extract_stanza_ids(source);
-    for intent in intents {
-        let (IngressEffectIntent::ArchiveAuthoritative { stanza_id, .. }
-        | IngressEffectIntent::SystemMessageArchive { stanza_id, .. }) = intent
-        else {
-            continue;
-        };
-        // Several system broadcasts can share one row. Never borrow the
-        // stanza-id of another payload merely because its authority is the room.
-        if stamps.contains(stanza_id) {
-            waddle_xmpp_core::xep0359::add_stanza_id(&mut message, stanza_id);
-        }
-    }
     message
 }

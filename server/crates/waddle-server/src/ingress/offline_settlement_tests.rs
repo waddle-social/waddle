@@ -24,7 +24,7 @@ use waddle_xmpp::{
     registry::ConnectionRegistry,
 };
 
-async fn rollback(fixture: IngressFixture) {
+async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress_uow::DbRetryClass>) {
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(
         DatabasePendingDeliveryStorage::from_database(fixture.db.clone(), QuotaPolicy::Unlimited)
             .await
@@ -91,7 +91,12 @@ async fn rollback(fixture: IngressFixture) {
     let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("commit pending plan");
-    super::execute_uow::fail_before_offline_settlement(decision.message_key.expect("canonical"));
+    let key = decision.message_key.expect("canonical");
+    if let Some(retry_class) = retry_class {
+        super::execute_uow::retry_before_offline_settlement(key, retry_class);
+    } else {
+        super::execute_uow::fail_before_offline_settlement(key);
+    }
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::new(&registry, "example.com");
     deps.pending_delivery_storage = Some(&storage);
@@ -104,10 +109,20 @@ async fn rollback(fixture: IngressFixture) {
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(failed.outcomes[0].1, ExternalOutcome::Uncertain);
-    assert_eq!(fixture.count("pending_delivery").await, 0);
-    assert_eq!(fixture.count("notification_candidates").await, 0);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    if retry_class.is_some() {
+        // The injected failure occurs after both inserts. The frozen candidate
+        // intent requires Inserted, so leaking the first transaction would
+        // produce Duplicate on retry and could not settle all three receipts.
+        assert_eq!(failed.outcomes[0].1, ExternalOutcome::Done);
+        assert_eq!(fixture.count("pending_delivery").await, 1);
+        assert_eq!(fixture.count("notification_candidates").await, 1);
+        assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
+    } else {
+        assert_eq!(failed.outcomes[0].1, ExternalOutcome::Uncertain);
+        assert_eq!(fixture.count("pending_delivery").await, 0);
+        assert_eq!(fixture.count("notification_candidates").await, 0);
+        assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    }
     let retried = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -137,12 +152,28 @@ async fn rollback(fixture: IngressFixture) {
 
 #[tokio::test]
 async fn offline_atomic_rollback_sqlite() {
-    rollback(IngressFixture::sqlite().await).await;
+    rollback(IngressFixture::sqlite().await, None).await;
 }
 #[tokio::test]
 async fn offline_atomic_rollback_postgres() {
     if let Some(fixture) = IngressFixture::postgres("offline_atomic_rollback").await {
-        rollback(fixture).await;
+        rollback(fixture, None).await;
+    }
+}
+
+#[tokio::test]
+async fn offline_atomic_contention_retry_rolls_back_sqlite() {
+    rollback(
+        IngressFixture::sqlite().await,
+        Some(crate::ingress_uow::DbRetryClass::SqliteContention),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn offline_atomic_deadlock_retry_rolls_back_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("offline_atomic_deadlock_retry").await {
+        rollback(fixture, Some(crate::ingress_uow::DbRetryClass::Deadlock)).await;
     }
 }
 

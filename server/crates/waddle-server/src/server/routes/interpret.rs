@@ -162,12 +162,15 @@ mod groupchat_validation;
 mod handoff;
 mod notification_activity_ingest;
 pub(crate) mod offline_delivery;
+mod recipient_selection;
 mod room_dispatch;
 mod room_pin;
 mod room_subject;
 mod room_system_message;
 mod route_to_connection;
 mod routing;
+#[cfg(feature = "clustering")]
+pub(crate) use recipient_selection::{local_recipient_inventory, RecipientInventory};
 
 pub(crate) use deps::DeliveryExecutionContext;
 
@@ -218,6 +221,8 @@ use room_pin::apply_pin_change_event;
 use room_subject::{
     persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use route_to_connection::deliver_ordered_local_copy;
 #[cfg(all(test, feature = "clustering"))]
 pub(crate) use route_to_connection::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
 pub(crate) use route_to_connection::{

@@ -135,7 +135,7 @@ pub(super) async fn finalize(
             .await?;
         }
     }
-    Ok(())
+    super::archive_dispatch::record(tx, key, archive, message, ordinal, intents).await
 }
 
 #[cfg(test)]

@@ -35,12 +35,11 @@ and local UserActor detach drains (#1789, #1805). The authorization-failure
 fallback remains unkeyed and at-least-once;
 #1760 now retains immutable proof and replay payload as one durable custody
 unit, with atomic pending-delivery handoff and independent recovery (§3.3a). Live sends remain at-least-once, and maintenance never relays
-remote-hosted resources; (iii) live full-JID delivery keeps the
-destination connection's own recipient archive/inbox pipeline (#1658, now tracked as #1759);
+remote-hosted resources; (iii) live full-JID delivery prepares recipient archive, inbox and carbon effects in the canonical ingress plan (#1759), then sends a processed copy;
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
 connection-generation fence (follow-up issue); (vi) ~~extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.~~ Resolved by #1753: typed extension ingress covers direct and local-room bot sends (§3.1).
-(vii) archive ordinals do not yet enforce concurrent live dispatch order (#1770, §3.7).
+(vii) archive dispatch uses durable predecessor gates and frozen recipient selection (#1770, §3.7).
 
 ### Recovery convergence (#1782)
 
@@ -439,19 +438,23 @@ happens before the progress transaction; progress and the aggregate kind-2
 receipt commit together under the canonical row lock. The aggregate is arm-owned,
 not generic all-or-nothing fanout evidence.
 
-The sender reflection remains `Always`: every duplicate can resend it, including
-a relayed-owner frame. It carries no kind-2 receipt identity, contributes no
-occupant progress, and supplies no aggregate proof through frame completion or
-`owner_receipts`. Its delivery proof remains the sender's XEP-0198 stream.
-Ordinary cross-node occupant copies use `deliver_ordered.v11`; a definite
+Transient sender reflections remain `Always` and can be resent on a duplicate.
+An archived original reflection instead owns an exact-resource direct receipt:
+transport completion settles it independently of the kind-2 occupant aggregate.
+A delayed execution decision rechecks that receipt and cannot resend a completed
+archived reflection. A retransmission from a sibling resource preserves that
+attempt's reflection without replacing the original resource's obligation.
+Ordinary cross-node occupant copies use `deliver_ordered.v12`; a definite
 `Delivered` ACK proves that occupant's copy. The MUC-only `RelayFullJid` executor
 arm records progress and preserves the MUC append context when ownership becomes
 local before execution or during relay fallback. Declined or uncertain delivery
 leaves the occupant pending. Both direct-route and MUC groupchat obligations
 carry their append identity through ordered relay and the
-`remote_resource_route.v7` full-JID second hop. Receiver-authorized detached
-appends and the registered-socket detach drain (#1789) are keyed, subject to the
-authorization-failure fallback and unchanged #1760 custody limits in §3.3a.
+`remote_resource_route.v8` full-JID second hop. Archive-ordered copies require
+valid canonical authority before entering the destination queue; failed
+validation cannot turn them into unkeyed deliveries. Already accepted frames
+retain the registered-socket detach drain behavior and #1760 custody limits
+in §3.3a.
 
 Phase B freezes the room-canonical groupchat envelope at first owner acceptance,
 independently of observer eligibility, retaining observer request context when
@@ -608,7 +611,7 @@ unrecorded until the websocket state binds `RecoveryEnvironment`. Receipts
 and durably keyed sinks are exactly-once; keyless live sends and observers
 retain the at-least-once limitation in (i).
 
-### 3.7 Archive order (#1770 stage 1)
+### 3.7 Archive and dispatch order (#1770)
 
 Planning-time timestamps cannot order concurrent senders: a message planned
 first can commit after a later message. XEP-0313 §3.1 (in-tree
@@ -635,23 +638,67 @@ after deletion and repair. Timestamp-based `delete_before` is removed: with
 receive time independent of archive order, it can delete holes rather than the
 prefix required by XEP-0313 retention.
 
-**Stated limitation.** Dispatch enforcement (wire order equals ordinal order
-across concurrent senders) is not implemented. An in-process lane is unsound:
-A can partially deliver, time out and release the lane; B delivers; retrying A
-then delivers its earlier ordinal after B. Waiting inside the connection loop
-also creates a backpressure cycle: a predecessor's carbon blocks on that
-connection's full outbound channel while the connection waits for the lane,
-unable to drain output or process the SM acknowledgements that release its
-send window. Stage 2 needs a durable predecessor/release gate that executes
-lost predecessor obligations through the #1755 recovery executor, with waiting
-off the connection loop. #1755's executor now recovers the recorded families
-in §3.6b, but does not close the remote-owner or delegated-live-route gaps.
-It must bring every producer outside ingress under
-that authority: live full-JID delivery (#1759), extension-host dispatch (#1753),
-pending flush, remote-owner bare relay, disconnect drains, and the remote
-full-JID detached raw-append bypass that can omit recipient archival entirely.
-#1770 remains open; stage 1 supplies durable archive order, not the complete
-XEP-0313 live-order guarantee.
+Dispatch obligations are indexed in `ingress_archive_dispatch` (ledger V1020)
+in the same transaction that assigns the archive ordinal. Each index entry
+names the exact effect receipt and resource; opaque fanout and pending delivery
+use an archive-wide barrier. A later copy cannot execute until every lower
+ordinal owed to that resource has a durable aggregate receipt or exact resource
+progress. Receipt of offline enqueue does not discharge an offline-delivery
+barrier: the pending row remains a predecessor until its delivery/ack lifecycle
+removes it, except on the same live SM stream after the socket has assigned its
+outbound sequence. That stream already orders the earlier copy before its
+successor; the exemption carries its stream identity and cannot migrate to a
+replacement connection. Pending writes explicitly request an SM acknowledgement
+so other resources do not wait indefinitely on a quiet client. The gate also consults archived pending rows produced independently
+by SM promotion. Retention cannot remove a canonical pending barrier while its
+pending row remains.
+
+A blocked executor returns without waiting for its predecessor. An ordering
+deferral does not accrue a stalled-row cooldown; predecessor progress can release
+it on the next maintenance pass. The existing maintenance pump replays frozen effects off the connection loop, preserving
+SM acknowledgement progress and avoiding the carbon/backpressure cycle. Partial
+fanout advances each resource independently. Archived original room reflections
+have a separate recorded delivery receipt and use the exact-resource outbound
+FIFO, including on relayed room owners. Their receipt completes at FIFO or
+durable detached acceptance, as for other occupant copies; the occupant aggregate
+cannot discharge that independent reflection obligation. Literal returned frames
+(including errors and transient reflections) retain transport-write completion.
+Generated pin messages register dispatch authority in their deferred archive
+transaction before broadcast and use the resource FIFO for every copy, including
+the initiating occupant's copy.
+
+Archive positions accompany the exact append obligation through local actors,
+remote owners and registered sockets. The receiver validates them against
+canonical authority before using them. The final socket boundary rechecks durable completion while retaining its exact
+connection owner across the read, so a delayed attempt cannot move onto a
+replacement socket with an empty acceptance cache. Queue acceptance and a per-archive
+frontier share one non-blocking critical section on the connection entry. This
+closes the concurrent-attempt race where A1 completes, B is released, then a
+previously admitted A2 tries to enqueue behind B. Only receipt identities at
+the current ordinal are retained, allowing distinct effects at the same
+position without an ever-growing per-message deduplication set. Full channels
+do not advance the frontier. Detached allocation continues to use durable
+`sm_ingress_appends` custody.
+
+Personal-message planning freezes the recipient owner's original and carbon
+resource inventory before the shared recipient pass, including explicitly stored
+headline messages that share the personal archive. Headline selection retains
+its all-available, non-negative-priority audience and has no unmatched-full-JID
+fallback. A full-JID hit selects
+one original; a missing full JID for chat/normal selects the bare audience before preparation.
+Recipient archive/inbox work therefore commits with sender authority, including
+live full-JID delivery. Processed copies preserve the selected full target
+through owner refresh and bypass recipient processing at the destination.
+Carbon recovery reconstructs its frozen targets, direction and payload, rather
+than selecting a new audience. Pending flush claims use archive order and an
+owner-bound off-loop retry pump when an earlier obligation or SM ack is pending.
+
+The cutover uses `deliver_ordered.v12`, `remote_resource_route.v8` and
+`remote_resource_frame.v3`. A one-shot Recreate deployment is required: an old
+writer does not participate in dispatch gates and the route/frame endpoints
+cannot negotiate the mixed wire shape. This does not strengthen XEP-0198 into
+an exactly-once client-observation protocol; retransmission after an uncertain
+client acknowledgement retains XEP-0198's existing semantics.
 
 ## 4. Backends
 The unit of work is dialect-aware through `Database`: SQLite uses

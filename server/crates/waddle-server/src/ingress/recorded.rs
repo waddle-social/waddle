@@ -41,7 +41,7 @@ pub fn restore_delivery_payloads(
         // A retry's reflection is fresh work, never frozen occupant repair.
         if reflection::is_attempt_reflection(planned, sender, &plan.intents) {
             if let Some(repair) = reflection::historical_repair(
-                planned, envelope, &plan.intents, route_progress,
+                planned, envelope, route_progress,
             ) {
                 repairs.push(repair);
             }
@@ -104,7 +104,6 @@ pub fn restore_delivery_payloads(
             **stanza = waddle_xmpp::Stanza::Message(super::room_canonical::occupant_copy_message(
                 source,
                 &target,
-                &plan.intents,
             ));
         }
         true
@@ -136,7 +135,9 @@ pub fn restore_delivery_payloads(
             | ExternalDeliveryEffect::RouteToPeer { stanza, .. },
         ) = effect
         {
-            if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(_)) {
+            if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
+                if message.type_ != xmpp_parsers::message::MessageType::Groupchat)
+            {
                 **stanza = waddle_xmpp::Stanza::Message(delivery_message(
                     envelope,
                     &recipient,

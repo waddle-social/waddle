@@ -6,6 +6,16 @@ pub(super) async fn run_headless_recipient_pass(
     stanza: Stanza,
     depth: u8,
 ) {
+    run_selected_headless_recipient_pass(deps, recipient_bare, None, stanza, depth).await;
+}
+
+pub(super) async fn run_selected_headless_recipient_pass(
+    deps: &Deps<'_>,
+    recipient_bare: &jid::BareJid,
+    carbon_recipients: Option<&[FullJid]>,
+    stanza: Stanza,
+    depth: u8,
+) {
     let Some(dispatcher) = deps.message_dispatcher else {
         debug!(
             bare_jid = %recipient_bare,
@@ -72,6 +82,21 @@ pub(super) async fn run_headless_recipient_pass(
     let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
     for event in events {
         match event {
+            OutboundEvent::SendCarbons {
+                owner,
+                message,
+                kind,
+                exclude,
+            } if deps.effects.is_planning() && carbon_recipients.is_some() => {
+                super::carbons::plan_carbon_resources(
+                    deps,
+                    owner,
+                    message,
+                    kind,
+                    exclude,
+                    carbon_recipients.unwrap_or_default().to_vec(),
+                );
+            }
             OutboundEvent::SendStanza(_) if deps.effects.is_planning() => {}
             OutboundEvent::RouteToConnection { .. } => side_routes.push(event),
             other => remaining.push(other),
@@ -180,6 +205,17 @@ pub(super) async fn run_fanout_recipient_pass(
     stanza: Stanza,
     depth: u8,
 ) -> FanoutPassResult {
+    run_selected_recipient_pass(deps, recipient_bare, delivery_fanout, None, stanza, depth).await
+}
+
+pub(super) async fn run_selected_recipient_pass(
+    deps: &Deps<'_>,
+    recipient_bare: &jid::BareJid,
+    delivery_fanout: Vec<jid::FullJid>,
+    carbon_recipients: Option<&[jid::FullJid]>,
+    stanza: Stanza,
+    depth: u8,
+) -> FanoutPassResult {
     let Some(dispatcher) = deps.message_dispatcher else {
         debug!(
             bare_jid = %recipient_bare,
@@ -260,6 +296,21 @@ pub(super) async fn run_fanout_recipient_pass(
     let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
     for event in events {
         match event {
+            OutboundEvent::SendCarbons {
+                owner,
+                message,
+                kind,
+                exclude,
+            } if deps.effects.is_planning() && carbon_recipients.is_some() => {
+                super::carbons::plan_carbon_resources(
+                    deps,
+                    owner,
+                    message,
+                    kind,
+                    exclude,
+                    carbon_recipients.unwrap_or_default().to_vec(),
+                );
+            }
             OutboundEvent::SendStanza(boxed) if matches!(boxed.as_ref(), Stanza::Message(_)) => {
                 if processed.is_some() {
                     warn!(
@@ -403,10 +454,9 @@ pub enum FullJidDeliveryOutcome {
     /// classified `MaybeEnqueued` (never routed to detached, to avoid
     /// double-delivery).
     Dropped,
-    /// The relay ask may have reached the target and committed the delivery,
-    /// but the sender did not observe the reply. Callers must suppress local
-    /// or headless fallback to avoid duplicate user-visible effects.
-    #[cfg(feature = "clustering")]
+    /// Delivery completion could not be established: a relay reply was lost,
+    /// or a local socket could not revalidate durable receipt/stream authority.
+    /// Suppress fallback and retry the frozen obligation without inferring failure.
     MaybeCommitted,
 }
 
@@ -415,7 +465,6 @@ impl FullJidDeliveryOutcome {
         match self {
             Self::Delivered | Self::QueuedDetached => true,
             Self::Unavailable | Self::Dropped => false,
-            #[cfg(feature = "clustering")]
             Self::MaybeCommitted => true,
         }
     }
@@ -457,7 +506,6 @@ pub(crate) fn close_call_setup_from_outcome(
         FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
             ticket.delivered();
         }
-        #[cfg(feature = "clustering")]
         FullJidDeliveryOutcome::MaybeCommitted => ticket.delivered(),
         FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {
             ticket.undeliverable();
@@ -892,6 +940,11 @@ pub(super) async fn append_detached(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> Result<bool, waddle_xmpp::stream_management::SmRegistryError> {
+    if context.is_some_and(|context| context.dispatch_stream.is_some()) {
+        // The predecessor exemption was for a live stream that has since gone.
+        // Retry with a fresh gate, never transplant that proof to a detached one.
+        return Ok(false);
+    }
     match context {
         Some(context) => sm
             .record_keyed_stanza_for_detached_bound_resource(
@@ -901,7 +954,13 @@ pub(super) async fn append_detached(
                 context.for_resource(target),
             )
             .await
-            .map(|outcome| outcome.is_allocated()),
+            .map(|outcome| {
+                outcome.is_allocated()
+                    || matches!(
+                        outcome,
+                        waddle_xmpp::stream_management::SmKeyedAppendOutcome::Suppressed
+                    )
+            }),
         None => {
             sm.record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
                 .await

@@ -462,7 +462,6 @@ async fn deliver_deferred_lookup_reply(
                 );
                 return;
             }
-            #[cfg(feature = "clustering")]
             FullJidDeliveryOutcome::MaybeCommitted => return,
             outcome @ (FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped) => {
                 let Some(delay) = delays.next() else {

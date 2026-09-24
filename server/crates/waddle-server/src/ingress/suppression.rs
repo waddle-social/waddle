@@ -788,6 +788,7 @@ mod progress_tests {
             route_identity: identity.clone(),
         };
         let progress = RouteProgress {
+            reflection_room: None,
             receipt: crate::ingress::durable::receipt_key(&intent).expect("receipt"),
             obligation: super::super::ProgressObligation::Direct {
                 recipient: a.to_bare(),

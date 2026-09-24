@@ -296,6 +296,59 @@ impl OrderedRelayDeliveryBridge {
         let services = self.services.get().cloned()?;
         let origin = local_origin_for_remote_resource(remote_origin);
         match target {
+            RemoteResourceRouteTarget::ProcessedDirectMessage {
+                target,
+                stanza,
+                ingress_append,
+            } => {
+                if ingress_append.is_none()
+                    || !crate::clustering::ordered_relay::processed_message_matches_target(
+                        &stanza.0,
+                        &target.clone().into(),
+                    )
+                {
+                    return Some(FullJidDeliveryOutcome::Unavailable);
+                }
+                let context = super::ingress_append::authorize_ingress_append(
+                    &services,
+                    &origin.sender_entity,
+                    &stanza.0,
+                    ingress_append.as_ref(),
+                )
+                .await;
+                if ingress_append.is_some() && context.is_none() {
+                    return Some(FullJidDeliveryOutcome::Unavailable);
+                }
+                if let Some(outcome) = self
+                    .try_deliver_processed_full_jid_remote(
+                        &target,
+                        &stanza.0,
+                        &origin,
+                        context.clone(),
+                    )
+                    .await
+                {
+                    Some(outcome)
+                } else {
+                    Some(
+                        match self
+                            .deliver_processed_resource(
+                                &services,
+                                &target,
+                                &stanza.0,
+                                context.as_ref(),
+                            )
+                            .await
+                        {
+                            Ok(()) => FullJidDeliveryOutcome::Delivered,
+                            Err(OrderedRelayNackReason::TargetUnavailable) => {
+                                FullJidDeliveryOutcome::Unavailable
+                            }
+                            Err(_) => FullJidDeliveryOutcome::MaybeCommitted,
+                        },
+                    )
+                }
+            }
             RemoteResourceRouteTarget::FullJid {
                 target,
                 stanza,
@@ -308,6 +361,11 @@ impl OrderedRelayDeliveryBridge {
                     ingress_append.as_ref(),
                 )
                 .await;
+                if super::ingress_append::requires_ordering_authority(ingress_append.as_ref())
+                    && ingress_append_context.is_none()
+                {
+                    return Some(FullJidDeliveryOutcome::Unavailable);
+                }
                 if let Some(remote) = self
                     .try_deliver_full_jid_remote(
                         &target,

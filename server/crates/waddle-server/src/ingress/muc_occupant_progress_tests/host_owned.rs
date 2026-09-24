@@ -103,7 +103,15 @@ async fn host_owned_progress(fixture: IngressFixture) {
         .expect("commit");
     let key = first.message_key.expect("key");
     assert_eq!(
-        sorted(first.route_progress[0].fanout.clone()),
+        sorted(
+            first
+                .route_progress
+                .iter()
+                .find(|progress| progress.receipt == receipt)
+                .expect("occupant progress")
+                .fanout
+                .clone()
+        ),
         sorted(vec![bot.clone(), a.clone(), b.clone()]),
         "the frozen non-reflection audience is exactly bot, A and B"
     );
@@ -230,8 +238,8 @@ async fn host_owned_progress(fixture: IngressFixture) {
     assert!(b_rx.try_recv().is_ok(), "B delivers on retry");
     assert!(a_rx.try_recv().is_err(), "A is not delivered twice");
     assert!(
-        sender_rx.try_recv().is_ok(),
-        "sender reflection remains fresh work"
+        sender_rx.try_recv().is_err(),
+        "the archived original reflection was already delivered"
     );
 
     let mut tx = fixture.uow.begin().await.expect("inspect final progress");

@@ -14,6 +14,7 @@ use tracing::{debug, info, instrument};
 
 use crate::Stanza;
 
+mod archive_dispatch;
 mod connections;
 mod outbound;
 mod presence;
@@ -25,7 +26,9 @@ mod subscriptions;
 pub use outbound::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
     ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance, SendResult,
+    TerminalOrderingRetryLease,
 };
+pub use sending::{PendingFlushReservation, PendingFlushReserveError};
 pub use state::{LastActivityState, PresenceState};
 
 /// Registry for tracking active XMPP connections.

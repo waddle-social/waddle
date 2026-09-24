@@ -106,6 +106,7 @@ async fn lost_execute(fixture: IngressFixture, archived: bool) {
             &stored.recipient,
             &full,
             FlushContext {
+                dispatch_gate: None,
                 server_domain: "example.com",
                 sm_session: None,
                 blocking_storage: None,
@@ -359,6 +360,7 @@ async fn notification_only(fixture: IngressFixture) {
         &row(&first).recipient,
         &full,
         FlushContext {
+            dispatch_gate: None,
             server_domain: "example.com",
             sm_session: None,
             blocking_storage: None,

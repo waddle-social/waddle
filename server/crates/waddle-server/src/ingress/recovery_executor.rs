@@ -240,11 +240,13 @@ fn pending_kinds(intents: &[IngressEffectIntent]) -> Vec<IngressEffectKind> {
 }
 
 fn classify_report(report: &super::execute::ExecutionReport) -> AttemptClassification {
-    if report
-        .outcomes
-        .iter()
-        .any(|(_, outcome)| *outcome == super::execute::ExternalOutcome::Uncertain)
-        || !report.receipt_failures.is_empty()
+    if report.outcomes.iter().any(|(_, outcome)| {
+        matches!(
+            outcome,
+            super::execute::ExternalOutcome::Uncertain
+                | super::execute::ExternalOutcome::AwaitingPredecessor
+        )
+    }) || !report.receipt_failures.is_empty()
         || report.terminalization_failure.is_some()
     {
         AttemptClassification::Inconclusive
@@ -268,22 +270,33 @@ async fn blocked_recipients(
     let recipients: std::collections::BTreeSet<_> = frozen
         .unreceipted
         .iter()
-        .filter(|intent| {
-            recovery_rebuild::policy_checked_direct_route(
-                &frozen.envelope,
-                &frozen.recorded,
-                intent,
-            )
-        })
         .filter_map(|intent| match intent {
-            IngressEffectIntent::RouteDirect { recipient, .. } => Some(recipient),
+            IngressEffectIntent::RouteDirect { recipient, .. }
+                if recovery_rebuild::policy_checked_direct_route(
+                    &frozen.envelope,
+                    &frozen.recorded,
+                    intent,
+                ) =>
+            {
+                Some(recipient.clone())
+            }
+            IngressEffectIntent::Carbons {
+                excluded_source,
+                kind: waddle_xmpp::protocol::CarbonKind::Received,
+                ..
+            } => Some(excluded_source.to_bare()),
+            IngressEffectIntent::RelayCarbons {
+                owner,
+                kind: waddle_xmpp::protocol::CarbonKind::Received,
+                ..
+            } => Some(owner.clone()),
             _ => None,
         })
         .collect();
     let mut blocked = Vec::new();
     for recipient in recipients {
         let entries = storage
-            .list_blocked_jid_entries(recipient)
+            .list_blocked_jid_entries(&recipient)
             .await
             .map_err(IngressUowError::BlocklistUnavailable)?;
         if let Some(sender) = frozen.envelope.message().from.as_ref() {
@@ -387,6 +400,7 @@ async fn freeze(
         else {
             continue;
         };
+        super::reflection_dispatch::classify_progress(&mut route, &recorded);
         route.completed = progress
             .iter()
             .find(|(receipt, _)| receipt == &route.receipt)

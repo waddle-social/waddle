@@ -166,6 +166,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
     }
     let state = state_for(&f, sm.clone()).await;
     let mut submission = planned_room(&f, &state, case, &resources).await;
+    store_detached(&sm, &submission.sender).await;
     let mut muc = submission
         .plan
         .intents
@@ -538,6 +539,9 @@ async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) 
     // the observer hook carries.
     let mut submission =
         planned_room(&f, &state, Case::Partial, std::slice::from_ref(&occupant)).await;
+    // The original archived reflection is another frozen copy; retain its
+    // stream so the observer really is the only obligation left after replay.
+    store_detached(&sm, &submission.sender).await;
     let muc = submission
         .plan
         .intents

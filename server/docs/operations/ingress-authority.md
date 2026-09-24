@@ -697,8 +697,39 @@ forward with an ordinal-aware binary.
 Once the rollout and verification complete, open a follow-up PR restoring
 `RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`), following #1758 → #1765.
 That flip-back restores the deployment strategy, not the pre-cutover binary
-or schema. Archive ordinals do not yet enforce concurrent live dispatch order;
-RFC 0018 §3.7 records stage 2 and #1770 remains open.
+or schema. Stage 2 below adds dispatch enforcement to these archive ordinals.
+
+### Archive dispatch cutover (#1770 stage 2)
+
+V1020 introduces `ingress_archive_dispatch`, an epoch-guarded index of frozen
+receipt/resource obligations at each archive position. Deploy the server using
+the committed one-shot **Recreate** strategy. It also changes ordered delivery
+to `deliver_ordered.v12`, remote routing to `remote_resource_route.v8` and
+registered socket frames to `remote_resource_frame.v3`. Do not mix these binaries
+with earlier writers. Restore `RollingUpdate` only in a follow-up after the
+image containing all three endpoints and V1020 is running on every replica.
+No production rollout is performed by the implementation/test workflow.
+
+A blocked successor remains nonterminal for maintenance recovery; it must not
+wait inside a socket's inbound loop. Inspect the preceding archive position's
+exact receipt and resource progress before attempting operator repair. An
+archived pending row is intentionally a barrier even after its enqueue receipt
+exists, including independently promoted SM rows. A copy already counted into
+the same live SM stream does not block that stream; its sequence precedes the
+successor without requiring a client ack. Other streams retain the barrier, and
+pending writes request an acknowledgement even below the ordinary cadence.
+The owner-bound offline pump
+retries after predecessor completion or an SM acknowledgement without requiring
+another presence stanza. Do not delete the ordering index to clear a backlog:
+that permits successors to overtake the missing copy. Resolve the underlying
+delivery, pending-row lifecycle, or storage failure instead.
+
+Expected verification: concurrent and recovered copies have the same order as
+MAM results; partial fanout on one resource does not block already-completed
+siblings; retrying live full-JID delivery does not repeat recipient archive or
+unread effects; late concurrent attempts do not enqueue behind newer archive
+positions. Retained-pending GC references are included in the CNPG eligibility
+query and the ordering table is included in storage metrics.
 
 ## Read-only verification
 

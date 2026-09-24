@@ -62,7 +62,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 9] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 10] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -72,6 +72,7 @@ pub const EPOCH_GUARDED_TABLES: [&str; 9] = [
     "ingress_effect_receipts",
     "ingress_carbon_receipts",
     "ingress_delivery_receipts",
+    "ingress_archive_dispatch",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -1079,13 +1080,16 @@ async fn gc_candidate_batch(
         )
         .await
         .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let delete_sql = gc_retained_child_sql(
+            &mut tx,
+            GC_DELETE_MESSAGE_POSTGRES,
+            GC_DELETE_MESSAGE_SQLITE,
+        )
+        .await
+        .map_err(|error| gc_database_failure(deleted_messages, error))?;
         let deleted = tx
             .execute(
-                dialect_sql(
-                    tx.driver(),
-                    GC_DELETE_MESSAGE_POSTGRES,
-                    GC_DELETE_MESSAGE_SQLITE,
-                ),
+                &delete_sql,
                 crate::db_params![message_key.to_storage().to_string()],
             )
             .await
@@ -1302,9 +1306,13 @@ async fn expired_candidates(
 ) -> Result<Vec<MessageKey>, AliasGcError> {
     let mut tx = db.begin().await.map_err(gc_error_from_database)?;
     install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
+    let candidate_sql =
+        gc_retained_child_sql(&mut tx, GC_CANDIDATES_POSTGRES, GC_CANDIDATES_SQLITE)
+            .await
+            .map_err(gc_error_from_database)?;
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), GC_CANDIDATES_POSTGRES, GC_CANDIDATES_SQLITE),
+            &candidate_sql,
             crate::db_params![cutoff, GC_BATCH_LIMIT as i64],
         )
         .await
@@ -1321,6 +1329,38 @@ async fn expired_candidates(
     drop(rows);
     tx.commit().await.map_err(gc_error_from_database)?;
     Ok(candidates)
+}
+
+/// Pending enqueue may terminalize ingress before its offline copy is sent.
+/// Retain its ordering authority just like a live SM reference. The pending
+/// store owns its schema and is absent in minimal installations; inspect the
+/// catalog before mentioning it in SQL. Alias/delivery expiration still runs,
+/// and the next scan omits protected rows once those children are gone, so a
+/// full batch of pending copies cannot starve collectable later messages.
+async fn gc_retained_child_sql(
+    tx: &mut Transaction<'_>,
+    postgres: &'static str,
+    sqlite: &'static str,
+) -> Result<String, DatabaseError> {
+    let base = dialect_sql(tx.driver(), postgres, sqlite);
+    let mut rows = tx
+        .query(
+            dialect_sql(
+                tx.driver(),
+                "SELECT 1 WHERE to_regclass('pending_delivery') IS NOT NULL",
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending_delivery'",
+            ),
+            (),
+        )
+        .await?;
+    let has_pending = rows.next().await?.is_some();
+    if !has_pending {
+        return Ok(base.to_owned());
+    }
+    Ok(base.replace(
+        "SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key",
+        "SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = m.message_key AND dispatch.pending_row_id <> ''",
+    ))
 }
 
 /// Why a candidate was not collected in this pass.

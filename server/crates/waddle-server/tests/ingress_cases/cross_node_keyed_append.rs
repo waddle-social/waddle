@@ -34,6 +34,8 @@ pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
         .await
         .expect("commit recorded route");
     let obligation = IngressAppendObligationRef {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: decision.message_key.expect("canonical key"),
         sender_bare: submission.sender.to_bare(),
         receipt: decision.external_receipts[0][0].clone(),

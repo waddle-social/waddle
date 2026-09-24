@@ -2,6 +2,131 @@ use super::*;
 use crate::ingress::IngressEffectCapture;
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
+struct RecipientCarbonPlanGate {
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl BlockingStorage for RecipientCarbonPlanGate {
+    async fn list_blocked_jids(
+        &self,
+        _user: &jid::BareJid,
+    ) -> Result<Vec<jid::BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        self.entered.notify_one();
+        self.resume.notified().await;
+        Ok(Vec::new())
+    }
+}
+
+async fn headless_carbon_audience(existing_carbon: bool) {
+    use super::super::effects::{
+        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, PlanSink,
+    };
+    let registry = ConnectionRegistry::new();
+    let users = waddle_xmpp::registry::UserRegistryActor::spawn(
+        waddle_xmpp::registry::UserRegistryActor::new(),
+    );
+    let existing: jid::FullJid = "bob@example.com/negative"
+        .parse()
+        .expect("valid existing recipient resource JID");
+    let late: jid::FullJid = "bob@example.com/late"
+        .parse()
+        .expect("valid late recipient resource JID");
+    let (sender, _receiver) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &users, &existing, sender).await;
+    registry.set_carbons_enabled(&existing, existing_carbon);
+    registry.update_presence(&existing, true, -1);
+    let gate = Arc::new(RecipientCarbonPlanGate {
+        entered: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    });
+    let blocking: Arc<dyn BlockingStorage> = gate.clone();
+    let dispatcher = pipelined_dispatcher();
+    let sink = PlanSink::new();
+    let capture = IngressEffectCapture::new();
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.user_registry = Some(&users);
+    deps.message_dispatcher = Some(&dispatcher);
+    deps.blocking_storage = Some(&blocking);
+    deps.effects = &sink;
+    deps.ingress_effect_capture = Some(capture.clone());
+    let plan = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: jid("bob@example.com"),
+            stanza: Box::new(Stanza::Message(chat_msg(
+                jid("alice@example.com/web"),
+                jid("bob@example.com"),
+                "frozen audience",
+            ))),
+            call_setup: None,
+        }],
+        &deps,
+    );
+    let bind_late = async {
+        gate.entered.notified().await;
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        register_into_both_tiers(&registry, &users, &late, sender).await;
+        registry.set_carbons_enabled(&late, true);
+        gate.resume.notify_one();
+        receiver
+    };
+    let (_, mut late_receiver) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(plan, bind_late)
+    })
+    .await
+    .expect("recipient pass finishes after inventory race");
+    let targets: Vec<_> = capture
+        .snapshot()
+        .intents
+        .into_iter()
+        .filter_map(|intent| match intent {
+            IngressEffectIntent::Carbons {
+                carbon_recipients,
+                kind: CarbonKind::Received,
+                ..
+            } => Some(carbon_recipients),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let expected = if existing_carbon {
+        vec![existing]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        targets, expected,
+        "negative priority remains carbon-eligible; late bind cannot expand the frozen audience"
+    );
+    let (planned, _) = sink.take();
+    let effect_targets: Vec<_> = planned
+        .iter()
+        .filter_map(|effect| match &effect.effect {
+            Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+                recipient,
+                ..
+            })) => Some(recipient.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(effect_targets, expected);
+    assert!(
+        late_receiver.try_recv().is_err(),
+        "planning has no wire effects"
+    );
+}
+
+#[tokio::test]
+async fn xep_0280_headless_planning_keeps_the_initial_carbon_audience() {
+    headless_carbon_audience(true).await;
+}
+
+#[tokio::test]
+async fn xep_0280_headless_planning_keeps_an_empty_carbon_audience() {
+    headless_carbon_audience(false).await;
+}
+
 // -----------------------------------------------------------------
 // XEP-0280 — SendCarbons fan-out
 // -----------------------------------------------------------------

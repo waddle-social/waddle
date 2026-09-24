@@ -10,7 +10,7 @@ use waddle_xmpp::{
 use crate::ingress::decision::{EffectReceiptKey, IngressDecision};
 use crate::{
     ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
+        run_with_retry, settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
         EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
         PendingReceiptRepository, RecoveryReceiptRepository,
     },
@@ -39,7 +39,7 @@ enum StoreOutcome {
 
 #[cfg(test)]
 static FAIL_BEFORE_SETTLEMENT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<waddle_xmpp::ingress::MessageKey>>,
+    std::sync::Mutex<std::collections::HashMap<waddle_xmpp::ingress::MessageKey, IngressUowError>>,
 > = std::sync::LazyLock::new(Default::default);
 
 #[cfg(test)]
@@ -47,7 +47,18 @@ pub(crate) fn fail_before_offline_settlement(key: waddle_xmpp::ingress::MessageK
     FAIL_BEFORE_SETTLEMENT
         .lock()
         .expect("offline fault hooks")
-        .insert(key);
+        .insert(key, IngressUowError::Timeout);
+}
+
+#[cfg(test)]
+pub(crate) fn retry_before_offline_settlement(
+    key: waddle_xmpp::ingress::MessageKey,
+    retry_class: crate::ingress_uow::DbRetryClass,
+) {
+    FAIL_BEFORE_SETTLEMENT
+        .lock()
+        .expect("offline fault hooks")
+        .insert(key, IngressUowError::Database { retry_class });
 }
 
 pub(super) async fn execute(
@@ -68,16 +79,28 @@ pub(super) async fn execute(
     let Some(storage) = deps.pending_delivery_storage else {
         return EffectOutcome::Unavailable;
     };
-    match store(
-        uow,
-        decision,
-        index,
-        row,
-        prepared_notification,
-        storage.quota_policy(),
-    )
+    // Each failed store drops its transaction before the next attempt. Only
+    // typed ingress database classes are retryable; pending-storage errors
+    // remain unchanged. The executor's deadline encloses this entire future.
+    let result = run_with_retry(5, || async {
+        match store(
+            uow,
+            decision,
+            index,
+            row,
+            prepared_notification,
+            storage.quota_policy(),
+        )
+        .await
+        {
+            Err(StoreError::Ingress(error)) => Err(error),
+            result => Ok(result),
+        }
+    })
     .await
-    {
+    .map_err(|failure| StoreError::Ingress(failure.last_error))
+    .and_then(std::convert::identity);
+    match result {
         Ok(StoreOutcome::Settled(settled)) => EffectOutcome::Settled(settled),
         Ok(StoreOutcome::QuotaExceeded(mut settled)) => {
             settled.refusal = Some(
@@ -182,12 +205,12 @@ async fn store(
     };
     notification_evidence(&mut tx, decision, index, row, prepared, &mut evidence).await?;
     #[cfg(test)]
-    if FAIL_BEFORE_SETTLEMENT
+    if let Some(error) = FAIL_BEFORE_SETTLEMENT
         .lock()
         .expect("offline fault hooks")
         .remove(&key)
     {
-        return Err(IngressUowError::Timeout.into());
+        return Err(error.into());
     }
     let persisted = settle_recorded(&mut tx, key, &evidence).await?;
     if !already_receipted && !persisted.contains(&pending) {

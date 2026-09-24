@@ -62,9 +62,9 @@ fn locally_hosted_send_excludes_remote_owner_mirror() {
     let (tx, mut rx) = mpsc::channel(1);
     registry.register_entry(jid.clone(), ConnectionEntry::remote_hosted(tx));
 
-    let outcome = registry.try_send_to_locally_hosted(
+    let outcome = registry.try_send_outbound_to_locally_hosted(
         &jid,
-        Stanza::Message(make_test_message("remote@example.com")),
+        OutboundStanza::new(Stanza::Message(make_test_message("remote@example.com"))),
     );
 
     assert_eq!(outcome, BroadcastOutcome::NotConnected);
@@ -1035,4 +1035,296 @@ fn try_send_outbound_if_owner_preserves_kind_and_refuses_stale_owner() {
     assert_eq!(live, BroadcastOutcome::Delivered);
     let outbound = rx_b.try_recv().expect("live owner should receive frame");
     assert_eq!(outbound.kind, DeliveryKind::PeerStanza);
+}
+
+#[test]
+fn pending_flush_reservation_distinguishes_absent_full_and_closed() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    assert_eq!(
+        registry
+            .try_reserve_pending_flush(&jid, None)
+            .expect_err("absent recipient"),
+        PendingFlushReserveError::NotConnected
+    );
+    let (sender, receiver) = mpsc::channel(1);
+    let owner = registry.register(jid.clone(), sender);
+    assert!(registry.update_presence(&jid, true, 0));
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve empty channel");
+    assert_eq!(
+        registry
+            .try_reserve_pending_flush(&jid, Some(&owner))
+            .expect_err("capacity reserved"),
+        PendingFlushReserveError::Full
+    );
+    drop(reservation);
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("dropping reservation returns capacity");
+    drop(reservation);
+    drop(receiver);
+    assert_eq!(
+        registry
+            .try_reserve_pending_flush(&jid, Some(&owner))
+            .expect_err("receiver closed"),
+        PendingFlushReserveError::Closed
+    );
+    assert!(!registry.is_connected(&jid));
+}
+
+#[test]
+fn pending_flush_reservation_rejects_replacement_with_or_without_explicit_owner() {
+    for explicit_owner in [true, false] {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("reserved");
+        let (sender, mut old_receiver) = mpsc::channel(1);
+        let owner = registry.register(jid.clone(), sender);
+        assert!(registry.update_presence(&jid, true, 0));
+        let reservation = registry
+            .try_reserve_pending_flush(&jid, explicit_owner.then_some(&owner))
+            .expect("reserve original connection");
+        let (replacement_sender, mut replacement_receiver) = mpsc::channel(1);
+        registry.register(jid.clone(), replacement_sender);
+        assert!(registry.update_presence(&jid, true, 0));
+        assert_eq!(
+            registry
+                .try_reserve_pending_flush(&jid, Some(&owner))
+                .expect_err("stale owner"),
+            PendingFlushReserveError::NotConnected
+        );
+        assert!(matches!(
+            registry.send_reserved_pending_flush(
+                reservation,
+                OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+            ),
+            SendResult::NotConnected
+        ));
+        assert!(old_receiver.try_recv().is_err());
+        assert!(replacement_receiver.try_recv().is_err());
+    }
+}
+
+#[test]
+fn pending_flush_reservation_checks_channel_even_when_owner_is_reused() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut old_receiver) = mpsc::channel(1);
+    let owner = registry.register(jid.clone(), sender);
+    assert!(registry.update_presence(&jid, true, 0));
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve original connection");
+    let mut replacement = registry.get_entry(&jid).expect("registered entry");
+    let (replacement_sender, mut replacement_receiver) = mpsc::channel(1);
+    replacement.sender = replacement_sender;
+    registry.register_entry(jid, replacement);
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        SendResult::NotConnected
+    ));
+    assert!(old_receiver.try_recv().is_err());
+    assert!(replacement_receiver.try_recv().is_err());
+}
+
+#[test]
+fn pending_flush_reservation_checks_receiver_before_commit() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, receiver) = mpsc::channel(1);
+    let owner = registry.register(jid.clone(), sender);
+    assert!(registry.update_presence(&jid, true, 0));
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve original connection");
+    drop(receiver);
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        SendResult::ChannelClosed
+    ));
+    assert!(!registry.is_connected(&jid));
+}
+
+#[test]
+fn pending_flush_reservation_preserves_sm_row_metadata() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(1);
+    let owner = registry.register(jid.clone(), sender);
+    assert!(registry.update_presence(&jid, true, 0));
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve original connection");
+    let row_id = crate::pending_delivery::PendingRowId::fresh();
+    let received_at = chrono::Utc::now();
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::for_pending_flush(
+                Stanza::Message(make_test_message("reserved@example.com")),
+                row_id.clone(),
+                received_at,
+            )
+        ),
+        SendResult::Sent
+    ));
+    let outbound = receiver.try_recv().expect("committed pending frame");
+    assert_eq!(outbound.pending_row_id, Some(row_id));
+    assert_eq!(outbound.pending_row_original_receipt_at, Some(received_at));
+}
+
+#[tokio::test]
+async fn pending_flush_reservation_waits_for_capacity_before_commit() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(1);
+    let owner = registry.register(jid.clone(), sender);
+    assert!(registry.update_presence(&jid, true, 0));
+    let first = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve first frame");
+    let reserve = registry.reserve_pending_flush(&jid, Some(&owner));
+    tokio::pin!(reserve);
+    assert!(matches!(
+        futures::poll!(&mut reserve),
+        std::task::Poll::Pending
+    ));
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            first,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        SendResult::Sent
+    ));
+    receiver.recv().await.expect("drain first frame");
+    let second = reserve.await.expect("capacity available after drain");
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            second,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        SendResult::Sent
+    ));
+    assert!(receiver.try_recv().is_ok());
+}
+
+#[test]
+fn pending_flush_reservation_rechecks_presence_after_reservation() {
+    for (available, priority) in [(false, 0), (true, -1)] {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("reserved");
+        let (sender, mut receiver) = mpsc::channel(1);
+        let owner = registry.register(jid.clone(), sender);
+        assert!(registry.update_presence(&jid, true, 0));
+        let reservation = registry
+            .try_reserve_pending_flush(&jid, Some(&owner))
+            .expect("reserve eligible connection");
+        assert!(registry.update_presence_if_owner(&jid, &owner, available, priority));
+        assert!(matches!(
+            registry.send_reserved_pending_flush(
+                reservation,
+                OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+            ),
+            SendResult::NotConnected
+        ));
+        assert!(
+            receiver.try_recv().is_err(),
+            "ineligible resource receives no pending frame"
+        );
+        assert!(
+            registry.is_connected(&jid),
+            "ineligible resource remains registered"
+        );
+        assert!(
+            registry
+                .try_reserve_pending_flush(&jid, Some(&owner))
+                .is_ok(),
+            "rejected commit returned capacity"
+        );
+    }
+}
+
+#[test]
+fn pending_flush_reservation_rejects_remote_hosted_mirror() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(1);
+    let owner = registry.register_entry(jid.clone(), ConnectionEntry::remote_hosted(sender));
+    assert!(registry.update_presence(&jid, true, 0));
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve mirror queue");
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        SendResult::NotConnected
+    ));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn terminal_ordering_retry_lease_is_shared_across_clones_and_released_on_drop() {
+    let (sender, _receiver) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(sender);
+    let clone = entry.clone();
+    let lease = entry
+        .try_acquire_terminal_ordering_retry()
+        .expect("acquire idle slot");
+    assert!(clone.try_acquire_terminal_ordering_retry().is_none());
+    drop(lease);
+    assert!(clone.try_acquire_terminal_ordering_retry().is_some());
+}
+
+#[test]
+fn terminal_ordering_retry_lease_is_independent_of_replacement_connection() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("retry");
+    let (sender, _receiver) = mpsc::channel(1);
+    registry.register(jid.clone(), sender);
+    let original = registry.get_entry(&jid).expect("original entry");
+    let original_lease = original
+        .try_acquire_terminal_ordering_retry()
+        .expect("original slot");
+    let (replacement_sender, _replacement_receiver) = mpsc::channel(1);
+    registry.register(jid.clone(), replacement_sender);
+    let replacement = registry.get_entry(&jid).expect("replacement entry");
+    let replacement_lease = replacement
+        .try_acquire_terminal_ordering_retry()
+        .expect("independent replacement slot");
+    drop(original_lease);
+    assert!(
+        replacement.try_acquire_terminal_ordering_retry().is_none(),
+        "old lease cannot clear the replacement slot"
+    );
+    drop(replacement_lease);
+    assert!(replacement.try_acquire_terminal_ordering_retry().is_some());
+}
+
+#[tokio::test]
+async fn terminal_ordering_retry_lease_is_released_when_task_is_cancelled() {
+    let (sender, _receiver) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(sender);
+    let lease = entry
+        .try_acquire_terminal_ordering_retry()
+        .expect("acquire task slot");
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _lease = lease;
+        started.send(()).expect("observer awaits task start");
+        std::future::pending::<()>().await;
+    });
+    ready.await.expect("task started with lease");
+    assert!(entry.try_acquire_terminal_ordering_retry().is_none());
+    task.abort();
+    assert!(task.await.expect_err("task cancelled").is_cancelled());
+    assert!(entry.try_acquire_terminal_ordering_retry().is_some());
 }

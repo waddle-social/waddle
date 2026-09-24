@@ -209,8 +209,13 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
             .iter()
             .map(|frame| frame.frames.len())
             .sum::<usize>(),
-        1,
-        "original sender reflection travels in owner reply"
+        0,
+        "archived original sender reflection uses the resource FIFO"
+    );
+    assert_eq!(
+        receivers[0].try_recv().is_ok(),
+        destination != Destination::Remote,
+        "original reflection is accepted independently of the owner reply"
     );
     // Drop the owner reply before origin confirmation, losing the dispatch receipt.
     drop(first_report);
@@ -240,7 +245,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
     submission.plan = plan_muc_for_relay(&deps, room.clone(), message).await;
     guard_plan(&mut submission.plan, &fence);
     assert!(submission.plan.plan.iter().any(|planned| matches!(&planned.effect,
-        Effect::External(ExternalEffect::Frame(stanza)) if matches!(stanza.as_ref(), Stanza::Message(copy) if copy.to == Some(sibling.clone().into())))), "real relay planner converts sibling reflection to Frame");
+        Effect::External(effect @ ExternalEffect::Delivery(_)) if super::super::recorded::single_target(effect) == Some(&sibling))), "real relay planner keeps the archived sibling reflection in the resource FIFO");
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("relayed sibling owner retry");
@@ -284,8 +289,22 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
                         "historical repair must use the occupant's resolved delivery destination"
                     ),
                 };
+                if !retry.external_receipts[index].contains(&receipt) {
+                    reflections += 1;
+                    assert!(
+                        !super::super::execute_uow::owns(effect, &retry.route_progress),
+                        "fresh attempt echo never owns historical occupant progress"
+                    );
+                    let Stanza::Message(copy) = stanza.as_ref() else {
+                        panic!("fresh echo")
+                    };
+                    assert_eq!(
+                        copy.from,
+                        Some(room.with_resource_str("mobile").expect("nick").into())
+                    );
+                    continue;
+                }
                 repairs += 1;
-                assert!(retry.external_receipts[index].contains(&receipt));
                 assert!(super::super::execute_uow::owns(
                     effect,
                     &retry.route_progress
@@ -335,15 +354,29 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
         .await;
     assert!(report.receipt_failures.is_empty(), "{report:?}");
     match destination {
-        Destination::Live => assert!(
-            receivers[1].try_recv().is_ok(),
-            "historical copy reaches sibling"
-        ),
+        Destination::Live => {
+            let Stanza::Message(fresh) =
+                receivers[1].try_recv().expect("fresh attempt echo").stanza
+            else {
+                panic!("fresh message")
+            };
+            assert_eq!(
+                fresh.from,
+                Some(room.with_resource_str("mobile").expect("nick").into())
+            );
+            let Stanza::Message(repaired) =
+                receivers[1].try_recv().expect("historical copy").stanza
+            else {
+                panic!("historical message")
+            };
+            assert_eq!(repaired.from, frozen_source.from);
+            assert_eq!(repaired.bodies, frozen_source.bodies);
+        }
         Destination::Detached => {
             assert_eq!(
                 super::local::append_count(&sm, &sibling).await,
-                1,
-                "frozen repair queued for detached sibling"
+                2,
+                "fresh attempt echo and frozen repair queued for detached sibling"
             );
             let append_key = waddle_xmpp::stream_management::SmIngressAppendKey {
                 message_key: key,
@@ -363,15 +396,18 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
         }
         Destination::Remote => assert_eq!(
             *relay_targets.lock().expect("relay targets"),
-            vec![sibling.clone()],
-            "remote repair delivered on exact resource channel"
+            vec![sibling.clone(), sibling.clone()],
+            "fresh attempt echo and remote repair use the exact resource channel"
         ),
     }
     assert!(
         receivers[1].try_recv().is_err(),
         "only one historical delivery"
     );
-    assert_eq!(report.frame_obligations.iter().flat_map(|frame| &frame.frames).filter(|stanza| matches!(stanza, Stanza::Message(copy) if copy.to == Some(sibling.clone().into()))).count(), 1, "fresh reflection returned alongside repaired delivery");
+    assert!(
+        report.frame_obligations.is_empty(),
+        "fresh echo and repaired copy both use delivery effects"
+    );
     assert!(report
         .frame_obligations
         .iter()
@@ -401,10 +437,11 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
     )
     .await
     .expect("confirm origin dispatch");
-    assert!(
+    assert_eq!(
         terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
-            .expect("complete fanout")
+            .expect("original reflection is independent of the sibling reply"),
+        destination != Destination::Remote,
     );
     fixture.close().await;
 }

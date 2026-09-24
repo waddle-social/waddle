@@ -16,6 +16,7 @@ enum AuthorityCase {
     CanonicalSenderMismatch,
     ClaimMismatch,
     StanzaMismatch,
+    ArchivePositionMismatch,
 }
 
 async fn ingress_append_authority(
@@ -111,6 +112,7 @@ async fn ingress_append_authority(
             AuthorityCase::CanonicalSenderMismatch,
             AuthorityCase::ClaimMismatch,
             AuthorityCase::StanzaMismatch,
+            AuthorityCase::ArchivePositionMismatch,
         ]
     };
     for (index, case) in cases.iter().copied().enumerate() {
@@ -169,13 +171,17 @@ async fn ingress_append_authority(
             None
         };
         let mut submission = fixture.submission(None, "receiver authority");
+        let room_stamp = waddle_xmpp_core::xep0359::StanzaId::new(
+            format!("room-authority-{index}"),
+            source.to_bare().into(),
+        );
         let intent = if muc {
             IngressEffectIntent::RouteMucGroupchat {
                 room: source.to_bare(),
                 occupants: vec![recipient.clone()],
                 reflection: submission.sender.clone(),
                 room_generation: waddle_xmpp::ingress::EntityGeneration::INITIAL,
-                route_identity: EffectMessageIdentity::capture_ordinal(index as u64),
+                route_identity: EffectMessageIdentity::stanza(room_stamp.clone()),
             }
         } else {
             IngressEffectIntent::RouteDirect {
@@ -189,6 +195,11 @@ async fn ingress_append_authority(
             occupant.from = Some(source.clone().into());
             occupant.to = Some(recipient.clone().into());
             occupant.type_ = xmpp_parsers::message::MessageType::Groupchat;
+            waddle_xmpp_core::xep0359::add_stanza_id(&mut occupant, &room_stamp);
+            waddle_xmpp::xep::xep0421::set_occupant_id_on_message(
+                &mut occupant,
+                &waddle_xmpp::xep::xep0421::OccupantId("sender-occupant".into()),
+            );
             crate::ingress::test_support::capture_room_message(&mut submission.plan, &occupant);
         }
         let receipt = crate::ingress::receipt_key(&intent).expect("receipt");
@@ -197,6 +208,8 @@ async fn ingress_append_authority(
             .await
             .expect("canonical row");
         let mut obligation = IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             message_key: decision.message_key.expect("canonical key"),
             sender_bare: source.to_bare(),
             receipt: receipt.clone(),
@@ -221,6 +234,12 @@ async fn ingress_append_authority(
             }
             AuthorityCase::ClaimMismatch => obligation.sender_bare = sender_full().to_bare(),
             AuthorityCase::StanzaMismatch => message.from = Some(sender_full().into()),
+            AuthorityCase::ArchivePositionMismatch => obligation.archive_positions.push(
+                waddle_xmpp::stream_management::ArchiveDispatchPosition {
+                    archive: recipient.to_bare(),
+                    ordinal: waddle_xmpp::mam::ArchiveOrdinal::FIRST,
+                },
+            ),
         }
         let alternate_sender = matches!(case, AuthorityCase::CanonicalSenderMismatch);
         let ledger_key = waddle_xmpp::stream_management::SmIngressAppendKey {
@@ -282,7 +301,11 @@ async fn ingress_append_authority(
                 .await;
             assert_eq!(
                 reply.outcome,
-                RemoteResourceRouteOutcome::QueuedDetached,
+                if matches!(case, AuthorityCase::ArchivePositionMismatch) {
+                    RemoteResourceRouteOutcome::Unavailable
+                } else {
+                    RemoteResourceRouteOutcome::QueuedDetached
+                },
                 "{case:?}"
             );
         } else {
@@ -309,10 +332,17 @@ async fn ingress_append_authority(
             };
             // Exercise the authenticated delivery seam directly, including its
             // stanza-sender defense even if the ordered parser also rejects it.
-            bridge
+            let result = bridge
                 .deliver_reserved(&sign_envelope(envelope, &keypair), &mut None)
-                .await
-                .expect("authority rejection must not reject delivery");
+                .await;
+            if matches!(case, AuthorityCase::ArchivePositionMismatch) {
+                assert!(matches!(
+                    result,
+                    Err(OrderedRelayNackReason::TargetUnavailable)
+                ));
+            } else {
+                result.expect("unsequenced delivery can proceed without an optional key");
+            }
         }
         if let Some(rx) = live_rx.as_mut() {
             let outbound = rx
@@ -341,6 +371,14 @@ async fn ingress_append_authority(
             .await
             .expect("queue read")
             .expect("session");
+        if matches!(case, AuthorityCase::ArchivePositionMismatch) {
+            assert!(
+                queued.unacked_stanzas.is_empty(),
+                "ordered copies cannot degrade to unkeyed appends"
+            );
+            assert_eq!(queued.outbound_count, 0);
+            continue;
+        }
         assert_eq!(queued.unacked_stanzas.len(), 1, "{case:?}");
         assert_eq!(queued.outbound_count, 1, "{case:?}");
         let queued_message = Message::try_from(
@@ -415,6 +453,8 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         .await
         .expect("canonical row naming the sender");
     let obligation = IngressAppendObligationRef {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         message_key: decision.message_key.expect("canonical key"),
         sender_bare: source.to_bare(),
         receipt,
@@ -607,6 +647,8 @@ async fn origin_preparation_signs_direct_and_muc_ingress_append_obligations() {
             }
         };
         let context = crate::server::routes::interpret::SmIngressAppendContext {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
             message_key: waddle_xmpp::ingress::MessageKey::new(),
             receipt: crate::ingress::receipt_key(&intent).expect("receipt"),
             received_at: Some(

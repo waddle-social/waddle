@@ -1,6 +1,5 @@
 use super::*;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
-use waddle_xmpp::protocol::InboundEvent;
 
 async fn recorded_obligations(state: &WebSocketState) -> Vec<IngressEffectIntent> {
     let key = {
@@ -51,13 +50,17 @@ async fn assert_terminal_with_receipts(state: &WebSocketState, intents: &[Ingres
     assert_eq!(terminal, 1, "all recorded obligations terminalized");
 }
 
-async fn live_full_jid_disconnect_retry(state: Arc<WebSocketState>) {
+async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool) {
     seed_local_account(&state, "bob").await;
     let full: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     register_test_connection(&state, &full, tx).await;
     let mut conn = connection(&state, true).await;
-    let mut message = xmpp_parsers::message::Message::new(Some(full.clone().into()));
+    let mut message = xmpp_parsers::message::Message::new(Some(if bare {
+        full.to_bare().into()
+    } else {
+        full.clone().into()
+    }));
     message.type_ = xmpp_parsers::message::MessageType::Chat;
     message
         .bodies
@@ -72,24 +75,8 @@ async fn live_full_jid_disconnect_retry(state: Arc<WebSocketState>) {
         .expect("recipient channel");
     assert!(matches!(
         outbound.kind,
-        waddle_xmpp::registry::DeliveryKind::PeerStanza
+        waddle_xmpp::registry::DeliveryKind::DirectFrame
     ));
-    let mut recipient_conn = WsConnState::new();
-    recipient_conn.phase = ConnectionPhase::ready(full.clone(), false);
-    recipient_conn.ensure_state_machine(
-        "example.com",
-        &state.deps.protocol.dispatcher,
-        full.clone(),
-        false,
-        Default::default(),
-    );
-    let machine = recipient_conn
-        .state_machine
-        .as_mut()
-        .expect("recipient machine");
-    let events = machine.handle(InboundEvent::StanzaFromPeer(Box::new(outbound.stanza)));
-    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(&state, None);
-    crate::server::routes::websocket::replay::drive_interpret_loop(events, machine, &deps).await;
     let archived = state
         .deps
         .protocol
@@ -164,11 +151,21 @@ async fn live_full_jid_disconnect_retry(state: Arc<WebSocketState>) {
 
 #[tokio::test]
 async fn ingress_live_full_jid_disconnect_retry_advances_h_sqlite() {
-    live_full_jid_disconnect_retry(create_test_websocket_state().await).await;
+    live_recipient_disconnect_retry(create_test_websocket_state().await, false).await;
 }
 #[tokio::test]
 async fn ingress_live_full_jid_disconnect_retry_advances_h_postgres() {
-    recovery::postgres_case(live_full_jid_disconnect_retry).await;
+    recovery::postgres_case(|state| live_recipient_disconnect_retry(state, false)).await;
+}
+
+#[tokio::test]
+async fn ingress_live_bare_jid_disconnect_retry_keeps_frozen_audience_sqlite() {
+    live_recipient_disconnect_retry(create_test_websocket_state().await, true).await;
+}
+
+#[tokio::test]
+async fn ingress_live_bare_jid_disconnect_retry_keeps_frozen_audience_postgres() {
+    recovery::postgres_case(|state| live_recipient_disconnect_retry(state, true)).await;
 }
 
 async fn live_full_jid_recipient_stamp_sender_repair(state: Arc<WebSocketState>) {
@@ -199,7 +196,7 @@ async fn live_full_jid_recipient_stamp_sender_repair(state: Arc<WebSocketState>)
         .expect("recipient channel");
     assert!(matches!(
         outbound.kind,
-        waddle_xmpp::registry::DeliveryKind::PeerStanza
+        waddle_xmpp::registry::DeliveryKind::DirectFrame
     ));
     let archived = state
         .deps
@@ -230,10 +227,8 @@ async fn live_full_jid_recipient_stamp_sender_repair(state: Arc<WebSocketState>)
         "sanitization preserves the recipient-assigned sibling"
     );
     let obligations = recorded_obligations(&state).await;
-    let archive_receipt_kind = obligations.iter().find(|intent| matches!(intent, IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &sender))
-        .expect("sender archive obligation")
-        .with_encoded_v1(|kind, _| kind)
-        .expect("archive receipt kind");
+    let archive_receipt = crate::ingress::receipt_key(obligations.iter().find(|intent| matches!(intent, IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &sender))
+        .expect("sender archive obligation")).expect("sender receipt");
     assert_terminal_with_receipts(&state, &obligations).await;
     {
         let db = state
@@ -256,8 +251,11 @@ async fn live_full_jid_recipient_stamp_sender_repair(state: Arc<WebSocketState>)
         // Require the retry to receipt the repaired sender archive itself.
         assert_eq!(
             db.execute(
-                "DELETE FROM ingress_effect_receipts WHERE kind = ?",
-                crate::db_params![archive_receipt_kind]
+                "DELETE FROM ingress_effect_receipts WHERE kind = ? AND semantic_identity_hash = ?",
+                crate::db_params![
+                    archive_receipt.kind.to_storage(),
+                    archive_receipt.semantic_identity_hash.to_vec()
+                ]
             )
             .await
             .expect("remove sender archive receipt"),

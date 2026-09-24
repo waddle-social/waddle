@@ -54,8 +54,8 @@ impl DrainAuthority {
         obligation: Option<SmRelayedAppendObligation>,
     ) -> Option<SmRelayedAppendObligation> {
         use crate::ingress::append_authority::{
-            check_canonical_sender, check_stanza_binding, record_degraded_to_unkeyed,
-            AppendAuthorityRejection,
+            check_canonical_obligation, check_canonical_sender, check_stanza_binding,
+            record_authorization_failure, AppendAuthorityRejection,
         };
         use waddle_xmpp::telemetry::attributes::IngressAppendAuthorizationFailure;
 
@@ -63,6 +63,11 @@ impl DrainAuthority {
         let exhausted =
             self.canonical_reads_indeterminate || tokio::time::Instant::now() >= self.deadline;
         let bound = stanza.map_or(Ok(()), |stanza| {
+            crate::ingress::append_authority::check_resource_binding(
+                stanza,
+                obligation.key.kind.to_storage(),
+                &obligation.key.resource,
+            )?;
             check_stanza_binding(
                 stanza,
                 &obligation.sender_bare,
@@ -72,6 +77,27 @@ impl DrainAuthority {
         let outcome = match bound {
             Err(reason) => Err(reason),
             Ok(()) if exhausted => Err(AppendAuthorityRejection::ServicesUnavailable),
+            Ok(()) if stanza.is_some() => {
+                let reference = crate::ingress::identity::IngressAppendObligationRef::from_relayed(
+                    obligation.clone(),
+                );
+                check_canonical_obligation(
+                    state.deps.app_state.db_pool.global(),
+                    stanza.expect("matched typed stanza"),
+                    &reference,
+                )
+                .await
+            }
+            Ok(())
+                if [
+                    waddle_xmpp::ingress::IngressEffectKind::Carbons,
+                    waddle_xmpp::ingress::IngressEffectKind::RelayCarbons,
+                ]
+                .iter()
+                .any(|kind| kind.storage_tag() == obligation.key.kind.to_storage()) =>
+            {
+                Err(AppendAuthorityRejection::CarbonObligationMismatch)
+            }
             Ok(()) => {
                 check_canonical_sender(
                     state.deps.app_state.db_pool.global(),
@@ -88,7 +114,7 @@ impl DrainAuthority {
                     reason.failure_class(),
                     IngressAppendAuthorizationFailure::Indeterminate
                 );
-                record_degraded_to_unkeyed(&reason, &obligation.sender_bare);
+                record_authorization_failure(&reason, &obligation.sender_bare);
                 None
             }
         }
@@ -109,7 +135,17 @@ pub(super) async fn reserve_live_recorded(
 ) {
     let mut authority = DrainAuthority::default();
     for (sequence, obligation) in sm_state.unacked_ingress_appends() {
-        let Some(obligation) = authority.authorize(state, None, Some(obligation)).await else {
+        let Some((payload, received_at)) = sm_state.ingress_replay_payload(sequence) else {
+            warn!(
+                sequence,
+                "ingress replay payload unavailable at detach; entry stays unkeyed"
+            );
+            continue;
+        };
+        let Some(obligation) = authority
+            .authorize(state, Some(&payload), Some(obligation))
+            .await
+        else {
             continue;
         };
         if drained_appends
@@ -126,14 +162,7 @@ pub(super) async fn reserve_live_recorded(
             .await
         {
             Ok(Some(ticket)) => {
-                if let Some((payload, received_at)) = sm_state.ingress_replay_payload(sequence) {
-                    drained_appends.push(DrainedAppend(ticket.at(sequence, payload, received_at)));
-                } else {
-                    warn!(
-                        sequence,
-                        "ingress replay payload unavailable at detach; entry stays unkeyed"
-                    );
-                }
+                drained_appends.push(DrainedAppend(ticket.at(sequence, payload, received_at)));
             }
             Ok(None) => {}
             Err(error) => {
@@ -150,6 +179,17 @@ pub(super) fn bind_live(
     obligation: Option<SmRelayedAppendObligation>,
 ) -> Option<SmRelayedAppendObligation> {
     let obligation = obligation?;
+    if let Err(reason) = crate::ingress::append_authority::check_resource_binding(
+        stanza,
+        obligation.key.kind.to_storage(),
+        &obligation.key.resource,
+    ) {
+        crate::ingress::append_authority::record_authorization_failure(
+            &reason,
+            &obligation.sender_bare,
+        );
+        return None;
+    }
     match crate::ingress::append_authority::check_stanza_binding(
         stanza,
         &obligation.sender_bare,
@@ -157,7 +197,7 @@ pub(super) fn bind_live(
     ) {
         Ok(()) => Some(obligation),
         Err(reason) => {
-            crate::ingress::append_authority::record_degraded_to_unkeyed(
+            crate::ingress::append_authority::record_authorization_failure(
                 &reason,
                 &obligation.sender_bare,
             );
@@ -182,7 +222,7 @@ pub(super) fn key_recipient_pass_frame(
     match message {
         Some(message) => Some((obligation.key, Stanza::Message(message))),
         None => {
-            crate::ingress::append_authority::record_degraded_to_unkeyed(
+            crate::ingress::append_authority::record_authorization_failure(
                 &crate::ingress::append_authority::AppendAuthorityRejection::NotMessage,
                 &obligation.sender_bare,
             );
@@ -241,7 +281,9 @@ pub(super) async fn claim(
         .await
     {
         Ok(SmKeyedAppendOutcome::Appended { .. }) => Claim::RecordedInDetachedStream,
-        Ok(SmKeyedAppendOutcome::AlreadyAppended { .. }) => Claim::AlreadyAllocated,
+        Ok(SmKeyedAppendOutcome::AlreadyAppended { .. } | SmKeyedAppendOutcome::Suppressed) => {
+            Claim::AlreadyAllocated
+        }
         Ok(SmKeyedAppendOutcome::NoSession) => Claim::Unkeyed,
         Err(error) => {
             warn!(stream_id, %error, "keyed detach-drain record failed; draining unkeyed");

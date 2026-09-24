@@ -2,13 +2,26 @@
 //!
 //! Shared by every place a relayed obligation is about to key an XEP-0198 replay
 //! append: the ordered-relay receivers (#1778) and the registered-socket detach
-//! drain (#1789). Failure removes the optional deduplication key, never delivery.
+//! drain (#1789). An archive-ordered relay must retain valid authority to enter
+//! the destination queue. Already accepted transport frames keep their drain
+//! behavior when optional deduplication authority cannot be recovered.
 
 use std::time::Duration;
 
 use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 use waddle_xmpp::telemetry::attributes::IngressAppendAuthorizationFailure;
 use waddle_xmpp::Stanza;
+
+#[path = "append_authority_carbons.rs"]
+mod carbons;
+
+#[cfg(test)]
+#[path = "append_authority_carbon_tests.rs"]
+mod carbon_tests;
+
+#[cfg(test)]
+#[path = "append_authority_room_tests.rs"]
+mod room_tests;
 
 const AUTHORIZATION_READ_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -25,6 +38,8 @@ pub(crate) enum AppendAuthorityRejection {
     CanonicalReadTimedOut,
     CanonicalSenderMissing,
     CanonicalSenderMismatch,
+    CarbonObligationMismatch,
+    ArchivePositionMismatch,
 }
 
 impl AppendAuthorityRejection {
@@ -41,7 +56,9 @@ impl AppendAuthorityRejection {
             | Self::NotMessage
             | Self::StanzaSenderMismatch
             | Self::CanonicalSenderMissing
-            | Self::CanonicalSenderMismatch => IngressAppendAuthorizationFailure::Unauthorized,
+            | Self::CanonicalSenderMismatch
+            | Self::CarbonObligationMismatch => IngressAppendAuthorizationFailure::Unauthorized,
+            Self::ArchivePositionMismatch => IngressAppendAuthorizationFailure::Unauthorized,
             #[cfg(feature = "clustering")]
             Self::SenderClaimMismatch => IngressAppendAuthorizationFailure::Unauthorized,
             Self::ServicesUnavailable | Self::CanonicalReadFailed | Self::CanonicalReadTimedOut => {
@@ -51,11 +68,13 @@ impl AppendAuthorityRejection {
     }
 }
 
-/// Only recorded direct and MUC groupchat routes allocate keyed SM appends.
+/// Only recorded message routes and carbon copies allocate keyed SM appends.
 pub(crate) fn receipt_kind_is_append_eligible(storage_tag: i32) -> bool {
     [
         IngressEffectKind::RouteDirect,
         IngressEffectKind::RouteMucGroupchat,
+        IngressEffectKind::Carbons,
+        IngressEffectKind::RelayCarbons,
     ]
     .into_iter()
     .any(|kind| kind.storage_tag() == storage_tag)
@@ -71,13 +90,145 @@ pub(crate) fn check_stanza_binding(
     if !receipt_kind_is_append_eligible(receipt_kind_storage_tag) {
         return Err(AppendAuthorityRejection::IneligibleKind);
     }
-    let Stanza::Message(message) = stanza else {
-        return Err(AppendAuthorityRejection::NotMessage);
-    };
-    if message.from.as_ref().map(jid::Jid::to_bare).as_ref() != Some(sender_bare) {
+    if &stanza_sender(stanza, receipt_kind_storage_tag)? != sender_bare {
         return Err(AppendAuthorityRejection::StanzaSenderMismatch);
     }
     Ok(())
+}
+
+pub(crate) fn stanza_sender(
+    stanza: &Stanza,
+    receipt_kind_storage_tag: i32,
+) -> Result<jid::BareJid, AppendAuthorityRejection> {
+    let Stanza::Message(message) = stanza else {
+        return Err(AppendAuthorityRejection::NotMessage);
+    };
+    let sender = if carbons::is_carbon_kind(receipt_kind_storage_tag) {
+        carbons::parse(message)?.inner.from
+    } else {
+        message.from.clone()
+    };
+    sender
+        .map(|jid| jid.to_bare())
+        .ok_or(AppendAuthorityRejection::StanzaSenderMismatch)
+}
+
+pub(crate) fn check_resource_binding(
+    stanza: &Stanza,
+    receipt_kind_storage_tag: i32,
+    resource: &jid::FullJid,
+) -> Result<(), AppendAuthorityRejection> {
+    if carbons::is_carbon_kind(receipt_kind_storage_tag) {
+        let Stanza::Message(message) = stanza else {
+            return Err(AppendAuthorityRejection::NotMessage);
+        };
+        if message.to.as_ref() != Some(&resource.clone().into()) {
+            return Err(AppendAuthorityRejection::CarbonObligationMismatch);
+        }
+    }
+    Ok(())
+}
+
+/// Carbon envelopes additionally prove the frozen receipt, target and inner
+/// message; their outer sender is the carbon owner rather than the originator.
+pub(crate) async fn check_canonical_obligation(
+    db: &crate::db::Database,
+    stanza: &Stanza,
+    obligation: &super::identity::IngressAppendObligationRef,
+) -> Result<(), AppendAuthorityRejection> {
+    if obligation.receipt.kind.to_storage() == IngressEffectKind::RouteMucGroupchat.storage_tag()
+        || (obligation.receipt.kind.to_storage() == IngressEffectKind::RouteDirect.storage_tag()
+            && matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat))
+    {
+        tokio::time::timeout(
+            AUTHORIZATION_READ_TIMEOUT,
+            authorize_room_route(db, stanza, obligation),
+        )
+        .await
+        .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)??;
+    } else if carbons::is_carbon_kind(obligation.receipt.kind.to_storage()) {
+        tokio::time::timeout(
+            AUTHORIZATION_READ_TIMEOUT,
+            carbons::authorize(db, stanza, obligation),
+        )
+        .await
+        .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)??;
+    } else {
+        check_canonical_sender(db, obligation.message_key, &obligation.sender_bare).await?;
+    }
+    let positions = tokio::time::timeout(
+        AUTHORIZATION_READ_TIMEOUT,
+        crate::ingress_uow::ArchiveDispatchRepository::positions_pooled(
+            db,
+            obligation.message_key,
+            &obligation.receipt,
+        ),
+    )
+    .await
+    .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)?
+    .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
+    if positions != obligation.archive_positions {
+        return Err(AppendAuthorityRejection::ArchivePositionMismatch);
+    }
+    Ok(())
+}
+
+async fn authorize_room_route(
+    db: &crate::db::Database,
+    stanza: &Stanza,
+    obligation: &super::identity::IngressAppendObligationRef,
+) -> Result<(), AppendAuthorityRejection> {
+    let Stanza::Message(message) = stanza else {
+        return Err(AppendAuthorityRejection::NotMessage);
+    };
+    let (envelope, intents) =
+        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
+            .await
+            .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
+    let target = message
+        .to
+        .as_ref()
+        .and_then(|jid| jid.try_as_full().ok())
+        .ok_or(AppendAuthorityRejection::StanzaSenderMismatch)?;
+    for intent in &intents {
+        if super::receipt_key(intent).ok().as_ref() != Some(&obligation.receipt) {
+            continue;
+        }
+        let (room, occupants, source_intent) = match intent {
+            waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat {
+                room,
+                occupants,
+                ..
+            }
+            | waddle_xmpp::ingress::IngressEffectIntent::RouteMucSystemBroadcast {
+                room,
+                occupants,
+                ..
+            } => (room, occupants, intent),
+            waddle_xmpp::ingress::IngressEffectIntent::RouteDirect { fanout, .. } => {
+                let Some(source_intent) = intents.iter().find(|source| {
+                    super::reflection_dispatch::original_intent(source).as_ref() == Some(intent)
+                }) else {
+                    continue;
+                };
+                let waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat { room, .. } =
+                    source_intent
+                else {
+                    continue;
+                };
+                (room, fanout, source_intent)
+            }
+            _ => continue,
+        };
+        if let Ok(source) = super::room_canonical::source(&envelope, source_intent) {
+            let expected = super::room_canonical::occupant_copy_message(source, target);
+            if *room == obligation.sender_bare && occupants.contains(target) && expected == *message
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err(AppendAuthorityRejection::StanzaSenderMismatch)
 }
 
 /// The canonical ingress row must exist and name the claimed sender.
@@ -100,8 +251,8 @@ pub(crate) async fn check_canonical_sender(
     Ok(())
 }
 
-/// Record that a relayed obligation degraded to unkeyed delivery.
-pub(crate) fn record_degraded_to_unkeyed(
+/// Record failed authority validation at a relay or accepted-frame drain boundary.
+pub(crate) fn record_authorization_failure(
     reason: &AppendAuthorityRejection,
     sender_bare: &jid::BareJid,
 ) {
@@ -114,21 +265,19 @@ pub(crate) fn record_degraded_to_unkeyed(
         IngressAppendAuthorizationFailure::Unauthorized => tracing::warn!(
             ?reason,
             sender = %sender_bare,
-            "relay append identity unauthorized; continuing with unkeyed delivery"
+            "relay append identity unauthorized"
         ),
         IngressAppendAuthorizationFailure::Indeterminate => tracing::debug!(
             ?reason,
             sender = %sender_bare,
-            "relay append identity could not be authorized; continuing with \
-             unkeyed delivery"
+            "relay append identity could not be authorized"
         ),
     }
     waddle_xmpp::counter_add!(
         "waddle.clustering.ingress_append.authorization_failed",
         "{obligation}",
-        "Relayed ingress append identities degraded to unkeyed delivery -- \
-         `indeterminate` means this node could not read canonical state and the \
-         cross-node duplicate window is open for as long as it persists.",
+        "Relayed ingress append authority failures -- indeterminate means \
+         this node could not read canonical state.",
         1,
         reason.failure_class(),
     );

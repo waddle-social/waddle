@@ -372,7 +372,6 @@ fn pm_delivery_capture(
                 record_definitive_route: true,
             }
         }
-        #[cfg(feature = "clustering")]
         crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
             PmDeliveryCapture {
                 any_session_handled: true,

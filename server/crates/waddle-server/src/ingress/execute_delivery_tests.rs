@@ -236,7 +236,7 @@ async fn postgres_remote_carbons_failure_retains_intent_and_retry_success_receip
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn remote_carbons_planning_captures_owner_obligation_before_relay() {
+async fn remote_carbons_planning_requires_owner_inventory_before_commit() {
     use crate::clustering::route_bridge::{
         OrderedRelayDeliveryBridge, RemoteResourceOriginSnapshot,
     };
@@ -296,25 +296,17 @@ async fn remote_carbons_planning_captures_owner_obligation_before_relay() {
         &deps,
     )
     .await;
-    assert_eq!(
-        capture.snapshot().intents,
-        vec![IngressEffectIntent::RelayCarbons {
-            owner,
-            exclude: vec![sender],
-            kind: CarbonKind::Sent
-        }]
+    assert!(
+        capture.snapshot().intents.is_empty(),
+        "an unreachable inventory cannot freeze a guessed audience"
     );
-    let plan = sink.take().0;
-    assert_eq!(plan.len(), 1);
-    assert!(matches!(
-        plan[0].effect,
-        Effect::External(ExternalEffect::Delivery(
-            ExternalDeliveryEffect::RelayCarbons { .. }
-        ))
-    ));
+    assert!(
+        sink.take().0.is_empty(),
+        "no post-commit relay may choose new carbon targets"
+    );
     assert_eq!(
-        plan[0].suppression,
-        crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always
+        sink.failure(),
+        Some(crate::server::routes::interpret::effects::PlanFailure::CarbonInventoryRead)
     );
 }
 

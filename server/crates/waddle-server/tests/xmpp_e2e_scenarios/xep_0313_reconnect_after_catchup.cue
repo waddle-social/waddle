@@ -2,7 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "xep-0313-reconnect-after-catchup"
-	xeps: ["XEP-0045", "XEP-0059", "XEP-0160", "XEP-0297", "XEP-0313"]
+	xeps: ["XEP-0045", "XEP-0059", "XEP-0160", "XEP-0199", "XEP-0297", "XEP-0313"]
 	users: {
 			alice: devices: phone: #Actor & {
 				user:     "alice"
@@ -66,6 +66,15 @@ scenario: #Scenario & {
 			id:    "cue-gap-two"
 			body:  "missed reconnect gap two"
 		},
+		// The sender-stream reply proves the preceding offline intake finished.
+		#SendIq & {
+			actor: alicePhone
+			type:  "get"
+			id:    "cue-gap-intake-barrier"
+			to:    scenario.domain
+			payload: #XmlElement & {name: "ping", ns: "urn:xmpp:ping"}
+		},
+		#ExpectIq & {target: alicePhone, type: "result", id: "cue-gap-intake-barrier"},
 		#ConnectActor & {
 			actor: bobPhone
 		},

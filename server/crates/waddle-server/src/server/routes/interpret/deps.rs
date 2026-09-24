@@ -137,6 +137,8 @@ pub struct SmIngressAppendContext {
     pub message_key: waddle_xmpp::ingress::MessageKey,
     pub receipt: crate::ingress::EffectReceiptKey,
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub archive_positions: Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>,
+    pub dispatch_stream: Option<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
 impl SmIngressAppendContext {

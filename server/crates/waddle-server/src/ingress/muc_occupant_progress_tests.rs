@@ -308,9 +308,10 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         retry_case != RetryCase::MissingProvenance
     );
     assert!(receivers[0].try_recv().is_err(), "A receives no duplicate");
-    assert!(
+    assert_eq!(
         receivers[2].try_recv().is_ok(),
-        "S receives duplicate reflection"
+        bodyless || retry_case == RetryCase::ReconnectedSender,
+        "completed archived reflections are not resent; a new resource gets its attempt reflection"
     );
     assert!(c_rx.try_recv().is_err(), "C receives no historical copy");
     if retry_case == RetryCase::MissingProvenance {
@@ -444,3 +445,7 @@ mod host_owned;
 #[cfg(feature = "clustering")]
 #[path = "muc_occupant_progress_tests/relayed_sibling.rs"]
 mod relayed_sibling;
+
+#[cfg(feature = "clustering")]
+#[path = "muc_occupant_progress_tests/ordered_reflection.rs"]
+mod ordered_reflection;

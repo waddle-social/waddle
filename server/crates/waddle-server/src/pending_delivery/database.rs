@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, PendingClaimToken};
 
 mod ack_windows;
 mod custody;
@@ -651,7 +652,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // ongoing claim).
         self.execute(
             "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, \
-                                          claimed_at_ms = ? \
+                                          claimed_at_ms = ?, claim_token = NULL, claim_offered = 0 \
              WHERE recipient_jid = ? AND flushed_in_session IS NULL",
             crate::db_params![
                 session.as_str().to_string(),
@@ -736,7 +737,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             Some(after) => {
                 self.query(
                     "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, \
-                                                 claimed_at_ms = ? \
+                                                 claimed_at_ms = ?, claim_token = NULL, claim_offered = 0 \
                      WHERE flushed_in_session IS NULL AND row_id IN ( \
                          SELECT row_id FROM pending_delivery \
                          WHERE recipient_jid = ? AND flushed_in_session IS NULL AND row_id > ? \
@@ -758,7 +759,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             None => {
                 self.query(
                     "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, \
-                                                 claimed_at_ms = ? \
+                                                 claimed_at_ms = ?, claim_token = NULL, claim_offered = 0 \
                      WHERE flushed_in_session IS NULL AND row_id IN ( \
                          SELECT row_id FROM pending_delivery \
                          WHERE recipient_jid = ? AND flushed_in_session IS NULL \
@@ -801,12 +802,144 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn claim_archive_ordered_batch_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+        token: &PendingClaimToken,
+        limit: usize,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Serialize admission across independent nodes, using the same
+        // recipient advisory lock as pending inserts. A snapshot-only NOT
+        // EXISTS check would race another claimant on PostgreSQL.
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        if matches!(tx.driver(), DatabaseDriver::Postgres) {
+            let mut admission = tx
+                .query(
+                    "SELECT pg_try_advisory_xact_lock(hashtext(?))",
+                    crate::db_params![recipient.to_string()],
+                )
+                .await
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let acquired = admission
+                .next()
+                .await
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?
+                .is_some_and(|row| row.get::<bool>(0).is_ok_and(|held| held));
+            if !acquired {
+                return Err(PendingStorageError::ClaimContended);
+            }
+        }
+        let mut prefix = tx.query(
+            "SELECT row_id FROM pending_delivery WHERE recipient_jid = ? AND flushed_in_session IS NOT NULL AND outbound_sequence IS NULL LIMIT 1",
+            crate::db_params![recipient.to_string()],
+        ).await.map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        if prefix
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .is_some()
+        {
+            return Err(PendingStorageError::ClaimContended);
+        }
+        drop(prefix);
+        // Match the archive resolver's newest row for either UID or stanza-id.
+        // Missing pointers are still claimed so materialization can discard them.
+        const ORDINAL: &str = "(SELECT MAX(archive_seq) FROM mam_messages m WHERE m.room_jid = pending_delivery.archive_stanza_by AND (m.id = pending_delivery.archive_stanza_id OR m.stanza_id = pending_delivery.archive_stanza_id))";
+        // Merge archive-ordered and transient FIFO streams by their row-id
+        // heads. A running maximum delays a skewed archived row behind its
+        // canonical predecessors instead of giving all archived mail priority.
+        // Conflicting UUID order cannot override canonical archive order.
+        // Materialize the bounded candidates so RETURNING uses the exact same
+        // order even as UPDATE removes rows from the unclaimed set.
+        let sql = format!(
+            "WITH eligible AS ( \
+                 SELECT row_id, payload_kind, {ORDINAL} AS ordinal FROM pending_delivery \
+                 WHERE recipient_jid = ? AND flushed_in_session IS NULL \
+             ), merged AS ( \
+                 SELECT row_id, ordinal, \
+                     MAX(row_id) OVER (PARTITION BY payload_kind \
+                         ORDER BY ordinal ASC NULLS FIRST, row_id ASC \
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS fifo_key \
+                 FROM eligible \
+             ), candidates AS MATERIALIZED ( \
+                 SELECT row_id, ordinal, ROW_NUMBER() OVER ( \
+                     ORDER BY fifo_key ASC, ordinal ASC NULLS FIRST, row_id ASC) AS claim_order \
+                 FROM merged \
+                 ORDER BY fifo_key ASC, ordinal ASC NULLS FIRST, row_id ASC LIMIT ? \
+             ) \
+             UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL, claimed_at_ms = ?, claim_token = ?, claim_offered = 0 \
+             WHERE flushed_in_session IS NULL AND row_id IN (SELECT row_id FROM candidates) \
+             RETURNING row_id, recipient_jid, original_receipt_at, payload_kind, \
+                       archive_stanza_by, archive_stanza_id, transient_xml, \
+                       flushed_in_session, outbound_sequence, \
+                       (SELECT ordinal FROM candidates WHERE candidates.row_id = pending_delivery.row_id), \
+                       (SELECT claim_order FROM candidates WHERE candidates.row_id = pending_delivery.row_id)"
+        );
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![
+                    recipient.to_string(),
+                    limit as i64,
+                    session.as_str().to_string(),
+                    chrono::Utc::now().timestamp_millis(),
+                    token.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let mut claimed = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        {
+            let ordinal: Option<i64> = row
+                .get(9)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            ordinal
+                .map(waddle_xmpp::mam::ArchiveOrdinal::from_storage)
+                .transpose()
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let claim_order: i64 = row
+                .get(10)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            claimed.push((decode_row(&row)?, claim_order));
+        }
+        // UPDATE RETURNING has no ordering guarantee on either backend.
+        drop(rows);
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        claimed.sort_by_key(|(_, claim_order)| *claim_order);
+        Ok(claimed.into_iter().map(|(row, _)| row).collect())
+    }
+
     async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
         self.execute(
             "DELETE FROM pending_delivery WHERE row_id = ?",
             crate::db_params![id.as_str().to_string()],
         )
         .await
+    }
+
+    async fn delete_unsequenced_claim(
+        &self,
+        claim: &PendingClaim,
+        phase: PendingClaimPhase,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE row_id = ? AND flushed_in_session = ? AND claim_token = ? AND outbound_sequence IS NULL AND claim_offered = ?",
+            crate::db_params![claim.row_id.as_str().to_string(), claim.session.as_str().to_string(), claim.token.to_string(), i64::from(matches!(phase, PendingClaimPhase::Offered))],
+        ).await
     }
 
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
@@ -820,7 +953,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         self.execute(
             "UPDATE pending_delivery SET flushed_in_session = NULL, \
                                           outbound_sequence = NULL, \
-                                          claimed_at_ms = NULL \
+                                          claimed_at_ms = NULL, claim_token = NULL, claim_offered = 0 \
              WHERE flushed_in_session = ?",
             crate::db_params![session.as_str().to_string()],
         )
@@ -847,7 +980,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         match session {
             Some(session) => self.release_row_if_session(id, &SmSessionId::new(session)).await,
             None => self.execute(
-                "UPDATE pending_delivery SET outbound_sequence = NULL, claimed_at_ms = NULL WHERE row_id = ? AND flushed_in_session IS NULL",
+                "UPDATE pending_delivery SET outbound_sequence = NULL, claimed_at_ms = NULL, claim_token = NULL, claim_offered = 0 WHERE row_id = ? AND flushed_in_session IS NULL",
                 crate::db_params![id.as_str().to_string()],
             ).await,
         }
@@ -867,7 +1000,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         self.execute(
             "UPDATE pending_delivery SET flushed_in_session = NULL, \
                                           outbound_sequence = NULL, \
-                                          claimed_at_ms = NULL \
+                                          claimed_at_ms = NULL, claim_token = NULL, claim_offered = 0 \
              WHERE row_id = ? AND flushed_in_session = ?",
             crate::db_params![
                 id.as_str().to_string(),
@@ -875,6 +1008,82 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             ],
         )
         .await
+    }
+
+    async fn release_unpushed_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+        token: &PendingClaimToken,
+    ) -> Result<u64, PendingStorageError> {
+        let state = self.ack_windows.for_session(expected_session);
+        let _guard = state.operation.lock().await;
+        self.settle_ack_windows(expected_session, &state).await?;
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, claimed_at_ms = NULL, claim_token = NULL, claim_offered = 0 \
+             WHERE row_id = ? AND flushed_in_session = ? AND outbound_sequence IS NULL AND claim_token = ? AND claim_offered = 0",
+            crate::db_params![
+                id.as_str().to_string(),
+                expected_session.as_str().to_string(),
+                token.to_string()
+            ],
+        )
+        .await
+    }
+
+    async fn mark_claim_offered(&self, claim: &PendingClaim) -> Result<bool, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET claim_offered = 1 WHERE row_id = ? AND flushed_in_session = ? AND claim_token = ? AND outbound_sequence IS NULL",
+            crate::db_params![claim.row_id.as_str().to_string(), claim.session.as_str().to_string(), claim.token.to_string()],
+        ).await.map(|updated| updated > 0)
+    }
+
+    async fn release_unqueued_offer(
+        &self,
+        claim: &PendingClaim,
+    ) -> Result<u64, PendingStorageError> {
+        let state = self.ack_windows.for_session(&claim.session);
+        let _guard = state.operation.lock().await;
+        self.settle_ack_windows(&claim.session, &state).await?;
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, claimed_at_ms = NULL, claim_token = NULL, claim_offered = 0 WHERE row_id = ? AND flushed_in_session = ? AND claim_token = ? AND outbound_sequence IS NULL",
+            crate::db_params![claim.row_id.as_str().to_string(), claim.session.as_str().to_string(), claim.token.to_string()],
+        ).await
+    }
+
+    async fn list_unoffered_claims(
+        &self,
+        recipient: &BareJid,
+        after: Option<&PendingRowId>,
+        claimed_before_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<PendingClaim>, PendingStorageError> {
+        let mut rows = self.query(
+            "SELECT row_id, flushed_in_session, claim_token FROM pending_delivery WHERE recipient_jid = ? AND row_id > ? AND claimed_at_ms <= ? AND flushed_in_session IS NOT NULL AND claim_token IS NOT NULL AND claim_offered = 0 AND outbound_sequence IS NULL ORDER BY row_id ASC LIMIT ?",
+            crate::db_params![recipient.to_string(), after.map(PendingRowId::as_str).unwrap_or_default().to_string(), claimed_before_ms, limit as i64],
+        ).await?;
+        let mut claims = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let session: String = row
+                .get(1)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let token: String = row
+                .get(2)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            claims.push(PendingClaim {
+                row_id: PendingRowId::new(id),
+                session: SmSessionId::new(session),
+                token: PendingClaimToken::from(token.parse::<uuid::Uuid>()?),
+            });
+        }
+        Ok(claims)
     }
 
     async fn release_rows_for_outbound_sequences(
@@ -1040,7 +1249,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let update_sql = format!(
             "UPDATE pending_delivery SET flushed_in_session = NULL, \
                                           outbound_sequence = NULL, \
-                                          claimed_at_ms = NULL \
+                                          claimed_at_ms = NULL, claim_token = NULL, claim_offered = 0 \
              WHERE row_id IN ({row_placeholders}) \
                AND flushed_in_session = ? \
                AND outbound_sequence IN ({sequence_placeholders})"

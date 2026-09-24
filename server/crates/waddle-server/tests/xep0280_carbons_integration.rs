@@ -490,6 +490,7 @@ async fn sent_carbon_is_delivered_after_authority_commit() {
 pub mod ingress_support;
 
 async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixture) {
+    use kameo::actor::Spawn;
     use std::time::Duration;
     use waddle_server::ingress::{
         commit::commit_submission,
@@ -498,10 +499,14 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
     };
     use waddle_xmpp::{
-        ingress::IngressEffectIntent, protocol::CarbonKind, registry::ConnectionRegistry, Stanza,
+        ingress::IngressEffectIntent,
+        protocol::CarbonKind,
+        registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
+        Stanza,
     };
 
     let registry = ConnectionRegistry::new();
+    let users = UserRegistryActor::spawn(UserRegistryActor::new());
     let mut submission = fixture.submission(Some("xep0280-partial-carbon"), "carbon fanout");
     let source = submission.sender.clone();
     let owner = source.to_bare();
@@ -515,6 +520,15 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
     registry.register_with_carbons(middle.clone(), middle_tx, true);
     registry.register_with_carbons(last.clone(), last_tx, true);
     for recipient in [&first, &middle, &last] {
+        users
+            .ask(RegisterUserResource {
+                jid: recipient.clone(),
+                entry: registry
+                    .get_entry(recipient)
+                    .expect("registered carbon resource"),
+            })
+            .await
+            .expect("register carbon actor resource");
         submission.plan.intents.push(IngressEffectIntent::Carbons {
             carbon_recipients: vec![recipient.clone()],
             excluded_source: source.clone(),
@@ -537,7 +551,8 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
         .await
         .expect("commit carbons");
     drop(middle_rx);
-    let deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.user_registry = Some(&users);
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -574,6 +589,21 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
     .expect("partial receipts"));
     for (recipient, receiver) in [(first, &mut first_rx), (last, &mut last_rx)] {
         let delivered = receiver.try_recv().expect("healthy carbon destination");
+        let obligation = delivered
+            .ingress_append
+            .as_ref()
+            .expect("frozen carbon append identity");
+        assert_eq!(obligation.key.message_key, key);
+        assert_eq!(obligation.key.resource, recipient);
+        assert_eq!(obligation.sender_bare, source.to_bare());
+        assert_eq!(
+            obligation.key.kind.to_storage(),
+            waddle_xmpp::ingress::IngressEffectKind::Carbons.storage_tag()
+        );
+        assert!(
+            obligation.received_at.is_some(),
+            "recovery retains original receipt time"
+        );
         let Stanza::Message(copy) = delivered.stanza else {
             panic!("carbon must be a message")
         };
@@ -585,7 +615,16 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
             .any(|payload| xmpp_parsers::carbons::Sent::try_from(payload.clone()).is_ok()));
     }
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel(8);
-    registry.register_with_carbons(middle, retry_tx, true);
+    registry.register_with_carbons(middle.clone(), retry_tx, true);
+    users
+        .ask(RegisterUserResource {
+            jid: middle.clone(),
+            entry: registry
+                .get_entry(&middle)
+                .expect("reconnected carbon resource"),
+        })
+        .await
+        .expect("register reconnected carbon actor resource");
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("retry carbons");

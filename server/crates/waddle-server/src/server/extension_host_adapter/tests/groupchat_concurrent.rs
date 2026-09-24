@@ -112,6 +112,20 @@ async fn concurrent(f: IngressFixture) {
         .expect("task")
         .expect("second committed without stale room generation");
     assert_eq!(gate.arrivals.load(Ordering::SeqCst), 2);
+    // The second committed archive entry may defer dispatch while the first
+    // reflection is awaiting settlement. Recovery releases it after that proof.
+    assert_eq!(
+        crate::ingress::maintenance::run_maintenance_pass(
+            &f.db,
+            &f.uow,
+            crate::ingress::maintenance::MaintenanceBudget {
+                grace: chrono::Duration::zero(),
+                ..crate::ingress::maintenance::MaintenanceBudget::DEFAULT
+            },
+            Some(Arc::clone(&fixture.adapter.state) as Arc<dyn crate::ingress::RecoveryEnvironment>),
+        ).await,
+        crate::ingress::maintenance::MaintenanceOutcome::Complete,
+    );
     let snapshot = fixture.actor.ask(GetSnapshot).await.expect("snapshot");
     assert_eq!(
         snapshot

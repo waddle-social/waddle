@@ -121,3 +121,67 @@ fn muc_recovery_body_with_subject_does_not_require_subject_mutation() {
         Ok(envelope.message())
     );
 }
+
+#[test]
+fn original_reflection_recovers_after_occupant_receipt_without_new_audience() {
+    use crate::ingress::{
+        recorded::RouteProgress,
+        recovery_rebuild::{self, RecoveryInput},
+    };
+    use waddle_xmpp::ingress::MessageKey;
+    let (envelope, room) = groupchat();
+    let reflection =
+        crate::ingress::reflection_dispatch::original_intent(&room).expect("reflection");
+    let recorded = vec![room, reflection.clone()];
+    let pending = vec![reflection.clone()];
+    let progress = RouteProgress::from_intent(&reflection, None, vec![])
+        .expect("progress")
+        .expect("direct");
+    let rebuilt = recovery_rebuild::rebuild(RecoveryInput {
+        key: MessageKey::new(),
+        envelope: &envelope,
+        created_at: chrono::Utc::now(),
+        recorded: &recorded,
+        unreceipted: &pending,
+        route_progress: vec![progress],
+        host_owned_resources: vec![],
+        departed_occupants: vec![],
+        blocked_recipients: &[],
+    })
+    .expect("rebuild");
+    assert!(rebuilt.unsupported_receipts.is_empty());
+    assert_eq!(rebuilt.decision.external.len(), 1);
+    let ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+        resources,
+        stanza,
+        route_identity,
+        ..
+    }) = &rebuilt.decision.external[0]
+    else {
+        panic!("frozen reflection")
+    };
+    assert_eq!(
+        resources,
+        &["romeo@example.com/phone"
+            .parse::<jid::FullJid>()
+            .expect("original")]
+    );
+    let IngressEffectIntent::RouteDirect {
+        route_identity: expected,
+        ..
+    } = &reflection
+    else {
+        panic!("reflection route")
+    };
+    assert_eq!(route_identity.as_ref(), Some(expected));
+    let Stanza::Message(message) = stanza.as_ref() else {
+        panic!("message")
+    };
+    let mut expected_message = envelope.message().clone();
+    expected_message.to = Some(resources[0].clone().into());
+    assert_eq!(message, &expected_message);
+    assert_eq!(
+        rebuilt.decision.external_receipts[0],
+        vec![crate::ingress::receipt_key(&reflection).expect("receipt")]
+    );
+}

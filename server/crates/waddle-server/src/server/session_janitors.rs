@@ -1123,16 +1123,35 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 .list(&session.jid.to_bare())
                 .await
             {
-                Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
-                Err(_) => false,
+                Ok(rows) => rows.iter().any(|row| row.outbound_sequence.is_none()),
+                Err(_) => true,
             };
-            let released_redrive_aborted = (row_release.released_rows || has_unflushed_backlog)
-                && routes::websocket::redrive_terminal_pending_rows_to_live_resource(
+            let redrive_outcome = if row_release.released_rows || has_unflushed_backlog {
+                routes::websocket::redrive_terminal_pending_rows_to_live_resource(
                     state,
                     &session.jid.to_bare(),
-                )
-                .await
-                    == routes::websocket::TerminalRedriveOutcome::Aborted;
+                ).await
+            } else {
+                routes::websocket::TerminalRedriveOutcome::Settled
+            };
+            // Waiting for an earlier row's ACK/writer is not a failed
+            // promotion. Preserve any prior real failure count, and retain
+            // the tail without spending the dead-letter budget on ordering.
+            if redrive_outcome == routes::websocket::TerminalRedriveOutcome::OrderingDeferred
+                && !row_release.ownership_unknown
+                && !row_release.release_failed_known_rows
+            {
+                if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    &state.deps.protocol.sm_session_registry,
+                    session.clone(),
+                ).await {
+                    promotion_guard.complete();
+                } else {
+                    sweep_failed = true;
+                }
+                continue;
+            }
+            let released_redrive_aborted = redrive_outcome.blocks_promotion();
             // Promotion must wait while an earlier row is still pending at a
             // live replacement: an aborted re-drive (rows released but not
             // enqueued) or a failed sequence release (rows still claimed
@@ -7017,6 +7036,7 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
         .map(|v| v.max(1))
         .unwrap_or(60);
     tokio::spawn(async move {
+        let mut recovery = crate::pending_delivery::PendingRecovery::default();
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         // Skip the first tick (immediate) so we don't sweep before
         // any flush has had a chance to run.
@@ -7026,12 +7046,25 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            run_pending_delivery_claim_sweep(&state, interval_secs).await;
+            run_pending_delivery_claim_sweep(&state, interval_secs, &mut recovery).await;
         }
     });
 }
 
-async fn run_pending_delivery_claim_sweep(state: &WebSocketState, interval_secs: u64) {
+pub(crate) async fn run_pending_delivery_claim_sweep(
+    state: &Arc<WebSocketState>,
+    interval_secs: u64,
+    recovery: &mut crate::pending_delivery::PendingRecovery,
+) {
+    let claim_release_floor_ms = i64::try_from(interval_secs)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1_000)
+        .saturating_mul(PENDING_CLAIM_RELEASE_FLOOR_INTERVALS);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let claimed_before_ms = now_ms.saturating_sub(claim_release_floor_ms);
+    // Independent periodic recipient-local rediscovery also runs when there
+    // are no orphan-release events and the initial presence CAS was spent.
+    recovery.tick(state, claimed_before_ms).await;
     async {
         let mut sweep_failed = false;
         let detached_live: Option<Vec<waddle_xmpp::pending_delivery::SmSessionId>> = state
@@ -7075,12 +7108,6 @@ async fn run_pending_delivery_claim_sweep(state: &WebSocketState, interval_secs:
         // re-examined on later sweeps, so genuinely orphaned
         // (post-crash) claims are still released — just a few
         // intervals later.
-        let claim_release_floor_ms = i64::try_from(interval_secs)
-            .unwrap_or(i64::MAX)
-            .saturating_mul(1_000)
-            .saturating_mul(PENDING_CLAIM_RELEASE_FLOOR_INTERVALS);
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let claimed_before_ms = now_ms.saturating_sub(claim_release_floor_ms);
         // Adopt claims written without a recency stamp (a
         // pre-#1124 binary during a rolling deploy) so they age
         // into release-eligibility instead of being skipped
@@ -7934,8 +7961,8 @@ async fn run_graceful_shutdown_drain(
                     .list(&session.jid.to_bare())
                     .await
                 {
-                    Ok(rows) => rows.iter().any(|row| row.flushed_in_session.is_none()),
-                    Err(_) => false,
+                    Ok(rows) => rows.iter().any(|row| row.outbound_sequence.is_none()),
+                    Err(_) => true,
                 };
                 let released_redrive_aborted = (row_release.released_rows || has_unflushed_backlog)
                     && routes::websocket::redrive_terminal_pending_rows_to_live_resource(
@@ -7943,7 +7970,7 @@ async fn run_graceful_shutdown_drain(
                         &session.jid.to_bare(),
                     )
                     .await
-                        == routes::websocket::TerminalRedriveOutcome::Aborted;
+                    .blocks_promotion();
                 if row_release.ownership_unknown
                     || row_release.release_failed_known_rows
                     || released_redrive_aborted

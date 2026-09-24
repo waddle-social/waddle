@@ -2829,10 +2829,9 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         "remote occupant must have no copy while relay is blocked: {absent:?}"
     );
 
-    // The sender's own reflection for the blocked attempt is not part of the
-    // contract under test and its timing depends on how long the faulted relay
-    // holds the execution batch; drain it if it is already here, never wait.
-    let _ = sender
+    // The original reflection may already have completed before the relay
+    // stall. Its exact receipt prevents a retransmission from resending it.
+    let first_reflection = sender
         .recv_matching_within(Duration::from_millis(250), |frame| {
             frame.parse::<minidom::Element>().is_ok_and(|element| {
                 element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
@@ -2840,6 +2839,11 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
             })
         })
         .await;
+    assert!(
+        first_reflection.is_ok()
+            || matches!(&first_reflection, Err(error) if error.starts_with("Timeout waiting")),
+        "sender remains connected while the relay is blocked: {first_reflection:?}"
+    );
     // Restore reachability, then exercise a real same-origin retransmission.
     // The socket and durable receipts prove recovery; this does not assume
     // that the failed attempt permanently diverted an unchanged channel.
@@ -2847,9 +2851,11 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         .await
         .expect("B relay wakes");
     send_partial_fanout_with_origin(&mut sender, &room, "m2", pending).await;
-    receive_fanout_copy(&mut sender, &from, "m2", None, FANOUT_COPY_BUDGET)
-        .await
-        .expect("retransmission reflection proves the retry was processed");
+    if first_reflection.is_err() {
+        receive_fanout_copy(&mut sender, &from, "m2", None, FANOUT_COPY_BUDGET)
+            .await
+            .expect("the original reflection must arrive after relay recovery");
+    }
     receive_fanout_copy(&mut remote, &from, "m2", None, FANOUT_COPY_BUDGET)
         .await
         .expect("remaining remote copy arrives after relay recovery");

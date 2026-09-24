@@ -36,8 +36,8 @@ mod state;
 mod unacked_queue;
 
 pub use ingress_append::{
-    SmDrainedAppendTicket, SmDrainedIngressAppend, SmIngressAppendKey, SmKeyedAppendOutcome,
-    SmRelayedAppendObligation,
+    ArchiveDispatchPosition, SmDrainedAppendTicket, SmDrainedIngressAppend, SmIngressAppendKey,
+    SmKeyedAppendOutcome, SmRelayedAppendObligation,
 };
 pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngressReceiptKind};
 pub use session_registry::{

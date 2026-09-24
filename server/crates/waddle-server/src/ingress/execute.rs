@@ -15,7 +15,7 @@ use crate::{
     server::routes::interpret::{
         effects::{
             delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, Effect, EffectOutcome,
-            ExternalEffect, ImmediateSink, PlannedEffect, SettledCompletion,
+            ExternalEffect, ImmediateSink, PlannedEffect, SettledCompletion, SettledOutcome,
         },
         Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
     },
@@ -42,6 +42,7 @@ pub enum ExternalOutcome {
     Uncertain,
     /// Frames are prepared but their transport write and delivery receipts are not confirmed.
     AwaitingFrameDelivery,
+    AwaitingPredecessor,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -448,12 +449,29 @@ pub async fn execute_effects(
         }
         // Confirmed fanout and state mutations must not execute again.
         // Replaying historical activity could overwrite newer state.
-        let already_receipted = matches!(
+        let archived_reflection = !decision.archive_ids.is_empty()
+            && decision.external_receipts[index].iter().any(|receipt| {
+                receipt.kind.to_storage()
+                    == waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag()
+            })
+            && match effect {
+                ExternalEffect::Frame(stanza)
+                | ExternalEffect::Delivery(
+                    ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+                    | ExternalDeliveryEffect::QueueDetached { stanza, .. }
+                    | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
+                    | ExternalDeliveryEffect::HostOwnedCopy { stanza, .. },
+                ) => {
+                    matches!(stanza.as_ref(), Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat)
+                }
+                _ => false,
+            };
+        let already_receipted = (archived_reflection || matches!(
             effect,
             ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. } | ExternalDeliveryEffect::Carbons { .. })
                 | ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })
                 | ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { .. } | ExternalDirectEffect::NotificationActivity { .. })
-        ) && !decision.external_receipts[index].is_empty()
+        )) && !decision.external_receipts[index].is_empty()
             && decision.external_receipts[index]
                 .iter()
                 .all(|key| !decision.receipts_pending.contains(key));
@@ -475,6 +493,21 @@ pub async fn execute_effects(
             match tokio::time::timeout_at(
                 deadline,
                 async {
+                    let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
+                        Ok((crate::ingress_uow::DispatchReadiness::Ready, stream)) => stream,
+                        Ok((crate::ingress_uow::DispatchReadiness::Blocked(_), _)) => return EffectOutcome::Settled(SettledOutcome {
+                            refusal: None, persisted: Vec::new(), detached: None, completion: SettledCompletion::Deferred,
+                        }),
+                        Ok((crate::ingress_uow::DispatchReadiness::Completed, _)) => return EffectOutcome::Settled(SettledOutcome {
+                            refusal: None, persisted: Vec::new(), detached: None, completion: SettledCompletion::Complete,
+                        }),
+                        Err(error) => {
+                            tracing::warn!(%error, "archive dispatch ordering unavailable; leaving obligation pending");
+                            return EffectOutcome::Settled(SettledOutcome {
+                                refusal: None, persisted: Vec::new(), detached: None, completion: SettledCompletion::Uncertain,
+                            });
+                        }
+                    };
                     if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, effect, deps, deadline).await {
                         result
                     } else {
@@ -493,6 +526,18 @@ pub async fn execute_effects(
                         // unrelated effects (including MUC) get no append context.
                         let mut effect_deps = deps.clone();
                         effect_deps.ingress_append_context = None;
+                        if let Some(message_key) = decision.message_key {
+                            match carbon_progress::append_context(uow, message_key, effect, &decision.external_receipts[index]).await {
+                                Ok(mut context) => {
+                                    if let Some(context) = context.as_mut() { context.dispatch_stream = dispatch_stream.clone(); }
+                                    effect_deps.ingress_append_context = context;
+                                },
+                                Err(error) => {
+                                    tracing::warn!(%error, "carbon append authority unavailable; leaving obligation pending");
+                                    return EffectOutcome::Unavailable;
+                                }
+                            }
+                        }
                         if let ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) = effect {
                             if let Some(message_key) = decision.message_key {
                                 if let Some(progress) = decision.route_progress.iter().find(|progress| {
@@ -500,10 +545,19 @@ pub async fn execute_effects(
                                         && progress.fanout.contains(target)
                                         && decision.external_receipts[index].contains(&progress.receipt)
                                 }) {
+                                    let archive_positions = match super::archive_dispatch::positions(uow, message_key, &progress.receipt).await {
+                                        Ok(positions) => positions,
+                                        Err(error) => {
+                                            tracing::warn!(%error, "relay archive positions unavailable; preserving delivery");
+                                            return EffectOutcome::Unavailable;
+                                        }
+                                    };
                                     effect_deps.ingress_append_context = Some(SmIngressAppendContext {
                                         message_key,
                                         receipt: progress.receipt.clone(),
                                         received_at: progress.received_at,
+                                        archive_positions,
+                                        dispatch_stream: dispatch_stream.clone(),
                                     });
                                 }
                             }
@@ -892,6 +946,7 @@ fn classify_outcome(
                 SettledCompletion::Complete => ExternalOutcome::Done,
                 SettledCompletion::Incomplete => ExternalOutcome::Failed,
                 SettledCompletion::Uncertain => ExternalOutcome::Uncertain,
+                SettledCompletion::Deferred => ExternalOutcome::AwaitingPredecessor,
             }
         }
         #[cfg(feature = "clustering")]
@@ -977,7 +1032,6 @@ fn classify_outcome(
                 }
                 FullJidDeliveryOutcome::Unavailable => ExternalOutcome::Failed,
                 FullJidDeliveryOutcome::Dropped => ExternalOutcome::Uncertain,
-                #[cfg(feature = "clustering")]
                 FullJidDeliveryOutcome::MaybeCommitted => ExternalOutcome::Uncertain,
             }
         }

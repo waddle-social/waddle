@@ -64,6 +64,8 @@ pub enum SettledCompletion {
     Complete,
     Incomplete,
     Uncertain,
+    /// A committed predecessor can still make progress independently.
+    Deferred,
 }
 
 impl super::PlannedEffect {

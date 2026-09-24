@@ -293,8 +293,8 @@ fn plan_offline_flush(
 /// drain under load without ever wedging the producer.
 ///
 /// The CASes gating both actions were already consumed on the connection
-/// task; only the pushing is deferred here. Flush precedes subscribe
-/// delivery, preserving the pre-#1220 ordering.
+/// task; only the pushing is deferred here. Subscription requests are sent
+/// before the potentially long-running ordered archive drain.
 fn spawn_session_recovery_delivery(
     state: &WebSocketState,
     resource: &FullJid,
@@ -306,6 +306,7 @@ fn spawn_session_recovery_delivery(
         return;
     }
     let storage = std::sync::Arc::clone(&state.deps.protocol.pending_delivery_storage);
+    let ingress = std::sync::Arc::clone(&state.deps.protocol.ingress);
     let registry = std::sync::Arc::clone(&state.deps.protocol.connection_registry);
     let blocking_storage = std::sync::Arc::clone(&state.deps.protocol.blocking_storage);
     let mam_storage = std::sync::Arc::clone(&state.deps.protocol.mam_storage);
@@ -330,10 +331,14 @@ fn spawn_session_recovery_delivery(
             // redundant and a duplicate-delivery risk). The rows stay unclaimed
             // for the replacement. This narrows the window the off-task spawn
             // opened; a replacement racing in mid-flush is still janitor-healed.
+            // Subscription delivery must not wait for archive predecessor acks.
+            for stanza in subscribe_stanzas {
+                let _ = registry.send_to_if_owner(&resource, &owner, stanza).await;
+            }
             let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
             if let Some(plan) = flush_plan.filter(|_| still_owner) {
                 let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
-                let outcome = crate::pending_delivery::flush_for_resource(
+                let outcome = crate::pending_delivery::flush_for_resource_with_retry(
                     &storage,
                     &registry,
                     &recipient,
@@ -351,6 +356,7 @@ fn spawn_session_recovery_delivery(
                         // SM-claimed rows (issue #1220 review).
                         owner: Some(&owner),
                         archive_resolver: &resolver,
+                        dispatch_gate: Some(ingress.as_ref()),
                     },
                 )
                 .await;
@@ -364,7 +370,7 @@ fn spawn_session_recovery_delivery(
                         outcome.pushed,
                     ));
                 }
-                if outcome.deferred_transient > 0 {
+                if outcome.deferred_transient > 0 && outcome.deferred_ordering == 0 {
                     // Issue #1122 follow-up (R2): the flush hit a transient MAM
                     // failure and released the failing row plus the rest of the
                     // batch. `claim_offline_flush` is a once-per-connection CAS,
@@ -387,15 +393,6 @@ fn spawn_session_recovery_delivery(
                         "XEP-0160 pending_delivery flush completed"
                     );
                 }
-            }
-            // RFC 6121 §3.1.3 queued inbound subscription requests, delivered on
-            // this resource's initial available presence. Owner-gated (Qodo
-            // review on PR #1234): `pending_subscription_stanzas` is
-            // non-draining, so if this session was superseded the
-            // replacement's own once-per-session flush delivers them —
-            // rerouting them to the replacement here would double-deliver.
-            for stanza in subscribe_stanzas {
-                let _ = registry.send_to_if_owner(&resource, &owner, stanza).await;
             }
         }
         .instrument(flush_span),

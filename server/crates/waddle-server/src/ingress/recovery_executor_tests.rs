@@ -1764,15 +1764,17 @@ async fn unrecoverable_only_rows_do_not_enter_the_recovery_scan(f: IngressFixtur
     let sm = persistent_sm(&f).await;
     let state = state_for(&f, sm).await;
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
-    let mut submission = f.submission(Some("carbons-only"), "unrecoverable carbon");
-    submission.plan.intents.push(IngressEffectIntent::Carbons {
-        carbon_recipients: vec!["romeo@example.com/laptop".parse().expect("carbon")],
-        excluded_source: submission.sender.clone(),
-        kind: waddle_xmpp::protocol::CarbonKind::Sent,
-    });
+    let mut submission = f.submission(Some("unsupported-pm"), "unrecoverable occupant PM");
+    submission
+        .plan
+        .intents
+        .push(IngressEffectIntent::RouteOccupantPm {
+            recipient: "juliet@example.com/phone".parse().expect("recipient"),
+            sender: submission.sender.clone(),
+        });
     let key = commit_submission(&f.uow, &submission, 5)
         .await
-        .expect("carbons commit")
+        .expect("unsupported PM commit")
         .message_key
         .expect("key");
     let cursor = MaintenanceCursor::default();
@@ -1871,15 +1873,18 @@ async fn unsupported_kind_backlog_does_not_starve_recoverable_rows(f: IngressFix
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     let mut keys = Vec::new();
     for index in 0..70 {
-        let mut submission = f.submission(Some(&format!("carbons-{index}")), "carbon backlog");
-        submission.plan.intents.push(IngressEffectIntent::Carbons {
-            carbon_recipients: vec!["romeo@example.com/laptop".parse().expect("carbon")],
-            excluded_source: submission.sender.clone(),
-            kind: waddle_xmpp::protocol::CarbonKind::Sent,
-        });
+        let mut submission =
+            f.submission(Some(&format!("occupant-pm-{index}")), "occupant PM backlog");
+        submission
+            .plan
+            .intents
+            .push(IngressEffectIntent::RouteOccupantPm {
+                recipient: "juliet@example.com/phone".parse().expect("recipient"),
+                sender: submission.sender.clone(),
+            });
         let key = commit_submission(&f.uow, &submission, 5)
             .await
-            .expect("carbons commit")
+            .expect("unsupported PM commit")
             .message_key
             .expect("key");
         backdate_created(&f, key, 200 - index).await;
@@ -2326,7 +2331,24 @@ async fn groupchat_inbox_push_expires_without_replaying_stale_projection(fixture
             "MUC fanout is receipted independently of unrelated siblings"
         );
         tx.commit().await.expect("read inbox");
-        assert!(sender_rx.try_recv().is_err());
+        if iteration == 0 {
+            let Stanza::Message(reflection) = sender_rx
+                .try_recv()
+                .expect("recover original reflection")
+                .stanza
+            else {
+                panic!("room reflection");
+            };
+            assert_eq!(
+                reflection.type_,
+                xmpp_parsers::message::MessageType::Groupchat
+            );
+            assert_eq!(reflection.bodies, envelope.message().bodies);
+        }
+        assert!(
+            sender_rx.try_recv().is_err(),
+            "no repeated reflection or stale inbox push"
+        );
     }
     assert_eq!(
         blocking.0.load(Ordering::SeqCst),
@@ -2526,11 +2548,17 @@ fn recovery_report_requires_proven_execution_and_persistence() {
         report.outcomes = vec![(effect.clone(), outcome)];
         assert_eq!(classify_report(&report), AttemptClassification::Evaluable);
     }
-    report.outcomes = vec![(effect, ExternalOutcome::Uncertain)];
-    assert_eq!(
-        classify_report(&report),
-        AttemptClassification::Inconclusive
-    );
+    for outcome in [
+        ExternalOutcome::Uncertain,
+        ExternalOutcome::AwaitingPredecessor,
+    ] {
+        report.outcomes = vec![(effect.clone(), outcome)];
+        assert_eq!(
+            classify_report(&report),
+            AttemptClassification::Inconclusive,
+            "a predecessor wait must not park its successor on the stalled-row cooldown"
+        );
+    }
     report.outcomes.clear();
     report.terminalization_failure = Some(ExecutionPersistenceFailure::BudgetExhausted);
     assert_eq!(

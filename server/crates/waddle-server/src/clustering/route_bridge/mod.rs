@@ -77,6 +77,7 @@ const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 mod delivery;
 mod presence;
 mod reassert;
+mod recipient_inventory;
 mod registration;
 mod types;
 mod validation;

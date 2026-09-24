@@ -94,6 +94,8 @@ async fn committed_obligation(socket: &DetachingSocket) -> (Stanza, SmRelayedApp
     let mut message = submission.plan.sanitized_message.clone();
     message.to = Some(socket.recipient.clone().into());
     let obligation = SmRelayedAppendObligation {
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
         key: SmIngressAppendKey {
             message_key: decision.message_key.expect("canonical key"),
             kind: SmIngressReceiptKind::from_storage(receipt.kind.to_storage()),

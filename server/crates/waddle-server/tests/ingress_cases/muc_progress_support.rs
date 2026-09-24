@@ -690,3 +690,64 @@ async fn maintenance_case(fixture: IngressFixture, compare_occupant: bool) {
     drop(sm);
     fixture.close().await;
 }
+
+/// XEP-0045 §7.4 and XEP-0313: a confirmed archived reflection must not be
+/// appended again behind newer room traffic when the sender retransmits.
+pub async fn archived_reflection_replay(fixture: IngressFixture) {
+    use waddle_server::ingress::effects::{direct::DurableDirectEffect, DurableEffect};
+    use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
+    let mut submission = make_submission(&fixture, false);
+    let source = submission
+        .plan
+        .room_canonical_message
+        .as_ref()
+        .expect("source");
+    let accepted_at = chrono::Utc::now();
+    let mut archived =
+        ArchivedMessage::for_test(source.from.clone().expect("room sender"), room().into());
+    archived.id = stamp().id.clone();
+    archived.timestamp = accepted_at;
+    archived.message_type = MessageType::Groupchat;
+    archived.body = source.bodies.values().next().cloned();
+    archived.stanza_id = Some(stamp());
+    submission
+        .plan
+        .intents
+        .push(IngressEffectIntent::ArchiveAuthoritative {
+            archive: room(),
+            stanza_id: stamp(),
+            by: room(),
+            archived_at: accepted_at,
+            ordinal: None,
+        });
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
+            DurableDirectEffect::ArchiveDirect {
+                archive: room(),
+                message: Box::new(archived),
+                archive_expectation: ArchiveExpectation::Fresh,
+            },
+        ))));
+    let connections = ConnectionRegistry::new();
+    let sm = detached::registry(&fixture).await;
+    let [a, b, _] = detached::resources();
+    for resource in [&a, &b, &submission.sender] {
+        detached::attach(&sm, resource).await;
+    }
+    let first = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit");
+    detached::execute(&fixture, &first, &connections, &sm).await;
+    let reflection = wire(&sm, &submission.sender).await;
+    assert_eq!(reflection.from, source.from);
+    assert_eq!(reflection.to, Some(submission.sender.clone().into()));
+    let retry = detached::retry_decision(&fixture, &submission).await;
+    detached::execute(&fixture, &retry, &connections, &sm).await;
+    // Also execute the stale pre-completion decision, as a delayed concurrent attempt.
+    detached::execute(&fixture, &first, &connections, &sm).await;
+    assert_eq!(wire(&sm, &submission.sender).await, reflection);
+    assert_eq!(fixture.count("mam_messages").await, 1);
+    fixture.close().await;
+}

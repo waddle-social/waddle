@@ -2,7 +2,10 @@
 use crate::server::routes::interpret::DeliveryExecutionContext;
 pub(crate) mod append_authority;
 mod archive_authority;
+mod archive_dispatch;
 mod capture;
+mod pending_dispatch;
+mod reflection_dispatch;
 #[cfg(test)]
 pub(crate) use capture::TEST_CAPTURE_LIMIT;
 pub use capture::{IngressEffectCapture, IngressEffectCaptureSnapshot};

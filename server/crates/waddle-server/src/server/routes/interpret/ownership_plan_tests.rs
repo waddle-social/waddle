@@ -132,6 +132,12 @@ async fn ownership_failure(fixture: IngressFixture) {
         inbound_sequence: 1,
         handoff: None,
     });
+    // This test isolates route ownership; carbon inventory has its own failure tests.
+    submission
+        .plan
+        .sanitized_message
+        .payloads
+        .push(minidom::Element::builder("private", waddle_xmpp_core::carbons::CARBONS_NS).build());
     let message = submission.plan.sanitized_message.clone();
     let mut dispatcher = StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
@@ -252,6 +258,9 @@ async fn ingress_remote_full_jid_plan_preserves_direct_receipt_identity() {
     let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
     message.from = Some(sender.clone().into());
     message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .payloads
+        .push(minidom::Element::builder("private", waddle_xmpp_core::carbons::CARBONS_NS).build());
     message
         .bodies
         .insert(Default::default(), "remote delivery".into());

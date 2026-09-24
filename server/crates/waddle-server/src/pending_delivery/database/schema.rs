@@ -33,7 +33,9 @@ pub(super) async fn initialize(
             flushed_in_session TEXT,
             outbound_sequence INTEGER,
             notification_outboxed_at_ms {bigint},
-            claimed_at_ms {bigint}
+            claimed_at_ms {bigint},
+            claim_token TEXT,
+            claim_offered INTEGER NOT NULL DEFAULT 0
         )
         "#
             ),
@@ -52,6 +54,13 @@ pub(super) async fn initialize(
     // `ALTER COLUMN ... TYPE BIGINT` that still takes ACCESS EXCLUSIVE
     // even when the column is already BIGINT.
     if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
+        // GC monitoring checks retained row identities without reading content.
+        storage
+            .execute(
+                "GRANT SELECT (row_id) ON pending_delivery TO pg_monitor",
+                (),
+            )
+            .await?;
         widen_postgres_timestamp_millis_column_to_bigint(
             storage,
             "pending_delivery",
@@ -127,6 +136,31 @@ pub(super) async fn initialize(
         if msg.contains("duplicate column") || msg.contains("already exists") {
             debug!("pending_delivery.claimed_at_ms column already present");
         } else {
+            return Err(error);
+        }
+    }
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => {
+            "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS claim_token TEXT"
+        }
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery ADD COLUMN claim_token TEXT",
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let message = error.to_string().to_lowercase();
+        if !message.contains("duplicate column") && !message.contains("already exists") {
+            return Err(error);
+        }
+    }
+    // Pre-reservation claims have unknown offer status. Preserve them rather
+    // than infer that an already queued, unsequenced row was never offered.
+    // Every new claim explicitly initializes this reservation marker to zero.
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS claim_offered INTEGER NOT NULL DEFAULT 1",
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery ADD COLUMN claim_offered INTEGER NOT NULL DEFAULT 1",
+    };
+    if let Err(error) = storage.execute(alter_sql, ()).await {
+        let message = error.to_string().to_lowercase();
+        if !message.contains("duplicate column") && !message.contains("already exists") {
             return Err(error);
         }
     }

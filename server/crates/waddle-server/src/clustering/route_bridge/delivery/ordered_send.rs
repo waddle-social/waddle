@@ -53,6 +53,11 @@ impl OrderedRelayDeliveryBridge {
             recipient,
             stanza,
             ingress_append,
+        }
+        | OrderedRelayPayload::ProcessedDirectMessage {
+            recipient,
+            stanza,
+            ingress_append,
         } = &mut seed.payload
         {
             *ingress_append = recipient
