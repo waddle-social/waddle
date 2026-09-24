@@ -186,6 +186,28 @@ extension SessionCoordinator {
         }
     }
 
+    /// Correlate explicit errors without trusting their echoed body or metadata.
+    func messageRejected(_ clientID: String, from: JID, to: JID?) {
+        guard to == nil || to?.bare == account.jid,
+              let message = sentOutbound[clientID]
+                ?? outboundQueue.first(where: { $0.clientID == clientID })
+                ?? recentlyAcknowledgedOutbound[clientID]
+                ?? failedOutbound[clientID]
+        else { return }
+        let recipient = message.conversation.jid
+        // Only a service domain can report failures for another recipient.
+        // Our bare account is a peer identity, including when the core uses
+        // it as the RFC 6120 default for a missing `from`.
+        let serviceError = from.resource == nil && from.bare.localpart == nil
+            && (from.bare.domain == account.jid.domain || from.bare.domain == recipient.domain)
+        // Native conversations target bare accounts or bare rooms. A room
+        // occupant is a distinct entity and cannot reject a groupchat send.
+        let recipientError = from.bare == recipient
+            && (!message.conversation.isRoom || from.resource == nil)
+        guard serviceError || recipientError else { return }
+        sentMessageFailed(clientID, bounced: true)
+    }
+
     /// The written message failed after all (XEP-0198 or an error bounce):
     /// make it retryable.
     func sentMessageFailed(_ clientID: String, bounced: Bool) {

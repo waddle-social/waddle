@@ -12,8 +12,8 @@ impl XmppRuntime {
     /// IQ result and error stanzas are returned as [`ClientEvent::IqResult`] so the
     /// driver can route them to its IQ correlation map without broadcasting them on
     /// the public event bus.  Message stanzas are dispatched to the typed protocol
-    /// handlers in priority order: MAM results, PEP events, calls, then general
-    /// messaging. Unrecognised stanzas fall through to
+    /// handlers in priority order: message errors, trusted carbons, inbox/MAM
+    /// results, PEP events, calls, then general messaging. Unrecognised stanzas fall through to
     /// [`ClientEvent::UnhandledStanza`].
     pub fn handle_app_stanza(&mut self, element: &minidom::Element) -> Vec<ClientEvent> {
         use crate::{caps, inbox, mam, messaging, pep};
@@ -39,28 +39,10 @@ impl XmppRuntime {
         }
 
         if element.name() == "message" {
-            // XEP-0430 entries take priority over the MAM parser: query
-            // responses may embed a MAM `<result/>` (when
-            // `messages='true'`), while Waddle live pushes wrap the entry
-            // in a private `<push/>` marker. Either way, the inbox entry
-            // is the state transition the driver must see first.
-            if let Some(entry) = inbox::parse_inbox_stream_message(element) {
-                return vec![ClientEvent::InboxStreamEntry(entry)];
+            if type_attr == "error" {
+                return self.message_rejection_events(element, true);
             }
-
-            if let Some(archived) = mam::parse_mam_result(element) {
-                return vec![ClientEvent::MamResult(Box::new(archived))];
-            }
-
-            if let Some(pep_item) = pep::parse(element) {
-                return vec![ClientEvent::PepEvent(pep_item)];
-            }
-
-            if let Some(call_event) = parse_carbon_call_event(element, self.account_bare_jid()) {
-                return vec![ClientEvent::Call(Box::new(call_event))];
-            }
-
-            // XEP-0280: unwrap a normal (non-call) carbon copy so the
+            // XEP-0280: unwrap a trusted carbon copy so the
             // inner message flows through the regular messaging pipeline
             // tagged with its direction (#1243). The §11 forgery rule is
             // applied first: any carbon-shaped stanza whose wrapping
@@ -73,6 +55,19 @@ impl XmppRuntime {
                     inner,
                     forwarded_timestamp,
                 } => {
+                    if inner.attr("type") == Some("error") {
+                        // A sent carbon is an error our other resource sent,
+                        // not a rejection of one of our outbound messages.
+                        return match direction {
+                            messaging::CarbonDirection::Received => {
+                                self.message_rejection_events(&inner, false)
+                            }
+                            messaging::CarbonDirection::Sent => Vec::new(),
+                        };
+                    }
+                    if let Some(call_event) = messaging::parse_call_event(&inner) {
+                        return vec![ClientEvent::Call(Box::new(call_event))];
+                    }
                     if let Some(crate::messaging::MessagingEvent::Message(mut message)) =
                         messaging::parse(&inner)
                     {
@@ -90,6 +85,31 @@ impl XmppRuntime {
                 }
                 CarbonOutcome::Forged => return Vec::new(),
                 CarbonOutcome::NotCarbon => {}
+            }
+
+            // XEP-0430 entries take priority over the MAM parser: query
+            // responses may embed a MAM `<result/>` (when
+            // `messages='true'`), while Waddle live pushes wrap the entry
+            // in a private `<push/>` marker. Either way, the inbox entry
+            // is the state transition the driver must see first.
+            if let Some(entry) = inbox::parse_inbox_stream_message(element) {
+                return vec![ClientEvent::InboxStreamEntry(entry)];
+            }
+
+            if element
+                .get_child("result", waddle_xmpp_core::mam::MAM_NS)
+                .is_some()
+            {
+                // A malformed result or archived error must not fall through
+                // as a live message (including payloads on the wrapper).
+                return mam::parse_mam_result(element)
+                    .map(|archived| ClientEvent::MamResult(Box::new(archived)))
+                    .into_iter()
+                    .collect();
+            }
+
+            if let Some(pep_item) = pep::parse(element) {
+                return vec![ClientEvent::PepEvent(pep_item)];
             }
         }
 
@@ -143,6 +163,17 @@ fn pubsub_notification_events(event: &crate::messaging::MessagingEvent) -> Vec<C
 }
 
 impl XmppRuntime {
+    fn message_rejection_events(&mut self, element: &Element, direct: bool) -> Vec<ClientEvent> {
+        let account = self.account_bare_jid().clone();
+        let Some(rejection) =
+            crate::messaging::MessageRejection::parse(element, direct.then_some(&account))
+        else {
+            return Vec::new();
+        };
+        self.sm_state.reject_message(&rejection, &account);
+        vec![ClientEvent::MessageRejected(Box::new(rejection))]
+    }
+
     fn account_bare_jid(&self) -> &jid::BareJid {
         match &self.config.auth {
             AuthenticationConfig::OAuthBearer(config) => &config.account,
@@ -229,37 +260,6 @@ fn unwrap_carbon(element: &Element, account: &jid::BareJid) -> CarbonOutcome {
         inner: inner.clone(),
         forwarded_timestamp,
     }
-}
-
-fn parse_carbon_call_event(
-    element: &Element,
-    account: &jid::BareJid,
-) -> Option<crate::messaging::InboundCallEvent> {
-    if element.name() != "message" {
-        return None;
-    }
-    if !carbon_envelope_from_own_bare(element, account) {
-        return None;
-    }
-
-    for carbon in element.children().filter(|child| {
-        child.ns() == NS_CARBONS && (child.name() == "sent" || child.name() == "received")
-    }) {
-        let Some(forwarded) = carbon.get_child("forwarded", NS_FORWARD) else {
-            continue;
-        };
-        let Some(inner_message) = forwarded
-            .children()
-            .find(|child| child.name() == "message" && child.ns() == "jabber:client")
-        else {
-            continue;
-        };
-        if let Some(call_event) = crate::messaging::parse_call_event(inner_message) {
-            return Some(call_event);
-        }
-    }
-
-    None
 }
 
 fn jingle_iq_set_ack(inbound: &Element) -> Option<Element> {

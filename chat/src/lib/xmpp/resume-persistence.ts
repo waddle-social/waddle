@@ -72,7 +72,7 @@ export type PersistedSmResumeState = {
   inboundH: number;
   outboundH: number;
   maxResumeSeconds?: number;
-  unhandledOutboundEntries?: Array<{ xml: string; sentAt: string }>;
+  unhandledOutboundEntries?: Array<{ xml: string; sentAt: string; rejected: boolean }>;
   resource?: string;
 };
 
@@ -1430,11 +1430,11 @@ function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
   );
 }
 
-function isPersistedUnhandledOutboundEntries(value: unknown): value is Array<{ xml: string; sentAt: string }> {
+function isPersistedUnhandledOutboundEntries(value: unknown): value is Array<{ xml: string; sentAt: string; rejected: boolean }> {
   return Array.isArray(value) && value.every((entry) => {
     if (!entry || typeof entry !== "object") return false;
     const candidate = entry as Record<string, unknown>;
-    return typeof candidate.xml === "string" && typeof candidate.sentAt === "string";
+    return typeof candidate.xml === "string" && typeof candidate.sentAt === "string" && typeof candidate.rejected === "boolean";
   });
 }
 type ResumeStorageKind =

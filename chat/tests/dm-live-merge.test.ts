@@ -537,3 +537,22 @@ describe("dm call-anchor dedup via the live-merge path", () => {
     expect(h.messages.value.filter((m) => m.callThread)).toHaveLength(1);
   });
 });
+
+describe("rejected self sends", () => {
+  test("a late sent carbon cannot clear a rejection", () => {
+    const h = harness();
+    h.messages.value = [{ id: "rejected", author: "alice", authorJid: session.jid, body: "hello", createdAt: "2026-01-01T00:00:00Z", isSelf: true, deliveryStatus: "rejected" }];
+    h.liveMerge.mergeLiveMessage({ ...h.messages.value[0]!, deliveryStatus: "delivered", wireIds: ["rejected"] });
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.deliveryStatus).toBe("rejected");
+  });
+  test("a new send with the same body cannot replace a rejected send", () => {
+    const h = harness();
+    const failed: TimelineMessage = { id: "rejected", author: "alice", authorJid: session.jid, body: "hello", createdAt: "2026-01-01T00:00:00Z", isSelf: true, deliveryStatus: "rejected" };
+    h.messages.value = [failed];
+    h.pendingEchoClientIds.add("rejected");
+    h.liveMerge.mergeLiveMessage({ ...failed, id: "new-send", deliveryStatus: "delivered" });
+    expect(h.messages.value).toHaveLength(2);
+    expect(h.messages.value.find((message) => message.id === "rejected")?.deliveryStatus).toBe("rejected");
+  });
+});

@@ -118,9 +118,7 @@ struct ReviewRegressionTests {
         let (coordinator, _) = online()
         let id = await coordinator.send(Draft(text: "hi"), in: roomConversation)!
         coordinator.handle(.deliveryAcked(stanzaID: id))
-        var bounce = WireMessage(type: .error, from: JID(bare: room, resource: nil), to: nil, identity: MessageIdentity(messageID: id))
-        bounce.body = "hi"
-        coordinator.route(bounce)
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid(room.description), to: nil))
         #expect(coordinator.deliveries.state(of: id) == .failed)
     }
 

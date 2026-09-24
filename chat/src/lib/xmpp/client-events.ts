@@ -133,7 +133,7 @@ export type ClientEvents = {
   presence: [presence: RoomPresence];
   lastSeen: [nick: string, timestamp: number];
   messageAck: [messageId: string];
-  messageDeliveryFailure: [messageId: string];
+  messageDeliveryFailure: [messageId: string, reason?: "rejected"];
   queuedMessageStatus: [messageId: string, status: "queued" | "sending"];
   sessionLifecycle: [event: SessionLifecycleEvent];
   catchupFailure: [failure: CatchupConversationFailure];

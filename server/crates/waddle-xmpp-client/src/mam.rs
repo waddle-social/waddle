@@ -603,7 +603,7 @@ pub fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
 ///
 /// Returns `None` if the element is not a MAM result message.
 pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
-    if element.name() != "message" {
+    if element.name() != "message" || element.attr("type") == Some("error") {
         return None;
     }
 
@@ -624,6 +624,12 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         .children()
         .find(|c| c.name() == "message")?
         .clone();
+
+    // Archived errors are historical protocol outcomes, not incoming content
+    // or authority to change a live outbound send.
+    if inner.attr("type") == Some("error") {
+        return None;
+    }
 
     let from = inner.attr("from").map(str::to_string);
     let to = inner.attr("to").map(str::to_string);

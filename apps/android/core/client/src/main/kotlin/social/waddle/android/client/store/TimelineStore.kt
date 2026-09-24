@@ -74,6 +74,21 @@ class TimelineStore(
     fun timeline(conversationJid: String): StateFlow<List<TimelineItem>> =
         synchronized(lock) { flowFor(bareJid(conversationJid)) }.asStateFlow()
 
+    /** Called only after the manager correlates the error with its outbound send. */
+    fun rejectOutbound(conversationJid: String, stanzaId: String) {
+        synchronized(lock) {
+            val conversation = bareJid(conversationJid)
+            val list = entries[conversation] ?: return
+            for (index in list.indices) {
+                val entry = list[index]
+                if (entry.item.isMine && stanzaId in entry.item.identityIds) {
+                    list[index] = entry.copy(item = entry.item.copy(rejected = true))
+                }
+            }
+            publish(conversation, list)
+        }
+    }
+
     /**
      * Returns true only when the message was a genuinely NEW timeline
      * row — XEP-0198 replays, live/archive twins, and mutation messages
@@ -210,7 +225,10 @@ class TimelineStore(
                 // replay is dropped. Applied mutations live on the entry
                 // and survive the swap.
                 if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
-                    val merged = item.copy(timestamp = item.timestamp ?: existing.item.timestamp)
+                    val merged = item.copy(
+                        timestamp = item.timestamp ?: existing.item.timestamp,
+                        rejected = existing.item.rejected,
+                    )
                     // The sort key must follow the adopted timestamp or
                     // the row keeps its stale placement forever.
                     list[existingIndex] = existing.copy(

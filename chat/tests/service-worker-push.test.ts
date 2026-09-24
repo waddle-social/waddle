@@ -155,7 +155,7 @@ describe("service worker push handling", () => {
 
     const [, options] = worker.showNotification.mock.calls[0] ?? [];
     expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/dm/jane_doe",
+      "/dm/jane_doe%40example.com",
     );
   });
 
@@ -200,8 +200,19 @@ describe("service worker push handling", () => {
 
     const [, options] = worker.showNotification.mock.calls[0] ?? [];
     expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/dm/alice",
+      "/dm/alice%40muc.example.com",
     );
+  });
+
+  test("a DM push keeps an external account or full occupant address", async () => {
+    for (const peer of ["chat@other.example", "chat@muc.example.com/Nick/phone"]) {
+      const worker = loadServiceWorker();
+      const event = makePushEvent({ json: () => ({ v: 1, class: "dm", conversation: peer, item: "m1", unread: 1 }) });
+      worker.dispatch("push", event);
+      await event.done();
+      const [, options] = worker.showNotification.mock.calls[0] ?? [];
+      expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(`/dm/${encodeURIComponent(peer)}${peer.includes("/") ? "?scope=occupant" : ""}`);
+    }
   });
 
   test("notify_all (group-class) routes to /r/{channelId}", async () => {
@@ -350,7 +361,7 @@ describe("service worker push handling", () => {
     );
   });
 
-  test("v=1 envelope: dm class routes to /dm/{username}", async () => {
+  test("v=1 envelope: dm class routes to /dm/{peerJid}", async () => {
     // PR-D3: server emits flat `{ v: 1, class, conversation, thread?, item, unread? }`
     // — the SW must parse this shape and route the same as the legacy
     // nested-context shape.
@@ -371,7 +382,7 @@ describe("service worker push handling", () => {
     const [title, options] = worker.showNotification.mock.calls[0] ?? [];
     expect(title).toBe("3 new messages");
     expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/dm/alice",
+      "/dm/alice%40example.com",
     );
   });
 

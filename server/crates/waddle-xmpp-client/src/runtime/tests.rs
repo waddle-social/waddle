@@ -2124,6 +2124,87 @@ fn runtime_retries_only_unhandled_stanzas_after_failed_resume_fresh_enable() {
 }
 
 #[test]
+fn runtime_rejection_excludes_outbound_from_failed_resume_retry() {
+    let now = Utc::now();
+    let entries = ["rejected", "retry"].map(|id| {
+        UnhandledOutboundEntry::try_new(
+            Element::builder("message", crate::NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    "chat@example.com",
+                )
+                .build(),
+            now,
+        )
+        .unwrap()
+    });
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(
+        SmResumeState::from_unhandled_outbound_entries(StreamId::new("old-sm-id"), 0, 2, entries)
+            .unwrap(),
+    );
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    let rejection: Element = "<message xmlns='jabber:client' type='error' id='rejected' from='chat@example.com'><error type='cancel'><service-unavailable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></message>".parse().unwrap();
+    runtime.handle_app_stanza(&rejection);
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let failed = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    let bind_id = failed
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let bound = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = bound
+        .into_iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" => Some(element),
+            _ => None,
+        })
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+    let fresh = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    let retries: Vec<_> = fresh
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "message" => element.attr("id"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries, vec!["retry"]);
+}
+
+#[test]
 fn runtime_preserves_failed_resume_snapshot_until_fallback_retry_is_sent() {
     let resume_state = resume_state_with_sent_messages(["retry-after-drop"]);
     let mut config = config();

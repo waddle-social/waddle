@@ -5,7 +5,7 @@ use crate::bootstrap::{
 };
 use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
-use crate::messaging::{InboundCallEvent, MessagingEvent};
+use crate::messaging::{InboundCallEvent, MessageRejection, MessagingEvent};
 use crate::pep::PepItem;
 use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
@@ -55,6 +55,8 @@ pub enum ClientEvent {
     PubsubAttachmentSummary(PubsubAttachmentSummaryUpdate),
     /// Transport-level delivery status for outbound message stanzas.
     MessageDelivery(MessageDeliveryEvent),
+    /// A parsed message error. Echoed bodies and extensions are never dispatched.
+    MessageRejected(Box<MessageRejection>),
     /// XEP-0198 resume snapshot changed. Broadcast by the native driver
     /// whenever the runtime's resumable state differs from the last
     /// published snapshot — the same hook points the wasm driver uses

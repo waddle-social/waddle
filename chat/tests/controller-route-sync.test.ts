@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { computed, effectScope, nextTick, ref } from "vue";
+import { computed, effectScope, ref } from "vue";
 import { useChatShellState } from "../src/shell/state";
 import {
   applyMatchToShellState,
@@ -8,25 +8,10 @@ import {
 import type { ActiveRightPanel } from "../src/shell/controllers/use-thread-panels";
 import type { ExtensionRouteKey } from "../src/shell/controllers/use-extension-routes";
 import type { RouteMatch } from "../src/router";
-import type { WaddleSession } from "../src/lib/server-auth";
 import type { useWaddleDirectory } from "../src/waddles/directory";
 import type { useChannelMessages } from "../src/channels/messages";
 import type { useDirectMessages } from "../src/dms/messages";
 import type { useDirectMessageConversations } from "../src/dms/conversations";
-
-function session(): WaddleSession {
-  return {
-    username: "alice",
-    jid: "alice@example.com",
-    session_id: "s1",
-    user_id: "u1",
-    avatar_url: null,
-    xmpp_localpart: "alice",
-    xmpp_websocket_url: "wss://example.com/xmpp",
-    is_expired: false,
-    expires_at: null,
-  } as WaddleSession;
-}
 
 describe("applyMatchToShellState", () => {
   test("maps every top-level route id onto the page ladder", () => {
@@ -48,7 +33,7 @@ describe("applyMatchToShellState", () => {
     const ui = useChatShellState();
     applyMatchToShellState(ui, {
       id: "dm",
-      params: { username: "bob" },
+      params: { peerJid: "bob@example.com" },
       search: { thread: ["t1"], pinned: true },
     } as RouteMatch);
 
@@ -144,7 +129,6 @@ function makeHarness(overrides: {
   const routeSync = scope.run(() =>
     useRouteSync({
       ui,
-      session: computed(() => session()),
       waddles,
       messaging,
       dmMessaging,
@@ -261,11 +245,11 @@ describe("useRouteSync applyRouteTarget", () => {
     h.scope.stop();
   });
 
-  test("dm route opens the peer on the session domain and restores panels", async () => {
+  test("dm route opens the exact peer and restores panels", async () => {
     const h = makeHarness();
     await h.routeSync.applyRouteTarget({
       id: "dm",
-      params: { username: "@bob" },
+      params: { peerJid: "bob@example.com" },
       search: { thread: ["t1", "t2", "t1"], pinned: false },
     } as RouteMatch, h.routeSync.beginRouteRequest());
 
@@ -277,160 +261,30 @@ describe("useRouteSync applyRouteTarget", () => {
     h.scope.stop();
   });
 
-  test("dm username that matches a community channel redirects to the channel route", async () => {
+  test.each(["chat@example.com", "group-dm-abc@example.com", "bob@elsewhere.example", "chat@muc.example.com/Nick/Device"])("DM routes retain the exact peer %s despite room names", async (peerJid) => {
     const h = makeHarness();
     h.channels.value = [
-      { id: "general", name: "General", spaceId: "space-1" },
       { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+      { id: "group-dm-abc", name: "crew", jid: "group-dm-abc@muc.example.com", isGroupDm: true },
     ];
-
     await h.routeSync.applyRouteTarget({
-      id: "dm",
-      params: { username: "chat" },
-      search: { thread: [], pinned: false },
-    } as RouteMatch, h.routeSync.beginRouteRequest());
-
-    expect(h.openDm).not.toHaveBeenCalled();
-    expect(h.forgetPeer).toHaveBeenCalledWith("chat@example.com");
-    expect(h.activeChannelId.value).toBe("chat");
-    expect(h.ui.sidebarMode.value).toBe("channels");
-    expect(h.loadMessages).toHaveBeenCalledWith(
-      "space-1",
-      "chat",
-      0,
-      [],
-      { intent: "automatic" },
-    );
-    h.scope.stop();
-  });
-
-  test("dm username that matches a group DM redirects to the group-DM room", async () => {
-    const h = makeHarness();
-    h.channels.value = [
-      { id: "general", name: "General", spaceId: "space-1" },
-      {
-        id: "group-dm-abc",
-        name: "crew",
-        jid: "group-dm-abc@muc.example.com",
-        isGroupDm: true,
-      },
-    ];
-
-    await h.routeSync.applyRouteTarget({
-      id: "dm",
-      params: { username: "group-dm-abc" },
-      search: { thread: ["t1"], pinned: false },
-    } as RouteMatch, h.routeSync.beginRouteRequest());
-
-    expect(h.openDm).not.toHaveBeenCalled();
-    expect(h.forgetPeer).toHaveBeenCalledWith("group-dm-abc@example.com");
-    expect(h.selectGroupDm).toHaveBeenCalledWith("group-dm-abc@muc.example.com", {
-      updateUrl: false,
-      fromRoute: true,
-      intent: "automatic",
-    });
+      id: "dm", params: { peerJid }, search: { thread: [], pinned: false },
+    }, h.routeSync.beginRouteRequest());
+    expect(h.openDm).toHaveBeenCalledWith(peerJid, { intent: "automatic" });
+    expect(h.forgetPeer).not.toHaveBeenCalled();
+    expect(h.selectGroupDm).not.toHaveBeenCalled();
+    expect(h.loadMessages).not.toHaveBeenCalled();
     expect(h.ui.sidebarMode.value).toBe("dms");
     h.scope.stop();
   });
 
-  test("dm username match is case-insensitive", async () => {
-    const h = makeHarness();
-    h.channels.value = [
-      { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
-    ];
-
-    await h.routeSync.applyRouteTarget({
-      id: "dm",
-      params: { username: "Chat" },
-      search: { thread: [], pinned: false },
-    } as RouteMatch, h.routeSync.beginRouteRequest());
-
-    expect(h.openDm).not.toHaveBeenCalled();
-    expect(h.activeChannelId.value).toBe("chat");
-    h.scope.stop();
-  });
-
-  test("colliding dm route keeps a history-bearing 1:1 in the store", async () => {
-    const h = makeHarness();
-    h.conversations.value = [{
-      peerJid: "chat@example.com",
-      lastMessageAt: "2026-08-26T12:00:00.000Z",
-    }];
-    h.channels.value = [
-      { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
-    ];
-
-    await h.routeSync.applyRouteTarget({
-      id: "dm",
-      params: { username: "chat" },
-      search: { thread: [], pinned: false },
-    } as RouteMatch, h.routeSync.beginRouteRequest());
-
-    expect(h.openDm).not.toHaveBeenCalled();
-    expect(h.forgetPeer).not.toHaveBeenCalled();
-    expect(h.activeChannelId.value).toBe("chat");
-    h.scope.stop();
-  });
-
-  test("late channel catalog fill redirects an open /dm/:username collision", async () => {
-    const previousWindow = (globalThis as Record<string, unknown>).window;
-    const location = { pathname: "/dm/chat", search: "", hash: "" };
-    (globalThis as Record<string, unknown>).window = {
-      location,
-      history: {
-        replaceState(_state: unknown, _title: string, url?: string) {
-          if (!url) return;
-          const [path, search] = url.split("?");
-          location.pathname = path ?? "/";
-          location.search = search ? `?${search}` : "";
-        },
-        pushState(_state: unknown, _title: string, url?: string) {
-          if (!url) return;
-          const [path, search] = url.split("?");
-          location.pathname = path ?? "/";
-          location.search = search ? `?${search}` : "";
-        },
-      },
-      addEventListener() {},
-      removeEventListener() {},
-    };
-    const h = makeHarness();
-    try {
-      await h.routeSync.applyRouteTarget({
-        id: "dm",
-        params: { username: "chat" },
-        search: { thread: [], pinned: false },
-      } as RouteMatch, h.routeSync.beginRouteRequest());
-      expect(h.openDm).toHaveBeenCalledWith("chat@example.com", { intent: "automatic" });
-
-      h.openDm.mockClear();
-      h.channels.value = [
-        { id: "general", name: "General", spaceId: "space-1" },
-        { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
-      ];
-      await nextTick();
-      await Promise.resolve();
-
-      expect(h.openDm).not.toHaveBeenCalled();
-      expect(h.activeChannelId.value).toBe("chat");
-    } finally {
-      if (previousWindow === undefined) delete (globalThis as Record<string, unknown>).window;
-      else (globalThis as Record<string, unknown>).window = previousWindow;
-      h.scope.stop();
-    }
-  });
-
-  test("dm username does not open a 1:1 before structure discovery succeeds", async () => {
+  test("a DM route does not depend on room discovery", async () => {
     const h = makeHarness();
     h.hasLoadedStructure.value = false;
-
     await h.routeSync.applyRouteTarget({
-      id: "dm",
-      params: { username: "chat" },
-      search: { thread: [], pinned: false },
-    } as RouteMatch, h.routeSync.beginRouteRequest());
-
-    expect(h.openDm).not.toHaveBeenCalled();
+      id: "dm", params: { peerJid: "chat@example.com" }, search: { thread: [], pinned: false },
+    }, h.routeSync.beginRouteRequest());
+    expect(h.openDm).toHaveBeenCalledWith("chat@example.com", { intent: "automatic" });
     expect(h.forgetPeer).not.toHaveBeenCalled();
     h.scope.stop();
   });
@@ -439,7 +293,7 @@ describe("useRouteSync applyRouteTarget", () => {
     const h = makeHarness();
     await h.routeSync.applyRouteTarget({
       id: "dm",
-      params: { username: "bob" },
+      params: { peerJid: "bob@example.com" },
       search: { thread: [], pinned: true },
     } as RouteMatch, h.routeSync.beginRouteRequest());
 
@@ -461,7 +315,7 @@ describe("useRouteSync applyRouteTarget", () => {
 
     await h.routeSync.applyRouteTarget({
       id: "dm",
-      params: { username: "bob" },
+      params: { peerJid: "bob@example.com" },
       search: { thread: ["t9"], pinned: false },
     } as RouteMatch, h.routeSync.beginRouteRequest());
 

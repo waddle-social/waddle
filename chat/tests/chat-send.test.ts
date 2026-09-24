@@ -347,3 +347,21 @@ describe("useChatSend delivery lifecycle handlers", () => {
     expect(h.messages.value[0]?.deliveryStatus).toBe("failed");
   });
 });
+
+describe("useChatSend explicit rejection", () => {
+  test("a rejected send stays failed after an ack and leaves the echo fallback set", async () => {
+    const h = harness({ draft: "hello" });
+    await h.send.sendMessage();
+    h.send.onMessageAck("dm-sid-1");
+    h.send.onMessageDeliveryFailure("dm-sid-1", "rejected");
+    h.send.onMessageAck("dm-sid-1");
+    expect(h.messages.value[0]?.deliveryStatus).toBe("rejected");
+    expect(h.send.pendingEchoClientIds.has("dm-sid-1")).toBe(false);
+  });
+  test("a rejection before send completion creates a failed optimistic row", async () => {
+    const h = harness({ client: makeClient({ sendDirectMessage: mock(async () => ({ id: "fast-error", state: "rejected" as const })) }), draft: "hello" });
+    await h.send.sendMessage();
+    expect(h.messages.value[0]?.deliveryStatus).toBe("rejected");
+    expect(h.send.pendingEchoClientIds.has("fast-error")).toBe(false);
+  });
+});

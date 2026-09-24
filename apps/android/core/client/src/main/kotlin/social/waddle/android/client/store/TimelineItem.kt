@@ -47,6 +47,8 @@ data class TimelineItem(
     val edited: Boolean = false,
     /** Set when retracted/moderated; UI must not render [body]. */
     val tombstone: MessageTombstone? = null,
+    /** A validated stanza error rejected this outbound send. */
+    val rejected: Boolean = false,
 ) {
     /**
      * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),

@@ -12,6 +12,7 @@ pub(crate) mod namespaces;
 mod native;
 mod parsing;
 mod presence;
+mod rejection;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -49,6 +50,7 @@ pub use parsing::{
     parse_retraction_payload,
 };
 pub use presence::{build_presence_stanza, parse_show};
+pub use rejection::MessageRejection;
 pub use types::{
     CarbonDirection, ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload,
     ExtensionCapabilityData, ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData,

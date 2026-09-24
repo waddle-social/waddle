@@ -104,8 +104,14 @@ impl waddle_xmpp::AppState for XmppAppState {
         query: &str,
         limit: usize,
     ) -> Result<Vec<waddle_xmpp::UserDirectoryEntry>, XmppError> {
-        super::xmpp_account_state::search_users(&self.global_db_actor, &self.domain, query, limit)
-            .await
+        crate::auth::directory::search_local_accounts(
+            &self.global_db_actor,
+            &self.domain,
+            query,
+            limit,
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))
     }
 
     async fn set_room_affiliation(

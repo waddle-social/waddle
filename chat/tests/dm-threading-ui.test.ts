@@ -98,7 +98,7 @@ describe("DM threading UI contract", () => {
   test("restores DM route threads only after the async route request is still current", () => {
     const controller = readFileSync(new URL("../src/shell/controllers/use-route-sync.ts", import.meta.url), "utf8");
     const dmRouteStart = controller.indexOf('if (match.id === "dm") {');
-    const openDmIndex = controller.indexOf('await openDm(`${username}@${domain}`, { intent: "automatic" });', dmRouteStart);
+    const openDmIndex = controller.indexOf('await openDm(match.params.peerJid,', dmRouteStart);
     const staleGuardIndex = controller.indexOf("if (requestId !== routeRequestId) return;", openDmIndex);
     const restoreIndex = controller.indexOf("activeThreadStack.value = match.search.thread;", staleGuardIndex);
 

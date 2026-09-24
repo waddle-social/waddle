@@ -152,3 +152,130 @@ fn xep0198_failed_accepts_only_the_schema_stanza_error_group() {
         "an application condition after err:text is invalid because err:text is not in the group",
     );
 }
+
+mod rejection_support;
+
+#[test]
+fn rejection_preserves_sm_ordinals_but_is_excluded_from_fresh_stream_retry() {
+    let entries = [
+        persisted(
+            "<message xmlns='jabber:client' type='chat' id='before' to='bob@example.com'/>",
+            0,
+        ),
+        persisted(
+            "<message xmlns='jabber:client' type='chat' id='rejected' to='chat@example.com'/>",
+            1,
+        ),
+        persisted(
+            "<message xmlns='jabber:client' type='chat' id='after' to='bob@example.com'/>",
+            2,
+        ),
+    ];
+    let resume =
+        SmResumeState::from_unhandled_outbound_entries(StreamId::new("stream"), 0, 3, entries)
+            .unwrap();
+    let mut runtime = rejection_support::runtime(Some(resume));
+    runtime.handle_app_stanza(&rejection_support::rejection("chat@example.com"));
+    let snapshot = runtime.resume_state().unwrap();
+    let flags: Vec<_> = snapshot
+        .unhandled_outbound_entries()
+        .map(UnhandledOutboundEntry::is_rejected)
+        .collect();
+    assert_eq!(flags, vec![false, true, false]);
+    assert_eq!(snapshot.outbound_h(), 3);
+    let mut restored = SmState::from_resume_state(&snapshot);
+    assert_eq!(restored.server_h, 0, "a rejection cannot shift SM ordinals");
+    assert_eq!(
+        restored
+            .process_ack(1)
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["before"]
+    );
+    assert!(
+        restored.process_ack(2).is_empty(),
+        "a rejected send cannot become delivered"
+    );
+    assert_eq!(
+        restored
+            .process_ack(3)
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["after"]
+    );
+    let fallback = SmState::from_resume_state(&snapshot)
+        .fallback_retry_state()
+        .unwrap();
+    assert_eq!(
+        fallback
+            .unhandled_outbound_entries()
+            .map(|entry| entry.message_stanza_id().unwrap().as_str())
+            .collect::<Vec<_>>(),
+        vec!["before", "after"]
+    );
+    let retries = SmState::from_resume_state(&snapshot).unhandled_stanzas_for_fallback_retry();
+    assert_eq!(
+        retries
+            .iter()
+            .map(|entry| entry.attr("id").unwrap())
+            .collect::<Vec<_>>(),
+        vec!["before", "after"]
+    );
+}
+
+#[test]
+fn rejection_changes_retry_only_for_the_retained_outbound_recipient() {
+    for (recipient, muc, from, reject) in [
+        (
+            "chat@remote.example",
+            false,
+            "chat@remote.example/phone",
+            true,
+        ),
+        ("chat@remote.example", false, "remote.example", true),
+        ("chat@remote.example", false, "example.com", true),
+        (
+            "chat@remote.example",
+            false,
+            "mallory@remote.example",
+            false,
+        ),
+        ("chat@remote.example", false, "other.example", false),
+        ("room@muc.example/nick", true, "room@muc.example/nick", true),
+        (
+            "room@muc.example/nick",
+            true,
+            "room@muc.example/other",
+            false,
+        ),
+        ("room@muc.example/nick", true, "room@muc.example", true),
+        ("room@muc.example/nick", true, "muc.example", true),
+    ] {
+        let mut outbound = Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "rejected")
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), recipient);
+        if muc {
+            outbound = outbound
+                .append(Element::builder("x", "http://jabber.org/protocol/muc#user").build());
+        }
+        let entry = UnhandledOutboundEntry::try_new(outbound.build(), Utc::now()).unwrap();
+        let snapshot =
+            SmResumeState::from_unhandled_outbound_entries(StreamId::new("stream"), 0, 1, [entry])
+                .unwrap();
+        let mut runtime = rejection_support::runtime(Some(snapshot));
+        runtime.handle_app_stanza(&rejection_support::rejection(from));
+        let snapshot = runtime.resume_state().unwrap();
+        assert_eq!(
+            snapshot
+                .unhandled_outbound_entries()
+                .next()
+                .unwrap()
+                .is_rejected(),
+            reject,
+            "from {from} for {recipient}"
+        );
+    }
+}

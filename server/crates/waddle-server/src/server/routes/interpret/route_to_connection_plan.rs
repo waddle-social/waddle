@@ -98,8 +98,34 @@ pub(in crate::server::routes::interpret) async fn remote_owner(
     }
 }
 
-/// Bounce generation may revoke a Jingle token, so defer the whole obligation.
 pub(super) fn bounce_nonexistent(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
+    bounce_account_rejection(
+        deps,
+        stanza,
+        StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::ServiceUnavailable,
+            "en",
+            "Service unavailable at this address.",
+        ),
+    )
+}
+
+pub(super) fn bounce_account_lookup_failed(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
+    bounce_account_rejection(
+        deps,
+        stanza,
+        StanzaError::new(
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "en",
+            "Account lookup is temporarily unavailable.",
+        ),
+    )
+}
+
+/// Bounce generation may revoke a Jingle token, so defer the whole obligation.
+fn bounce_account_rejection(deps: &Deps<'_>, stanza: &Stanza, error: StanzaError) -> Vec<Stanza> {
     if deps.effects.is_planning() {
         if deps.sfu.is_some() {
             if let Stanza::Iq(iq) = stanza {
@@ -119,7 +145,7 @@ pub(super) fn bounce_nonexistent(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza
                 }
             }
         }
-        for reply in bounce_for_nonexistent_account(stanza, None) {
+        for reply in bounce_for_account_rejection(stanza, None, error) {
             if let Stanza::Message(message) = &reply {
                 if let Some(error) = message
                     .payloads
@@ -153,7 +179,7 @@ pub(super) fn bounce_nonexistent(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza
         }
         Vec::new()
     } else {
-        bounce_for_nonexistent_account(stanza, deps.sfu)
+        bounce_for_account_rejection(stanza, deps.sfu, error)
     }
 }
 

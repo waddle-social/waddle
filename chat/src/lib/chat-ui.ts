@@ -27,7 +27,7 @@ export type AdminTab = "rooms" | "people" | "settings";
 export type EditableAffiliation = "member" | "admin" | "owner" | "outcast";
 
 /** Delivery status for messages sent by the current user. */
-export type DeliveryStatus = "queued" | "sending" | "delivered" | "failed";
+export type DeliveryStatus = "queued" | "sending" | "delivered" | "failed" | "rejected";
 
 export interface TimelineSharedFile {
   name?: string;

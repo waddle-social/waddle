@@ -349,10 +349,10 @@ async fn route_to_full_jid(
                 )
         ) {
             let bare = full.to_bare();
-            if bare.domain().as_str() == deps.local_domain
-                && !local_account_exists_for(deps, &bare).await
-            {
-                return plan::bounce_nonexistent(deps, stanza.as_ref());
+            if bare.domain().as_str() == deps.local_domain {
+                if let Some(reply) = reject_unknown_local_account(deps, &bare, &stanza).await {
+                    return reply;
+                }
             }
             return Vec::new();
         }
@@ -638,22 +638,8 @@ async fn route_to_bare_jid(
                     "RouteToConnection: cross-domain bare JID with no \
                      local resources; dropping (s2s out of scope)"
                 );
-            } else if !local_account_exists_for(deps, &bare).await {
-                // #1246 — RFC 6121 §8.5.1: the domainpart
-                // matches but no local account exists. A
-                // message MUST be bounced with
-                // <service-unavailable/> (never persisted —
-                // no MAM/pending/inbox rows for arbitrary
-                // never-to-exist JIDs), a request IQ gets the
-                // same typed error, and presence is silently
-                // ignored.
-                debug!(
-                    bare_jid = %bare,
-                    "RouteToConnection: no local account for bare JID; \
-                     bouncing with service-unavailable instead of \
-                     persisting (RFC 6121 §8.5.1)"
-                );
-                return plan::bounce_nonexistent(deps, stanza.as_ref());
+            } else if let Some(reply) = reject_unknown_local_account(deps, &bare, &stanza).await {
+                return reply;
             } else {
                 run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1).await;
             }
@@ -928,13 +914,9 @@ async fn route_to_bare_jid(
                          selected target turned out stale and none is \
                          local, dropping (s2s out of scope)"
                     );
-                } else if !local_account_exists_for(deps, &bare).await {
-                    // #1246 residual: every selected target was a stale
-                    // registry/SM leftover for an account that does not
-                    // (or no longer does) exist — bounce instead of
-                    // creating archive/inbox rows for it (RFC 6121
-                    // §8.5.1).
-                    return plan::bounce_nonexistent(deps, stanza.as_ref());
+                } else if let Some(reply) = reject_unknown_local_account(deps, &bare, &stanza).await
+                {
+                    return reply;
                 } else {
                     debug!(
                         bare_jid = %bare,
@@ -952,40 +934,33 @@ async fn route_to_bare_jid(
     }
 }
 
-/// #1246 — does `bare` resolve to a registered local account?
-///
-/// Uses the OIDC + native aware [`crate::auth::local_account_exists`]
-/// (two-table identity: `users` for OIDC accounts, `native_users` for
-/// SCRAM accounts) — a native-only check would wrongly bounce every
-/// OIDC user. Fails OPEN: with no `web_socket_state` (unit-test
-/// fixtures) or on a transient DB error the message proceeds to the
-/// headless pass rather than bouncing a possibly-valid user; a
-/// domain-only bare JID (no localpart) is not a user account and is
-/// left to the existing routing behavior.
-async fn local_account_exists_for(deps: &Deps<'_>, bare: &BareJid) -> bool {
-    let Some(state) = deps.web_socket_state else {
-        return true;
-    };
-    let Some(node) = bare.node() else {
-        return true;
-    };
+/// Before offline storage, require a known OIDC or native account. A failed
+/// lookup produces a temporary stanza rejection, never evidence of existence.
+/// Domain-only services and state-free routing fixtures have no account lookup.
+async fn reject_unknown_local_account(
+    deps: &Deps<'_>,
+    bare: &BareJid,
+    stanza: &Stanza,
+) -> Option<Vec<Stanza>> {
+    let state = deps.web_socket_state?;
+    let node = bare.node()?;
     let actor = state.deps.app_state.db_pool.global_actor();
     match crate::auth::local_account_exists(actor, node.as_str(), bare.domain().as_str()).await {
-        Ok(exists) => exists,
+        Ok(true) => None,
+        Ok(false) => Some(plan::bounce_nonexistent(deps, stanza)),
         Err(error) => {
             warn!(
                 bare_jid = %bare,
                 %error,
-                "RouteToConnection: local_account_exists lookup failed; \
-                 failing open (message proceeds to the offline pass)"
+                "RouteToConnection: account lookup failed; rejecting offline delivery"
             );
-            true
+            Some(plan::bounce_account_lookup_failed(deps, stanza))
         }
     }
 }
 
-/// RFC 6121 §8.5.1 reply for a stanza addressed to a local bare JID
-/// with no registered account:
+/// RFC 6121 §8.5.1 reply for an absent account, or a temporary error if
+/// the lookup failed:
 ///
 /// - **message** (non-error): `<service-unavailable/>` bounce — the
 ///   same condition XEP-0191 blocked-sender bounces use, so the two
@@ -1001,27 +976,34 @@ async fn local_account_exists_for(deps: &Deps<'_>, bare: &BareJid) -> bool {
 ///
 /// Returned stanzas are written back to the originating connection by
 /// the interpret loop, exactly like the undeliverable-IQ fallback.
-fn bounce_for_nonexistent_account(
+fn bounce_for_account_rejection(
     stanza: &Stanza,
     sfu: Option<&dyn waddle_sfu::SfuService>,
+    error: StanzaError,
 ) -> Vec<Stanza> {
     match stanza {
         Stanza::Message(message) => {
             if matches!(message.type_, xmpp_parsers::message::MessageType::Error) {
                 return Vec::new();
             }
-            let reply = waddle_xmpp::protocol::handlers::errors::message_error_reply(
-                message,
-                StanzaError::new(
-                    ErrorType::Cancel,
-                    DefinedCondition::ServiceUnavailable,
-                    "en",
-                    "Service unavailable at this address.",
-                ),
-            );
+            let reply =
+                waddle_xmpp::protocol::handlers::errors::message_error_reply(message, error);
             vec![Stanza::Message(reply)]
         }
-        Stanza::Iq(_) => bounce_undeliverable_iq(stanza, sfu).into_iter().collect(),
+        Stanza::Iq(_) => {
+            let Some(mut reply) = bounce_undeliverable_iq(stanza, sfu) else {
+                return Vec::new();
+            };
+            if let Stanza::Iq(iq) = &mut reply {
+                if let Iq::Error {
+                    error: reply_error, ..
+                } = iq.as_mut()
+                {
+                    *reply_error = error;
+                }
+            }
+            vec![reply]
+        }
         _ => Vec::new(),
     }
 }

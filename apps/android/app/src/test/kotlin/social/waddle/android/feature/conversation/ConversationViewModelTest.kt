@@ -236,6 +236,33 @@ class ConversationViewModelTest {
     }
 
     @Test
+    fun `rejection restores failed display after ack handed row to storage`() = runTest {
+        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("client-origin-id"))
+        val viewModel = createViewModel()
+        runCurrent()
+        viewModel.send("rejected")
+        runCurrent()
+        store.onLiveMessage(
+            testMessage(
+                stanzaId = "stored-id", originId = "client-origin-id", from = "$ROOM_JID/icepuma",
+                to = OWN_JID, body = "rejected", messageType = "groupchat", isMuc = true,
+            ),
+        )
+        events.emit(XmppEvent.DeliveryAcked("client-origin-id"))
+        runCurrent()
+        assertTrue(viewModel.uiState.value.rows.single() is ConversationRow.Stored)
+
+        events.emit(XmppEvent.MessageRejected("client-origin-id", ROOM_JID, OWN_JID))
+        events.emit(XmppEvent.DeliveryAcked("client-origin-id"))
+        runCurrent()
+        val row = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
+        assertTrue(row.message.failed)
+        assertFalse(row.message.acked)
+        assertFalse(row.message.queued)
+        assertEquals(listOf("rejected"), io.sent)
+    }
+
+    @Test
     fun `sendSticker sends the desc body with the sticker extras`() = runTest {
         val viewModel = createViewModel()
         runCurrent()

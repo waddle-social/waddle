@@ -70,3 +70,12 @@ describe("applyDeliveryEvent — undefined current state", () => {
     expect(applyDeliveryEvent(undefined, "failed")).toBe("failed");
   });
 });
+
+describe("explicit stanza rejection", () => {
+  test("rejection overrides server acceptance", () => {
+    expect(applyDeliveryEvent("delivered", "rejected")).toBe("rejected");
+  });
+  test.each(["queued", "sending", "delivered", "failed", "rejected"] as const)("rejection survives a later %s event", (event) => {
+    expect(applyDeliveryEvent("rejected", event)).toBe("rejected");
+  });
+});

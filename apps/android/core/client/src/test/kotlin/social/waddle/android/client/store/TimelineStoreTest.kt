@@ -17,6 +17,35 @@ class TimelineStoreTest {
     }
 
     @Test
+    fun `rejection survives archived to live upgrade and does not affect a colliding peer id`() {
+        val peer = "alice@waddle.test"
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "mam-1", id = "s-1", originId = "s-1",
+                stanzaId = "archive-1", from = "me@waddle.test", to = peer, body = "mine",
+            ),
+        )
+        store.onLiveMessage(
+            testMessage(
+                id = "s-1", originId = "s-1", stanzaId = null,
+                from = peer, to = "me@waddle.test", body = "peer",
+            ),
+        )
+        store.rejectOutbound(peer, "s-1")
+        store.onLiveMessage(
+            testMessage(
+                id = "s-1", originId = "s-1", stanzaId = null,
+                from = "me@waddle.test", to = peer, body = "mine",
+            ),
+        )
+        val rows = store.timeline(peer).value
+        assertEquals(2, rows.size)
+        assertTrue(rows.single { it.isMine }.rejected)
+        assertTrue(rows.single { it.isMine }.source is TimelineSource.Live)
+        assertFalse(rows.single { !it.isMine }.rejected)
+    }
+
+    @Test
     fun `bodyless call anchor still inserts as a feed row`() {
         val inserted = store.onLiveMessage(
             testMessage(

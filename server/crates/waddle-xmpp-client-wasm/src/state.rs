@@ -182,6 +182,7 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
                     .ok()
                     .map(|xml| JsUnhandledOutboundEntry {
                         xml,
+                        rejected: entry.is_rejected(),
                         sent_at: entry
                             .sent_at()
                             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -205,6 +206,7 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
 pub(crate) struct JsUnhandledOutboundEntry {
     xml: String,
     sent_at: String,
+    rejected: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -251,6 +253,7 @@ fn resume_entry_from_persisted_js(
         .map_err(|_| PersistedResumeEntryError::Timestamp)?
         .with_timezone(&chrono::Utc);
     waddle_xmpp_client::UnhandledOutboundEntry::try_new(stanza, sent_at)
+        .map(|restored| restored.with_rejected(entry.rejected))
         .map_err(|_| PersistedResumeEntryError::UncountableStanza)
 }
 
@@ -279,6 +282,7 @@ pub(crate) struct WaddleClientInner {
     pub(crate) on_error: Option<Function>,
     pub(crate) on_message_delivery_acked: Option<Function>,
     pub(crate) on_message_delivery_failed: Option<Function>,
+    pub(crate) on_message_rejected: Option<Function>,
     /// XEP-0490 §3 displayed-event callback. Receives one
     /// `WaddleMdsDisplayedEntry`-shaped value per item carried in the
     /// inbound PEP event, so the chat layer can apply each one
@@ -669,9 +673,30 @@ mod tests {
 
     fn persisted_entry(xml: &str, sent_at: &str) -> JsUnhandledOutboundEntry {
         JsUnhandledOutboundEntry {
+            rejected: false,
             xml: xml.to_owned(),
             sent_at: sent_at.to_owned(),
         }
+    }
+
+    #[test]
+    fn persisted_resume_entries_preserve_rejection_without_changing_stanza() {
+        let mut persisted = persisted_entry(
+            "<message xmlns='jabber:client' id='rejected' to='chat@example.com'/>",
+            "2026-07-27T12:00:00.000Z",
+        );
+        persisted.rejected = true;
+        let restored = resume_entry_from_persisted_js(persisted).unwrap();
+        assert!(restored.is_rejected());
+        let snapshot = waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
+            waddle_xmpp_client::StreamId::new("stream"),
+            0,
+            1,
+            [restored],
+        )
+        .unwrap();
+        let serialized = serde_json::to_value(JsResumeState::from(snapshot)).unwrap();
+        assert_eq!(serialized["unhandledOutboundEntries"][0]["rejected"], true);
     }
 
     #[test]

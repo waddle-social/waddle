@@ -115,3 +115,121 @@ struct DeliveryAndTrustRoundTwoTests {
         #expect(coordinator.readCursors.cursor(.direct(bob)) == "a1")
     }
 }
+
+@MainActor
+@Suite("Typed message rejection")
+struct MessageRejectionTests {
+    private func online() -> (SessionCoordinator, FakePort, InMemoryOutboxStore) {
+        let port = FakePort()
+        let store = InMemoryOutboxStore()
+        let coordinator = SessionCoordinator(account: me, port: port, outboxStore: store)
+        coordinator.restoreOutboxIfNeeded()
+        coordinator.status.connection = .online
+        coordinator.isSendReady = true
+        return (coordinator, port, store)
+    }
+
+    @Test(arguments: [false, true])
+    func rejectionBeforeOrAfterAckStaysFailedAndDoesNotRetry(ackFirst: Bool) async throws {
+        let (coordinator, port, store) = online()
+        let id = try #require(await coordinator.send(Draft(text: "hi"), in: bobConversation))
+        if ackFirst { coordinator.handle(.deliveryAcked(stanzaID: id)) }
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid("bob@waddle.test/phone"), to: jid("alice@waddle.test/mac")))
+        coordinator.handle(.deliveryAcked(stanzaID: id))
+        #expect(coordinator.deliveries.state(of: id) == .failed)
+        #expect(coordinator.outboundQueue.isEmpty)
+        #expect(coordinator.sentOutbound.isEmpty)
+        #expect(coordinator.failedOutbound[id] != nil)
+        #expect(store.entries.map(\.state) == [.failed])
+        #expect(coordinator.timelines.timeline(for: bobConversation).items.count == 1)
+        #expect(coordinator.unread.total == 0)
+        coordinator.requeueUnconfirmedSendsForFreshStream()
+        await coordinator.flushOutboundQueue()
+        #expect(port.sent.count == 1)
+
+        let restoredPort = FakePort()
+        let restored = SessionCoordinator(account: me, port: restoredPort, outboxStore: store)
+        restored.restoreOutboxIfNeeded()
+        restored.status.connection = .online
+        restored.isSendReady = true
+        await restored.flushOutboundQueue()
+        #expect(restored.deliveries.state(of: id) == .failed)
+        #expect(restoredPort.sent.isEmpty)
+    }
+
+    @Test func rejectionWhileSendIsSuspendedWinsOverItsOutcome() async throws {
+        let (coordinator, port, _) = online()
+        port.sendOutcome = { [weak coordinator] message in
+            coordinator?.handle(.messageRejected(stanzaID: message.clientID, from: jid("bob@waddle.test"), to: nil))
+            coordinator?.handle(.deliveryAcked(stanzaID: message.clientID))
+            return .sent(stanzaID: message.clientID)
+        }
+        let id = try #require(await coordinator.send(Draft(text: "hi"), in: bobConversation))
+        #expect(coordinator.deliveries.state(of: id) == .failed)
+        #expect(coordinator.outboundQueue.isEmpty)
+        #expect(coordinator.sentOutbound.isEmpty)
+        #expect(coordinator.failedOutbound[id] != nil)
+    }
+
+    @Test(arguments: ["eve@waddle.test", "waddle.test/forged", "other.test", "alice@waddle.test", "alice@waddle.test/other-device"])
+    func wrongSenderCannotRejectKnownSend(sender: String) async throws {
+        let (coordinator, _, _) = online()
+        let id = try #require(await coordinator.send(Draft(text: "hi"), in: bobConversation))
+        coordinator.handle(.deliveryAcked(stanzaID: id))
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid(sender), to: nil))
+        #expect(coordinator.deliveries.state(of: id) == .acknowledged)
+        #expect(coordinator.failedOutbound.isEmpty)
+    }
+
+    @Test func wrongRecipientOrUnknownIDCannotRejectKnownSend() async throws {
+        let (coordinator, _, _) = online()
+        let id = try #require(await coordinator.send(Draft(text: "hi"), in: bobConversation))
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid("bob@waddle.test"), to: jid("eve@waddle.test")))
+        coordinator.handle(.messageRejected(stanzaID: "other-id", from: jid("bob@waddle.test"), to: nil))
+        #expect(coordinator.deliveries.state(of: id) == .sent)
+        #expect(coordinator.deliveries.state(of: "other-id") == nil)
+        #expect(coordinator.failedOutbound.isEmpty)
+    }
+
+    @Test(arguments: ["waddle.test", "remote.test"])
+    func trustedServicesCanReject(sender: String) async throws {
+        let (coordinator, _, _) = online()
+        let id = try #require(await coordinator.send(Draft(text: "hi"), in: .direct(bare("bob@remote.test"))))
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid(sender), to: nil))
+        #expect(coordinator.deliveries.state(of: id) == .failed)
+    }
+
+    @Test(arguments: ["alice@waddle.test", "alice@waddle.test/other-device"])
+    func ownAccountCanRejectOnlyItsOwnConversation(sender: String) async throws {
+        let (coordinator, _, _) = online()
+        let peerID = try #require(await coordinator.send(Draft(text: "peer"), in: .direct(bare("bob@remote.test"))))
+        let selfID = try #require(await coordinator.send(Draft(text: "self"), in: .direct(me.jid)))
+        coordinator.handle(.deliveryAcked(stanzaID: peerID))
+        coordinator.handle(.deliveryAcked(stanzaID: selfID))
+        coordinator.handle(.messageRejected(stanzaID: peerID, from: jid(sender), to: jid("alice@waddle.test/mac")))
+        coordinator.handle(.messageRejected(stanzaID: selfID, from: jid(sender), to: jid("alice@waddle.test/mac")))
+        #expect(coordinator.deliveries.state(of: peerID) == .acknowledged)
+        #expect(coordinator.failedOutbound[peerID] == nil)
+        #expect(coordinator.deliveries.state(of: selfID) == .failed)
+        #expect(coordinator.failedOutbound[selfID] != nil)
+    }
+
+    @Test func roomOccupantCannotRejectRoomSendButRoomCan() async throws {
+        let (coordinator, _, _) = online()
+        let id = try #require(await coordinator.send(Draft(text: "hi"), in: roomConversation))
+        coordinator.handle(.deliveryAcked(stanzaID: id))
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid("general@muc.waddle.test/eve"), to: nil))
+        #expect(coordinator.deliveries.state(of: id) == .acknowledged)
+        coordinator.handle(.messageRejected(stanzaID: id, from: jid(room.description), to: nil))
+        #expect(coordinator.deliveries.state(of: id) == .failed)
+    }
+
+    @Test func transportFailureAfterAckDoesNotBecomeRejection() async throws {
+        let (coordinator, _, _) = online()
+        let id = try #require(await coordinator.send(Draft(text: "hi"), in: bobConversation))
+        coordinator.handle(.deliveryAcked(stanzaID: id))
+        coordinator.handle(.deliveryFailed(stanzaID: id))
+        #expect(coordinator.deliveries.state(of: id) == .acknowledged)
+        #expect(coordinator.failedOutbound.isEmpty)
+    }
+}

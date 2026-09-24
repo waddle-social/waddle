@@ -827,6 +827,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_n
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
@@ -1065,6 +1067,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_boo
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_dm_notification_mode(`ptr`: Long,`dmJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_notification_mode(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_ping_server(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_avatar(`ptr`: Long,
 ): Long
@@ -1483,6 +1487,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_ping_server() != 33996) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar() != 59493) {
@@ -2694,6 +2701,11 @@ public interface WaddleClientInterface {
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
      */
     suspend fun `setRoomNotificationMode`(`roomJid`: kotlin.String, `mode`: WaddleNotifyMode, `name`: kotlin.String?, `richPayloadOptIn`: kotlin.Boolean): WaddleSetRoomNotificationModeOutcome
+
+    /**
+     * XEP-0199 client-to-server ping used to detect a half-open stream.
+     */
+    suspend fun `pingServer`()
 
     /**
      * XEP-0084 §4.3: publish the empty `<metadata/>` "no avatar"
@@ -4995,6 +5007,31 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeWaddleSetRoomNotificationModeOutcome.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0199 client-to-server ping used to detect a half-open stream.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pingServer`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_ping_server(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
@@ -12121,6 +12158,21 @@ sealed class WaddleClientEvent {
     }
 
     /**
+     * Explicit message rejection. Consumers must match both the id and
+     * addresses against a retained outbound send before changing its state.
+     */
+    data class MessageRejected(
+        val `stanzaId`: social.waddle.client.ffi.StanzaId,
+        val `from`: social.waddle.client.ffi.Jid,
+        val `to`: social.waddle.client.ffi.Jid?) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    /**
      * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
      * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
      * query-response entries resolve the `fetch_inbox` verb and are
@@ -12210,16 +12262,21 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             7 -> WaddleClientEvent.DeliveryFailed(
                 FfiConverterString.read(buf),
                 )
-            8 -> WaddleClientEvent.InboxPush(
+            8 -> WaddleClientEvent.MessageRejected(
+                FfiConverterTypeStanzaId.read(buf),
+                FfiConverterTypeJid.read(buf),
+                FfiConverterOptionalTypeJid.read(buf),
+                )
+            9 -> WaddleClientEvent.InboxPush(
                 FfiConverterTypeWaddleInboxEntry.read(buf),
                 )
-            9 -> WaddleClientEvent.Call(
+            10 -> WaddleClientEvent.Call(
                 FfiConverterTypeWaddleCallEvent.read(buf),
                 )
-            10 -> WaddleClientEvent.AuthenticationFailed(
+            11 -> WaddleClientEvent.AuthenticationFailed(
                 FfiConverterTypeWaddleSaslCondition.read(buf),
                 )
-            11 -> WaddleClientEvent.Error(
+            12 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -12272,6 +12329,15 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`stanzaId`)
+            )
+        }
+        is WaddleClientEvent.MessageRejected -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeStanzaId.allocationSize(value.`stanzaId`)
+                + FfiConverterTypeJid.allocationSize(value.`from`)
+                + FfiConverterOptionalTypeJid.allocationSize(value.`to`)
             )
         }
         is WaddleClientEvent.InboxPush -> {
@@ -12339,23 +12405,30 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterString.write(value.`stanzaId`, buf)
                 Unit
             }
-            is WaddleClientEvent.InboxPush -> {
+            is WaddleClientEvent.MessageRejected -> {
                 buf.putInt(8)
+                FfiConverterTypeStanzaId.write(value.`stanzaId`, buf)
+                FfiConverterTypeJid.write(value.`from`, buf)
+                FfiConverterOptionalTypeJid.write(value.`to`, buf)
+                Unit
+            }
+            is WaddleClientEvent.InboxPush -> {
+                buf.putInt(9)
                 FfiConverterTypeWaddleInboxEntry.write(value.`entry`, buf)
                 Unit
             }
             is WaddleClientEvent.Call -> {
-                buf.putInt(9)
+                buf.putInt(10)
                 FfiConverterTypeWaddleCallEvent.write(value.`event`, buf)
                 Unit
             }
             is WaddleClientEvent.AuthenticationFailed -> {
-                buf.putInt(10)
+                buf.putInt(11)
                 FfiConverterTypeWaddleSaslCondition.write(value.`condition`, buf)
                 Unit
             }
             is WaddleClientEvent.Error -> {
-                buf.putInt(11)
+                buf.putInt(12)
                 FfiConverterString.write(value.`description`, buf)
                 Unit
             }
@@ -15461,6 +15534,38 @@ public object FfiConverterOptionalSequenceTypeWaddleMdsDisplayedEntry: FfiConver
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeJid: FfiConverterRustBuffer<Jid?> {
+    override fun read(buf: ByteBuffer): Jid? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeJid.read(buf)
+    }
+
+    override fun allocationSize(value: Jid?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeJid.allocationSize(value)
+        }
+    }
+
+    override fun write(value: Jid?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeJid.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceUShort: FfiConverterRustBuffer<List<kotlin.UShort>> {
     override fun read(buf: ByteBuffer): List<kotlin.UShort> {
         val len = buf.getInt()
@@ -16462,6 +16567,26 @@ public object FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBuffer<
         }
     }
 }
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Jid = kotlin.String
+public typealias FfiConverterTypeJid = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias StanzaId = kotlin.String
+public typealias FfiConverterTypeStanzaId = FfiConverterString
 
 
 

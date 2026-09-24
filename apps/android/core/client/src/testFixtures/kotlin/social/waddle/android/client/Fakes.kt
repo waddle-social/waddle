@@ -842,6 +842,8 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         disconnectCalls += 1
     }
 
+    override suspend fun pingServer() = Unit
+
     /** Topology fake state: canned result, call count, failure knob. */
     val topology = FakeTopologyState()
 

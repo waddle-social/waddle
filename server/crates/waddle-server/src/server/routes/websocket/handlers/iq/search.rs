@@ -132,8 +132,6 @@ pub(super) async fn handle_user_search_iq(
     response_from: Option<&str>,
     response_to: Option<&str>,
 ) -> Vec<String> {
-    const MIN_USER_SEARCH_TERM_CHARS: usize = 2;
-
     match iq {
         xmpp_parsers::iq::Iq::Get { .. } => {
             let payload = Element::builder("query", "jabber:iq:search")
@@ -158,7 +156,7 @@ pub(super) async fn handle_user_search_iq(
                 .map(|child| child.text())
                 .unwrap_or_default();
             let term = term.trim();
-            if term.chars().count() < MIN_USER_SEARCH_TERM_CHARS {
+            if term.is_empty() {
                 return vec![build_iq_error_xml_typed(
                     iq.id(),
                     response_from,
@@ -166,46 +164,35 @@ pub(super) async fn handle_user_search_iq(
                     bad_request_iq_error("Malformed IQ payload."),
                 )];
             }
-            let like = format!("%{}%", escape_like_pattern(term));
-            let rows = match state
-                .deps
-                .app_state
-                .db_pool
-                .global_actor()
-                .clone()
-                .ask(DbQuery {
-                    sql: "SELECT username FROM native_users WHERE domain = ? AND username LIKE ? ESCAPE '\\' ORDER BY username LIMIT 50".to_string(),
-                    params: vec![domain.into(), like.into()],
-                })
-                .await
+            let users = match crate::auth::directory::search_local_accounts(
+                state.deps.app_state.db_pool.global_actor(),
+                domain,
+                term,
+                50,
+            )
+            .await
             {
-                Ok(rows) => rows,
+                Ok(users) => users,
                 Err(error) => {
-                    warn!(error = %error, "Failed to search native users over WebSocket");
+                    warn!(%error, "Failed to search local users over WebSocket");
                     return vec![build_iq_error_xml_typed(
-                                    iq.id(),
-                                    response_from,
-                                    response_to,
-                                    internal_server_error_iq_error("Internal server error."),
-                                )];
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
                 }
             };
             let mut query = Element::builder("query", "jabber:iq:search");
-            for row in rows {
-                let username = row_value(&row, 0)
-                    .and_then(ValueExt::as_string)
-                    .unwrap_or_default();
-                if username.is_empty() {
-                    continue;
-                }
+            for user in users {
                 let item = Element::builder("item", "jabber:iq:search")
                     .attr(
                         minidom::rxml::xml_ncname!("jid").to_owned(),
-                        format!("{username}@{domain}"),
+                        user.jid.to_string(),
                     )
                     .append(
                         Element::builder("nick", "jabber:iq:search")
-                            .append(username.clone())
+                            .append(user.username)
                             .build(),
                     )
                     .build();
@@ -225,17 +212,6 @@ pub(super) async fn handle_user_search_iq(
             bad_request_iq_error("Malformed IQ payload."),
         )],
     }
-}
-
-fn escape_like_pattern(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ import { useActiveConversation } from "../src/shell/controllers/use-active-conve
 import { useSendOrchestration } from "../src/shell/controllers/use-send-orchestration";
 import { useDirectMessageConversations } from "../src/dms/conversations";
 import { buildHref, matchLocation } from "../src/router";
+import type { UserSearchResult } from "../src/lib/chat-types";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 
@@ -69,8 +70,12 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
 
   const discoverTopology = mock(async () => discoveredTopology);
   const subscribeToPeerPresence = mock(done);
+  const searchUsers = mock(async (_query: string): Promise<UserSearchResult[]> => [
+    { id: "bob@example.com", jid: "bob@example.com", username: "bob", display_name: null, avatar_url: null },
+  ]);
   const client = {
     discoverTopology,
+    searchUsers,
     listRoomMembers: async () => [],
     subscribeToPeerPresence,
     rememberRoomJidForChannel: noop,
@@ -138,7 +143,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
     const dmSync = useDmSync({
       ...shared, selfDomain: computed(() => "example.com"), rosterContacts: { contacts: ref([]) },
       clearPendingChannelRoomJidSelection, cancelPendingRoute, updateUrl,
-      selectChannel: roomSync.selectChannel, selectGroupDm: roomSync.selectGroupDm,
+      selectGroupDm: roomSync.selectGroupDm,
     } as never);
     useThreadPanels({
       ...shared, ...roomSync, managedMucDomain, isActiveDirectDmSurface: () => !!dmConversations.activePeerJid.value,
@@ -162,7 +167,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
       notificationOrchestration: { setupPushSubscription: done },
       refreshExtensionRoutes, showFirstRunSetupIfNeeded: noop, resetSetupPrompt: noop,
     } as never);
-    return { ...shared, conversation, send, page, routeSync, dmSync, roomSync, connectionStore, discoverTopology, discoveredTopology, refreshExtensionRoutes, subscribeToPeerPresence, location, history, historyEntries, xmppStatus };
+    return { ...shared, conversation, send, page, routeSync, dmSync, roomSync, connectionStore, discoverTopology, searchUsers, discoveredTopology, refreshExtensionRoutes, subscribeToPeerPresence, location, history, historyEntries, xmppStatus };
   })!;
 }
 
@@ -254,7 +259,7 @@ describe("navigation during connection discovery", () => {
     h.isApplyingRoute.value = false;
     await flush();
 
-    expect(entriesAfterSelection).toEqual([initialPath, target === "dm" ? "/dm/bob" : "/r/random"]);
+    expect(entriesAfterSelection).toEqual([initialPath, target === "dm" ? "/dm/bob%40example.com" : "/r/random"]);
     expect(h.location.pathname + h.location.search).toBe(initialPath);
     expect(h.ui.sidebarMode.value).toBe("channels");
     expect(h.waddles.activeChannelId.value).toBe("general");
@@ -262,7 +267,7 @@ describe("navigation during connection discovery", () => {
     expect(h.ui.showPinnedPanel.value).toBe(true);
   });
 
-  for (const path of ["/dm/general", "/dm/alice"]) {
+  for (const path of ["/dm/general%40example.com", "/dm/alice%40example.com"]) {
     test(`reselecting the visible DM supersedes initial ${path} discovery`, async () => {
       const h = harness(path);
       const finishDiscovery = delayDiscovery(h);
@@ -283,8 +288,8 @@ describe("navigation during connection discovery", () => {
       finishPresence();
       await selection;
 
-      expect(pathWhilePresenceLoads).toBe("/dm/bob");
-      expect(h.location.pathname).toBe("/dm/bob");
+      expect(pathWhilePresenceLoads).toBe("/dm/bob%40example.com");
+      expect(h.location.pathname).toBe("/dm/bob%40example.com");
       expect(h.ui.sidebarMode.value).toBe("dms");
       expect(h.dmConversations.activePeerJid.value).toBe("bob@example.com");
       expect(h.waddles.activeChannelId.value).toBeNull();
@@ -298,21 +303,22 @@ describe("navigation during connection discovery", () => {
       await flush();
       expect(h.isApplyingRoute.value).toBe(true);
 
-      await h.dmSync[action](action === "handleNewDm" ? "bob" : "bob@example.com");
+      if (action === "handleNewDm") await h.dmSync.searchDmRecipients("bob");
+      await h.dmSync[action]("bob@example.com");
       finishDiscovery();
       await flush();
 
       expect(h.dmConversations.activePeerJid.value).toBe("bob@example.com");
       expect(h.ui.sidebarMode.value).toBe("dms");
       expect(h.waddles.activeChannelId.value).toBeNull();
-      expect(h.location.pathname).toBe("/dm/bob");
+      expect(h.location.pathname).toBe("/dm/bob%40example.com");
       expect(h.isApplyingRoute.value).toBe(false);
       expect(h.messaging.loadMessages).not.toHaveBeenCalled();
     });
   }
 
   test("a room chosen from the inbox supersedes a pending initial DM route", async () => {
-    const h = harness("/dm/alice");
+    const h = harness("/dm/alice%40example.com");
     const finishDiscovery = delayDiscovery(h);
     h.connectionStore.appState = "ready";
     await flush();
@@ -332,7 +338,7 @@ describe("navigation during connection discovery", () => {
     const group = { id: "crew", name: "Crew", jid: "crew@muc.example.com", channelType: "text" as const, isGroupDm: true };
     const path = buildHref(isGroupDm
       ? { id: "groupDmRoom", params: { roomJid: group.jid }, search: { thread: ["saved-thread"], pinned: true } }
-      : { id: "dm", params: { username: "bob" }, search: { thread: ["saved-thread"], pinned: true } });
+      : { id: "dm", params: { peerJid: "bob@example.com" }, search: { thread: ["saved-thread"], pinned: true } });
     const h = harness(path, { ...topology, rooms: [...topology.rooms, group] });
     h.connectionStore.appState = "ready";
     await flush();
@@ -348,7 +354,7 @@ describe("navigation during connection discovery", () => {
 
   test.each([false, true])("a room choice cancels bootstrap while extension discovery waits (group: %s)", async (isGroupDm) => {
     const group = { id: "crew", name: "Crew", jid: "crew@muc.example.com", channelType: "text" as const, isGroupDm: true };
-    const h = harness("/dm/alice", { ...topology, rooms: [...topology.rooms, group] });
+    const h = harness("/dm/alice%40example.com", { ...topology, rooms: [...topology.rooms, group] });
     await h.waddles.loadStructure(null, { noChannelSelect: true });
     let finishExtensions!: () => void;
     const pendingExtensions = new Promise<void>((resolve) => { finishExtensions = resolve; });
@@ -435,5 +441,123 @@ describe("navigation during connection discovery", () => {
     expect(h.location.pathname).toBe("/dm");
     expect(h.waddles.activeChannelId.value).toBeNull();
     expect(h.isApplyingRoute.value).toBe(false);
+  });
+});
+
+
+describe("New DM recipient identity through the full shell", () => {
+  test.each(["chat", "chat@example.com"])("selected account from %s stays a DM after delayed room discovery", async (input) => {
+    const chat = { id: "chat", name: "Chat", jid: "chat@muc.example.com", channelType: "text" as const };
+    const h = harness("/dm", { spaces: [], rooms: [chat] });
+    h.searchUsers.mockResolvedValue([
+      { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null, avatar_url: null },
+    ]);
+    const finishDiscovery = delayDiscovery(h);
+    h.connectionStore.appState = "ready";
+    await flush();
+    const results = await h.dmSync.searchDmRecipients(input);
+    await h.dmSync.handleNewDm(results[0]!.jid);
+    await flush();
+    expect(h.dmConversations.activePeerJid.value).toBe("chat@example.com");
+    expect(h.location.pathname).toBe("/dm/chat%40example.com");
+    await h.send.sendActiveMessage("local test message");
+    expect(h.dmMessaging.sendMessage).toHaveBeenCalledTimes(1);
+    expect(h.messaging.sendMessage).not.toHaveBeenCalled();
+    finishDiscovery();
+    await flush();
+    expect(h.location.pathname).toBe("/dm/chat%40example.com");
+    expect(h.dmConversations.activePeerJid.value).toBe("chat@example.com");
+    expect(h.waddles.activeChannelId.value).toBeNull();
+    expect(h.ui.sidebarMode.value).toBe("dms");
+    expect(h.conversation.activeTarget.value).toBe(h.dmMessaging);
+  });
+
+  test("missing directory account never opens or becomes a room when discovery completes", async () => {
+    const chat = { id: "chat", name: "Chat", jid: "chat@muc.example.com", channelType: "text" as const };
+    const h = harness("/dm", { spaces: [], rooms: [chat] });
+    h.searchUsers.mockResolvedValue([]);
+    const finishDiscovery = delayDiscovery(h);
+    h.connectionStore.appState = "ready";
+    await flush();
+    expect(await h.dmSync.searchDmRecipients("chat@example.com")).toEqual([]);
+    await h.dmSync.handleNewDm("chat@example.com");
+    finishDiscovery();
+    await flush();
+    expect(h.location.pathname).toBe("/dm");
+    expect(h.dmConversations.conversations.value).toEqual([]);
+    expect(h.dmConversations.activePeerJid.value).toBeNull();
+    expect(h.waddles.activeChannelId.value).toBeNull();
+    await h.send.sendActiveMessage("must not send");
+    expect(h.dmMessaging.sendMessage).not.toHaveBeenCalled();
+    expect(h.messaging.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])("a bare room DM route cannot retain the previous send target (group: %s)", async (group) => {
+    const crew = { id: "crew", name: "Crew", jid: "crew@muc.example.com", channelType: "text" as const, isGroupDm: true };
+    const h = harness("/dm", { ...topology, rooms: [...topology.rooms, crew] });
+    h.connectionStore.appState = "ready";
+    await flush();
+    if (group) await h.roomSync.selectGroupDm(crew.jid);
+    else await h.dmSync.selectDm("bob@example.com");
+    await flush();
+    await h.routeSync.applyRouteTarget({
+      id: "dm", params: { peerJid: "general@muc.example.com" }, search: { thread: [], pinned: false },
+    }, h.routeSync.beginRouteRequest());
+    await h.send.sendActiveMessage("must not go to the old target");
+    expect(h.dmConversations.activePeerJid.value).toBeNull();
+    expect(h.waddles.activeChannelId.value).toBeNull();
+    expect(h.conversation.activeTarget.value).toBeNull();
+    expect(h.dmMessaging.sendMessage).not.toHaveBeenCalled();
+    expect(h.messaging.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test.each(["chat@elsewhere.example", "chat@muc.elsewhere.example/Nick/Device"])("existing peer %s survives URL round trip", async (peerJid) => {
+    const h = harness("/dm");
+    h.connectionStore.appState = "ready";
+    await flush();
+    h.dmConversations.conversations.value = [{
+      peerJid, peerUsername: "chat", unreadCount: 0, ...(peerJid.includes("/") ? { mucPm: true } : {}),
+    }];
+    await h.dmSync.selectDm(peerJid);
+    await flush();
+    const match = matchLocation(h.location.pathname, h.location.search);
+    expect(match).toEqual({ id: "dm", params: { peerJid }, search: { thread: [], pinned: false, ...(peerJid.includes("/") ? { scope: "occupant" } : {}) } });
+    await h.routeSync.applyRouteTarget(match, h.routeSync.beginRouteRequest());
+    expect(h.dmConversations.activePeerJid.value).toBe(peerJid);
+    expect(h.dmMessaging.loadMessages).toHaveBeenLastCalledWith(peerJid, 0);
+  });
+});
+
+describe("cold occupant routes", () => {
+  test.each([false, true])("full occupant identity survives failed or partial discovery (partial=%s)", async (partial) => {
+    const peerJid = "room@nondefault-muc.service/Nick/Device";
+    const path = `/dm/${encodeURIComponent(peerJid)}`;
+    const h = harness(`${path}?scope=occupant`);
+    if (partial) h.discoverTopology.mockResolvedValue({ spaces: [], rooms: [] });
+    else h.discoverTopology.mockRejectedValue(new Error("discovery unavailable"));
+    h.connectionStore.appState = "ready";
+    await flush();
+    expect(h.dmConversations.activePeerJid.value).toBe(peerJid);
+    expect(h.dmConversations.activeConversationScope.value).toBe("muc-occupant");
+    expect(h.dmMessaging.loadMessages).toHaveBeenCalledWith(peerJid, 0);
+    expect(h.subscribeToPeerPresence).not.toHaveBeenCalled();
+    expect(h.location.pathname).toBe(path);
+    expect(h.location.search).toBe("?scope=occupant");
+    h.discoverTopology.mockResolvedValue({ spaces: [], rooms: [{ id: "room", name: "Room", jid: "room@nondefault-muc.service", channelType: "text" }] });
+    await h.waddles.loadStructure(null, { noChannelSelect: true });
+    await flush();
+    expect(h.dmConversations.activePeerJid.value).toBe(peerJid);
+    expect(h.dmConversations.conversations.value.map((conversation) => conversation.peerJid)).toEqual([peerJid]);
+    await h.send.sendActiveMessage("private reply");
+    expect(h.dmMessaging.sendMessage).toHaveBeenCalled();
+    expect(h.messaging.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("an account resource is never inferred to be an occupant", async () => {
+    const h = harness("/dm");
+    await h.dmSync.handleOpenDm("bob@external.example/mobile");
+    expect(h.dmConversations.activePeerJid.value).toBe("bob@external.example");
+    expect(h.dmConversations.activeConversationScope.value).toBe("account");
+    expect(matchLocation(`/dm/${encodeURIComponent("bob@external.example/mobile")}`)).toEqual({ id: "home" });
   });
 });

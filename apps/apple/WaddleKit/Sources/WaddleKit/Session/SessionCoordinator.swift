@@ -387,6 +387,8 @@ public final class SessionCoordinator {
             persistOutbox()
         case let .deliveryFailed(stanzaID):
             sentMessageFailed(stanzaID, bounced: false)
+        case let .messageRejected(stanzaID, from, to):
+            messageRejected(stanzaID, from: from, to: to)
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
@@ -428,19 +430,14 @@ public final class SessionCoordinator {
     // MARK: - Message routing
 
     func route(_ message: WireMessage) {
+        // Errors only change send state through the typed rejection event,
+        // where the outbound id and addresses are checked together.
+        guard message.type != .error else { return }
         if let cursors = message.displayedCursors {
             // A sibling device's XEP-0490 notification is read-state
             // metadata only, and only trusted from our own account.
             guard message.from?.bare == account.jid || message.from == nil else { return }
             cursors.forEach(applyDisplayedCursor)
-            return
-        }
-        // Error bounces are not conversation content; a bounce of one of
-        // our sends marks it failed.
-        if message.type == .error {
-            if let id = message.identity.messageID, deliveries.state(of: id) != nil {
-                sentMessageFailed(id, bounced: true)
-            }
             return
         }
         guard

@@ -233,7 +233,7 @@ export function useMucSend(deps: UseMucSendDeps) {
             ...(a.encrypted ? { encrypted: a.encrypted } : {}),
           }));
         }
-        pendingEchoClientIds.add(msgId);
+        if (result?.state !== "rejected") pendingEchoClientIds.add(msgId);
         messages.value = applyForumContext([...messages.value, optimistic]);
         void scrollToPinnedEdgeAndPin();
       }
@@ -313,8 +313,9 @@ export function useMucSend(deps: UseMucSendDeps) {
 
   // XEP-0198: the XMPP client gave up on the stanza (resume failed or no
   // resumable transport).
-  function onMessageDeliveryFailure(messageId: string) {
-    messages.value = applyDeliveryEventById(messages.value, messageId, "failed");
+  function onMessageDeliveryFailure(messageId: string, reason?: "rejected") {
+    if (reason === "rejected") pendingEchoClientIds.delete(messageId);
+    messages.value = applyDeliveryEventById(messages.value, messageId, reason ?? "failed");
   }
 
   return {

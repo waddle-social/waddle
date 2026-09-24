@@ -198,7 +198,7 @@ private fun StoredMessageCard(
             mentionUris = item.source.mentionUris,
             selfBareJid = selfBareJid,
         ),
-        onLongPress = { onLongPress(item) },
+        onLongPress = if (item.rejected) null else ({ onLongPress(item) }),
         modifier = modifier,
         authorColor = consistentColor(author),
         badge = if (isGroupchat(item)) authorBadgeOf(authorPresence[author]) else null,
@@ -212,6 +212,13 @@ private fun StoredMessageCard(
             }
         },
     ) {
+        if (item.rejected) {
+            Text(
+                text = stringResource(R.string.message_delivery_failed),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         when {
             // Web sticker precedence: the image IS the message — the
             // text bubble and the attachment strip are both suppressed.

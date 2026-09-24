@@ -452,6 +452,7 @@ export function roomMessageFromArchived(
   sourceOrOptions: CodecSource | LinkPreviewDecodeOptions = "archive",
   maybeOptions: LinkPreviewDecodeOptions = {},
 ): LiveRoomMessage | null {
+  if (message.message_type === "error") return null;
   const source = typeof sourceOrOptions === "string" ? sourceOrOptions : "archive";
   const decodeOptions = typeof sourceOrOptions === "string" ? maybeOptions : sourceOrOptions;
   const fromJid = message.from ?? "";
@@ -643,6 +644,7 @@ export function dmMessageFromArchived(
   sourceOrOptions: CodecSource | LinkPreviewDecodeOptions = "archive",
   maybeOptions: LinkPreviewDecodeOptions = {},
 ): LiveDmMessage | null {
+  if (message.message_type === "error") return null;
   const source = typeof sourceOrOptions === "string" ? sourceOrOptions : "archive";
   const decodeOptions = typeof sourceOrOptions === "string" ? maybeOptions : sourceOrOptions;
   const fromBare = barePeerJid(message.from ?? "");

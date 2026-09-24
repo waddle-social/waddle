@@ -110,7 +110,7 @@ async fn postgres_accepted_alias_denial_retry_repairs_recorded_unpin() {
 /// RFC 0018 §3: a committed denial owns its origin id. A retransmission on a
 /// new wire position after the account is created must re-emit the recorded
 /// bounce, never plan the delivery today's policy would now allow.
-async fn nonexistent_account_bounce_replay(fixture: IngressFixture) {
+async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
     use crate::ingress::IngressStreamIdentity;
     use crate::ingress_uow::SmIngressStreamRepository;
     use crate::server::routes::interpret::effects::ExternalEffect;
@@ -149,6 +149,20 @@ async fn nonexistent_account_bounce_replay(fixture: IngressFixture) {
         .protocol
         .connection_registry
         .set_carbons_enabled(&sibling, true));
+    if lookup_failure {
+        crate::server::routes::websocket::tests::seed_local_account(&state, "ghost").await;
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(crate::db::actor::DbExecute {
+                sql: "ALTER TABLE native_users RENAME TO unavailable_native_users".into(),
+                params: vec![],
+            })
+            .await
+            .expect("make account lookup fail");
+    }
     let incoming = submission.plan.sanitized_message.clone();
     let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("ghost-bounce-stream");
     let mut tx = fixture.uow.begin().await.expect("begin");
@@ -183,10 +197,48 @@ async fn nonexistent_account_bounce_replay(fixture: IngressFixture) {
     let denied = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("committed denial");
+    let expected_error = if lookup_failure {
+        (
+            xmpp_parsers::stanza_error::ErrorType::Wait,
+            xmpp_parsers::stanza_error::DefinedCondition::InternalServerError,
+        )
+    } else {
+        (
+            xmpp_parsers::stanza_error::ErrorType::Cancel,
+            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
+        )
+    };
+    let assert_error = |effects: &[ExternalEffect]| {
+        let message = effects
+            .iter()
+            .find_map(|effect| match effect {
+                ExternalEffect::Frame(stanza) => match stanza.as_ref() {
+                    waddle_xmpp::Stanza::Message(message) => Some(message),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("recorded error message");
+        assert_eq!(message.type_, xmpp_parsers::message::MessageType::Error);
+        assert_eq!(message.id, incoming.id);
+        assert_eq!(message.bodies, incoming.bodies);
+        assert_eq!(message.from, incoming.to);
+        assert_eq!(message.to, incoming.from);
+        let error = message
+            .payloads
+            .iter()
+            .find_map(|payload| {
+                xmpp_parsers::stanza_error::StanzaError::try_from(payload.clone()).ok()
+            })
+            .expect("typed stanza error");
+        assert_eq!((error.type_, error.defined_condition), expected_error);
+    };
+    assert_error(&denied.external);
     assert_eq!(denied.class, IngressDecisionClass::PolicyDenied);
     assert!(denied.class.advances());
     let key = denied.message_key.expect("canonical key");
     assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+    assert_eq!(fixture.count("ingress_deliveries").await, 0);
     assert_eq!(fixture.count("mam_messages").await, 0);
     assert_eq!(fixture.count("inbox_entries").await, 0);
     let recorded_reply = denied
@@ -228,8 +280,22 @@ async fn nonexistent_account_bounce_replay(fixture: IngressFixture) {
         .expect("write bounce receipt"));
     assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
 
-    // The account now exists, so current policy plans a full delivery.
-    crate::server::routes::websocket::tests::seed_local_account(&state, "ghost").await;
+    // Current policy can now deliver, but the recorded rejection remains final.
+    if lookup_failure {
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(crate::db::actor::DbExecute {
+                sql: "ALTER TABLE unavailable_native_users RENAME TO native_users".into(),
+                params: vec![],
+            })
+            .await
+            .expect("restore account lookup");
+    } else {
+        crate::server::routes::websocket::tests::seed_local_account(&state, "ghost").await;
+    }
     submission.identity = wire_identity(2);
     submission.plan = plan_dm(&state, &deps, submission.sender.clone(), incoming.clone()).await;
     assert_eq!(submission.plan.rejection, None);
@@ -240,6 +306,7 @@ async fn nonexistent_account_bounce_replay(fixture: IngressFixture) {
     let replay = commit_submission(&fixture.uow, &submission, 2)
         .await
         .expect("recorded denial replay");
+    assert_error(&replay.external);
     assert_eq!(replay.message_key, Some(key));
     assert_eq!(replay.alias, AliasOutcomeClass::Existing);
     assert_eq!(replay.class, IngressDecisionClass::ExistingCommitted);
@@ -263,6 +330,7 @@ async fn nonexistent_account_bounce_replay(fixture: IngressFixture) {
     );
     assert_eq!(fixture.count("ingress_messages").await, 1);
     assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+    assert_eq!(fixture.count("ingress_deliveries").await, 0);
     assert_eq!(fixture.count("mam_messages").await, 0);
     assert_eq!(fixture.count("inbox_entries").await, 0);
     let intents = fixture.count("ingress_effect_intents").await;
@@ -318,12 +386,24 @@ async fn plan_dm(
 
 #[tokio::test]
 async fn sqlite_nonexistent_account_bounce_replay_keeps_recorded_denial() {
-    nonexistent_account_bounce_replay(IngressFixture::sqlite().await).await;
+    account_bounce_replay(IngressFixture::sqlite().await, false).await;
 }
 
 #[tokio::test]
 async fn postgres_nonexistent_account_bounce_replay_keeps_recorded_denial() {
     if let Some(fixture) = IngressFixture::postgres("nonexistent_account_bounce").await {
-        nonexistent_account_bounce_replay(fixture).await;
+        account_bounce_replay(fixture, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_account_lookup_failure_replay_keeps_temporary_rejection() {
+    account_bounce_replay(IngressFixture::sqlite().await, true).await;
+}
+
+#[tokio::test]
+async fn postgres_account_lookup_failure_replay_keeps_temporary_rejection() {
+    if let Some(fixture) = IngressFixture::postgres("account_lookup_failure").await {
+        account_bounce_replay(fixture, true).await;
     }
 }

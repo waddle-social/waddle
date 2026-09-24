@@ -288,7 +288,7 @@ function parseV1Envelope(data) {
 
 /// Convert a typed routing context to a URL the chat will navigate to
 /// on click. The mapping mirrors the chat-side router exactly:
-///   * DM    → `/dm/{username}` (router: `chat/src/router/routes/dm.ts`)
+///   * DM    → `/dm/{peerJid}` (router: `chat/src/router/routes/dm.ts`)
 ///   * MUC   → `/r/{channelId}`  (router: `chat/src/router/routes/channel.ts`)
 ///   * Thread is a `?thread=…` query string per
 ///     `chat/src/router/codecs.ts::threadSearch`, NOT a path segment.
@@ -332,11 +332,12 @@ function routeFromContext(context) {
   const isMuc = isMucByClass || (!isDmByClass && isMucByDomain);
   const base = isMuc
     ? `/r/${encodeURIComponent(localpart)}`
-    : `/dm/${encodeURIComponent(localpart)}`;
-  if (context.thread) {
-    return `${base}?thread=${encodeURIComponent(context.thread)}`;
-  }
-  return base;
+    : `/dm/${encodeURIComponent(conv)}`;
+  const search = [];
+  if (context.thread) search.push(`thread=${encodeURIComponent(context.thread)}`);
+  // Server conversation keys are bare for accounts and full for occupants.
+  if (!isMuc && conv.includes("/")) search.push("scope=occupant");
+  return base + (search.length ? `?${search.join("&")}` : "");
 }
 
 async function updateAppBadge(unreadCount) {

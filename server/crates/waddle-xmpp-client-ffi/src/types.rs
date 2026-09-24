@@ -1,5 +1,21 @@
 // ── Data types ───────────────────────────────────────────────────────────────
 
+pub use jid::Jid;
+pub use waddle_xmpp_client::request::StanzaId;
+
+// Keep validated protocol values in Rust. Only the UniFFI ABI lowers them
+// to strings; lifting validates them with the same core constructors.
+uniffi::custom_type!(Jid, String, {
+    remote,
+    lower: |jid| jid.to_string(),
+    try_lift: |value| Ok(Jid::new(&value)?),
+});
+uniffi::custom_type!(StanzaId, String, {
+    remote,
+    lower: |id| id.to_string(),
+    try_lift: |value| Ok(StanzaId::new(value)?),
+});
+
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleConfig {
     pub server_url: String,
@@ -1234,6 +1250,13 @@ pub enum WaddleClientEvent {
     DeliveryAcked { stanza_id: String },
     /// XEP-0198: transport-level delivery failure for this id.
     DeliveryFailed { stanza_id: String },
+    /// Explicit message rejection. Consumers must match both the id and
+    /// addresses against a retained outbound send before changing its state.
+    MessageRejected {
+        stanza_id: StanzaId,
+        from: Jid,
+        to: Option<Jid>,
+    },
     /// Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
     /// a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
     /// query-response entries resolve the `fetch_inbox` verb and are

@@ -122,6 +122,7 @@ const deliveryStatusLabel = computed(() => {
       return "queued";
     case "sending":
       return "sending…";
+    case "rejected":
     case "failed":
       return "failed";
     default:
@@ -133,6 +134,7 @@ const deliveryStatusClass = computed(() => {
   switch (props.message.deliveryStatus) {
     case "queued":
       return "text-warning/80";
+    case "rejected":
     case "failed":
       return "text-destructive/80";
     default:
@@ -146,6 +148,7 @@ const deliveryStatusIcon = computed(() => {
       return Clock;
     case "sending":
       return Loader2;
+    case "rejected":
     case "failed":
       return AlertCircle;
     default:

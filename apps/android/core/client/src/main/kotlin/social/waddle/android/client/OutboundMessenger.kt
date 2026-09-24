@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.prefs.QueuedOutboundMessage
@@ -22,6 +23,10 @@ internal class OutboundMessenger(
 ) {
     private val outboundQueue = OutboundQueue(sessionPrefs)
     private val sendMutex = Mutex()
+
+    // Only acknowledged sends need a second index; pending sends are durable.
+    // Bind entries to the login generation so same-account relogin is isolated.
+    private val acknowledged = linkedMapOf<String, Pair<ActiveSession.OwnerLease, QueuedOutboundMessage>>()
 
     /**
      * One manager-level send. The typed semantic intent is persisted
@@ -176,10 +181,36 @@ internal class OutboundMessenger(
         // DataStore transaction around transport I/O: sendMutex is the only
         // cross-suspension serialization point.
         sendMutex.withLock {
-            val owner = activeSession.ownBareJid ?: return@withLock
-            outboundQueue.acknowledge(owner, clientStanzaId)
+            val lease = activeSession.captureOwnerLease() ?: return@withLock
+            activeSession.runIfCurrent(lease) {
+                pendingDelivery(lease.ownerBareJid, clientStanzaId)?.let { message ->
+                    acknowledged[clientStanzaId] = lease to message
+                    while (acknowledged.size > MAX_ACKNOWLEDGED_SENDS) acknowledged.remove(acknowledged.keys.first())
+                }
+                outboundQueue.acknowledge(lease.ownerBareJid, clientStanzaId)
+            }
         }
     }
+
+    /** Validate and remove durable intent before exposing a terminal failure. */
+    suspend fun rejectDelivery(rejection: XmppEvent.MessageRejected): Boolean = sendMutex.withLock {
+        val lease = activeSession.captureOwnerLease() ?: return@withLock false
+        var accepted = false
+        activeSession.runIfCurrent(lease) {
+            val message = pendingDelivery(lease.ownerBareJid, rejection.stanzaId)
+                ?: acknowledged[rejection.stanzaId]?.takeIf { it.first == lease }?.second
+            if (message != null && rejection.matches(message)) {
+                outboundQueue.remove(lease.ownerBareJid, rejection.stanzaId)
+                stores.timelineStore.rejectOutbound(message.conversationJid, rejection.stanzaId)
+                acknowledged.remove(rejection.stanzaId)
+                accepted = true
+            }
+        }
+        accepted
+    }
+
+    private suspend fun pendingDelivery(owner: String, id: String): QueuedOutboundMessage? =
+        sessionPrefs.outboundQueue.first().firstOrNull { it.ownerBareJid == owner && it.clientStanzaId == id }
 
     private suspend fun sendMessage(
         lease: ActiveSession.OwnerLease,
@@ -241,5 +272,6 @@ internal class OutboundMessenger(
 
     private companion object {
         const val DROP_REASON_UNKNOWN = "rejected"
+        const val MAX_ACKNOWLEDGED_SENDS = 256
     }
 }

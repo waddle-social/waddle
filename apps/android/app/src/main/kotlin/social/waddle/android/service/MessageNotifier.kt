@@ -58,8 +58,7 @@ class MessageNotifier(
     )
 
     private val historyLock = Any()
-    private val queuedReplies =
-        java.util.concurrent.ConcurrentHashMap<String, Pair<String, Boolean>>()
+    private val replyDeliveries = ReplyDeliveryTracker()
 
     /**
      * Serializes append+notify as one unit: the inbound collector and the
@@ -89,8 +88,9 @@ class MessageNotifier(
                 // killing all future message notifications.
                 when (event) {
                     is XmppEvent.Message -> runCatching { onMessage(event.message) }
-                    is XmppEvent.DeliveryAcked -> queuedReplies.remove(event.stanzaId)
-                    is XmppEvent.DeliveryFailed -> runCatching { onQueuedReplyFailed(event.stanzaId) }
+                    is XmppEvent.DeliveryAcked -> replyDeliveries.acknowledge(event.stanzaId)
+                    is XmppEvent.DeliveryFailed -> runCatching { onReplyFailed(event.stanzaId, rejected = false) }
+                    is XmppEvent.MessageRejected -> runCatching { onReplyFailed(event.stanzaId, rejected = true) }
                     // Read on a sibling device (XEP-0490): the shade
                     // notification is stale.
                     is XmppEvent.ReadSynced ->
@@ -101,31 +101,22 @@ class MessageNotifier(
         }
     }
 
-    /**
-     * A direct reply that was offline-queued was already echoed into the
-     * shade as delivered; if its replay is later dropped permanently the
-     * shade must stop lying. Track the queued id → conversation so the
-     * eventual DeliveryFailed can re-post the failure note.
-     */
-    fun trackQueuedReply(stanzaId: String, conversationJid: String, isGroupchat: Boolean) {
-        queuedReplies[stanzaId] = conversationJid to isGroupchat
-    }
-
-    private suspend fun onQueuedReplyFailed(stanzaId: String) {
-        val (conversationJid, isGroupchat) = queuedReplies.remove(stanzaId) ?: return
+    private suspend fun onReplyFailed(stanzaId: String, rejected: Boolean) {
+        val (conversationJid, isGroupchat) = replyDeliveries.fail(stanzaId, rejected) ?: return
         notifyReplyFailed(conversationJid, isGroupchat)
     }
 
     /** Direct-reply echo: append the user's own message and re-post. */
-    suspend fun appendOwnReply(conversationJid: String, isGroupchat: Boolean, body: String) {
+    suspend fun appendOwnReply(conversationJid: String, isGroupchat: Boolean, body: String, stanzaId: String?) {
         postMutex.withLock {
+            val failed = stanzaId?.let { replyDeliveries.track(it, conversationJid, isGroupchat) } ?: false
             val entry = NotificationCompat.MessagingStyle.Message(
                 body,
                 System.currentTimeMillis(),
                 selfPerson(),
             )
             val messages = appendToHistory(conversationJid, entry)
-            postNotification(conversationJid, isGroupchat, messages, silent = true)
+            postNotification(conversationJid, isGroupchat, messages, silent = !failed, replyFailed = failed)
         }
     }
 
@@ -160,7 +151,7 @@ class MessageNotifier(
                 history.clear()
                 displayedTargets.clear()
             }
-            queuedReplies.clear()
+            replyDeliveries.clear()
             NotificationManagerCompat.from(context).cancelAll()
         }
     }

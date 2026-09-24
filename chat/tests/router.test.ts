@@ -54,24 +54,34 @@ describe("matchLocation", () => {
   });
 
   test("parses dm and preserves XMPP localpart characters", () => {
-    const m = matchLocation("/dm/first.last_user%2Btest", "");
+    const m = matchLocation("/dm/first.last_user%2Btest%40example.com", "");
     expect(m).toEqual({
       id: "dm",
-      params: { username: "first.last_user+test" },
+      params: { peerJid: "first.last_user+test@example.com" },
       search: { thread: [], pinned: false },
     });
   });
 
   test("parses dm with thread stack and pinned flag", () => {
-    const m = matchLocation("/dm/first.last_user%2Btest", "?thread=root&pinned=1");
+    const m = matchLocation("/dm/first.last_user%2Btest%40example.com", "?thread=root&pinned=1");
     expect(m).toEqual({
       id: "dm",
-      params: { username: "first.last_user+test" },
+      params: { peerJid: "first.last_user+test@example.com" },
       search: { thread: ["root"], pinned: true },
     });
   });
 
-  test("parses /dm as the DM list route (distinct from /dm/:username)", () => {
+  test.each(["bob@elsewhere.example", "chat@muc.example.com/Nick/Device", "room@muc.example.com/Nick ?#%"])("DM links preserve the full address %s", (peerJid) => {
+    const match = { id: "dm" as const, params: { peerJid }, search: { thread: ["root"], pinned: true, ...(peerJid.includes("/") ? { scope: "occupant" as const } : {}) } };
+    const url = new URL(buildHref(match), "https://example.com");
+    expect(matchLocation(url.pathname, url.search)).toEqual(match);
+  });
+
+  test.each(["chat", "chat%40", "chat%40example.com%40example.com", "%E0%A4%A"])("does not turn an invalid DM address %s into an account", (segment) => {
+    expect(matchLocation(`/dm/${segment}`)).toEqual({ id: "home" });
+  });
+
+  test("parses /dm as the DM list route (distinct from /dm/:peerJid)", () => {
     expect(matchLocation("/dm", "")).toEqual({ id: "dmList" });
   });
 
@@ -107,7 +117,7 @@ describe("matchLocation", () => {
     expect(matchLocation("/r/", "")).toEqual({ id: "home" });
   });
 
-  test("falls back to home for /dm/ with no username", () => {
+  test("falls back to home for /dm/ with no peer address", () => {
     expect(matchLocation("/dm/", "")).toEqual({ id: "home" });
   });
 
@@ -197,10 +207,10 @@ describe("buildHref", () => {
   test("dm encodes XMPP localpart specials", () => {
     const href = buildHref({
       id: "dm",
-      params: { username: "first.last_user+test" },
+      params: { peerJid: "first.last_user+test@example.com" },
       search: { thread: [] },
     });
-    expect(href).toBe("/dm/first.last_user%2Btest");
+    expect(href).toBe("/dm/first.last_user%2Btest%40example.com");
   });
 
   test("admin uses the panel slug", () => {
@@ -256,7 +266,7 @@ describe("buildHref ↔ matchLocation round trips", () => {
   test("dm with XMPP localpart specials round-trips", () => {
     const m: RouteMatch = {
       id: "dm",
-      params: { username: "first.last_user+test" },
+      params: { peerJid: "first.last_user+test@example.com" },
       search: { thread: ["root"], pinned: false },
     };
     expect(roundtrip(m)).toEqual(m);
@@ -265,7 +275,7 @@ describe("buildHref ↔ matchLocation round trips", () => {
   test("dm with pinned flag round-trips", () => {
     const m: RouteMatch = {
       id: "dm",
-      params: { username: "first.last_user+test" },
+      params: { peerJid: "first.last_user+test@example.com" },
       search: { thread: ["root"], pinned: true },
     };
     expect(roundtrip(m)).toEqual(m);

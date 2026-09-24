@@ -22,12 +22,12 @@ import {
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
-import { barePeerJid } from "./jid";
+import { bareJidKey, barePeerJid, fullJidIdentityKey, jidDomain } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import type { ResumePersistence } from "./resume-persistence";
 import type { SendDirectMessageOptions, SendGroupMessageOptions } from "./send-types";
 import type { XmppStatusSnapshot } from "./types";
-import type { WasmSendMessageOutcome } from "./wasm-types";
+import type { WasmMessageRejection, WasmSendMessageOutcome } from "./wasm-types";
 
 export type XmppResumeState = {
   previd: string;
@@ -36,7 +36,7 @@ export type XmppResumeState = {
   outboundH: number;
   maxResumeSeconds?: number;
   hasUnackedOutbound?: boolean;
-  unhandledOutboundEntries?: Array<{ xml: string; sentAt: string }>;
+  unhandledOutboundEntries?: Array<{ xml: string; sentAt: string; rejected: boolean }>;
   resource?: string;
 };
 
@@ -44,7 +44,7 @@ export type XmppResumeStateHandle = import("@waddle/xmpp-client-wasm").WaddleRes
 
 export interface OutboundSendResult {
   id: string | null;
-  state: "queued" | "sending";
+  state: "queued" | "sending" | "rejected";
 }
 
 /** Opaque ownership of one live-send attempt. */
@@ -112,20 +112,20 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
       previd: string,
       inboundH: number,
       outboundH: number,
-      entries: Array<{ xml: string; sentAt: string }>,
+      entries: Array<{ xml: string; sentAt: string; rejected: boolean }>,
     ) => void;
     with_resume_state_entries_with_max?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      entries: Array<{ xml: string; sentAt: string }>,
+      entries: Array<{ xml: string; sentAt: string; rejected: boolean }>,
       maxResumeSeconds: number,
     ) => void;
     with_resume_state_entries?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      entries: Array<{ xml: string; sentAt: string }>,
+      entries: Array<{ xml: string; sentAt: string; rejected: boolean }>,
     ) => void;
     with_resume_state_with_max?: (
       previd: string,
@@ -547,6 +547,9 @@ export class OfflineSendQueue {
   private readonly inflightQueuedIds = new Set<string>();
   private readonly resumeReplayQueuedIds = new Set<string>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
+  // Keep identity after an SM ack: the server can reject routing afterwards.
+  // Bound retained entries independently of the durable retry queue.
+  private readonly sentRecipients = new Map<string, { jid: string; scope: "account" | "room" | "occupant"; rejected: boolean }>();
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
   private depthHeartbeat: ReturnType<typeof setInterval> | null = null;
@@ -582,6 +585,45 @@ export class OfflineSendQueue {
     return { id, generation: this.generation };
   }
 
+  recordSentRecipient(id: string, jid: string, scope: "account" | "room" | "occupant"): void {
+    if (this.sentRecipients.has(id)) return;
+    this.sentRecipients.set(id, { jid, scope, rejected: false });
+    if (this.sentRecipients.size > 2048) this.sentRecipients.delete(this.sentRecipients.keys().next().value!);
+  }
+
+  wasRejected(id: string): boolean {
+    return this.sentRecipients.get(id)?.rejected ?? false;
+  }
+
+  handleRejected(rejection: Pick<WasmMessageRejection, "stanza_id" | "from" | "to">): void {
+    const { stanza_id: id, from, to } = rejection;
+    if (!this.sentRecipients.has(id) && this.inflightQueuedIds.has(id)) {
+      const entry = listQueuedMessages(this.deps.queueScope()).find((entry) => entry.id === id);
+      if (entry) this.recordSentRecipient(id, entry.kind === "dm" ? entry.peerJid : entry.roomJid, entry.kind === "room" ? "room" : entry.mucPm ? "occupant" : "account");
+    }
+    const sent = this.sentRecipients.get(id);
+    if (!sent || sent.rejected) return;
+    const self = bareJidKey(this.deps.queueScope());
+    if (to && bareJidKey(to) !== self) return;
+    const sender = fullJidIdentityKey(from);
+    const recipient = fullJidIdentityKey(sent.jid);
+    const matchesRecipient = sent.scope === "account"
+      ? bareJidKey(sender) === bareJidKey(sent.jid)
+      : sender === recipient || (sent.scope === "occupant" && sender === bareJidKey(sent.jid));
+    if (!matchesRecipient && sender !== jidDomain(self) && sender !== jidDomain(sent.jid)) return;
+    sent.rejected = true;
+    this.inflightQueuedIds.delete(id);
+    this.resumeReplayQueuedIds.delete(id);
+    removeQueuedMessage(this.deps.queueScope(), id);
+    this.deps.events.emit("messageDeliveryFailure", id, "rejected");
+    const pending = this.pendingSendAt.get(id);
+    if (pending) {
+      this.pendingSendAt.delete(id);
+      this.deps.events.emitSafe("messageDeliveryFailed", { kind: pending.kind });
+    }
+    this.emitQueueDepth();
+  }
+
   /** Undo a live-send claim when the host did not accept its exact id. */
   rollbackLiveAttempt(attempt: LiveSendAttempt): void {
     this.rollbackAttempt(attempt.id, attempt.generation);
@@ -612,12 +654,22 @@ export class OfflineSendQueue {
    * on resume are tracked so their acks clear the persisted queue copy.
    */
   seedFromResumeState(state: XmppResumeState | null | undefined): void {
+    const persisted = listQueuedMessages(this.deps.queueScope());
     for (const entry of state?.unhandledOutboundEntries ?? []) {
       const id = messageStanzaIdFromSerializedXml(entry.xml);
-      if (id) {
-        this.inflightQueuedIds.add(id);
-        this.resumeReplayQueuedIds.add(id);
+      if (!id) continue;
+      const queued = persisted.find((queued) => queued.id === id);
+      if (queued) this.recordSentRecipient(id, queued.kind === "dm" ? queued.peerJid : queued.roomJid, queued.kind === "room" ? "room" : queued.mucPm ? "occupant" : "account");
+      if (entry.rejected) {
+        // A crash can persist the native rejection before the JS callback
+        // removes its durable queue copy. That copy must never retry.
+        removeQueuedMessage(this.deps.queueScope(), id);
+        const sent = this.sentRecipients.get(id);
+        if (sent) sent.rejected = true;
+        continue;
       }
+      this.inflightQueuedIds.add(id);
+      this.resumeReplayQueuedIds.add(id);
     }
     // A queue restored from localStorage may never see another mutation
     // (a flush that cannot proceed raises no events), so report it —
@@ -677,6 +729,7 @@ export class OfflineSendQueue {
     this.inflightQueuedIds.clear();
     this.resumeReplayQueuedIds.clear();
     this.pendingSendAt.clear();
+    this.sentRecipients.clear();
     if (this.depthHeartbeat !== null) {
       clearInterval(this.depthHeartbeat);
       this.depthHeartbeat = null;
@@ -684,6 +737,7 @@ export class OfflineSendQueue {
   }
 
   handleAck(id: string): void {
+    if (this.wasRejected(id)) return;
     const wasQueued = this.inflightQueuedIds.delete(id);
     this.resumeReplayQueuedIds.delete(id);
     if (wasQueued) removeQueuedMessage(this.deps.queueScope(), id);
@@ -697,6 +751,7 @@ export class OfflineSendQueue {
   }
 
   handleFailed(id: string): void {
+    if (this.wasRejected(id)) return;
     // A native XEP-0198 replay can transiently fail while the resumable
     // transport is being replaced. Its persisted browser row remains the
     // crash-safe source for a fresh-session fallback, so keep all ownership
@@ -780,6 +835,7 @@ export class OfflineSendQueue {
 
   /** Persist an optimistic live room send so a crash before the ack replays it. */
   persistPendingRoomSend(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): void {
+    this.recordSentRecipient(opts.id, roomJid, "room");
     enqueueQueuedMessage(this.deps.queueScope(), {
       kind: "room",
       id: opts.id,
@@ -801,6 +857,7 @@ export class OfflineSendQueue {
 
   /** Persist an optimistic live DM send so a crash before the ack replays it. */
   persistPendingDirectSend(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): void {
+    this.recordSentRecipient(opts.id, opts.mucPm ? peerJid : barePeerJid(peerJid), opts.mucPm ? "occupant" : "account");
     enqueueQueuedMessage(this.deps.queueScope(), {
       kind: "dm",
       id: opts.id,
@@ -835,6 +892,7 @@ export class OfflineSendQueue {
         const generation = this.generation;
         this.inflightQueuedIds.add(entry.id);
         this.notePendingSend(entry.id, "dm");
+        this.recordSentRecipient(entry.id, entry.peerJid, entry.mucPm ? "occupant" : "account");
         let messageId: string | null;
         try {
           messageId = await this.deps.sendDirect(entry.mucPm ? entry.peerJid : barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.mucPm ? { mucPm: true } : {}), id: entry.id });
@@ -874,6 +932,7 @@ export class OfflineSendQueue {
         const generation = this.generation;
         this.inflightQueuedIds.add(entry.id);
         this.notePendingSend(entry.id, "room");
+        this.recordSentRecipient(entry.id, entry.roomJid, "room");
         let messageId: string | null;
         try {
           messageId = await this.deps.sendRoom(roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.deps.roomMemberJids(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });

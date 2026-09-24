@@ -41,6 +41,9 @@ pub fn parse(element: &Element) -> Option<MessagingEvent> {
 // ─── Message parsing ──────────────────────────────────────────────────────
 
 fn parse_message(el: &Element) -> Option<InboundMessage> {
+    if el.attr("type") == Some("error") {
+        return None;
+    }
     let id = el.attr("id").map(String::from);
     let from = el.attr("from").map(String::from);
     let to = el.attr("to").map(String::from);

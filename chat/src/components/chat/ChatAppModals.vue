@@ -21,6 +21,7 @@ const {
   inferredMemberJids,
   displayedMemberState,
   handleNewDm,
+  searchDmRecipients,
   handleCreateGroupDm,
   handleCreateChannel,
   handleUpdateChannel,
@@ -39,6 +40,7 @@ const {
     <!-- Dialogs -->
     <NewDmDialog
       v-model:open="ui.showNewDm.value"
+      :search-recipients="searchDmRecipients"
       @submit="handleNewDm"
     />
     <NewGroupDmDialog
