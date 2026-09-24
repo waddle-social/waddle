@@ -40,11 +40,16 @@ struct MessageAttachmentsView: View {
 }
 
 /// An inline image capped to the media width; tap opens an in-app preview.
+/// GIFs play; other images load with `AsyncImage`.
 struct MessageImageAttachment: View {
     let file: SharedFile
     let open: (SharedFile) -> Void
 
     static let maxHeight: CGFloat = 320
+
+    private var isGIF: Bool {
+        GifMedia.isGIF(mediaType: file.mediaType, url: file.url)
+    }
 
     var body: some View {
         Button {
@@ -68,15 +73,36 @@ struct MessageImageAttachment: View {
             maxWidth: Double(Theme.Size.mediaMaxWidth),
             maxHeight: Double(Self.maxHeight)
         ) {
-            AsyncImage(url: file.url) { phase in
-                phaseView(phase, fill: true)
+            picture(fill: true)
+                .frame(width: CGFloat(size.width), height: CGFloat(size.height))
+        } else {
+            picture(fill: false)
+                .frame(maxWidth: Theme.Size.mediaMaxWidth, maxHeight: Self.maxHeight, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func picture(fill: Bool) -> some View {
+        if isGIF {
+            RemoteImageDataView(url: file.url) { phase in
+                gifPhaseView(phase)
             }
-            .frame(width: CGFloat(size.width), height: CGFloat(size.height))
         } else {
             AsyncImage(url: file.url) { phase in
-                phaseView(phase, fill: false)
+                phaseView(phase, fill: fill)
             }
-            .frame(maxWidth: Theme.Size.mediaMaxWidth, maxHeight: Self.maxHeight, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func gifPhaseView(_ phase: RemoteImageDataPhase) -> some View {
+        switch phase {
+        case let .success(data):
+            AnimatedImageView(data: data)
+        case .failure:
+            placeholder(symbol: "photo.badge.exclamationmark")
+        case .empty:
+            placeholder(symbol: nil)
         }
     }
 
@@ -113,19 +139,35 @@ struct MessageImageAttachment: View {
     }
 }
 
-/// A sticker: the image alone, without chrome.
+/// A sticker: the image alone, without chrome. GIF stickers play.
 struct MessageStickerView: View {
     let file: SharedFile
 
     var body: some View {
-        AsyncImage(url: file.url) { image in
-            image.resizable().scaledToFit()
-        } placeholder: {
-            Color.clear
+        sticker
+            .frame(width: 120, height: 120)
+            .accessibilityLabel(Text(file.description ?? "Sticker"))
+            .accessibilityAddTraits(.isImage)
+    }
+
+    @ViewBuilder
+    private var sticker: some View {
+        if GifMedia.isGIF(mediaType: file.mediaType, url: file.url) {
+            RemoteImageDataView(url: file.url) { phase in
+                switch phase {
+                case let .success(data):
+                    AnimatedImageView(data: data, maxPixelSize: 360)
+                case .empty, .failure:
+                    Color.clear
+                }
+            }
+        } else {
+            AsyncImage(url: file.url) { image in
+                image.resizable().scaledToFit()
+            } placeholder: {
+                Color.clear
+            }
         }
-        .frame(width: 120, height: 120)
-        .accessibilityLabel(Text(file.description ?? "Sticker"))
-        .accessibilityAddTraits(.isImage)
     }
 }
 
@@ -217,25 +259,8 @@ struct MessageImagePreviewView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            AsyncImage(url: file.url) { phase in
-                switch phase {
-                case let .success(image):
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .failure:
-                    ContentUnavailableView("Couldn't Load Image", systemImage: "photo.badge.exclamationmark")
-                        .foregroundStyle(.white)
-                case .empty:
-                    ProgressView()
-                        .tint(.white)
-                @unknown default:
-                    ProgressView()
-                        .tint(.white)
-                }
-            }
-            .accessibilityLabel(Text(file.description ?? file.displayName))
+            picture
+                .accessibilityLabel(Text(file.description ?? file.displayName))
 
             VStack {
                 HStack {
@@ -254,5 +279,48 @@ struct MessageImagePreviewView: View {
             .padding()
         }
         .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var picture: some View {
+        if GifMedia.isGIF(mediaType: file.mediaType, url: file.url) {
+            RemoteImageDataView(url: file.url) { phase in
+                switch phase {
+                case let .success(data):
+                    AnimatedImageView(data: data, maxPixelSize: 1600)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .failure:
+                    failureView
+                case .empty:
+                    loadingView
+                }
+            }
+        } else {
+            AsyncImage(url: file.url) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .failure:
+                    failureView
+                case .empty:
+                    loadingView
+                @unknown default:
+                    loadingView
+                }
+            }
+        }
+    }
+
+    private var failureView: some View {
+        ContentUnavailableView("Couldn't Load Image", systemImage: "photo.badge.exclamationmark")
+            .foregroundStyle(.white)
+    }
+
+    private var loadingView: some View {
+        ProgressView()
+            .tint(.white)
     }
 }

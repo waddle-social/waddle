@@ -2,10 +2,12 @@ import SwiftUI
 import WaddleKit
 
 /// A decrypted XEP-0448 image, sized like a plain inline image; tap
-/// previews it.
+/// previews it. A decrypted GIF plays.
 struct DecryptedImageAttachment: View {
     let file: SharedFile
     let image: Image
+    /// The plaintext when it is a GIF.
+    let animatedData: Data?
     let isSticker: Bool
     let open: () -> Void
 
@@ -24,18 +26,29 @@ struct DecryptedImageAttachment: View {
     @ViewBuilder
     private var sized: some View {
         if isSticker {
-            image.resizable().scaledToFit().frame(width: 120, height: 120)
+            picture(fill: false).frame(width: 120, height: 120)
         } else if let size = MessageContent.mediaSize(
             width: file.width,
             height: file.height,
             maxWidth: Double(Theme.Size.mediaMaxWidth),
             maxHeight: Double(MessageImageAttachment.maxHeight)
         ) {
-            image.resizable().scaledToFill()
+            picture(fill: true)
                 .frame(width: CGFloat(size.width), height: CGFloat(size.height))
         } else {
-            image.resizable().scaledToFit()
+            picture(fill: false)
                 .frame(maxWidth: Theme.Size.mediaMaxWidth, maxHeight: MessageImageAttachment.maxHeight, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func picture(fill: Bool) -> some View {
+        if let animatedData {
+            AnimatedImageView(data: animatedData)
+        } else if fill {
+            image.resizable().scaledToFill()
+        } else {
+            image.resizable().scaledToFit()
         }
     }
 }

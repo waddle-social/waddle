@@ -43,6 +43,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
 | Pinned messages | urn:waddle:pin:0 | ❌ | ✅ | Pin/unpin, pinned list, live pin events |
+| `/me` actions | 0245 | ❌ | ✅ | Rendered as "* Name action" in italics, keeping the action's markup, mentions and links; conversation-list, reply and VoiceOver previews match |
 | @-mentions | 0372 | 🟡 | ✅ | Autocomplete sends XEP-0372 references; self-mentions highlighted and alerted. Baseline: regex highlight only; no references sent |
 | Nick colors | 0392 | ❌ | ✅ | Shared Rust hue, HSL 55%/45% like web |
 | Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications |
@@ -73,8 +74,9 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | File upload + attachments | 0363, 0447 | ✅ | ✅ | Photos re-encoded as JPEG without location data |
 | Encrypted attachments | 0448 | ❌ | 🟡 | Received files are downloaded, verified (XEP-0300 sha-256/sha-512, GCM tag) and decrypted in memory (AES-128/256-GCM with or without tag, AES-256-CBC), then shown like plain attachments. Sending encrypted files is not implemented |
 | Link previews | urn:waddle:link-preview:0 | ❌ | ✅ | Renders server-attached cards |
-| Stickers | 0449 | 🟡 | 🟡 | Render only |
-| GIF picker | — | ❌ | ❌ | Removed the fake picker; not rebuilt. Baseline: shipped six hardcoded GIF URLs |
+| Stickers | 0449 | 🟡 | 🟡 | Render only; GIF stickers play |
+| Animated GIFs | 0447, 0448 | ❌ | ✅ | Shared GIFs (plain and decrypted XEP-0448) and bodies that are a single `https` image or Giphy URL render inline like web, GIFs playing; first frame only with Reduce Motion. Baseline: first frame only; image URL bodies showed as text |
+| GIF picker | — | ❌ | ✅ | GIPHY search through the server's web-app `/api/giphy` proxy (the Giphy key stays server-side), debounced, trending when empty; sends the GIF URL as the body, as web does. Baseline: shipped six hardcoded GIF URLs |
 
 ## Calls, community, admin
 

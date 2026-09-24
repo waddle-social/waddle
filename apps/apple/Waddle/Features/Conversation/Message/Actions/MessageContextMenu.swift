@@ -131,6 +131,8 @@ struct MessageAccessibilityActions: ViewModifier {
                         openURL(file.url)
                     }
                 }
+            } else if let imageURL = MessageContent.inlineImageURL(of: item), item.tombstone == nil {
+                Button("Open image") { openImage(MessageContent.inlineImageFile(imageURL)) }
             }
             if let preview = item.message.linkPreviews.first {
                 Button("Open link") { openURL(preview.url) }

@@ -54,6 +54,7 @@ private struct MessageRowContent: View {
                 }
                 MessageRowBody(
                     entry: entry,
+                    authorName: author.name,
                     showsThreadChip: showsThreadChip,
                     openThread: openThread,
                     openImage: openImage
@@ -148,6 +149,7 @@ private struct MessageRowBody: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(MessageActionModel.self) private var actions
     let entry: TimelineFeedEntry
+    let authorName: String
     let showsThreadChip: Bool
     let openThread: () -> Void
     let openImage: (SharedFile) -> Void
@@ -175,7 +177,16 @@ private struct MessageRowBody: View {
     @ViewBuilder
     private var content: some View {
         if MessageContent.visibleBody(of: item) != nil {
-            MessageRichBody(item: item, account: session.account, showsEditedMark: item.isEdited && !entry.startsGroup)
+            if let imageURL = MessageContent.inlineImageURL(of: item) {
+                MessageImageAttachment(file: MessageContent.inlineImageFile(imageURL), open: openImage)
+            } else {
+                MessageRichBody(
+                    item: item,
+                    account: session.account,
+                    showsEditedMark: item.isEdited && !entry.startsGroup,
+                    authorName: authorName
+                )
+            }
         }
         if !item.message.sharedFiles.isEmpty {
             MessageAttachmentsView(

@@ -19,8 +19,9 @@ enum MentionHighlight {
         return .someone
     }
 
-    /// The layout input for a row.
-    static func input(for item: TimelineItem, account: AccountIdentity) -> RichTextInput {
+    /// The layout input for a row. `hiddenPrefix` scalars at the start of
+    /// the body are not rendered (a XEP-0245 action line's "/me ").
+    static func input(for item: TimelineItem, account: AccountIdentity, hiddenPrefix: Int = 0) -> RichTextInput {
         RichTextInput(
             displayedBody: item.body,
             wireBody: item.message.body,
@@ -29,7 +30,8 @@ enum MentionHighlight {
             spans: item.message.markupSpans,
             references: item.message.references,
             ownNick: account.nick,
-            mentionKind: { kind(of: $0, account: account, in: item.conversation) }
+            mentionKind: { kind(of: $0, account: account, in: item.conversation) },
+            hiddenPrefix: hiddenPrefix
         )
     }
 }
