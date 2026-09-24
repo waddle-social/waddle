@@ -71,6 +71,7 @@ name: waddle-server-rustTests
       - server/rust-toolchain.toml/**
       - server/schema/**
       - server/scripts/**
+      - server/scripts/*cutover*.py
       - server/scripts/build-nextest-archive.sh
       - server/scripts/build-nextest-archive.sh/**
       - server/scripts/check_nextest_shards.py
