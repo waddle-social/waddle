@@ -79,12 +79,61 @@ team's App ID. The server needs `WADDLE_APNS_KEY_PATH`, `WADDLE_APNS_TEAM_ID`,
 `WADDLE_APNS_KEY_ID` and `WADDLE_APNS_BUNDLE_ID` (all four, or none to leave
 APNs off); debug builds register as `sandbox`, release builds as `prod`.
 
-## Xcode Cloud
+## Xcode Cloud and TestFlight
 
-`ci_scripts/ci_post_clone.sh` installs the pinned Rust toolchain and builds the
-XCFramework before Xcode builds the app targets.
+Xcode Cloud archives both apps and hands them to TestFlight. The repository
+carries everything the build needs; the workflow itself lives in App Store
+Connect.
+
+`ci_scripts/ci_post_clone.sh` installs the Rust toolchain pinned in
+`server/rust-toolchain.toml` and builds the XCFramework. An archive action
+builds only its own platform's device slices (`--platform ios` or
+`--platform macos`), since every slice is a separate fat-LTO release build.
+Build and test actions build every slice.
 
 Xcode Cloud does not resolve packages itself, so the project carries its own
 `Waddle.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
 When WaddleKit's dependencies change, update it to the same pins as
 `WaddleKit/Package.resolved`.
+
+Signing is automatic for team `6KXCJGJ45W`; Xcode Cloud uses cloud-managed
+certificates and replaces `CURRENT_PROJECT_VERSION` with its own build number.
+The macOS app is sandboxed (App Store requirement) with outbound network
+access and read access to files the user picks.
+
+### One-time setup
+
+1. **App ID.** In Certificates, Identifiers & Profiles, enable Push
+   Notifications on `p4x.waddle.social`.
+2. **App record.** In App Store Connect, the Waddle app (bundle ID
+   `p4x.waddle.social`) needs both the iOS and the macOS platform.
+3. **Workflow.** In Xcode, *Integrate → Create Workflow…* (the first time
+   Xcode Cloud is set up for Waddle) or *Integrate → Manage Workflows…*, and
+   create a workflow on the Waddle product:
+   - Start condition: *Branch Changes* on `main`. Optionally restrict it to
+     *Files and Folders* `apps/apple/`, `scripts/build-xcframework.sh`,
+     `server/crates/`, `server/Cargo.lock` and `server/rust-toolchain.toml`,
+     so unrelated merges do not spend compute hours.
+   - Environment: latest release Xcode (16 or later; the project format
+     needs it), *Clean* enabled.
+   - Action *Archive – iOS*, scheme `Waddle-iOS`, deployment preparation
+     *TestFlight and App Store*.
+   - Action *Archive – macOS*, scheme `Waddle-macOS`, deployment preparation
+     *TestFlight and App Store*.
+   - Post-action *TestFlight Internal Testing* for both archives, with the
+     tester group that should receive every build.
+4. **Build number.** In App Store Connect, *Xcode Cloud → Settings → Build
+   Number*, set the next build number above any build already uploaded.
+5. **Export compliance.** Neither target declares
+   `ITSAppUsesNonExemptEncryption`, so each build waits in *Missing
+   Compliance* until someone answers the encryption questions for it in App
+   Store Connect. The app ships its own encryption, not only the OS's: TLS
+   through rustls/ring in the Rust core, and XEP-0448 AES-GCM through
+   swift-crypto. Once the classification is settled, declare it in
+   `project.yml`. `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO` sends
+   builds straight to testers; `YES` also needs
+   `INFOPLIST_KEY_ITSEncryptionExportComplianceCode` from App Store Connect.
+
+`Waddle/PrivacyInfo.xcprivacy` declares the app's required-reason API use
+(`UserDefaults`, reason CA92.1). Update it when the app starts using another
+API on Apple's required-reason list.

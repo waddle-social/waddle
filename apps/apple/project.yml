@@ -9,6 +9,10 @@ settings:
     SWIFT_VERSION: 5.0
     MARKETING_VERSION: 0.1.0
     CURRENT_PROJECT_VERSION: 3
+    # Xcode Cloud signs with cloud-managed certificates for this team and
+    # overrides CURRENT_PROJECT_VERSION with its own build number.
+    DEVELOPMENT_TEAM: 6KXCJGJ45W
+    CODE_SIGN_STYLE: Automatic
     GENERATE_INFOPLIST_FILE: YES
     ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
     FRAMEWORK_SEARCH_PATHS:
@@ -75,6 +79,12 @@ targets:
       path: Waddle/Platform/Waddle-macOS.entitlements
       properties:
         com.apple.developer.aps-environment: development
+        # The Mac App Store and TestFlight reject builds without the sandbox.
+        com.apple.security.app-sandbox: true
+        # XMPP connection, device-authorization sign-in, XEP-0363 uploads.
+        com.apple.security.network.client: true
+        # Composer file importer.
+        com.apple.security.files.user-selected.read-only: true
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS

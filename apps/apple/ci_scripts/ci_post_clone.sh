@@ -1,62 +1,31 @@
 #!/bin/bash
+# Xcode Cloud runs this after cloning, in every action's fresh environment.
+# It installs the pinned Rust toolchain and builds the XCFramework the app
+# targets link against.
+
 set -euo pipefail
 
-# Xcode Cloud pre-build script to prepare dependencies for iOS/macOS build
-# This script runs after the repository is cloned but before building
+REPO_ROOT="${CI_PRIMARY_REPOSITORY_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 
-echo "=== Xcode Cloud Pre-Build Setup ==="
-
-# Get repository root
-# Script is at apps/apple/ci_scripts/ci_post_clone.sh
-# Need to go up 3 levels to reach repository root
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# From ci_scripts: .. = apple, ../.. = apps, ../../.. = repository
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-echo "📍 Script location: $SCRIPT_DIR"
-echo "📍 Repository root: $REPO_ROOT"
-
-# Verify we're in the right place
-if [ ! -f "$REPO_ROOT/scripts/build-xcframework.sh" ]; then
-  echo "❌ ERROR: scripts/build-xcframework.sh not found at $REPO_ROOT"
-  echo "   Current directory contents:"
-  ls -la "$REPO_ROOT" | head -20
-  exit 1
+# Homebrew's rustup formula is keg-only, so install rustup from upstream with
+# no default toolchain; server/rust-toolchain.toml supplies the version.
+if ! command -v rustup >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
 fi
-
-# Install Rust/rustup if not present
-if ! command -v rustup &> /dev/null; then
-  echo "📦 Installing Rust via rustup..."
-  brew install rustup-init
-  # Initialize rustup
-  rustup-init -y --quiet
-  # Source the cargo environment
-  export PATH="$HOME/.cargo/bin:$PATH"
-else
-  echo "✅ rustup already installed: $(rustup --version)"
-fi
-
-# Install the toolchain pinned in server/rust-toolchain.toml.
-# build-xcframework.sh adds the Apple targets it needs to that toolchain.
-echo "🎯 Installing pinned Rust toolchain..."
+export PATH="$HOME/.cargo/bin:$PATH"
 (cd "$REPO_ROOT/server" && rustup toolchain install)
 
-# Build the xcframework from repository root
-echo "🔨 Building WaddleXmppClientFFI.xcframework..."
-cd "$REPO_ROOT"
-bash "$REPO_ROOT/scripts/build-xcframework.sh" --release
-if [ $? -ne 0 ]; then
-  echo "❌ Failed to build xcframework"
-  exit 1
+# An archive only needs the device slice(s) of the platform it archives, so
+# skip the rest: each extra slice is another fat-LTO release build. Build and
+# test actions keep every slice because they may target the Simulator.
+PLATFORM="all"
+if [[ "${CI_XCODEBUILD_ACTION:-}" == "archive" ]]; then
+  case "${CI_PRODUCT_PLATFORM:-}" in
+    iOS) PLATFORM="ios" ;;
+    macOS) PLATFORM="macos" ;;
+    *) PLATFORM="all" ;;
+  esac
 fi
 
-# Verify the framework was created
-XCFW_PATH="$REPO_ROOT/apps/apple/Generated/WaddleXmppClientFFI.xcframework"
-if [ ! -d "$XCFW_PATH" ]; then
-  echo "❌ XCFramework not found at $XCFW_PATH"
-  ls -la "$REPO_ROOT/apps/apple/Generated/" || echo "   Generated directory does not exist"
-  exit 1
-fi
-echo "✅ XCFramework created at: $XCFW_PATH"
-ls -lh "$XCFW_PATH" 2>/dev/null | head -5
-
-echo "✅ Xcode Cloud pre-build setup complete"
+bash "$REPO_ROOT/scripts/build-xcframework.sh" --platform "$PLATFORM"
