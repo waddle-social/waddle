@@ -159,25 +159,41 @@ async fn process_row(
             // the existence check is not a reason to skip processing.
         }
     }
-    match judge.is_question(&row.body_snapshot).await {
-        Ok(judgment) => {
-            let record = JudgmentRecord {
-                waddle_id: row.waddle_id,
-                stanza_id: row.stanza_id,
-                judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
-                taxonomy_version: judgment.taxonomy_version,
-                model_version: judgment.model_version,
-                probability: judgment.probability,
-                cost_usd: judgment.cost_usd,
-                decided_at_ms: now_ms,
-                created_at_ms: now_ms,
-            };
-            if let Err(error) = store::insert_judgment(db, record).await {
-                tracing::warn!(%error, "message_judgment_outbox: insert_judgment failed");
+    match judge.judge(&row.body_snapshot).await {
+        Ok(batch) => {
+            if batch.judgments.is_empty() {
+                tracing::warn!(
+                    "message_judgment_outbox: judge returned an empty batch, treating as invalid"
+                );
                 return RowOutcome::StoreErrorIgnored;
             }
-            if let Err(error) = store::mark_done(db, &row.id).await {
-                tracing::warn!(%error, "message_judgment_outbox: mark_done after success failed");
+            let records: Vec<JudgmentRecord> = batch
+                .judgments
+                .into_iter()
+                .enumerate()
+                .map(|(index, named)| JudgmentRecord {
+                    waddle_id: row.waddle_id.clone(),
+                    stanza_id: row.stanza_id.clone(),
+                    judgment_name: named.judgment_name,
+                    taxonomy_version: named.taxonomy_version,
+                    model_version: batch.model_version.clone(),
+                    probability: named.probability,
+                    // Attribute the whole call's cost to exactly the first
+                    // judgment row; every other row from this same call
+                    // gets 0.0, so a later SUM(cost_usd) never double- (or
+                    // N-times-) counts one Jev call as if it cost N times.
+                    cost_usd: if index == 0 { batch.cost_usd } else { 0.0 },
+                    decided_at_ms: now_ms,
+                    created_at_ms: now_ms,
+                })
+                .collect();
+            if let Err(error) =
+                store::insert_judgment_batch_and_mark_done(db, &records, &row.id).await
+            {
+                tracing::warn!(
+                    %error,
+                    "message_judgment_outbox: insert_judgment_batch_and_mark_done failed"
+                );
                 return RowOutcome::StoreErrorIgnored;
             }
             RowOutcome::Judged
@@ -257,7 +273,7 @@ pub async fn run_drain_loop(db: Database, judge: Arc<dyn MessageJudge>, poll_int
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message_judgment_outbox::judge::{IsQuestionJudgment, JudgeError};
+    use crate::message_judgment_outbox::judge::{JudgeError, JudgmentBatch, NamedJudgment};
     use crate::message_judgment_outbox::store::{
         enqueue_pending, fetch_due_batch, PendingJudgmentInput,
     };
@@ -296,7 +312,7 @@ mod tests {
     /// implementing `Clone` (the fixed contract in `judge.rs` is not ours
     /// to change) while still letting a single judge instance answer
     /// differently for different rows in the same batch.
-    type FakeJudgeResponder = dyn Fn(&str) -> Result<IsQuestionJudgment, JudgeError> + Send + Sync;
+    type FakeJudgeResponder = dyn Fn(&str) -> Result<JudgmentBatch, JudgeError> + Send + Sync;
 
     struct FakeJudge {
         responder: Box<FakeJudgeResponder>,
@@ -305,7 +321,7 @@ mod tests {
 
     impl FakeJudge {
         fn new(
-            responder: impl Fn(&str) -> Result<IsQuestionJudgment, JudgeError> + Send + Sync + 'static,
+            responder: impl Fn(&str) -> Result<JudgmentBatch, JudgeError> + Send + Sync + 'static,
         ) -> Self {
             Self {
                 responder: Box::new(responder),
@@ -320,22 +336,29 @@ mod tests {
 
     #[async_trait]
     impl MessageJudge for FakeJudge {
-        async fn is_question(&self, body: &str) -> Result<IsQuestionJudgment, JudgeError> {
+        async fn judge(&self, body: &str) -> Result<JudgmentBatch, JudgeError> {
             *self.calls.lock().expect("calls mutex") += 1;
             (self.responder)(body)
         }
     }
 
-    fn ok_judgment() -> Result<IsQuestionJudgment, JudgeError> {
-        Ok(IsQuestionJudgment {
-            probability: 0.75,
-            taxonomy_version: "v1".to_string(),
+    /// A batch of exactly one judgment — enough to exercise the drain
+    /// worker's per-row logic without depending on the real Jev client's
+    /// specific set of judgments (this fake is judge-agnostic, per
+    /// `MessageJudge`'s decoupling from any one implementation).
+    fn ok_judgment() -> Result<JudgmentBatch, JudgeError> {
+        Ok(JudgmentBatch {
+            judgments: vec![NamedJudgment {
+                judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                probability: 0.75,
+                taxonomy_version: "v1".to_string(),
+            }],
             model_version: "jev-1".to_string(),
             cost_usd: 0.00002,
         })
     }
 
-    fn err_judgment() -> Result<IsQuestionJudgment, JudgeError> {
+    fn err_judgment() -> Result<JudgmentBatch, JudgeError> {
         Err(JudgeError::Transport("connection reset".to_string()))
     }
 
@@ -382,6 +405,91 @@ mod tests {
         assert_eq!(row.get::<f64>(1).expect("cost_usd"), 0.00002);
         assert_eq!(row.get::<String>(2).expect("taxonomy_version"), "v1");
         assert_eq!(row.get::<String>(3).expect("model_version"), "jev-1");
+    }
+
+    #[tokio::test]
+    async fn drain_once_stores_every_judgment_in_a_multi_judgment_batch() {
+        let db = test_db().await;
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-multi"),
+                body: "you are all idiots".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+
+        let judge = FakeJudge::new(|_body| {
+            Ok(JudgmentBatch {
+                judgments: vec![
+                    NamedJudgment {
+                        judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                        probability: 0.05,
+                        taxonomy_version: "is-question-v1".to_string(),
+                    },
+                    NamedJudgment {
+                        judgment_name: store::SAFETY_HARASSMENT_JUDGMENT_NAME.to_string(),
+                        probability: 0.87,
+                        taxonomy_version: "safety-harassment-v1".to_string(),
+                    },
+                    NamedJudgment {
+                        judgment_name: store::SAFETY_HATE_SPEECH_JUDGMENT_NAME.to_string(),
+                        probability: 0.1,
+                        taxonomy_version: "safety-hate-speech-v1".to_string(),
+                    },
+                ],
+                model_version: "jev-1".to_string(),
+                cost_usd: 0.00003,
+            })
+        });
+        let outcome = drain_once(&db, &judge, 1_000, 10).await;
+
+        assert_eq!(
+            outcome.judged, 1,
+            "one row judged, even though it produced three stored judgments"
+        );
+        assert_eq!(
+            judge.call_count(),
+            1,
+            "one Jev call answers every judgment for this row"
+        );
+
+        let connection = db.guard().await.expect("guard");
+        let mut rows = connection
+            .query(
+                "SELECT judgment_name, probability, cost_usd FROM message_judgments \
+                 WHERE stanza_id = ? ORDER BY judgment_name",
+                crate::db_params!["stanza-multi"],
+            )
+            .await
+            .expect("query");
+        let mut seen = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            seen.push((
+                row.get::<String>(0).expect("judgment_name"),
+                row.get::<f64>(1).expect("probability"),
+                row.get::<f64>(2).expect("cost_usd"),
+            ));
+        }
+        assert_eq!(
+            seen.len(),
+            3,
+            "all three judgments from the one call are stored"
+        );
+        let harassment = seen
+            .iter()
+            .find(|(name, ..)| name == store::SAFETY_HARASSMENT_JUDGMENT_NAME)
+            .expect("harassment row");
+        assert_eq!(harassment.1, 0.87);
+        // Exactly one row in the batch carries the call's real cost; the
+        // rest are 0.0, so SUM(cost_usd) over this batch equals the one
+        // call's actual cost, not 3x it.
+        let total_cost: f64 = seen.iter().map(|(.., cost)| cost).sum();
+        assert_eq!(total_cost, 0.00003);
+        assert_eq!(seen.iter().filter(|(.., cost)| *cost > 0.0).count(), 1);
     }
 
     #[tokio::test]
@@ -434,7 +542,7 @@ mod tests {
 
     #[async_trait]
     impl MessageJudge for BodyKeyedFakeJudge {
-        async fn is_question(&self, body: &str) -> Result<IsQuestionJudgment, JudgeError> {
+        async fn judge(&self, body: &str) -> Result<JudgmentBatch, JudgeError> {
             if body == self.fail_body {
                 err_judgment()
             } else {

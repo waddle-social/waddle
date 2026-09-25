@@ -17,6 +17,17 @@ use crate::db::{Database, DatabaseDriver, Row};
 /// judgment kinds reuse `message_judgments` without a schema change.
 pub const IS_QUESTION_JUDGMENT_NAME: &str = "is_question";
 
+/// Content-safety `judgment_name` values, one row per category per judged
+/// message. Namespaced under `safety:` so they're visibly a family distinct
+/// from `is_question` (a community-enrichment signal, not a safety one)
+/// when scanning `message_judgments` directly. All five are asked together
+/// in one Jev call — see `jev_client.rs`.
+pub const SAFETY_HATE_SPEECH_JUDGMENT_NAME: &str = "safety:hate_speech";
+pub const SAFETY_EXPLICIT_JUDGMENT_NAME: &str = "safety:explicit";
+pub const SAFETY_HARASSMENT_JUDGMENT_NAME: &str = "safety:harassment";
+pub const SAFETY_VIOLENCE_JUDGMENT_NAME: &str = "safety:violence";
+pub const SAFETY_SELF_HARM_JUDGMENT_NAME: &str = "safety:self_harm";
+
 /// Cap on the persisted body snapshot. This table is not the canonical
 /// message store — just enough context for the judge call — so the
 /// snapshot is truncated (on a `char` boundary) before insert.
@@ -293,6 +304,63 @@ pub async fn insert_judgment(
             ],
         )
         .await?;
+    Ok(())
+}
+
+/// Insert every judgment in a batch and mark the outbox row done, in one
+/// transaction: either every judgment is recorded and the row is marked
+/// done, or none of it is and the row stays due for a clean retry from
+/// scratch. A single call now answers several judgments at once (e.g.
+/// `is_question` plus several `safety:*` categories); without this, a
+/// failure partway through inserting them could leave some recorded and
+/// others silently missing while the row is still marked done.
+pub async fn insert_judgment_batch_and_mark_done(
+    db: &Database,
+    records: &[JudgmentRecord],
+    outbox_id: &MessageJudgmentOutboxId,
+) -> Result<(), MessageJudgmentOutboxError> {
+    let insert_sql = match db.driver() {
+        DatabaseDriver::Postgres => {
+            "INSERT INTO message_judgments \
+             (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
+              model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (stanza_id, judgment_name, model_version) DO NOTHING"
+        }
+        DatabaseDriver::Sqlite => {
+            "INSERT OR IGNORE INTO message_judgments \
+             (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
+              model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        }
+    };
+    let mut tx = db.begin().await?;
+    for record in records {
+        let id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            insert_sql,
+            crate::db_params![
+                id,
+                record.waddle_id.as_str(),
+                record.stanza_id.id.as_str(),
+                record.stanza_id.by.to_string(),
+                record.judgment_name.as_str(),
+                record.taxonomy_version.as_str(),
+                record.model_version.as_str(),
+                record.probability,
+                record.cost_usd,
+                record.decided_at_ms,
+                record.created_at_ms,
+            ],
+        )
+        .await?;
+    }
+    tx.execute(
+        "UPDATE message_judgment_outbox SET done = TRUE WHERE id = ?",
+        crate::db_params![outbox_id.as_str()],
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 

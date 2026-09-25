@@ -30,11 +30,14 @@ pub use drain::{
     MAX_RETRY_DELAY_MS,
 };
 pub use jev_client::{JevClient, JevClientConfig, JevClientConfigError};
-pub use judge::{IsQuestionJudgment, JudgeError, MessageJudge};
+pub use judge::{JudgeError, JudgmentBatch, MessageJudge, NamedJudgment};
 pub use store::{
-    dead_letter, enqueue_pending, fetch_due_batch, insert_judgment, judgment_exists, mark_done,
-    record_failure, JudgmentRecord, MessageJudgmentOutboxId, PendingJudgmentInput,
-    PendingJudgmentRow, IS_QUESTION_JUDGMENT_NAME, MAX_BODY_SNAPSHOT_CHARS,
+    dead_letter, enqueue_pending, fetch_due_batch, insert_judgment,
+    insert_judgment_batch_and_mark_done, judgment_exists, mark_done, record_failure,
+    JudgmentRecord, MessageJudgmentOutboxId, PendingJudgmentInput, PendingJudgmentRow,
+    IS_QUESTION_JUDGMENT_NAME, MAX_BODY_SNAPSHOT_CHARS, SAFETY_EXPLICIT_JUDGMENT_NAME,
+    SAFETY_HARASSMENT_JUDGMENT_NAME, SAFETY_HATE_SPEECH_JUDGMENT_NAME,
+    SAFETY_SELF_HARM_JUDGMENT_NAME, SAFETY_VIOLENCE_JUDGMENT_NAME,
 };
 
 use crate::db::{Database, DatabaseError};

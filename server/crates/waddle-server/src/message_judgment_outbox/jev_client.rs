@@ -1,10 +1,11 @@
 //! HTTP client for Jev, TypeSafe AI's "System One" structured decision
-//! model, used to answer the `is_question` judgment defined by
-//! [`super::judge::MessageJudge`]. Jev is available through this codebase's
-//! existing OpenRouter account (the same `OPENROUTER_API_KEY`/secret already
-//! deployed for the `ai-chatbot` extension's provider calls — see
-//! `server/extensions/ai-chatbot/src/provider.rs` — so wiring this in is not
-//! a new vendor integration).
+//! model, used to answer every judgment defined by [`JUDGMENT_QUESTIONS`]
+//! in a single call, per [`super::judge::MessageJudge`]. Jev is available
+//! through this codebase's existing OpenRouter account (the same
+//! `OPENROUTER_API_KEY`/secret already deployed for the `ai-chatbot`
+//! extension's provider calls — see
+//! `server/extensions/ai-chatbot/src/provider.rs` — so wiring this in is
+//! not a new vendor integration).
 //!
 //! # Wire format: per OpenRouter's official Decisions API docs
 //!
@@ -18,15 +19,19 @@
 //!   <OpenRouter API key>` — the same key, same account, as the existing
 //!   OpenRouter usage in this repo.
 //! - Request: `{"model": "typesafe/jev-1.13", "questions": {"<key>": {"type":
-//!   "noul"|"choice"|"score", "instructions": "...", "criteria": ...}},
-//!   "state": <the content to evaluate>}`. `is_question` is a "Noul"
-//!   question (a yes/no condition), so `criteria` is `{"true": "...",
-//!   "false": "..."}`.
+//!   "noul"|"choice"|"score", "instructions": "...", "criteria": ...}, ...},
+//!   "state": <the content to evaluate>}`. The Decisions API accepts any
+//!   number of named questions per request, all evaluated against the same
+//!   `state` — this client asks every judgment in [`JUDGMENT_QUESTIONS`] this
+//!   way, in one request, rather than one call per judgment (cheaper, since
+//!   `state`'s input tokens are billed once per call, not once per
+//!   judgment). Every judgment here is a "Noul" question (a yes/no
+//!   condition), so `criteria` is `{"true": "...", "false": "..."}`.
 //! - Response: `{"answers": {"<key>": {"noul": <0.0..=1.0>, "type":
-//!   "noul"}}, "model": "typesafe/jev-1.13-<date>", "usage": {"cost": <USD>,
-//!   "input_tokens": N, "output_tokens": N}, ...}`. **A Noul answer has no
-//!   `confidence` field** — only `Choice`/`Score` answers do — which is why
-//!   [`super::judge::IsQuestionJudgment`] does not carry one.
+//!   "noul"}, ...}, "model": "typesafe/jev-1.13-<date>", "usage": {"cost":
+//!   <USD>, "input_tokens": N, "output_tokens": N}, ...}`. **A Noul answer
+//!   has no `confidence` field** — only `Choice`/`Score` answers do — which
+//!   is why [`super::judge::NamedJudgment`] does not carry one.
 //! - Errors: `{"error": {"code": <status>, "message": "..."}}` for every
 //!   non-2xx status the docs enumerate (400/401/402/403/404/413/429/5xx).
 //!
@@ -37,6 +42,7 @@
 //! functions: if a live call ever turns up a documentation/reality mismatch,
 //! only this file (and its tests) needs to change.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -45,7 +51,12 @@ use reqwest::{redirect, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::judge::{IsQuestionJudgment, JudgeError, MessageJudge};
+use super::judge::{JudgeError, JudgmentBatch, MessageJudge, NamedJudgment};
+use super::store::{
+    IS_QUESTION_JUDGMENT_NAME, SAFETY_EXPLICIT_JUDGMENT_NAME, SAFETY_HARASSMENT_JUDGMENT_NAME,
+    SAFETY_HATE_SPEECH_JUDGMENT_NAME, SAFETY_SELF_HARM_JUDGMENT_NAME,
+    SAFETY_VIOLENCE_JUDGMENT_NAME,
+};
 
 /// Jev's Decisions API endpoint, confirmed from OpenRouter's own docs (see
 /// module docs). Not a guess: this is the one and only documented endpoint
@@ -69,18 +80,72 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 /// bounds a misbehaving or compromised endpoint.
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
-/// Version tag for the exact `instructions`/`criteria` wording below —
-/// Waddle's own concept, not part of Jev's response. Bump it whenever that
-/// wording changes, so a stored judgment's `taxonomy_version` shows the
-/// question's wording drifted even though `model_version` didn't.
-const TAXONOMY_VERSION: &str = "is-question-v1";
+/// One named "Noul" (yes/no) question this client asks Jev about a message
+/// body, and the fixed wording behind it.
+///
+/// `taxonomy_version` is Waddle's own concept, not part of Jev's response —
+/// bump a question's version whenever its `instructions`/`criteria` wording
+/// changes, so a stored judgment's `taxonomy_version` shows the question's
+/// wording drifted even though `model_version` didn't.
+struct JudgmentQuestionSpec {
+    /// The `message_judgments.judgment_name` this question's answer is
+    /// stored under, and the key it's asked under in the Decisions API
+    /// request/response (`questions`/`answers`).
+    judgment_name: &'static str,
+    taxonomy_version: &'static str,
+    instructions: &'static str,
+    criteria_true: &'static str,
+    criteria_false: &'static str,
+}
 
-const IS_QUESTION_INSTRUCTIONS: &str =
-    "Is this chat message phrased as a question that expects an answer or response from someone else in the conversation?";
-const IS_QUESTION_CRITERIA_TRUE: &str =
-    "The message asks something and expects a reply from someone else.";
-const IS_QUESTION_CRITERIA_FALSE: &str =
-    "The message is a statement, reaction, or does not expect a reply.";
+/// Every judgment this outbox currently asks about a message body, asked
+/// together in one Decisions API call (see the module docs on why one call
+/// rather than one per judgment). Adding a new judgment kind is adding one
+/// entry here — no other code in this file changes.
+const JUDGMENT_QUESTIONS: &[JudgmentQuestionSpec] = &[
+    JudgmentQuestionSpec {
+        judgment_name: IS_QUESTION_JUDGMENT_NAME,
+        taxonomy_version: "is-question-v1",
+        instructions: "Is this chat message phrased as a question that expects an answer or response from someone else in the conversation?",
+        criteria_true: "The message asks something and expects a reply from someone else.",
+        criteria_false: "The message is a statement, reaction, or does not expect a reply.",
+    },
+    JudgmentQuestionSpec {
+        judgment_name: SAFETY_HATE_SPEECH_JUDGMENT_NAME,
+        taxonomy_version: "safety-hate-speech-v1",
+        instructions: "Does this chat message contain hate speech: content that attacks, demeans, or incites hatred or violence against people based on a protected characteristic such as race, ethnicity, religion, gender, sexual orientation, or disability?",
+        criteria_true: "The message attacks, demeans, or incites hatred or violence against people based on a protected characteristic.",
+        criteria_false: "The message does not attack, demean, or incite hatred or violence based on a protected characteristic.",
+    },
+    JudgmentQuestionSpec {
+        judgment_name: SAFETY_EXPLICIT_JUDGMENT_NAME,
+        taxonomy_version: "safety-explicit-v1",
+        instructions: "Does this chat message contain sexually explicit content: graphic sexual descriptions or explicit sexual solicitation, as distinct from casual, non-graphic references?",
+        criteria_true: "The message contains graphic sexual content or explicit sexual solicitation.",
+        criteria_false: "The message does not contain graphic sexual content or explicit sexual solicitation.",
+    },
+    JudgmentQuestionSpec {
+        judgment_name: SAFETY_HARASSMENT_JUDGMENT_NAME,
+        taxonomy_version: "safety-harassment-v1",
+        instructions: "Does this chat message harass, bully, insult, or demean a specific person in the conversation, as distinct from criticizing a public figure's actions or ideas in general?",
+        criteria_true: "The message directly targets a specific individual with insults, bullying, or demeaning language.",
+        criteria_false: "The message does not directly target a specific individual this way.",
+    },
+    JudgmentQuestionSpec {
+        judgment_name: SAFETY_VIOLENCE_JUDGMENT_NAME,
+        taxonomy_version: "safety-violence-v1",
+        instructions: "Does this chat message threaten violence, or describe or glorify graphic violence against a person, animal, or group?",
+        criteria_true: "The message threatens violence, or describes or glorifies graphic violence.",
+        criteria_false: "The message does not threaten, describe, or glorify graphic violence.",
+    },
+    JudgmentQuestionSpec {
+        judgment_name: SAFETY_SELF_HARM_JUDGMENT_NAME,
+        taxonomy_version: "safety-self-harm-v1",
+        instructions: "Does this chat message express intent toward self-harm or suicide, or encourage self-harm or suicide in someone else?",
+        criteria_true: "The message expresses intent toward self-harm or suicide, or encourages it in someone else.",
+        criteria_false: "The message does not express or encourage self-harm or suicide.",
+    },
+];
 
 /// Configuration for a [`JevClient`].
 ///
@@ -326,7 +391,7 @@ impl JevClient {
 
 #[async_trait]
 impl MessageJudge for JevClient {
-    async fn is_question(&self, body: &str) -> Result<IsQuestionJudgment, JudgeError> {
+    async fn judge(&self, body: &str) -> Result<JudgmentBatch, JudgeError> {
         let request_body = build_request_body(&self.model, body);
         let response = self.transport.send(request_body).await?;
         if !(200..300).contains(&response.status) {
@@ -383,20 +448,9 @@ fn documented_error_message(body: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Request shape confirmed from OpenRouter's Decisions API reference (see
-/// module docs) — one named "Noul" (yes/no) question per request.
-#[derive(Serialize)]
-struct DecisionsRequest<'a> {
-    model: &'a str,
-    questions: DecisionsQuestions<'a>,
-    state: &'a str,
-}
-
-#[derive(Serialize)]
-struct DecisionsQuestions<'a> {
-    is_question: NoulQuestion<'a>,
-}
-
+/// One question's shape within a Decisions API request's `questions`
+/// object, confirmed from OpenRouter's Decisions API reference (see module
+/// docs).
 #[derive(Serialize)]
 struct NoulQuestion<'a> {
     #[serde(rename = "type")]
@@ -416,43 +470,48 @@ struct NoulCriteria<'a> {
 /// Pure, separately testable request-body builder — analogous to
 /// `provider_request_json_from_parts` in `ai-chatbot/src/provider.rs`. Kept
 /// free of any I/O so its exact shape can be exercised with plain
-/// assertions and adjusted without touching the transport.
+/// assertions and adjusted without touching the transport. Asks every
+/// question in [`JUDGMENT_QUESTIONS`] against the same `state` in one
+/// request.
 fn build_request_body(model: &str, body: &str) -> Value {
-    let request = DecisionsRequest {
-        model,
-        questions: DecisionsQuestions {
-            is_question: NoulQuestion {
-                kind: "noul",
-                instructions: IS_QUESTION_INSTRUCTIONS,
-                criteria: NoulCriteria {
-                    when_true: IS_QUESTION_CRITERIA_TRUE,
-                    when_false: IS_QUESTION_CRITERIA_FALSE,
-                },
+    let mut questions = serde_json::Map::with_capacity(JUDGMENT_QUESTIONS.len());
+    for spec in JUDGMENT_QUESTIONS {
+        let question = NoulQuestion {
+            kind: "noul",
+            instructions: spec.instructions,
+            criteria: NoulCriteria {
+                when_true: spec.criteria_true,
+                when_false: spec.criteria_false,
             },
-        },
-        state: body,
-    };
-    serde_json::to_value(request).expect("DecisionsRequest always serializes")
+        };
+        questions.insert(
+            spec.judgment_name.to_string(),
+            serde_json::to_value(question).expect("NoulQuestion always serializes"),
+        );
+    }
+    serde_json::json!({
+        "model": model,
+        "questions": Value::Object(questions),
+        "state": body,
+    })
 }
 
 /// Response shape confirmed from OpenRouter's Decisions API reference (see
-/// module docs). Deliberately does not derive `deny_unknown_fields`: fields
-/// this client doesn't need (`id`, `provider`, per-answer `type`,
-/// `usage.input_tokens`/`output_tokens`) are ignored rather than rejected,
-/// so an additive change on Jev's side doesn't break this client.
+/// module docs). `answers` is a dynamic map (rather than one field per
+/// judgment) since [`JUDGMENT_QUESTIONS`] can grow without a matching
+/// struct-field change here. Deliberately does not derive
+/// `deny_unknown_fields`: fields this client doesn't need (`id`,
+/// `provider`, per-answer `type`, `usage.input_tokens`/`output_tokens`) are
+/// ignored rather than rejected, so an additive change on Jev's side
+/// doesn't break this client.
 #[derive(Deserialize)]
 struct DecisionsResponse {
-    answers: DecisionsAnswers,
+    answers: HashMap<String, NoulAnswer>,
     /// The actual model snapshot that answered (e.g.
     /// `"typesafe/jev-1.13-20260917"`), distinct from the requested `model`
-    /// in [`DecisionsRequest`] (e.g. `"typesafe/jev-1.13"`, no date suffix).
+    /// (e.g. `"typesafe/jev-1.13"`, no date suffix).
     model: String,
     usage: DecisionsUsage,
-}
-
-#[derive(Deserialize)]
-struct DecisionsAnswers {
-    is_question: NoulAnswer,
 }
 
 #[derive(Deserialize)]
@@ -471,8 +530,10 @@ struct DecisionsUsage {
 
 /// Pure, separately testable response parser — analogous to
 /// `parse_provider_answer_from_document` in `ai-chatbot/src/provider.rs`.
-/// Never panics on an out-of-range value: that becomes a typed
-/// [`JudgeError::InvalidResponse`], never a stored garbage value.
+/// Never panics on an out-of-range or missing value: either becomes a
+/// typed [`JudgeError::InvalidResponse`] for the *whole* batch, never a
+/// partially-stored result — a response missing one expected judgment is
+/// exactly as untrustworthy as one missing all of them.
 ///
 /// `fallback_model_version` is the configured model identifier, used only
 /// if the response's own `model` field is empty (not expected per the
@@ -480,13 +541,29 @@ struct DecisionsUsage {
 fn parse_response(
     response: DecisionsResponse,
     fallback_model_version: &str,
-) -> Result<IsQuestionJudgment, JudgeError> {
-    let probability = response.answers.is_question.noul;
-    if !(0.0..=1.0).contains(&probability) {
-        return Err(JudgeError::InvalidResponse(format!(
-            "jev is_question probability {probability} was outside 0.0..=1.0"
-        )));
+) -> Result<JudgmentBatch, JudgeError> {
+    let mut judgments = Vec::with_capacity(JUDGMENT_QUESTIONS.len());
+    for spec in JUDGMENT_QUESTIONS {
+        let answer = response.answers.get(spec.judgment_name).ok_or_else(|| {
+            JudgeError::InvalidResponse(format!(
+                "jev response did not include an answer for \"{}\"",
+                spec.judgment_name
+            ))
+        })?;
+        let probability = answer.noul;
+        if !(0.0..=1.0).contains(&probability) {
+            return Err(JudgeError::InvalidResponse(format!(
+                "jev \"{}\" probability {probability} was outside 0.0..=1.0",
+                spec.judgment_name
+            )));
+        }
+        judgments.push(NamedJudgment {
+            judgment_name: spec.judgment_name.to_string(),
+            probability,
+            taxonomy_version: spec.taxonomy_version.to_string(),
+        });
     }
+
     let cost_usd = response.usage.cost;
     if !cost_usd.is_finite() || cost_usd < 0.0 {
         return Err(JudgeError::InvalidResponse(format!(
@@ -499,9 +576,8 @@ fn parse_response(
         response.model
     };
 
-    Ok(IsQuestionJudgment {
-        probability,
-        taxonomy_version: TAXONOMY_VERSION.to_string(),
+    Ok(JudgmentBatch {
+        judgments,
         model_version,
         cost_usd,
     })
@@ -552,85 +628,122 @@ mod tests {
         }
     }
 
+    /// A complete, well-formed `answers` object covering every judgment in
+    /// [`JUDGMENT_QUESTIONS`], defaulting every probability to `0.1` except
+    /// the overrides given. Keeps individual tests from having to spell out
+    /// all six judgments just to exercise one of them.
+    fn full_answers(overrides: &[(&str, f64)]) -> Value {
+        let mut answers = serde_json::Map::new();
+        for spec in JUDGMENT_QUESTIONS {
+            let probability = overrides
+                .iter()
+                .find(|(name, _)| *name == spec.judgment_name)
+                .map(|(_, probability)| *probability)
+                .unwrap_or(0.1);
+            answers.insert(
+                spec.judgment_name.to_string(),
+                serde_json::json!({ "noul": probability, "type": "noul" }),
+            );
+        }
+        Value::Object(answers)
+    }
+
+    fn full_response(overrides: &[(&str, f64)], model: &str, cost: f64) -> Value {
+        serde_json::json!({
+            "answers": full_answers(overrides),
+            "id": "gen-dec-1789738314-X5e5eKGQdvR9rblyX250",
+            "model": model,
+            "provider": "TypeSafe",
+            "usage": { "cost": cost, "input_tokens": 476, "output_tokens": 70 }
+        })
+    }
+
+    fn judgment(batch: &JudgmentBatch, judgment_name: &str) -> f64 {
+        batch
+            .judgments
+            .iter()
+            .find(|j| j.judgment_name == judgment_name)
+            .unwrap_or_else(|| panic!("no judgment named {judgment_name} in batch"))
+            .probability
+    }
+
     #[test]
-    fn build_request_body_matches_documented_decisions_api_shape() {
+    fn build_request_body_asks_every_judgment_in_one_request() {
         let body = build_request_body("typesafe/jev-1.13", "are we there yet?");
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "model": "typesafe/jev-1.13",
-                "questions": {
-                    "is_question": {
-                        "type": "noul",
-                        "instructions": IS_QUESTION_INSTRUCTIONS,
-                        "criteria": {
-                            "true": IS_QUESTION_CRITERIA_TRUE,
-                            "false": IS_QUESTION_CRITERIA_FALSE,
-                        }
-                    }
-                },
-                "state": "are we there yet?",
-            })
-        );
+        let questions = body
+            .get("questions")
+            .and_then(Value::as_object)
+            .expect("questions object");
+
+        assert_eq!(body.get("model").unwrap(), "typesafe/jev-1.13");
+        assert_eq!(body.get("state").unwrap(), "are we there yet?");
+        assert_eq!(questions.len(), JUDGMENT_QUESTIONS.len());
+        for spec in JUDGMENT_QUESTIONS {
+            let question = questions
+                .get(spec.judgment_name)
+                .unwrap_or_else(|| panic!("missing question for {}", spec.judgment_name));
+            assert_eq!(question.get("type").unwrap(), "noul");
+            assert_eq!(question.get("instructions").unwrap(), spec.instructions);
+            let criteria = question.get("criteria").expect("criteria");
+            assert_eq!(criteria.get("true").unwrap(), spec.criteria_true);
+            assert_eq!(criteria.get("false").unwrap(), spec.criteria_false);
+        }
     }
 
     #[tokio::test]
-    async fn is_question_parses_documented_response_shape() {
+    async fn judge_parses_every_judgment_from_one_documented_response() {
         let client = client_with(|_request| {
-            Ok(ok_response(serde_json::json!({
-                "answers": {
-                    "is_question": {
-                        "noul": 0.92,
-                        "type": "noul"
-                    }
-                },
-                "id": "gen-dec-1789738314-X5e5eKGQdvR9rblyX250",
-                "model": "typesafe/jev-1.13-20260917",
-                "provider": "TypeSafe",
-                "usage": {
-                    "cost": 0.000019992,
-                    "input_tokens": 476,
-                    "output_tokens": 70
-                }
-            })))
+            Ok(ok_response(full_response(
+                &[
+                    (IS_QUESTION_JUDGMENT_NAME, 0.92),
+                    (SAFETY_HATE_SPEECH_JUDGMENT_NAME, 0.03),
+                    (SAFETY_EXPLICIT_JUDGMENT_NAME, 0.01),
+                    (SAFETY_HARASSMENT_JUDGMENT_NAME, 0.02),
+                    (SAFETY_VIOLENCE_JUDGMENT_NAME, 0.0),
+                    (SAFETY_SELF_HARM_JUDGMENT_NAME, 0.0),
+                ],
+                "typesafe/jev-1.13-20260917",
+                0.000019992,
+            )))
         });
 
-        let judgment = client
-            .is_question("are we there yet?")
+        let batch = client
+            .judge("are we there yet?")
             .await
             .expect("well-formed response should parse");
 
-        assert_eq!(
-            judgment,
-            IsQuestionJudgment {
-                probability: 0.92,
-                taxonomy_version: TAXONOMY_VERSION.to_string(),
-                model_version: "typesafe/jev-1.13-20260917".to_string(),
-                cost_usd: 0.000019992,
-            }
-        );
+        assert_eq!(batch.judgments.len(), JUDGMENT_QUESTIONS.len());
+        assert_eq!(judgment(&batch, IS_QUESTION_JUDGMENT_NAME), 0.92);
+        assert_eq!(judgment(&batch, SAFETY_HATE_SPEECH_JUDGMENT_NAME), 0.03);
+        assert_eq!(judgment(&batch, SAFETY_EXPLICIT_JUDGMENT_NAME), 0.01);
+        assert_eq!(batch.model_version, "typesafe/jev-1.13-20260917");
+        assert_eq!(batch.cost_usd, 0.000019992);
+        // Every judgment carries its own taxonomy_version, independent of
+        // the others, even though all six came from one call.
+        let hate_speech_taxonomy = batch
+            .judgments
+            .iter()
+            .find(|j| j.judgment_name == SAFETY_HATE_SPEECH_JUDGMENT_NAME)
+            .expect("hate speech judgment")
+            .taxonomy_version
+            .clone();
+        assert_eq!(hate_speech_taxonomy, "safety-hate-speech-v1");
     }
 
     #[tokio::test]
-    async fn is_question_falls_back_to_configured_model_when_response_omits_it() {
-        let client = client_with(|_request| {
-            Ok(ok_response(serde_json::json!({
-                "answers": { "is_question": { "noul": 0.1, "type": "noul" } },
-                "model": "",
-                "usage": { "cost": 0.0, "input_tokens": 10, "output_tokens": 1 }
-            })))
-        });
+    async fn judge_falls_back_to_configured_model_when_response_omits_it() {
+        let client = client_with(|_request| Ok(ok_response(full_response(&[], "", 0.0))));
 
-        let judgment = client
-            .is_question("hello there")
+        let batch = client
+            .judge("hello there")
             .await
             .expect("empty model field should still parse, using the fallback");
 
-        assert_eq!(judgment.model_version, "jev-test-model");
+        assert_eq!(batch.model_version, "jev-test-model");
     }
 
     #[tokio::test]
-    async fn is_question_rejects_malformed_json_shape() {
+    async fn judge_rejects_malformed_json_shape() {
         let client = client_with(|_request| {
             Ok(ok_response(serde_json::json!({
                 "unexpected": "shape entirely"
@@ -638,7 +751,7 @@ mod tests {
         });
 
         let error = client
-            .is_question("does this even parse")
+            .judge("does this even parse")
             .await
             .expect_err("a response missing the documented fields must be rejected");
 
@@ -646,17 +759,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_question_rejects_probability_out_of_range() {
+    async fn judge_rejects_response_missing_one_judgment() {
+        // Only is_question answered; every safety category is missing. The
+        // whole batch must fail rather than storing a partial result.
         let client = client_with(|_request| {
             Ok(ok_response(serde_json::json!({
-                "answers": { "is_question": { "noul": 1.5, "type": "noul" } },
+                "answers": { IS_QUESTION_JUDGMENT_NAME: { "noul": 0.5, "type": "noul" } },
                 "model": "typesafe/jev-1.13-20260917",
                 "usage": { "cost": 0.0, "input_tokens": 1, "output_tokens": 1 }
             })))
         });
 
         let error = client
-            .is_question("body")
+            .judge("body")
+            .await
+            .expect_err("a response missing an expected judgment must be rejected entirely");
+
+        assert!(matches!(error, JudgeError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn judge_rejects_probability_out_of_range() {
+        let client = client_with(|_request| {
+            Ok(ok_response(full_response(
+                &[(SAFETY_VIOLENCE_JUDGMENT_NAME, 1.5)],
+                "typesafe/jev-1.13-20260917",
+                0.0,
+            )))
+        });
+
+        let error = client
+            .judge("body")
             .await
             .expect_err("out-of-range probability must be rejected");
 
@@ -664,17 +797,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_question_rejects_negative_cost() {
+    async fn judge_rejects_negative_cost() {
         let client = client_with(|_request| {
-            Ok(ok_response(serde_json::json!({
-                "answers": { "is_question": { "noul": 0.5, "type": "noul" } },
-                "model": "typesafe/jev-1.13-20260917",
-                "usage": { "cost": -0.01, "input_tokens": 1, "output_tokens": 1 }
-            })))
+            Ok(ok_response(full_response(
+                &[],
+                "typesafe/jev-1.13-20260917",
+                -0.01,
+            )))
         });
 
         let error = client
-            .is_question("body")
+            .judge("body")
             .await
             .expect_err("a negative usage.cost must be rejected, not silently stored");
 
@@ -682,7 +815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_question_rejects_non_json_body() {
+    async fn judge_rejects_non_json_body() {
         let client = client_with(|_request| {
             Ok(JevHttpResponse {
                 status: 200,
@@ -691,7 +824,7 @@ mod tests {
         });
 
         let error = client
-            .is_question("body")
+            .judge("body")
             .await
             .expect_err("non-JSON body must be rejected, not panic");
 
@@ -699,7 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_question_maps_non_2xx_status_using_documented_error_shape() {
+    async fn judge_maps_non_2xx_status_using_documented_error_shape() {
         let client = client_with(|_request| {
             Ok(JevHttpResponse {
                 status: 503,
@@ -709,7 +842,7 @@ mod tests {
         });
 
         let error = client
-            .is_question("body")
+            .judge("body")
             .await
             .expect_err("non-2xx status must be a transport error");
 
@@ -723,7 +856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_question_maps_transport_failure_to_transport_error() {
+    async fn judge_maps_transport_failure_to_transport_error() {
         let client = client_with(|_request| {
             Err(JudgeError::Transport(
                 "jev request failed: operation timed out".to_string(),
@@ -731,7 +864,7 @@ mod tests {
         });
 
         let error = client
-            .is_question("body")
+            .judge("body")
             .await
             .expect_err("connection/timeout failures must surface as Transport");
 
@@ -787,7 +920,7 @@ mod tests {
     }
 
     // The tests above exercise `build_request_body`/`parse_response` and
-    // `JevClient::is_question`'s error-mapping logic entirely through
+    // `JevClient::judge`'s error-mapping logic entirely through
     // `MockTransport`, which bypasses `ReqwestJevTransport` completely.
     // These tests instead run the real transport (request building, the
     // bearer-auth header, status handling, and the response byte cap)
@@ -817,33 +950,23 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(header("authorization", "Bearer test-api-key"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "answers": {
-                        "is_question": {
-                            "noul": 0.9,
-                            "type": "noul"
-                        }
-                    },
-                    "model": "typesafe/jev-1.13-20260917",
-                    "provider": "TypeSafe",
-                    "usage": {
-                        "cost": 0.00002,
-                        "input_tokens": 100,
-                        "output_tokens": 10
-                    }
-                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(full_response(
+                    &[(SAFETY_HATE_SPEECH_JUDGMENT_NAME, 0.9)],
+                    "typesafe/jev-1.13-20260917",
+                    0.00002,
+                )))
                 .mount(&server)
                 .await;
 
             let client = client_against(&server, DEFAULT_MAX_RESPONSE_BYTES);
-            let judgment = client
-                .is_question("are we there yet?")
+            let batch = client
+                .judge("are we there yet?")
                 .await
                 .expect("well-formed response over real HTTP must parse");
 
-            assert_eq!(judgment.probability, 0.9);
-            assert_eq!(judgment.model_version, "typesafe/jev-1.13-20260917");
-            assert_eq!(judgment.cost_usd, 0.00002);
+            assert_eq!(judgment(&batch, SAFETY_HATE_SPEECH_JUDGMENT_NAME), 0.9);
+            assert_eq!(batch.model_version, "typesafe/jev-1.13-20260917");
+            assert_eq!(batch.cost_usd, 0.00002);
         }
 
         #[tokio::test]
@@ -862,7 +985,7 @@ mod tests {
 
             let client = client_against(&server, DEFAULT_MAX_RESPONSE_BYTES);
             let error = client
-                .is_question("body")
+                .judge("body")
                 .await
                 .expect_err("non-2xx status over real HTTP must be a transport error");
 
@@ -893,7 +1016,7 @@ mod tests {
 
             let client = client_against(&server, DEFAULT_MAX_RESPONSE_BYTES);
             let error = client
-                .is_question("body")
+                .judge("body")
                 .await
                 .expect_err("a 3xx must not be silently followed and swallowed");
 
@@ -921,7 +1044,7 @@ mod tests {
             // an accurate Content-Length.
             let client = client_against(&server, 16);
             let error = client
-                .is_question("body")
+                .judge("body")
                 .await
                 .expect_err("oversized response over real HTTP must be rejected");
 
