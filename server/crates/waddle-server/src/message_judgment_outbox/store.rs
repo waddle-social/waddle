@@ -5,8 +5,7 @@
 //! result. Retry/backoff *policy* (when to give up on a row) lives in
 //! [`super::drain`], not here.
 
-use jid::Jid;
-use waddle_xmpp::muc::durable::WaddleId;
+use jid::{BareJid, Jid};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::judge::JudgmentKind;
@@ -55,11 +54,51 @@ impl MessageJudgmentOutboxId {
     }
 }
 
+/// Opaque claim token for one [`claim_due_batch`] winner, matching this
+/// codebase's `room_effect_outbox::types::RoomEffectLeaseToken` shape (a
+/// UUID-backed newtype, not a bare `String`, so a lease token can never be
+/// confused with any other identifier at a call site).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MessageJudgmentOutboxLeaseToken(String);
+
+impl Default for MessageJudgmentOutboxLeaseToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MessageJudgmentOutboxLeaseToken {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A due row is considered abandoned (reclaimable by another node) once its
+/// lease is older than this, in milliseconds. Copied from
+/// `room_effect_outbox::store::CLAIM_TIMEOUT_MS` (5 minutes): the same
+/// generic "comfortably longer than one processing round-trip" reasoning
+/// applies here — this outbox's own worst case is
+/// `DEFAULT_BATCH_LIMIT` (100) rows divided across
+/// `MAX_CONCURRENT_JUDGE_CALLS` (8) concurrent Jev calls at the Jev client's
+/// own `DEFAULT_REQUEST_TIMEOUT` (4s) each, roughly 50s — well inside this
+/// timeout, with ample margin for a stalled node to be detected and its
+/// claim reclaimed.
+pub const CLAIM_TIMEOUT_MS: i64 = 300_000;
+
 /// Input to [`enqueue_pending`]. `body` is the raw, untruncated message
 /// body; truncation to [`MAX_BODY_SNAPSHOT_CHARS`] happens inside
 /// `enqueue_pending`, not at the call site.
 pub struct PendingJudgmentInput {
-    pub waddle_id: WaddleId,
+    /// The bare JID of the archive this message was judged alongside
+    /// (the room, for groupchat; the local mailbox owner, for direct) —
+    /// a real `BareJid`, not a `WaddleId` (that type names a different,
+    /// tenant-scoped identifier; see the rename note on
+    /// [`PendingJudgmentRow::archive`]).
+    pub archive: BareJid,
     pub stanza_id: StanzaId,
     pub body: String,
     pub now_ms: i64,
@@ -69,7 +108,12 @@ pub struct PendingJudgmentInput {
 #[derive(Debug, Clone)]
 pub struct PendingJudgmentRow {
     pub id: MessageJudgmentOutboxId,
-    pub waddle_id: WaddleId,
+    /// See [`PendingJudgmentInput::archive`]. Stored in the
+    /// `archive_jid` column (not `waddle_id`, unlike
+    /// `clustering_muc_rooms`, which really does carry a `WaddleId`
+    /// under that column name) — deliberately distinct names so the two
+    /// are never confused when scanning across tables.
+    pub archive: BareJid,
     pub stanza_id: StanzaId,
     pub body_snapshot: String,
     pub available_at_ms: i64,
@@ -80,7 +124,8 @@ pub struct PendingJudgmentRow {
 
 /// Input to [`insert_judgment`]: one result row for `message_judgments`.
 pub struct JudgmentRecord {
-    pub waddle_id: WaddleId,
+    /// See [`PendingJudgmentInput::archive`].
+    pub archive: BareJid,
     pub stanza_id: StanzaId,
     pub judgment_name: JudgmentKind,
     pub taxonomy_version: String,
@@ -94,12 +139,23 @@ pub struct JudgmentRecord {
     pub created_at_ms: i64,
 }
 
-const OUTBOX_SELECT_COLUMNS: &str = "id, waddle_id, stanza_id, stanza_by, body_snapshot, \
+const OUTBOX_SELECT_COLUMNS: &str = "id, archive_jid, stanza_id, stanza_by, body_snapshot, \
      available_at_ms, attempt_count, last_error, created_at_ms";
+
+const ENQUEUE_SQL: &str = "INSERT INTO message_judgment_outbox \
+     (id, archive_jid, stanza_id, stanza_by, body_snapshot, available_at_ms, \
+      attempt_count, last_error, done, created_at_ms) \
+     VALUES (?, ?, ?, ?, ?, ?, 0, NULL, FALSE, ?)";
 
 /// Enqueue one message for judgment. Plain insert, no dedup — the queue
 /// itself may carry duplicates (e.g. a retried enqueue); `message_judgments`
 /// is where idempotency is enforced (see [`insert_judgment`]).
+///
+/// Used by this module's own tests and by any future caller outside a live
+/// ingress transaction. The real production enqueue site
+/// (`ingress::durable::apply_durable`) uses [`enqueue_pending_in_tx`]
+/// instead, so the row and the archive write it accompanies commit or roll
+/// back together (#1831 Phase 2) — see that function's docs.
 pub async fn enqueue_pending(
     db: &Database,
     input: PendingJudgmentInput,
@@ -109,13 +165,10 @@ pub async fn enqueue_pending(
     let connection = db.guard().await?;
     connection
         .execute(
-            "INSERT INTO message_judgment_outbox \
-             (id, waddle_id, stanza_id, stanza_by, body_snapshot, available_at_ms, \
-              attempt_count, last_error, done, created_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, 0, NULL, FALSE, ?)",
+            ENQUEUE_SQL,
             crate::db_params![
                 id.as_str(),
-                input.waddle_id.as_str(),
+                input.archive.to_string(),
                 input.stanza_id.id.as_str(),
                 input.stanza_id.by.to_string(),
                 body_snapshot,
@@ -127,8 +180,57 @@ pub async fn enqueue_pending(
     Ok(())
 }
 
+/// Enqueue one message for judgment inside the caller's own transaction.
+///
+/// This is the real transactional-outbox seam (#1831 Phase 2): called from
+/// `ingress::durable::apply_durable` (via
+/// `ingress_uow::MessageJudgmentOutboxRepository::enqueue_in_tx`) on the
+/// exact same [`crate::db::Transaction`] that just wrote the archive row,
+/// before that transaction commits. Dropping the transaction without
+/// committing — the same rollback-on-drop behaviour every other
+/// `ingress_uow` repository write relies on — undoes this insert together
+/// with the archive write, so the two can never observably diverge:
+/// no crash window exists where one is durable and the other is not.
+///
+/// Mirrors [`enqueue_pending`] exactly (same columns, same no-dedup
+/// semantics) but executes against a transaction handle instead of
+/// checking out a pooled connection.
+pub async fn enqueue_pending_in_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    input: PendingJudgmentInput,
+) -> Result<(), MessageJudgmentOutboxError> {
+    let id = MessageJudgmentOutboxId::generate();
+    let body_snapshot: String = input.body.chars().take(MAX_BODY_SNAPSHOT_CHARS).collect();
+    tx.execute(
+        ENQUEUE_SQL,
+        crate::db_params![
+            id.as_str(),
+            input.archive.to_string(),
+            input.stanza_id.id.as_str(),
+            input.stanza_id.by.to_string(),
+            body_snapshot,
+            input.now_ms,
+            input.now_ms,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Fetch up to `limit` not-yet-done rows whose `available_at_ms` has
-/// elapsed, oldest first.
+/// elapsed, oldest first. A plain, non-claiming read: it never touches
+/// `lease_token`/`leased_at_ms`, so two concurrent callers can both see
+/// (and both act on) the same row.
+///
+/// **Not safe for the drain worker or any other concurrent processing
+/// path** — production runs more than one replica
+/// (`clustering.enabled: true`), and two replicas both fetching this same
+/// due row would both call the paid Jev API for it (#1831 Phase 2). The
+/// drain worker uses [`claim_due_batch`] instead, which requires a
+/// caller to win an exclusive lease before a row is returned. This
+/// function remains for read-only inspection (tests, and any future
+/// metrics/backfill tooling that only needs to observe the due set, never
+/// to process it).
 pub async fn fetch_due_batch(
     db: &Database,
     limit: i64,
@@ -144,6 +246,72 @@ pub async fn fetch_due_batch(
                  LIMIT ?"
             ),
             crate::db_params![now_ms, limit.clamp(1, 1_000)],
+        )
+        .await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        out.push(decode_pending_row(&row)?);
+    }
+    Ok(out)
+}
+
+/// Claim up to `limit` due rows for this drain pass, so only one node
+/// processes a given row at a time (#1831 Phase 2 — see the module docs on
+/// why this is required now that production runs more than one replica).
+///
+/// One dual-driver-compatible `UPDATE ... WHERE id IN (SELECT ... LIMIT
+/// ?) RETURNING *`, mirroring this codebase's own established idiom for
+/// exactly this shape (`pending_delivery::claim_prefix`'s `UPDATE ...
+/// RETURNING`, and `room_effect_outbox::store`'s optimistic
+/// `lease_token`/`leased_at_ms` claim — adapted here from a single-row
+/// claim to a batch claim, since this outbox fetches several due rows per
+/// poll rather than one at a time). The outer `WHERE` re-checks
+/// eligibility (not done, due, and unleased-or-stale-leased): a
+/// concurrent claimant that already won one of the inner `SELECT`'s
+/// preselected ids makes this call's `UPDATE` a no-op for that id, so
+/// `RETURNING` yields only the rows THIS call actually transitioned —
+/// never a row a concurrent caller also preselected but already claimed.
+/// No `SKIP LOCKED` is needed: this optimistic-lease pattern already works
+/// on both Postgres and SQLite (unlike `SKIP LOCKED`, which SQLite does
+/// not support).
+///
+/// A row whose lease is older than [`CLAIM_TIMEOUT_MS`] is treated as
+/// abandoned (its claimant crashed or stalled) and is reclaimable by any
+/// caller, including the original claimant retrying.
+pub async fn claim_due_batch(
+    db: &Database,
+    limit: i64,
+    now_ms: i64,
+) -> Result<Vec<PendingJudgmentRow>, MessageJudgmentOutboxError> {
+    let token = MessageJudgmentOutboxLeaseToken::new();
+    let stale = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
+    let bounded_limit = limit.clamp(1, 1_000);
+    let connection = db.guard().await?;
+    let mut rows = connection
+        .query(
+            &format!(
+                "UPDATE message_judgment_outbox \
+                 SET lease_token = ?, leased_at_ms = ? \
+                 WHERE NOT done AND available_at_ms <= ? \
+                   AND (lease_token IS NULL OR leased_at_ms <= ?) \
+                   AND id IN ( \
+                     SELECT id FROM message_judgment_outbox \
+                     WHERE NOT done AND available_at_ms <= ? \
+                       AND (lease_token IS NULL OR leased_at_ms <= ?) \
+                     ORDER BY available_at_ms, id \
+                     LIMIT ? \
+                   ) \
+                 RETURNING {OUTBOX_SELECT_COLUMNS}"
+            ),
+            crate::db_params![
+                token.as_str(),
+                now_ms,
+                now_ms,
+                stale,
+                now_ms,
+                stale,
+                bounded_limit,
+            ],
         )
         .await?;
     let mut out = Vec::new();
@@ -227,8 +395,17 @@ pub async fn record_failure(
     let connection = db.guard().await?;
     let affected = connection
         .execute(
+            // Clears `lease_token`/`leased_at_ms` (not just rescheduling
+            // `available_at_ms`): the retry backoff delay for early
+            // attempts (`retry_delay_ms`, starting at `BASE_RETRY_DELAY_MS`
+            // = 5s) is far shorter than a stale lease's own timeout
+            // (`CLAIM_TIMEOUT_MS` = 5 minutes), so a row that kept its old
+            // claim would sit unreclaimable — by this same worker or any
+            // other — long after it becomes due again, silently stalling
+            // every retry until the lease happens to age out.
             "UPDATE message_judgment_outbox \
-             SET attempt_count = attempt_count + 1, last_error = ?, available_at_ms = ? \
+             SET attempt_count = attempt_count + 1, last_error = ?, available_at_ms = ?, \
+                 lease_token = NULL, leased_at_ms = NULL \
              WHERE id = ? AND NOT done",
             crate::db_params![error, next_attempt_at_ms, id.as_str()],
         )
@@ -249,14 +426,14 @@ pub async fn insert_judgment(
     let sql = match db.driver() {
         DatabaseDriver::Postgres => {
             "INSERT INTO message_judgments \
-             (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
+             (id, archive_jid, stanza_id, stanza_by, judgment_name, taxonomy_version, \
               model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (stanza_id, judgment_name, model_version) DO NOTHING"
         }
         DatabaseDriver::Sqlite => {
             "INSERT OR IGNORE INTO message_judgments \
-             (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
+             (id, archive_jid, stanza_id, stanza_by, judgment_name, taxonomy_version, \
               model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         }
@@ -267,7 +444,7 @@ pub async fn insert_judgment(
             sql,
             crate::db_params![
                 id,
-                record.waddle_id.as_str(),
+                record.archive.to_string(),
                 record.stanza_id.id.as_str(),
                 record.stanza_id.by.to_string(),
                 record.judgment_name.as_str(),
@@ -324,7 +501,7 @@ pub async fn insert_judgment_batch_and_mark_done(
     // clause (rather than `message_judgments.cost_usd`) is valid in both
     // Postgres and SQLite.
     let insert_sql = "INSERT INTO message_judgments \
-         (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
+         (id, archive_jid, stanza_id, stanza_by, judgment_name, taxonomy_version, \
           model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (stanza_id, judgment_name, model_version) \
@@ -350,7 +527,7 @@ pub async fn insert_judgment_batch_and_mark_done(
             insert_sql,
             crate::db_params![
                 id,
-                record.waddle_id.as_str(),
+                record.archive.to_string(),
                 record.stanza_id.id.as_str(),
                 record.stanza_id.by.to_string(),
                 record.judgment_name.as_str(),
@@ -370,7 +547,10 @@ pub async fn insert_judgment_batch_and_mark_done(
 
 fn decode_pending_row(row: &Row) -> Result<PendingJudgmentRow, MessageJudgmentOutboxError> {
     let id: String = row.get(0)?;
-    let waddle_id: String = row.get(1)?;
+    let archive_jid: String = row.get(1)?;
+    let archive: BareJid = archive_jid
+        .parse()
+        .map_err(|_| MessageJudgmentOutboxError::InvalidArchiveJid(archive_jid.clone()))?;
     let stanza_id: String = row.get(2)?;
     let stanza_by: String = row.get(3)?;
     let by: Jid = stanza_by
@@ -378,7 +558,7 @@ fn decode_pending_row(row: &Row) -> Result<PendingJudgmentRow, MessageJudgmentOu
         .map_err(|_| MessageJudgmentOutboxError::InvalidStanzaByJid(stanza_by.clone()))?;
     Ok(PendingJudgmentRow {
         id: MessageJudgmentOutboxId::from_stored(id),
-        waddle_id: WaddleId::new(waddle_id),
+        archive,
         stanza_id: StanzaId::new(stanza_id, by),
         body_snapshot: row.get(4)?,
         available_at_ms: row.get(5)?,
@@ -393,8 +573,8 @@ mod tests {
     use super::*;
     use crate::db::Database;
 
-    fn waddle_id() -> WaddleId {
-        WaddleId::new("default".to_string())
+    fn archive() -> BareJid {
+        "default@example.test".parse().expect("archive jid")
     }
 
     fn stanza(id: &str) -> StanzaId {
@@ -436,7 +616,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-1"),
                 body: "is this a question?".to_string(),
                 now_ms: 1_000,
@@ -451,7 +631,7 @@ mod tests {
 
         let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
         assert_eq!(due.len(), 1);
-        assert_eq!(due[0].waddle_id.as_str(), "default");
+        assert_eq!(due[0].archive.to_string(), "default@example.test");
         assert_eq!(due[0].stanza_id.as_str(), "stanza-1");
         assert_eq!(due[0].body_snapshot, "is this a question?");
         assert_eq!(due[0].attempt_count, 0);
@@ -469,7 +649,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-long"),
                 body,
                 now_ms: 1_000,
@@ -495,7 +675,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-done"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -521,7 +701,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-fail"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -556,7 +736,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-dead"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -596,7 +776,7 @@ mod tests {
 
     fn judgment(stanza_id: &str, model_version: &str) -> JudgmentRecord {
         JudgmentRecord {
-            waddle_id: waddle_id(),
+            archive: archive(),
             stanza_id: stanza(stanza_id),
             judgment_name: JudgmentKind::IsQuestion,
             taxonomy_version: "v1".to_string(),
@@ -685,7 +865,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-raced"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -729,7 +909,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-raced-retry"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -776,7 +956,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-raced-batch"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -838,7 +1018,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-cost-accum"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -861,7 +1041,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-cost-accum"),
                 body: "body".to_string(),
                 now_ms: 2_000,
@@ -910,6 +1090,183 @@ mod tests {
             row.get::<f64>(2).expect("cost_usd"),
             0.00002 + 0.00003,
             "the second call's cost must be added, not discarded, even though its judgment collided"
+        );
+    }
+
+    // #1831 Phase 2: `enqueue_pending_in_tx` is the real production seam
+    // (called from `ingress::durable::apply_durable` via
+    // `ingress_uow::MessageJudgmentOutboxRepository`). These two tests
+    // prove it round-trips identically to `enqueue_pending` when
+    // committed, and — the whole point of moving this onto a caller-owned
+    // transaction — that it rolls back cleanly when that transaction
+    // never commits, exactly like every other ingress repository write.
+
+    #[tokio::test]
+    async fn enqueue_pending_in_tx_is_visible_once_committed() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+
+        let mut tx = db.begin().await.expect("begin");
+        enqueue_pending_in_tx(
+            &mut tx,
+            PendingJudgmentInput {
+                archive: archive(),
+                stanza_id: stanza("stanza-tx-commit"),
+                body: "is this committed?".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue in tx");
+        tx.commit().await.expect("commit");
+
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].stanza_id.as_str(), "stanza-tx-commit");
+        assert_eq!(due[0].body_snapshot, "is this committed?");
+    }
+
+    #[tokio::test]
+    async fn enqueue_pending_in_tx_is_absent_when_the_transaction_rolls_back() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+
+        let mut tx = db.begin().await.expect("begin");
+        enqueue_pending_in_tx(
+            &mut tx,
+            PendingJudgmentInput {
+                archive: archive(),
+                stanza_id: stanza("stanza-tx-rollback"),
+                body: "never committed".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue in tx");
+        // No `tx.commit()`: dropping the transaction rolls it back, the
+        // same behaviour `ingress_uow::IngressUowTransaction` documents
+        // and relies on for every other repository write in the same
+        // ingress transaction as an archive write.
+        drop(tx);
+
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        assert!(
+            due.is_empty(),
+            "a row enqueued on a rolled-back transaction must not persist"
+        );
+    }
+
+    // #1831 Phase 2 HIGH finding: every replica ran its own unguarded drain
+    // loop (`fetch_due_batch` is a plain `SELECT`, no claim), so two nodes
+    // could both fetch and both judge (and both pay for) the same due row.
+    // `claim_due_batch` is the fix; these tests prove its exclusivity.
+
+    #[tokio::test]
+    async fn claim_due_batch_excludes_a_row_it_just_claimed_from_a_second_call() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                archive: archive(),
+                stanza_id: stanza("stanza-claim"),
+                body: "body".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+
+        let first = claim_due_batch(&db, 10, 1_000).await.expect("first claim");
+        assert_eq!(first.len(), 1, "the only due row is claimed");
+
+        // Simulates a second node polling for the same due window at (about)
+        // the same instant: it must not also win this row, or both nodes
+        // would call the paid judge API for it.
+        let second = claim_due_batch(&db, 10, 1_000).await.expect("second claim");
+        assert!(
+            second.is_empty(),
+            "a row already claimed and not yet stale must not be claimable again"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_claim_due_batch_calls_never_both_win_the_same_row() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                archive: archive(),
+                stanza_id: stanza("stanza-race"),
+                body: "body".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+
+        // Two "nodes" racing `claim_due_batch` against the same due row at
+        // the same instant. Exactly one may win it -- never both, and never
+        // neither (the row is due and unleased, so someone must claim it).
+        let (first, second) = tokio::join!(
+            claim_due_batch(&db, 10, 1_000),
+            claim_due_batch(&db, 10, 1_000),
+        );
+        let claimed = first.expect("first claim").len() + second.expect("second claim").len();
+        assert_eq!(
+            claimed, 1,
+            "exactly one concurrent caller may claim the single due row"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_due_batch_reclaims_a_stale_lease_after_a_crashed_node() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                archive: archive(),
+                stanza_id: stanza("stanza-stale-lease"),
+                body: "body".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+
+        let first = claim_due_batch(&db, 10, 1_000).await.expect("first claim");
+        assert_eq!(first.len(), 1);
+
+        // Immediately after: still within the lease window, unclaimable.
+        assert!(claim_due_batch(&db, 10, 1_000)
+            .await
+            .expect("still leased")
+            .is_empty());
+
+        // The original claimant never comes back (crash/stall). Once its
+        // lease is older than `CLAIM_TIMEOUT_MS`, the row is reclaimable --
+        // a permanently unreclaimable claim would let one crashed node wedge
+        // a row forever.
+        let after_timeout = 1_000 + CLAIM_TIMEOUT_MS + 1;
+        let reclaimed = claim_due_batch(&db, 10, after_timeout)
+            .await
+            .expect("reclaim after stale lease");
+        assert_eq!(
+            reclaimed.len(),
+            1,
+            "a stale lease (its claimant presumed dead) must be reclaimable"
         );
     }
 }

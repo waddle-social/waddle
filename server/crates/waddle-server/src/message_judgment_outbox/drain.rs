@@ -4,12 +4,20 @@
 //! send path, nothing here is wire-visible, and a permanently-failing row
 //! never blocks other rows or grows the queue unboundedly (it is
 //! dead-lettered — marked done, never deleted — once `MAX_ATTEMPTS` is
-//! exceeded). Unlike `room_effect_outbox`, there is no clustering lease,
-//! ownership claim, or supervisor here: this is a single background poll
-//! loop, safe to run on exactly one process at a time (running it on
-//! several is also harmless, since `fetch_due_batch` + retries are not
-//! exactly-once — duplicate judge calls are tolerated, per the idempotent
-//! `message_judgments` insert).
+//! exceeded).
+//!
+//! Unlike `room_effect_outbox`, there is no clustering ownership claim or
+//! supervisor here — this is a plain poll loop, not a clustered actor with
+//! claim-fenced ownership of a specific entity. It IS, however, safe to run
+//! on more than one node at once: production runs multiple replicas
+//! (`clustering.enabled: true`) against shared Postgres, so each poll tick
+//! claims its batch via [`store::claim_due_batch`] (an optimistic
+//! `lease_token`/`leased_at_ms` claim, #1831 Phase 2) rather than a plain
+//! `SELECT` — without that claim, two replicas would both pick up the same
+//! due row and both call the paid Jev API for it. A stalled or crashed
+//! claimant's lease eventually goes stale (`store::CLAIM_TIMEOUT_MS`) and
+//! becomes reclaimable, so a row can still never be stuck forever behind a
+//! dead node.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,10 +73,11 @@ pub struct DrainOutcome {
     pub dead_lettered: usize,
 }
 
-/// Fetch one due batch and attempt a judgment for each row. Never panics
-/// and never propagates a judge failure as a hard error: a judge failure is
-/// expected, per-row, and handled by rescheduling with backoff or
-/// dead-lettering — it is never allowed to abort the batch.
+/// Claim one due batch (exclusively — see [`store::claim_due_batch`]) and
+/// attempt a judgment for each row. Never panics and never propagates a
+/// judge failure as a hard error: a judge failure is expected, per-row, and
+/// handled by rescheduling with backoff or dead-lettering — it is never
+/// allowed to abort the batch.
 pub async fn drain_once(
     db: &Database,
     judge: &dyn MessageJudge,
@@ -76,10 +85,10 @@ pub async fn drain_once(
     batch_limit: i64,
 ) -> DrainOutcome {
     let mut outcome = DrainOutcome::default();
-    let batch = match store::fetch_due_batch(db, batch_limit, now_ms).await {
+    let batch = match store::claim_due_batch(db, batch_limit, now_ms).await {
         Ok(batch) => batch,
         Err(error) => {
-            tracing::warn!(%error, "message_judgment_outbox: fetch_due_batch failed");
+            tracing::warn!(%error, "message_judgment_outbox: claim_due_batch failed");
             return outcome;
         }
     };
@@ -145,7 +154,7 @@ async fn process_row(
                 .into_iter()
                 .enumerate()
                 .map(|(index, named)| JudgmentRecord {
-                    waddle_id: row.waddle_id.clone(),
+                    archive: row.archive.clone(),
                     stanza_id: row.stanza_id.clone(),
                     judgment_name: named.judgment_name,
                     taxonomy_version: named.taxonomy_version,
@@ -240,8 +249,11 @@ async fn process_row(
 /// Background poll loop: calls [`drain_once`] on an interval, forever.
 /// Callers `tokio::spawn` this; it never returns. Plain interval polling —
 /// no supervisor/actor, unlike `room_effect_outbox`'s
-/// `RoomEffectArmSupervisor` (a different problem: clustered lease
-/// contention, which this single-worker outbox does not have).
+/// `RoomEffectArmSupervisor` — safe to spawn from every node's startup
+/// (`server::http::spawn_message_judgment_outbox`) at once precisely
+/// because `drain_once` claims its batch exclusively (see the module docs
+/// and [`store::claim_due_batch`]), not because there is only ever one
+/// worker.
 ///
 /// Assumes [`super::initialize`] has already run against `db` (schema
 /// bootstrap is not repeated here on every tick).
@@ -264,12 +276,12 @@ mod tests {
         enqueue_pending, fetch_due_batch, PendingJudgmentInput,
     };
     use async_trait::async_trait;
+    use jid::BareJid;
     use std::sync::Mutex;
-    use waddle_xmpp::muc::durable::WaddleId;
     use waddle_xmpp_core::xep0359::StanzaId;
 
-    fn waddle_id() -> WaddleId {
-        WaddleId::new("default".to_string())
+    fn archive() -> BareJid {
+        "default@example.test".parse().expect("archive jid")
     }
 
     fn stanza(id: &str) -> StanzaId {
@@ -354,7 +366,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-ok"),
                 body: "is this a question?".to_string(),
                 now_ms: 1_000,
@@ -399,7 +411,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-multi"),
                 body: "you are all idiots".to_string(),
                 now_ms: 1_000,
@@ -484,7 +496,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-fail"),
                 body: "body".to_string(),
                 now_ms: 1_000,
@@ -543,7 +555,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-dead-letter"),
                 body: "body-fails".to_string(),
                 now_ms: 0,
@@ -557,7 +569,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-healthy"),
                 body: "body-healthy".to_string(),
                 now_ms: 0,
@@ -647,7 +659,7 @@ mod tests {
         enqueue_pending(
             &db,
             PendingJudgmentInput {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-partial"),
                 body: "you are all idiots".to_string(),
                 now_ms: 0,
@@ -658,7 +670,7 @@ mod tests {
         store::insert_judgment(
             &db,
             JudgmentRecord {
-                waddle_id: waddle_id(),
+                archive: archive(),
                 stanza_id: stanza("stanza-partial"),
                 judgment_name: JudgmentKind::IsQuestion,
                 taxonomy_version: "v1".to_string(),

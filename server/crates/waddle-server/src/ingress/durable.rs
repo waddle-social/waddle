@@ -144,6 +144,74 @@ pub(super) async fn apply_durable(
                     &outcome,
                 )
                 .await?;
+                // #1831 Phase 2: enqueue a `message_judgment_outbox` row in
+                // this exact transaction, right after the archive write it
+                // accompanies (and before this same transaction commits),
+                // so the two can never diverge — a crash or error between
+                // them rolls both back, and a retried/replayed commit sees
+                // `MamTxStoreOutcome::Existing`/`Repaired` (not `Inserted`)
+                // and correctly skips re-enqueueing.
+                //
+                // Gated on `tx.judgment_outbox_enabled()`
+                // (`MessageJudgmentOutboxConfig::enabled`, default false):
+                // fully inert unless an operator opts in.
+                //
+                // Correctness notes:
+                // - Only `Inserted` (a genuinely new archive row) enqueues;
+                //   `Existing`/`Repaired`/`TombstoneHit`/`Expired` do not.
+                // - A 1:1 direct message archives twice — once into the
+                //   sender's own MAM store, once into the recipient's —
+                //   both driven through this same match arm with the same
+                //   `message`. Enqueueing on both would judge (and cost)
+                //   every DM twice. `is_own_archive_copy` restricts a
+                //   `Direct` effect to the sender's own archive write,
+                //   using this codebase's existing sender/recipient-archive
+                //   test (`direct_archive.rs`'s `sender_archive`). A
+                //   groupchat message has exactly one room-owned archive,
+                //   so no such restriction applies there.
+                // - The row is grouped by `archive` itself (a real
+                //   `jid::BareJid` — the room's bare JID for groupchat, the
+                //   local mailbox owner's bare JID for direct), not by
+                //   `waddle_xmpp::muc::durable::WaddleId`: that type names a
+                //   different, tenant-scoped identifier that lives only on
+                //   the in-memory `RoomActor` (`self.room.waddle_id`) —
+                //   unreachable from this DB-only transactional boundary —
+                //   and clustering's durable `clustering_muc_rooms` table
+                //   that also carries a `WaddleId` does not exist in a
+                //   single-node deployment. This row is analysis-only (never
+                //   wire-visible, no foreign key); using the archive's own
+                //   JID is finer-grained than a per-tenant scope would be,
+                //   available here with no extra lookup, and keeps a real
+                //   JID a typed `BareJid` rather than smuggling it through
+                //   an unrelated identifier type.
+                // - An empty or whitespace-only `<body/>` (e.g. a `<store/>`
+                //   hint on a reaction/retraction/correction stanza XMPP
+                //   allows to carry one) is skipped: it would still cost a
+                //   real Jev call for no useful signal.
+                if tx.judgment_outbox_enabled() {
+                    if let MamTxStoreOutcome::Inserted { stanza_id, .. } = &outcome {
+                        let is_own_archive_copy = match effect {
+                            DurableEffect::Direct(_) => &message.from.to_bare() == archive,
+                            DurableEffect::Room(_) => true,
+                        };
+                        if is_own_archive_copy {
+                            if let Some(body) = message.body.clone() {
+                                if !body.trim().is_empty() {
+                                    crate::ingress_uow::MessageJudgmentOutboxRepository::enqueue_in_tx(
+                                        tx,
+                                        crate::message_judgment_outbox::PendingJudgmentInput {
+                                            archive: archive.clone(),
+                                            stanza_id: stanza_id.clone(),
+                                            body,
+                                            now_ms: crate::time::now_ms(),
+                                        },
+                                    )
+                                    .await?;
+                                }
+                            }
+                        }
+                    }
+                }
                 applied.archives.push((
                     PlanEffectDependency::AfterArchive {
                         archive: archive.clone(),

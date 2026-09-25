@@ -29,34 +29,32 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
                         .await
                 }
             };
-            // TODO(#1831 Phase 2): fire-and-forget enqueue into
-            // `message_judgment_outbox::enqueue_pending` here, gated on
-            // `MessageJudgmentOutboxConfig::enabled` and on `outcome` being
-            // `Ok(StoreOutcome::Stored { stanza_id, .. })` (never on a
-            // fenced-ownership-lost or storage-error outcome). This is the
-            // correct seam — not `groupchat_archive.rs`'s
-            // `finish_archive_groupchat_message_with_effects` — because
-            // that function also runs during the two-phase *planning* pass
-            // (`deps.effects.is_planning() == true`), where `deps.effects
-            // .execute(...)` only records an assumed outcome and never
-            // touches `storage`; enqueueing there would fire for plans that
-            // are later rejected and never actually committed. This
-            // `execute_durable` arm is the single place a groupchat archive
-            // write is ever really performed (both for a directly-executed
-            // `ImmediateSink` message and for a previously-planned effect
-            // replayed for real by the ingress commit path), so it is the
-            // only site that reliably fires exactly once per real archive.
-            // `message.body` (`Option<String>`) is already the RFC 6121
-            // §5.2.3-aware body extraction done upstream in
-            // `groupchat_archive.rs`'s `prototype_body` — reuse it directly
-            // rather than re-deriving a body extractor. Left as a TODO: a
-            // fire-and-forget `tokio::spawn` needs a `Database` handle and
-            // the config flag, and neither reaches `Deps` today without a
-            // new field threaded through `Deps`/`WebSocketState::deps` and
-            // every one of their ~51 literal construction sites — out of
-            // scope to force safely in this PR. The real Jev client +
-            // startup wiring for `run_drain_loop` lands in the same
-            // follow-up.
+            // CORRECTION (#1831 Phase 2): an earlier draft of this comment
+            // claimed this `execute_durable` arm was "the single place a
+            // groupchat archive write is ever really performed," including
+            // for the primary ingress commit path, and planned to enqueue
+            // `message_judgment_outbox` rows here. Two independent
+            // adversarial reviews traced the real call graph and found
+            // that claim false: `ingress::execute::execute_effects` (the
+            // post-commit "Phase C" replay `commit_submission` actually
+            // drives) only ever reconstructs `Effect::External` payloads
+            // to run through `ImmediateSink` — never `Effect::Durable` —
+            // so this arm is *never* reached by a normal user chat
+            // message's commit. The real (and only) archive write for
+            // that path is `ingress_uow::MamArchiveRepository::store` /
+            // `store_fenced`, called from `ingress::durable::apply_durable`
+            // inside the same database transaction the ingress commit
+            // uses; the `message_judgment_outbox` enqueue now lives there
+            // too, in the same transaction — see that function's docs.
+            //
+            // This arm instead serves callers that construct and execute a
+            // `Durable(ArchiveGroupchat)` effect directly through
+            // `ImmediateSink`, outside any ingress transaction — room
+            // system messages (`room_system_message.rs`), not ordinary
+            // occupant chat messages. Those do not enqueue a judgment-
+            // outbox row: they are synthetic notices (subject changes and
+            // similar), not user content, so nothing here needs to change
+            // that.
             EffectOutcome::Archive(outcome)
         }
         DurableRoomEffect::ProjectGroupchatInbox {
