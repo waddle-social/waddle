@@ -18,15 +18,18 @@ enum ComposerTextSelection {
     }
 
     /// Scalar offsets of a single-range selection in `text`; nil for a
-    /// multi-range selection or indices `text` does not hold (the field can
-    /// report a selection before the new text arrives).
+    /// multi-range selection. `text` and `selection` are reported by the
+    /// field independently and not in a guaranteed order, so an endpoint
+    /// from a newer string than `text` holds is clamped to `text`'s end
+    /// rather than rejected — otherwise the tracked selection can never
+    /// advance past that mismatch, pinning the caret behind where the
+    /// field is actually inserting.
     static func range(of selection: TextSelection, in text: String) -> Range<Int>? {
         guard case let .selection(range) = selection.indices else { return nil }
-        guard let lower = offset(of: range.lowerBound, in: text),
-              let upper = offset(of: range.upperBound, in: text),
-              lower <= upper
-        else { return nil }
-        return lower..<upper
+        let count = text.unicodeScalars.count
+        let lower = offset(of: range.lowerBound, in: text) ?? count
+        let upper = offset(of: range.upperBound, in: text) ?? count
+        return min(lower, upper)..<max(lower, upper)
     }
 
     private static func offset(of index: String.Index, in text: String) -> Int? {

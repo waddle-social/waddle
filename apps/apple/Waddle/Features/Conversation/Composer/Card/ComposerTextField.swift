@@ -67,8 +67,10 @@ struct ComposerTextField: View {
                     selection = nil
                     return
                 }
-                // A selection reported before its text arrives keeps the
-                // previous one until the next report.
+                // nil only for a multi-range selection, which this field
+                // never produces; a selection reported before its text
+                // arrives is clamped rather than dropped, see
+                // `ComposerTextSelection.range(of:in:)`.
                 if let range = ComposerTextSelection.range(of: newValue, in: text) {
                     selection = range
                 }
