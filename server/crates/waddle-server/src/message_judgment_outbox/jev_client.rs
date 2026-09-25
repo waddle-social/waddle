@@ -487,6 +487,12 @@ fn parse_response(
             "jev is_question probability {probability} was outside 0.0..=1.0"
         )));
     }
+    let cost_usd = response.usage.cost;
+    if !cost_usd.is_finite() || cost_usd < 0.0 {
+        return Err(JudgeError::InvalidResponse(format!(
+            "jev usage.cost {cost_usd} was not a finite non-negative value"
+        )));
+    }
     let model_version = if response.model.is_empty() {
         fallback_model_version.to_string()
     } else {
@@ -497,7 +503,7 @@ fn parse_response(
         probability,
         taxonomy_version: TAXONOMY_VERSION.to_string(),
         model_version,
-        cost_usd: response.usage.cost,
+        cost_usd,
     })
 }
 
@@ -653,6 +659,24 @@ mod tests {
             .is_question("body")
             .await
             .expect_err("out-of-range probability must be rejected");
+
+        assert!(matches!(error, JudgeError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn is_question_rejects_negative_cost() {
+        let client = client_with(|_request| {
+            Ok(ok_response(serde_json::json!({
+                "answers": { "is_question": { "noul": 0.5, "type": "noul" } },
+                "model": "typesafe/jev-1.13-20260917",
+                "usage": { "cost": -0.01, "input_tokens": 1, "output_tokens": 1 }
+            })))
+        });
+
+        let error = client
+            .is_question("body")
+            .await
+            .expect_err("a negative usage.cost must be rejected, not silently stored");
 
         assert!(matches!(error, JudgeError::InvalidResponse(_)));
     }
