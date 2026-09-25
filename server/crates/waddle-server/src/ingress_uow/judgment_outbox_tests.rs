@@ -25,7 +25,7 @@ async fn judgment_input(archive: &BareJid, outcome: &MamTxStoreOutcome) -> Pendi
         panic!("expected a fresh archive insert, got {outcome:?}");
     };
     PendingJudgmentInput {
-        waddle_id: waddle_xmpp::muc::durable::WaddleId::new(archive.to_string()),
+        archive: archive.clone(),
         stanza_id: stanza_id.clone(),
         body: "is this durable?".to_string(),
         now_ms: crate::time::now_ms(),

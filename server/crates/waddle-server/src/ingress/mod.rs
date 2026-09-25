@@ -1248,4 +1248,7 @@ mod offline_hardening_tests;
 #[cfg(test)]
 mod muc_occupant_progress_tests;
 
+#[cfg(test)]
+mod judgment_outbox_gating_tests;
+
 mod room_canonical;

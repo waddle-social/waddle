@@ -169,19 +169,25 @@ pub(super) async fn apply_durable(
                 //   test (`direct_archive.rs`'s `sender_archive`). A
                 //   groupchat message has exactly one room-owned archive,
                 //   so no such restriction applies there.
-                // - `WaddleId` (`waddle_xmpp::muc::durable::WaddleId`) is
-                //   documented as "the application scope that owns a
-                //   channel-backed MUC room", but that scope lives only on
+                // - The row is grouped by `archive` itself (a real
+                //   `jid::BareJid` — the room's bare JID for groupchat, the
+                //   local mailbox owner's bare JID for direct), not by
+                //   `waddle_xmpp::muc::durable::WaddleId`: that type names a
+                //   different, tenant-scoped identifier that lives only on
                 //   the in-memory `RoomActor` (`self.room.waddle_id`) —
                 //   unreachable from this DB-only transactional boundary —
                 //   and clustering's durable `clustering_muc_rooms` table
-                //   that also carries it does not exist in a single-node
-                //   deployment. This row is analysis-only (never
-                //   wire-visible, no foreign key), so `archive` itself
-                //   (the room's bare JID for groupchat, the local mailbox
-                //   owner's bare JID for direct) is used as the grouping
-                //   key instead — finer-grained than a per-tenant scope
-                //   would be, and available here with no extra lookup.
+                //   that also carries a `WaddleId` does not exist in a
+                //   single-node deployment. This row is analysis-only (never
+                //   wire-visible, no foreign key); using the archive's own
+                //   JID is finer-grained than a per-tenant scope would be,
+                //   available here with no extra lookup, and keeps a real
+                //   JID a typed `BareJid` rather than smuggling it through
+                //   an unrelated identifier type.
+                // - An empty or whitespace-only `<body/>` (e.g. a `<store/>`
+                //   hint on a reaction/retraction/correction stanza XMPP
+                //   allows to carry one) is skipped: it would still cost a
+                //   real Jev call for no useful signal.
                 if tx.judgment_outbox_enabled() {
                     if let MamTxStoreOutcome::Inserted { stanza_id, .. } = &outcome {
                         let is_own_archive_copy = match effect {
@@ -190,18 +196,18 @@ pub(super) async fn apply_durable(
                         };
                         if is_own_archive_copy {
                             if let Some(body) = message.body.clone() {
-                                crate::ingress_uow::MessageJudgmentOutboxRepository::enqueue_in_tx(
-                                    tx,
-                                    crate::message_judgment_outbox::PendingJudgmentInput {
-                                        waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
-                                            archive.to_string(),
-                                        ),
-                                        stanza_id: stanza_id.clone(),
-                                        body,
-                                        now_ms: crate::time::now_ms(),
-                                    },
-                                )
-                                .await?;
+                                if !body.trim().is_empty() {
+                                    crate::ingress_uow::MessageJudgmentOutboxRepository::enqueue_in_tx(
+                                        tx,
+                                        crate::message_judgment_outbox::PendingJudgmentInput {
+                                            archive: archive.clone(),
+                                            stanza_id: stanza_id.clone(),
+                                            body,
+                                            now_ms: crate::time::now_ms(),
+                                        },
+                                    )
+                                    .await?;
+                                }
                             }
                         }
                     }

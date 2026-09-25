@@ -1,18 +1,21 @@
 //! Dual Postgres/SQLite schema for the `is_question` community-enrichment
-//! judgment outbox (issue #1831 Phase 1).
+//! judgment outbox (issue #1831 Phase 1, lease-claiming added Phase 2).
 //!
 //! Two tables:
 //! - `message_judgment_outbox`: the durable queue of messages awaiting a
 //!   judgment call, drained asynchronously by [`super::drain::drain_once`].
+//!   Carries `lease_token`/`leased_at_ms` (Phase 2, #1831): production runs
+//!   more than one replica (`clustering.enabled: true`, `replicaCount: 2`),
+//!   so a batch claim (see [`super::store::claim_due_batch`]) is required —
+//!   without it, two replicas draining the same due row both call the paid
+//!   Jev API for it. Mirrors `room_effect_outbox`'s optimistic-lease shape
+//!   (`lease_token` + `leased_at_ms`, claimed via a conditional `UPDATE`),
+//!   adapted from a single-row claim to a batch claim since this outbox
+//!   fetches several due rows per poll.
 //! - `message_judgments`: the append-only results table. Never updated or
 //!   deleted; inserts are idempotent under replay via a unique index on
 //!   `(stanza_id, judgment_name, model_version)` (see
 //!   [`super::store::insert_judgment`]).
-//!
-//! Neither table carries clustering lease/ownership/fencing columns — this
-//! is a single background drain worker, not a clustered actor with lease
-//! contention (unlike `room_effect_outbox`, which this module otherwise
-//! mirrors the shape of).
 
 use super::MessageJudgmentOutboxError;
 use crate::db::{Database, DatabaseDriver};
@@ -43,7 +46,7 @@ async fn postgres(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
     tx.execute(
         "CREATE TABLE IF NOT EXISTS message_judgment_outbox ( \
             id TEXT PRIMARY KEY, \
-            waddle_id TEXT NOT NULL, \
+            archive_jid TEXT NOT NULL, \
             stanza_id TEXT NOT NULL, \
             stanza_by TEXT NOT NULL, \
             body_snapshot TEXT NOT NULL, \
@@ -51,8 +54,20 @@ async fn postgres(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
             attempt_count BIGINT NOT NULL DEFAULT 0, \
             last_error TEXT, \
             done BOOLEAN NOT NULL DEFAULT FALSE, \
-            created_at_ms BIGINT NOT NULL \
+            created_at_ms BIGINT NOT NULL, \
+            lease_token TEXT NULL, \
+            leased_at_ms BIGINT NULL \
         )",
+        (),
+    )
+    .await?;
+    tx.execute(
+        "ALTER TABLE message_judgment_outbox ADD COLUMN IF NOT EXISTS lease_token TEXT",
+        (),
+    )
+    .await?;
+    tx.execute(
+        "ALTER TABLE message_judgment_outbox ADD COLUMN IF NOT EXISTS leased_at_ms BIGINT",
         (),
     )
     .await?;
@@ -65,7 +80,7 @@ async fn postgres(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
     tx.execute(
         "CREATE TABLE IF NOT EXISTS message_judgments ( \
             id TEXT PRIMARY KEY, \
-            waddle_id TEXT NOT NULL, \
+            archive_jid TEXT NOT NULL, \
             stanza_id TEXT NOT NULL, \
             stanza_by TEXT NOT NULL, \
             judgment_name TEXT NOT NULL, \
@@ -95,7 +110,7 @@ async fn sqlite(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
         .execute(
             "CREATE TABLE IF NOT EXISTS message_judgment_outbox ( \
                 id TEXT PRIMARY KEY, \
-                waddle_id TEXT NOT NULL, \
+                archive_jid TEXT NOT NULL, \
                 stanza_id TEXT NOT NULL, \
                 stanza_by TEXT NOT NULL, \
                 body_snapshot TEXT NOT NULL, \
@@ -103,11 +118,29 @@ async fn sqlite(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
                 attempt_count INTEGER NOT NULL DEFAULT 0, \
                 last_error TEXT, \
                 done BOOLEAN NOT NULL DEFAULT FALSE, \
-                created_at_ms INTEGER NOT NULL \
+                created_at_ms INTEGER NOT NULL, \
+                lease_token TEXT NULL, \
+                leased_at_ms INTEGER NULL \
             )",
             (),
         )
         .await?;
+    if !sqlite_column_present(&connection, "message_judgment_outbox", "lease_token").await? {
+        connection
+            .execute(
+                "ALTER TABLE message_judgment_outbox ADD COLUMN lease_token TEXT",
+                (),
+            )
+            .await?;
+    }
+    if !sqlite_column_present(&connection, "message_judgment_outbox", "leased_at_ms").await? {
+        connection
+            .execute(
+                "ALTER TABLE message_judgment_outbox ADD COLUMN leased_at_ms INTEGER",
+                (),
+            )
+            .await?;
+    }
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS message_judgment_outbox_due_idx \
@@ -119,7 +152,7 @@ async fn sqlite(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
         .execute(
             "CREATE TABLE IF NOT EXISTS message_judgments ( \
                 id TEXT PRIMARY KEY, \
-                waddle_id TEXT NOT NULL, \
+                archive_jid TEXT NOT NULL, \
                 stanza_id TEXT NOT NULL, \
                 stanza_by TEXT NOT NULL, \
                 judgment_name TEXT NOT NULL, \
@@ -141,4 +174,21 @@ async fn sqlite(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
         )
         .await?;
     Ok(())
+}
+
+async fn sqlite_column_present(
+    connection: &crate::db::ConnectionGuard,
+    table: &str,
+    column: &str,
+) -> Result<bool, MessageJudgmentOutboxError> {
+    let mut rows = connection
+        .query(&format!("PRAGMA table_info({table})"), ())
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
