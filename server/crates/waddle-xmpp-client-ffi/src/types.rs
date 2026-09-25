@@ -97,6 +97,8 @@ pub struct WaddleMessage {
     /// urn:waddle:call-thread:0 ended fastening targeting a
     /// call-thread anchor.
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
+    /// XEP-0422 `urn:waddle:safety-scores:1` fastening from the room.
+    pub safety_scores: Option<WaddleSafetyScoresFastening>,
     /// XEP-0280: direction of the carbon envelope this message was
     /// unwrapped from. Only stamped after the runtime verified the
     /// wrapping stanza came from the account's own bare JID (§11
@@ -140,6 +142,50 @@ pub struct WaddleCallThreadEnded {
     pub ended: String,
     /// ISO 8601 duration of the call (e.g. `PT5M`).
     pub duration: String,
+}
+
+/// Judgment category of a `urn:waddle:safety-scores:1` score. Mirrors
+/// `waddle_xmpp_client::xep::safety_scores::SafetyScoreCategory`; wire
+/// categories the client does not know are dropped before the boundary.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleSafetyScoreCategory {
+    IsQuestion,
+    HateSpeech,
+    Explicit,
+    Harassment,
+    Violence,
+    SelfHarm,
+}
+
+/// One per-category probability of a safety-scores batch.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct WaddleSafetyScore {
+    pub category: WaddleSafetyScoreCategory,
+    /// Validated probability in `0.0..=1.0`.
+    pub probability: f64,
+    /// Revision of this category's question wording.
+    pub taxonomy_version: String,
+}
+
+/// XEP-0422 payload of a safety-scores fastening.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
+pub enum WaddleSafetyScoresPayload {
+    /// Replace the target's scores (one model call produced all of them).
+    Scores {
+        model_version: String,
+        scores: Vec<WaddleSafetyScore>,
+    },
+    /// XEP-0422 `clear='true'`: remove the target's scores.
+    Cleared,
+}
+
+/// XEP-0422 `urn:waddle:safety-scores:1` fastening broadcast by a room.
+/// Mirrors `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct WaddleSafetyScoresFastening {
+    /// XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
+    pub target_id: String,
+    pub payload: WaddleSafetyScoresPayload,
 }
 
 /// One XEP-0359 `<stanza-id/>` entry. Mirrors the core `StanzaId`
@@ -515,6 +561,8 @@ pub struct WaddleArchivedMessage {
     pub call_thread: Option<WaddleCallThreadAnchor>,
     /// urn:waddle:call-thread:0 ended fastening, if present.
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
+    /// XEP-0422 `urn:waddle:safety-scores:1` fastening from the room.
+    pub safety_scores: Option<WaddleSafetyScoresFastening>,
     pub shared_files: Vec<WaddleSharedFile>,
     /// XEP-0511 link previews of the inner message.
     pub link_previews: Vec<WaddleLinkPreview>,

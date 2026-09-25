@@ -8,7 +8,10 @@ use chrono::{DateTime, Utc};
 use minidom::Element;
 
 use crate::xep::fallback::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
-use crate::xep::{call_thread as xep_call_thread, reply as xep_reply, thread as xep_thread};
+use crate::xep::{
+    call_thread as xep_call_thread, reply as xep_reply, safety_scores as xep_safety_scores,
+    thread as xep_thread,
+};
 use waddle_xmpp_core::{
     first_eligible_https_url_text, xep0359::StanzaId as StableStanzaId, PreviewImageMediaType,
 };
@@ -136,6 +139,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
     let pubsub_events = crate::pubsub_event::parse_pubsub_events(el);
     let call_thread = xep_call_thread::parse_call_thread_anchor_child(el);
     let call_thread_ended = xep_call_thread::parse_call_thread_ended_child(el);
+    let safety_scores = xep_safety_scores::parse_room_safety_scores_child(el);
 
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
@@ -325,6 +329,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         parent_thread_id,
         call_thread,
         call_thread_ended,
+        safety_scores,
         is_sticker,
         pin_event,
         extension_envelope,

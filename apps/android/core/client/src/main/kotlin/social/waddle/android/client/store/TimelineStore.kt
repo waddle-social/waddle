@@ -8,6 +8,7 @@ import social.waddle.android.client.conversationKeyOf
 import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleSafetyScoresPayload
 import java.time.Instant
 import java.time.OffsetDateTime
 
@@ -20,7 +21,8 @@ import java.time.OffsetDateTime
  * after timestamped history (live messages are the newest).
  *
  * Mutation messages (XEP-0444 reactions, XEP-0308 corrections, XEP-0424
- * retractions, XEP-0425 moderation — see [MessageMutation]) never insert
+ * retractions, XEP-0425 moderation, XEP-0422 safety-score fastenings —
+ * see [MessageMutation]) never insert
  * rows; they are applied to the row whose wire identity contains their
  * target id. Latest-wins per mutation kind: a mutation's rank is its
  * timestamp (live mutations, which carry none, rank newest), insertion
@@ -373,6 +375,7 @@ class TimelineStore(
             is MessageMutation.Correction -> mutations.applyingCorrection(mutation, ranked, item)
             is MessageMutation.Retraction -> mutations.applyingRetraction(mutation, ranked, item)
             is MessageMutation.Moderation -> mutations.applyingModeration(mutation, item)
+            is MessageMutation.SafetyScores -> mutations.applyingSafetyScores(mutation, ranked.rank, item)
         }
         return if (next == mutations) this else copy(mutations = next)
     }
@@ -434,6 +437,23 @@ class TimelineStore(
         )
     }
 
+    private fun MutationState.applyingSafetyScores(
+        mutation: MessageMutation.SafetyScores,
+        rank: Rank,
+        item: TimelineItem,
+    ): MutationState = when {
+        // Same authenticity rule as XEP-0425: only the room service
+        // itself (bare room JID, no occupant resource) scores messages.
+        mutation.from != item.conversationJid -> this
+        // XEP-0422 replace is latest-wins; a clear keeps its rank so an
+        // older MAM replay cannot resurrect scores it removed.
+        safetyScoresRank != null && safetyScoresRank > rank -> this
+        else -> copy(
+            safetyScores = mutation.payload as? WaddleSafetyScoresPayload.Scores,
+            safetyScoresRank = rank,
+        )
+    }
+
     private fun publish(conversation: String, list: List<Entry>) {
         flowFor(conversation).value = list.map { it.enriched() }
     }
@@ -448,6 +468,7 @@ class TimelineStore(
             edited = state.correctedBody != null,
             tombstone = state.tombstone,
             reactions = aggregateReactions(state.reactionsBySender),
+            safetyScores = state.safetyScores,
         )
     }
 
@@ -494,6 +515,8 @@ class TimelineStore(
         val correctedBody: String? = null,
         val correctionRank: Rank? = null,
         val tombstone: MessageTombstone? = null,
+        val safetyScores: WaddleSafetyScoresPayload.Scores? = null,
+        val safetyScoresRank: Rank? = null,
     )
 
     private companion object {

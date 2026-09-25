@@ -13,6 +13,9 @@ use waddle_xmpp_client::{
     xep::{
         call_thread::CallThreadEnded,
         reply::{FallbackRange, ReplyMarker},
+        safety_scores::{
+            SafetyScore, SafetyScoreCategory, SafetyScoresFastening, SafetyScoresPayload,
+        },
         thread::ThreadRef,
     },
     ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
@@ -29,9 +32,10 @@ use crate::{
     WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType, WaddleMdsDisplayedEntry,
     WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePackSticker,
     WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
-    WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
-    WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
-    WaddleStickerPack,
+    WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSafetyScore,
+    WaddleSafetyScoreCategory, WaddleSafetyScoresFastening, WaddleSafetyScoresPayload,
+    WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType,
+    WaddleStanzaId, WaddleStickerHash, WaddleStickerPack,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -679,6 +683,38 @@ fn call_thread_ended_to_ffi(ended: CallThreadEnded) -> WaddleCallThreadEnded {
     }
 }
 
+fn safety_scores_to_ffi(fastening: SafetyScoresFastening) -> WaddleSafetyScoresFastening {
+    WaddleSafetyScoresFastening {
+        target_id: fastening.target_id,
+        payload: match fastening.payload {
+            SafetyScoresPayload::Scores(batch) => WaddleSafetyScoresPayload::Scores {
+                model_version: batch.model_version.as_str().to_owned(),
+                scores: batch.scores.into_iter().map(safety_score_to_ffi).collect(),
+            },
+            SafetyScoresPayload::Cleared => WaddleSafetyScoresPayload::Cleared,
+        },
+    }
+}
+
+fn safety_score_to_ffi(score: SafetyScore) -> WaddleSafetyScore {
+    WaddleSafetyScore {
+        category: safety_score_category_to_ffi(score.category),
+        probability: score.probability.value(),
+        taxonomy_version: score.taxonomy_version.as_str().to_owned(),
+    }
+}
+
+fn safety_score_category_to_ffi(category: SafetyScoreCategory) -> WaddleSafetyScoreCategory {
+    match category {
+        SafetyScoreCategory::IsQuestion => WaddleSafetyScoreCategory::IsQuestion,
+        SafetyScoreCategory::HateSpeech => WaddleSafetyScoreCategory::HateSpeech,
+        SafetyScoreCategory::Explicit => WaddleSafetyScoreCategory::Explicit,
+        SafetyScoreCategory::Harassment => WaddleSafetyScoreCategory::Harassment,
+        SafetyScoreCategory::Violence => WaddleSafetyScoreCategory::Violence,
+        SafetyScoreCategory::SelfHarm => WaddleSafetyScoreCategory::SelfHarm,
+    }
+}
+
 fn carbon_to_ffi(direction: CarbonDirection) -> WaddleCarbonDirection {
     match direction {
         CarbonDirection::Sent => WaddleCarbonDirection::Sent,
@@ -849,6 +885,7 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         link_previews: link_previews_to_ffi(msg.link_previews),
         pin_event: msg.pin_event.map(pin_event_to_ffi),
         call_thread_ended: msg.call_thread_ended.map(call_thread_ended_to_ffi),
+        safety_scores: msg.safety_scores.map(safety_scores_to_ffi),
         carbon: msg.carbon.map(carbon_to_ffi),
         reply_to_id: msg.reply_to_id,
         reply_to_sender: msg.reply_to_sender,
@@ -976,6 +1013,9 @@ pub(crate) fn archived_to_ffi(
         call_thread_ended: parsed
             .and_then(|m| m.call_thread_ended.clone())
             .map(call_thread_ended_to_ffi),
+        safety_scores: parsed
+            .and_then(|m| m.safety_scores.clone())
+            .map(safety_scores_to_ffi),
         shared_files: parsed
             .map(|m| {
                 m.shared_files
@@ -2204,6 +2244,85 @@ mod tests {
         .expect("call-thread-ended survives archive conversion");
         assert_eq!(ended.anchor_id, "anchor-stanza-id");
         assert_eq!(ended.duration, "PT5M");
+    }
+
+    #[test]
+    fn safety_scores_fastening_survives_inbound_to_ffi() {
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='groupchat' id='scores-1' \
+                      from='general@muc.waddle.test'>\
+               <apply-to xmlns='urn:xmpp:fasten:0' id='judged-stanza-id'>\
+                 <safety-scores xmlns='urn:waddle:safety-scores:1' \
+                                model-version='typesafe/jev-1.13-20260917'>\
+                   <score category='is_question' probability='0.92' \
+                          taxonomy-version='is-question-v1'/>\
+                   <score category='safety:self_harm' probability='0.0' \
+                          taxonomy-version='safety-self-harm-v1'/>\
+                   <score category='safety:future' probability='0.5' \
+                          taxonomy-version='future-v1'/>\
+                 </safety-scores>\
+               </apply-to>\
+             </message>",
+        ));
+        let fastening = ffi.safety_scores.expect("safety scores survive conversion");
+        assert_eq!(fastening.target_id, "judged-stanza-id");
+        assert_eq!(
+            fastening.payload,
+            WaddleSafetyScoresPayload::Scores {
+                model_version: "typesafe/jev-1.13-20260917".to_owned(),
+                scores: vec![
+                    WaddleSafetyScore {
+                        category: WaddleSafetyScoreCategory::IsQuestion,
+                        probability: 0.92,
+                        taxonomy_version: "is-question-v1".to_owned(),
+                    },
+                    WaddleSafetyScore {
+                        category: WaddleSafetyScoreCategory::SelfHarm,
+                        probability: 0.0,
+                        taxonomy_version: "safety-self-harm-v1".to_owned(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn safety_scores_from_an_occupant_do_not_reach_ffi() {
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='groupchat' id='spoof-1' \
+                      from='general@muc.waddle.test/mallory'>\
+               <apply-to xmlns='urn:xmpp:fasten:0' id='judged-stanza-id'>\
+                 <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='m'>\
+                   <score category='safety:harassment' probability='0.99' taxonomy-version='t'/>\
+                 </safety-scores>\
+               </apply-to>\
+             </message>",
+        ));
+        assert!(ffi.safety_scores.is_none());
+    }
+
+    #[test]
+    fn archived_to_ffi_maps_safety_scores_clear() {
+        let cleared = archived_to_ffi(parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-scores' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-09-25T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='scores-2' \
+                            from='general@muc.waddle.test'>\
+                     <apply-to xmlns='urn:xmpp:fasten:0' id='judged-stanza-id' clear='true'>\
+                       <safety-scores xmlns='urn:waddle:safety-scores:1'/>\
+                     </apply-to>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        ))
+        .expect("scores row must convert")
+        .safety_scores
+        .expect("safety-scores clear survives archive conversion");
+        assert_eq!(cleared.target_id, "judged-stanza-id");
+        assert_eq!(cleared.payload, WaddleSafetyScoresPayload::Cleared);
     }
 
     /// Wasm-parity drop-guard (XEP-0425 spoof): an occupant-authored
