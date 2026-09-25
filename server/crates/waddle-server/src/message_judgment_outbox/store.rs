@@ -235,31 +235,6 @@ pub async fn record_failure(
     Ok(affected > 0)
 }
 
-/// Whether any judgment already exists for `(stanza_id, judgment_name)`,
-/// under any `model_version`. Checked by the drain worker before invoking
-/// the judge again for a row that is still due: a judge call can succeed
-/// and durably insert a judgment, yet the *same* `process_row` pass can
-/// still fail afterward (e.g. `mark_done` errors transiently), leaving the
-/// row due again on the next poll. Without this check, that next poll would
-/// call the judge a second time, and if that second call happened to fail,
-/// the row's `last_error` would be overwritten with a spurious failure even
-/// though a correct judgment was already durably recorded — a completed
-/// judgment misreported as failed.
-pub async fn judgment_exists(
-    db: &Database,
-    stanza_id: &StanzaId,
-    judgment_name: &str,
-) -> Result<bool, MessageJudgmentOutboxError> {
-    let connection = db.guard().await?;
-    let mut rows = connection
-        .query(
-            "SELECT 1 FROM message_judgments WHERE stanza_id = ? AND judgment_name = ? LIMIT 1",
-            crate::db_params![stanza_id.id.as_str(), judgment_name],
-        )
-        .await?;
-    Ok(rows.next().await?.is_some())
-}
-
 /// Insert one judgment result. Idempotent under replay: a second insert for
 /// the same `(stanza_id, judgment_name, model_version)` is a no-op (never a
 /// duplicate row, never an error) via `ON CONFLICT ... DO NOTHING`
@@ -314,11 +289,22 @@ pub async fn insert_judgment(
 /// `is_question` plus several `safety:*` categories); without this, a
 /// failure partway through inserting them could leave some recorded and
 /// others silently missing while the row is still marked done.
+///
+/// Guarded on `NOT done`, checked *before* any judgment is inserted, for
+/// the same reason as [`dead_letter`]/[`record_failure`]: this outbox
+/// tolerates more than one drain worker running concurrently, so a
+/// different worker can have already finalized this row (e.g.
+/// dead-lettered it) between this call's judge invocation and this write.
+/// Without the guard, this call would still insert its (now-stale)
+/// judgments and leave a row that shows a terminal failure sitting
+/// alongside judgments recorded after that failure — an inconsistent
+/// audit trail. Returns `true` if this call's write actually applied,
+/// `false` if it was a no-op because the row was already done.
 pub async fn insert_judgment_batch_and_mark_done(
     db: &Database,
     records: &[JudgmentRecord],
     outbox_id: &MessageJudgmentOutboxId,
-) -> Result<(), MessageJudgmentOutboxError> {
+) -> Result<bool, MessageJudgmentOutboxError> {
     let insert_sql = match db.driver() {
         DatabaseDriver::Postgres => {
             "INSERT INTO message_judgments \
@@ -335,6 +321,20 @@ pub async fn insert_judgment_batch_and_mark_done(
         }
     };
     let mut tx = db.begin().await?;
+    let claimed = tx
+        .execute(
+            "UPDATE message_judgment_outbox SET done = TRUE WHERE id = ? AND NOT done",
+            crate::db_params![outbox_id.as_str()],
+        )
+        .await?;
+    if claimed == 0 {
+        // Lost the race: some other worker already finalized this row
+        // (e.g. dead-lettered it) before this write. Roll back without
+        // inserting anything -- these judgments are stale relative to
+        // whatever already resolved the row.
+        tx.rollback().await?;
+        return Ok(false);
+    }
     for record in records {
         let id = uuid::Uuid::new_v4().to_string();
         tx.execute(
@@ -355,13 +355,8 @@ pub async fn insert_judgment_batch_and_mark_done(
         )
         .await?;
     }
-    tx.execute(
-        "UPDATE message_judgment_outbox SET done = TRUE WHERE id = ?",
-        crate::db_params![outbox_id.as_str()],
-    )
-    .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 fn decode_pending_row(row: &Row) -> Result<PendingJudgmentRow, MessageJudgmentOutboxError> {
@@ -758,5 +753,64 @@ mod tests {
         let row = rows.next().await.expect("row").expect("row present");
         assert_eq!(row.get::<i64>(0).expect("attempt_count"), 0);
         assert_eq!(row.get::<Option<String>>(1).expect("last_error"), None);
+    }
+
+    #[tokio::test]
+    async fn insert_judgment_batch_and_mark_done_is_a_no_op_when_row_already_done() {
+        // Simulates losing a race against a concurrent drain worker (e.g. one
+        // that dead-lettered this exact row) between this call's judge
+        // invocation and this write.
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-raced-batch"),
+                body: "body".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        let id = due[0].id.clone();
+        dead_letter(&db, &id, "a concurrent worker already gave up")
+            .await
+            .expect("simulate concurrent winner");
+
+        let applied = insert_judgment_batch_and_mark_done(
+            &db,
+            &[judgment("stanza-raced-batch", "model-a")],
+            &id,
+        )
+        .await
+        .expect("insert_judgment_batch_and_mark_done must not error on an already-done row");
+        assert!(
+            !applied,
+            "insert_judgment_batch_and_mark_done must be a no-op once the row is already done"
+        );
+
+        let connection = db.guard().await.expect("guard");
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM message_judgments WHERE stanza_id = ?",
+                crate::db_params!["stanza-raced-batch"],
+            )
+            .await
+            .expect("count query");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("row present")
+            .get(0)
+            .expect("count");
+        assert_eq!(
+            count, 0,
+            "no judgment must be inserted when the row was already done"
+        );
     }
 }

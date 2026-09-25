@@ -132,33 +132,6 @@ async fn process_row(
     row: PendingJudgmentRow,
     now_ms: i64,
 ) -> RowOutcome {
-    // A prior pass over this exact row can have already judged it
-    // successfully (insert_judgment committed) and then failed on the
-    // *next* step (e.g. a transient mark_done error), leaving the row due
-    // again. Re-invoking the judge in that case risks a second, unrelated
-    // failure overwriting last_error on a row that is, in truth, already
-    // judged -- a completed judgment misreported as failed. Skip straight
-    // to marking it done instead.
-    match store::judgment_exists(db, &row.stanza_id, store::IS_QUESTION_JUDGMENT_NAME).await {
-        Ok(true) => {
-            return match store::mark_done(db, &row.id).await {
-                Ok(()) => RowOutcome::Judged,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "message_judgment_outbox: mark_done for already-judged row failed"
-                    );
-                    RowOutcome::StoreErrorIgnored
-                }
-            };
-        }
-        Ok(false) => {}
-        Err(error) => {
-            tracing::warn!(%error, "message_judgment_outbox: judgment_exists check failed");
-            // Fall through and attempt the judge call as normal; failing
-            // the existence check is not a reason to skip processing.
-        }
-    }
     match judge.judge(&row.body_snapshot).await {
         Ok(batch) => {
             if batch.judgments.is_empty() {
@@ -190,16 +163,24 @@ async fn process_row(
                     created_at_ms: now_ms,
                 })
                 .collect();
-            if let Err(error) =
-                store::insert_judgment_batch_and_mark_done(db, &records, &row.id).await
-            {
-                tracing::warn!(
-                    %error,
-                    "message_judgment_outbox: insert_judgment_batch_and_mark_done failed"
-                );
-                return RowOutcome::StoreErrorIgnored;
+            match store::insert_judgment_batch_and_mark_done(db, &records, &row.id).await {
+                Ok(true) => RowOutcome::Judged,
+                Ok(false) => {
+                    // Lost the race: a concurrent drain worker (or an
+                    // earlier dead-letter/record_failure call racing this
+                    // same row) already finalized it between fetch and this
+                    // write. This judgment batch is stale and must not
+                    // overwrite whatever is already durably persisted.
+                    RowOutcome::StoreErrorIgnored
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "message_judgment_outbox: insert_judgment_batch_and_mark_done failed"
+                    );
+                    RowOutcome::StoreErrorIgnored
+                }
             }
-            RowOutcome::Judged
         }
         Err(judge_error) => {
             let next_attempt = row.attempt_count.saturating_add(1);
@@ -652,19 +633,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_once_does_not_re_judge_a_row_already_durably_judged() {
-        // Simulates the aftermath of a prior pass whose judge call and
-        // insert_judgment both succeeded, but which failed afterward (e.g.
-        // a transient mark_done error) -- leaving the outbox row not done,
-        // so it's still due, even though `message_judgments` already has a
-        // correct, durable result for it.
+    async fn drain_once_backfills_missing_judgments_for_a_row_with_a_partial_pre_seeded_result() {
+        // Simulates a row left over from before the multi-category redesign
+        // (or a prior pass that was interrupted after inserting only some
+        // judgments): `message_judgments` already has an `is_question` row,
+        // but the outbox row is still not done, so it's still due. The
+        // correct behavior is to call the judge again and backfill whatever
+        // is missing -- not to skip the row, and not to duplicate or
+        // overwrite the pre-seeded judgment (idempotent insert handles that).
         let db = test_db().await;
         enqueue_pending(
             &db,
             PendingJudgmentInput {
                 waddle_id: waddle_id(),
-                stanza_id: stanza("stanza-already-judged"),
-                body: "body".to_string(),
+                stanza_id: stanza("stanza-partial"),
+                body: "you are all idiots".to_string(),
                 now_ms: 0,
             },
         )
@@ -674,43 +657,89 @@ mod tests {
             &db,
             JudgmentRecord {
                 waddle_id: waddle_id(),
-                stanza_id: stanza("stanza-already-judged"),
+                stanza_id: stanza("stanza-partial"),
                 judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
                 taxonomy_version: "v1".to_string(),
                 model_version: "jev-1".to_string(),
-                probability: 0.75,
+                probability: 0.05,
                 cost_usd: 0.00002,
                 decided_at_ms: 0,
                 created_at_ms: 0,
             },
         )
         .await
-        .expect("pre-seed judgment");
+        .expect("pre-seed partial judgment");
 
-        // A judge that always fails: if `drain_once` called it, this row
-        // would come out failed/dead-lettered and `last_error` would be
-        // overwritten -- exactly the misreport this guards against.
-        let judge = FakeJudge::new(|_body| err_judgment());
+        let judge = FakeJudge::new(|_body| {
+            Ok(JudgmentBatch {
+                judgments: vec![
+                    NamedJudgment {
+                        judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                        // Different from the pre-seeded value: the idempotent
+                        // insert must keep the pre-seeded row untouched, not
+                        // overwrite it with this one.
+                        probability: 0.99,
+                        taxonomy_version: "v1".to_string(),
+                    },
+                    NamedJudgment {
+                        judgment_name: store::SAFETY_HATE_SPEECH_JUDGMENT_NAME.to_string(),
+                        probability: 0.9,
+                        taxonomy_version: "safety-hate-speech-v1".to_string(),
+                    },
+                ],
+                model_version: "jev-1".to_string(),
+                cost_usd: 0.00003,
+            })
+        });
         let outcome = drain_once(&db, &judge, 0, 10).await;
 
         assert_eq!(outcome.judged, 1);
         assert_eq!(outcome.failed, 0);
         assert_eq!(
             judge.call_count(),
-            0,
-            "the judge must not be called for a row that's already durably judged"
+            1,
+            "a row with an incomplete result set must still be judged, to backfill what's missing"
         );
+
+        // Outbox row is now done.
+        assert!(fetch_due_batch(&db, 10, i64::MAX)
+            .await
+            .expect("fetch")
+            .is_empty());
 
         let connection = db.guard().await.expect("guard");
         let mut rows = connection
             .query(
-                "SELECT done, last_error FROM message_judgment_outbox WHERE stanza_id = ?",
-                crate::db_params!["stanza-already-judged"],
+                "SELECT judgment_name, probability FROM message_judgments \
+                 WHERE stanza_id = ? ORDER BY judgment_name",
+                crate::db_params!["stanza-partial"],
             )
             .await
             .expect("query");
-        let row = rows.next().await.expect("row").expect("row present");
-        assert!(row.get::<bool>(0).expect("done"));
-        assert_eq!(row.get::<Option<String>>(1).expect("last_error"), None);
+        let mut seen = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            seen.push((
+                row.get::<String>(0).expect("judgment_name"),
+                row.get::<f64>(1).expect("probability"),
+            ));
+        }
+        assert_eq!(
+            seen.len(),
+            2,
+            "the pre-seeded judgment plus the newly backfilled one"
+        );
+        let is_question = seen
+            .iter()
+            .find(|(name, _)| name == store::IS_QUESTION_JUDGMENT_NAME)
+            .expect("is_question row");
+        assert_eq!(
+            is_question.1, 0.05,
+            "the pre-seeded judgment must not be overwritten by the replayed judge call"
+        );
+        let hate_speech = seen
+            .iter()
+            .find(|(name, _)| name == store::SAFETY_HATE_SPEECH_JUDGMENT_NAME)
+            .expect("backfilled hate_speech row");
+        assert_eq!(hate_speech.1, 0.9);
     }
 }

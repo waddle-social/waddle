@@ -675,18 +675,27 @@ mod tests {
             .and_then(Value::as_object)
             .expect("questions object");
 
-        assert_eq!(body.get("model").unwrap(), "typesafe/jev-1.13");
-        assert_eq!(body.get("state").unwrap(), "are we there yet?");
+        assert_eq!(body.get("model").expect("model field"), "typesafe/jev-1.13");
+        assert_eq!(body.get("state").expect("state field"), "are we there yet?");
         assert_eq!(questions.len(), JUDGMENT_QUESTIONS.len());
         for spec in JUDGMENT_QUESTIONS {
             let question = questions
                 .get(spec.judgment_name)
                 .unwrap_or_else(|| panic!("missing question for {}", spec.judgment_name));
-            assert_eq!(question.get("type").unwrap(), "noul");
-            assert_eq!(question.get("instructions").unwrap(), spec.instructions);
+            assert_eq!(question.get("type").expect("type field"), "noul");
+            assert_eq!(
+                question.get("instructions").expect("instructions field"),
+                spec.instructions
+            );
             let criteria = question.get("criteria").expect("criteria");
-            assert_eq!(criteria.get("true").unwrap(), spec.criteria_true);
-            assert_eq!(criteria.get("false").unwrap(), spec.criteria_false);
+            assert_eq!(
+                criteria.get("true").expect("criteria.true field"),
+                spec.criteria_true
+            );
+            assert_eq!(
+                criteria.get("false").expect("criteria.false field"),
+                spec.criteria_false
+            );
         }
     }
 
