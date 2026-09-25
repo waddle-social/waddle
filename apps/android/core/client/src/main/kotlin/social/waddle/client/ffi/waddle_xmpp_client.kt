@@ -7231,7 +7231,9 @@ data class WaddleArchivedMessage (
     var `callThreadEnded`: WaddleCallThreadEnded?
     ,
     /**
-     * XEP-0422 `urn:waddle:safety-scores:1` fastening from the room.
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+     * server-side (`waddle-xmpp-client`) to the one trusted sender: the
+     * room itself.
      */
     var `safetyScores`: WaddleSafetyScoresFastening?
     ,
@@ -9594,7 +9596,9 @@ data class WaddleMessage (
     var `callThreadEnded`: WaddleCallThreadEnded?
     ,
     /**
-     * XEP-0422 `urn:waddle:safety-scores:1` fastening from the room.
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+     * server-side (`waddle-xmpp-client`) to the one trusted sender: the
+     * room itself.
      */
     var `safetyScores`: WaddleSafetyScoresFastening?
     ,
@@ -10787,20 +10791,17 @@ public object FfiConverterTypeWaddleRoomMemberEntry: FfiConverterRustBuffer<Wadd
 
 
 /**
- * One per-category probability of a safety-scores batch.
+ * One `<score/>`.
  */
 data class WaddleSafetyScore (
-    var `category`: WaddleSafetyScoreCategory
+    var `category`: WaddleSafetyCategory
     ,
     /**
-     * Validated probability in `0.0..=1.0`.
+     * In `0.0..=1.0`, validated by the parser.
      */
-    var `probability`: SafetyProbability
+    var `probability`: kotlin.Double
     ,
-    /**
-     * Revision of this category's question wording.
-     */
-    var `taxonomyVersion`: SafetyVersion
+    var `taxonomyVersion`: kotlin.String
 
 ){
 
@@ -10817,38 +10818,87 @@ data class WaddleSafetyScore (
 public object FfiConverterTypeWaddleSafetyScore: FfiConverterRustBuffer<WaddleSafetyScore> {
     override fun read(buf: ByteBuffer): WaddleSafetyScore {
         return WaddleSafetyScore(
-            FfiConverterTypeWaddleSafetyScoreCategory.read(buf),
-            FfiConverterTypeSafetyProbability.read(buf),
-            FfiConverterTypeSafetyVersion.read(buf),
+            FfiConverterTypeWaddleSafetyCategory.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleSafetyScore) = (
-            FfiConverterTypeWaddleSafetyScoreCategory.allocationSize(value.`category`) +
-            FfiConverterTypeSafetyProbability.allocationSize(value.`probability`) +
-            FfiConverterTypeSafetyVersion.allocationSize(value.`taxonomyVersion`)
+            FfiConverterTypeWaddleSafetyCategory.allocationSize(value.`category`) +
+            FfiConverterDouble.allocationSize(value.`probability`) +
+            FfiConverterString.allocationSize(value.`taxonomyVersion`)
     )
 
     override fun write(value: WaddleSafetyScore, buf: ByteBuffer) {
-            FfiConverterTypeWaddleSafetyScoreCategory.write(value.`category`, buf)
-            FfiConverterTypeSafetyProbability.write(value.`probability`, buf)
-            FfiConverterTypeSafetyVersion.write(value.`taxonomyVersion`, buf)
+            FfiConverterTypeWaddleSafetyCategory.write(value.`category`, buf)
+            FfiConverterDouble.write(value.`probability`, buf)
+            FfiConverterString.write(value.`taxonomyVersion`, buf)
     }
 }
 
 
 
 /**
- * XEP-0422 `urn:waddle:safety-scores:1` fastening broadcast by a room.
- * Mirrors `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`.
+ * One `<safety-scores/>` batch.
+ */
+data class WaddleSafetyScores (
+    /**
+     * Batch-level model identifier (`model-version`).
+     */
+    var `modelVersion`: kotlin.String
+    ,
+    /**
+     * Known categories only, one per category, in document order.
+     */
+    var `scores`: List<WaddleSafetyScore>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSafetyScores: FfiConverterRustBuffer<WaddleSafetyScores> {
+    override fun read(buf: ByteBuffer): WaddleSafetyScores {
+        return WaddleSafetyScores(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeWaddleSafetyScore.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleSafetyScores) = (
+            FfiConverterString.allocationSize(value.`modelVersion`) +
+            FfiConverterSequenceTypeWaddleSafetyScore.allocationSize(value.`scores`)
+    )
+
+    override fun write(value: WaddleSafetyScores, buf: ByteBuffer) {
+            FfiConverterString.write(value.`modelVersion`, buf)
+            FfiConverterSequenceTypeWaddleSafetyScore.write(value.`scores`, buf)
+    }
+}
+
+
+
+/**
+ * XEP-0422 fastening carrying `urn:waddle:safety-scores:1`. Mirrors
+ * `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`. The
+ * sender is already verified server-side: only a room broadcast (bare
+ * room JID, `type='groupchat'`) ever reaches this record.
  */
 data class WaddleSafetyScoresFastening (
     /**
-     * XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
+     * XEP-0422 `<apply-to id='…'/>` target.
      */
-    var `targetId`: FasteningTargetId
+    var `targetId`: kotlin.String
     ,
-    var `payload`: WaddleSafetyScoresPayload
+    var `action`: WaddleSafetyScoresAction
 
 ){
 
@@ -10865,19 +10915,19 @@ data class WaddleSafetyScoresFastening (
 public object FfiConverterTypeWaddleSafetyScoresFastening: FfiConverterRustBuffer<WaddleSafetyScoresFastening> {
     override fun read(buf: ByteBuffer): WaddleSafetyScoresFastening {
         return WaddleSafetyScoresFastening(
-            FfiConverterTypeFasteningTargetId.read(buf),
-            FfiConverterTypeWaddleSafetyScoresPayload.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleSafetyScoresAction.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleSafetyScoresFastening) = (
-            FfiConverterTypeFasteningTargetId.allocationSize(value.`targetId`) +
-            FfiConverterTypeWaddleSafetyScoresPayload.allocationSize(value.`payload`)
+            FfiConverterString.allocationSize(value.`targetId`) +
+            FfiConverterTypeWaddleSafetyScoresAction.allocationSize(value.`action`)
     )
 
     override fun write(value: WaddleSafetyScoresFastening, buf: ByteBuffer) {
-            FfiConverterTypeFasteningTargetId.write(value.`targetId`, buf)
-            FfiConverterTypeWaddleSafetyScoresPayload.write(value.`payload`, buf)
+            FfiConverterString.write(value.`targetId`, buf)
+            FfiConverterTypeWaddleSafetyScoresAction.write(value.`action`, buf)
     }
 }
 
@@ -13628,12 +13678,11 @@ public object FfiConverterTypeWaddleReferenceType : FfiConverterRustBuffer<Waddl
 
 
 /**
- * Judgment category of a `urn:waddle:safety-scores:1` score. Mirrors
- * `waddle_xmpp_client::xep::safety_scores::SafetyScoreCategory`; wire
- * categories the client does not know are dropped before the boundary.
+ * Judgment categories. Unknown wire categories never reach this enum:
+ * the parser skips them.
  */
 
-enum class WaddleSafetyScoreCategory {
+enum class WaddleSafetyCategory {
 
     IS_QUESTION,
     HATE_SPEECH,
@@ -13652,16 +13701,16 @@ enum class WaddleSafetyScoreCategory {
 /**
  * @suppress
  */
-public object FfiConverterTypeWaddleSafetyScoreCategory: FfiConverterRustBuffer<WaddleSafetyScoreCategory> {
+public object FfiConverterTypeWaddleSafetyCategory: FfiConverterRustBuffer<WaddleSafetyCategory> {
     override fun read(buf: ByteBuffer) = try {
-        WaddleSafetyScoreCategory.values()[buf.getInt() - 1]
+        WaddleSafetyCategory.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    override fun allocationSize(value: WaddleSafetyScoreCategory) = 4UL
+    override fun allocationSize(value: WaddleSafetyCategory) = 4UL
 
-    override fun write(value: WaddleSafetyScoreCategory, buf: ByteBuffer) {
+    override fun write(value: WaddleSafetyCategory, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -13671,16 +13720,12 @@ public object FfiConverterTypeWaddleSafetyScoreCategory: FfiConverterRustBuffer<
 
 
 /**
- * XEP-0422 payload of a safety-scores fastening.
+ * Replace the sender's scores, or clear them (XEP-0422 `clear='true'`).
  */
-sealed class WaddleSafetyScoresPayload {
+sealed class WaddleSafetyScoresAction {
 
-    /**
-     * Replace the target's scores (one model call produced all of them).
-     */
-    data class Scores(
-        val `modelVersion`: social.waddle.client.ffi.SafetyVersion,
-        val `scores`: List<social.waddle.client.ffi.WaddleSafetyScore>) : WaddleSafetyScoresPayload()
+    data class Apply(
+        val `scores`: social.waddle.client.ffi.WaddleSafetyScores) : WaddleSafetyScoresAction()
 
     {
 
@@ -13688,10 +13733,7 @@ sealed class WaddleSafetyScoresPayload {
         companion object
     }
 
-    /**
-     * XEP-0422 `clear='true'`: remove the target's scores.
-     */
-    object Cleared : WaddleSafetyScoresPayload()
+    object Clear : WaddleSafetyScoresAction()
 
 
 
@@ -13707,28 +13749,26 @@ sealed class WaddleSafetyScoresPayload {
 /**
  * @suppress
  */
-public object FfiConverterTypeWaddleSafetyScoresPayload : FfiConverterRustBuffer<WaddleSafetyScoresPayload>{
-    override fun read(buf: ByteBuffer): WaddleSafetyScoresPayload {
+public object FfiConverterTypeWaddleSafetyScoresAction : FfiConverterRustBuffer<WaddleSafetyScoresAction>{
+    override fun read(buf: ByteBuffer): WaddleSafetyScoresAction {
         return when(buf.getInt()) {
-            1 -> WaddleSafetyScoresPayload.Scores(
-                FfiConverterTypeSafetyVersion.read(buf),
-                FfiConverterSequenceTypeWaddleSafetyScore.read(buf),
+            1 -> WaddleSafetyScoresAction.Apply(
+                FfiConverterTypeWaddleSafetyScores.read(buf),
                 )
-            2 -> WaddleSafetyScoresPayload.Cleared
+            2 -> WaddleSafetyScoresAction.Clear
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
 
-    override fun allocationSize(value: WaddleSafetyScoresPayload) = when(value) {
-        is WaddleSafetyScoresPayload.Scores -> {
+    override fun allocationSize(value: WaddleSafetyScoresAction) = when(value) {
+        is WaddleSafetyScoresAction.Apply -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterTypeSafetyVersion.allocationSize(value.`modelVersion`)
-                + FfiConverterSequenceTypeWaddleSafetyScore.allocationSize(value.`scores`)
+                + FfiConverterTypeWaddleSafetyScores.allocationSize(value.`scores`)
             )
         }
-        is WaddleSafetyScoresPayload.Cleared -> {
+        is WaddleSafetyScoresAction.Clear -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -13736,15 +13776,14 @@ public object FfiConverterTypeWaddleSafetyScoresPayload : FfiConverterRustBuffer
         }
     }
 
-    override fun write(value: WaddleSafetyScoresPayload, buf: ByteBuffer) {
+    override fun write(value: WaddleSafetyScoresAction, buf: ByteBuffer) {
         when(value) {
-            is WaddleSafetyScoresPayload.Scores -> {
+            is WaddleSafetyScoresAction.Apply -> {
                 buf.putInt(1)
-                FfiConverterTypeSafetyVersion.write(value.`modelVersion`, buf)
-                FfiConverterSequenceTypeWaddleSafetyScore.write(value.`scores`, buf)
+                FfiConverterTypeWaddleSafetyScores.write(value.`scores`, buf)
                 Unit
             }
-            is WaddleSafetyScoresPayload.Cleared -> {
+            is WaddleSafetyScoresAction.Clear -> {
                 buf.putInt(2)
                 Unit
             }
@@ -16877,38 +16916,8 @@ public object FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBuffer<
  * is needed because the UDL type name is used in function/method signatures.
  * It's also what we have an external type that references a custom type.
  */
-public typealias FasteningTargetId = kotlin.String
-public typealias FfiConverterTypeFasteningTargetId = FfiConverterString
-
-
-
-/**
- * Typealias from the type name used in the UDL file to the builtin type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
 public typealias Jid = kotlin.String
 public typealias FfiConverterTypeJid = FfiConverterString
-
-
-
-/**
- * Typealias from the type name used in the UDL file to the builtin type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
-public typealias SafetyProbability = kotlin.Double
-public typealias FfiConverterTypeSafetyProbability = FfiConverterDouble
-
-
-
-/**
- * Typealias from the type name used in the UDL file to the builtin type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
-public typealias SafetyVersion = kotlin.String
-public typealias FfiConverterTypeSafetyVersion = FfiConverterString
 
 
 

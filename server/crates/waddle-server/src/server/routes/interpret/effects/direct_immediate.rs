@@ -18,6 +18,14 @@ pub(super) async fn execute_durable(effect: DurableDirectEffect, deps: &Deps<'_>
             let Some(storage) = deps.mam_storage else {
                 return EffectOutcome::Unavailable;
             };
+            // TODO(#1831 Phase 2): same fire-and-forget
+            // `message_judgment_outbox::enqueue_pending` seam as
+            // `room_immediate.rs`'s `ArchiveGroupchat` arm (see its TODO
+            // for why this `execute_durable` arm — not
+            // `direct_archive.rs`'s `archive_direct` — is the correct,
+            // exactly-once-per-real-write site, and why the `Database`
+            // handle + `MessageJudgmentOutboxConfig` are not yet reachable
+            // from `Deps` without an out-of-scope struct-field change).
             EffectOutcome::Archive(storage.store_message(&archive, &message).await)
         }
         DurableDirectEffect::ProjectInbox {

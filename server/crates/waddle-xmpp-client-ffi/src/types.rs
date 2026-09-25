@@ -2,9 +2,6 @@
 
 pub use jid::Jid;
 pub use waddle_xmpp_client::request::StanzaId;
-pub use waddle_xmpp_client::xep::safety_scores::{
-    FasteningTargetId, SafetyProbability, SafetyVersion,
-};
 
 // Keep validated protocol values in Rust. Only the UniFFI ABI lowers them
 // to strings; lifting validates them with the same core constructors.
@@ -17,21 +14,6 @@ uniffi::custom_type!(StanzaId, String, {
     remote,
     lower: |id| id.to_string(),
     try_lift: |value| Ok(StanzaId::new(value)?),
-});
-uniffi::custom_type!(FasteningTargetId, String, {
-    remote,
-    lower: |id| id.as_str().to_owned(),
-    try_lift: |value| Ok(FasteningTargetId::parse(&value)?),
-});
-uniffi::custom_type!(SafetyProbability, f64, {
-    remote,
-    lower: |probability| probability.value(),
-    try_lift: |value| Ok(SafetyProbability::new(value)?),
-});
-uniffi::custom_type!(SafetyVersion, String, {
-    remote,
-    lower: |version| version.as_str().to_owned(),
-    try_lift: |value| Ok(SafetyVersion::parse(&value)?),
 });
 
 #[derive(uniffi::Record, Clone)]
@@ -115,7 +97,9 @@ pub struct WaddleMessage {
     /// urn:waddle:call-thread:0 ended fastening targeting a
     /// call-thread anchor.
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
-    /// XEP-0422 `urn:waddle:safety-scores:1` fastening from the room.
+    /// XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+    /// server-side (`waddle-xmpp-client`) to the one trusted sender: the
+    /// room itself.
     pub safety_scores: Option<WaddleSafetyScoresFastening>,
     /// XEP-0280: direction of the carbon envelope this message was
     /// unwrapped from. Only stamped after the runtime verified the
@@ -162,48 +146,52 @@ pub struct WaddleCallThreadEnded {
     pub duration: String,
 }
 
-/// Judgment category of a `urn:waddle:safety-scores:1` score. Mirrors
-/// `waddle_xmpp_client::xep::safety_scores::SafetyScoreCategory`; wire
-/// categories the client does not know are dropped before the boundary.
+/// XEP-0422 fastening carrying `urn:waddle:safety-scores:1`. Mirrors
+/// `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`. The
+/// sender is already verified server-side: only a room broadcast (bare
+/// room JID, `type='groupchat'`) ever reaches this record.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct WaddleSafetyScoresFastening {
+    /// XEP-0422 `<apply-to id='…'/>` target.
+    pub target_id: String,
+    pub action: WaddleSafetyScoresAction,
+}
+
+/// Replace the sender's scores, or clear them (XEP-0422 `clear='true'`).
+#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
+pub enum WaddleSafetyScoresAction {
+    Apply { scores: WaddleSafetyScores },
+    Clear,
+}
+
+/// One `<safety-scores/>` batch.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct WaddleSafetyScores {
+    /// Batch-level model identifier (`model-version`).
+    pub model_version: String,
+    /// Known categories only, one per category, in document order.
+    pub scores: Vec<WaddleSafetyScore>,
+}
+
+/// One `<score/>`.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct WaddleSafetyScore {
+    pub category: WaddleSafetyCategory,
+    /// In `0.0..=1.0`, validated by the parser.
+    pub probability: f64,
+    pub taxonomy_version: String,
+}
+
+/// Judgment categories. Unknown wire categories never reach this enum:
+/// the parser skips them.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaddleSafetyScoreCategory {
+pub enum WaddleSafetyCategory {
     IsQuestion,
     HateSpeech,
     Explicit,
     Harassment,
     Violence,
     SelfHarm,
-}
-
-/// One per-category probability of a safety-scores batch.
-#[derive(uniffi::Record, Clone, Debug, PartialEq)]
-pub struct WaddleSafetyScore {
-    pub category: WaddleSafetyScoreCategory,
-    /// Validated probability in `0.0..=1.0`.
-    pub probability: SafetyProbability,
-    /// Revision of this category's question wording.
-    pub taxonomy_version: SafetyVersion,
-}
-
-/// XEP-0422 payload of a safety-scores fastening.
-#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
-pub enum WaddleSafetyScoresPayload {
-    /// Replace the target's scores (one model call produced all of them).
-    Scores {
-        model_version: SafetyVersion,
-        scores: Vec<WaddleSafetyScore>,
-    },
-    /// XEP-0422 `clear='true'`: remove the target's scores.
-    Cleared,
-}
-
-/// XEP-0422 `urn:waddle:safety-scores:1` fastening broadcast by a room.
-/// Mirrors `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`.
-#[derive(uniffi::Record, Clone, Debug, PartialEq)]
-pub struct WaddleSafetyScoresFastening {
-    /// XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
-    pub target_id: FasteningTargetId,
-    pub payload: WaddleSafetyScoresPayload,
 }
 
 /// One XEP-0359 `<stanza-id/>` entry. Mirrors the core `StanzaId`
@@ -579,7 +567,9 @@ pub struct WaddleArchivedMessage {
     pub call_thread: Option<WaddleCallThreadAnchor>,
     /// urn:waddle:call-thread:0 ended fastening, if present.
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
-    /// XEP-0422 `urn:waddle:safety-scores:1` fastening from the room.
+    /// XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+    /// server-side (`waddle-xmpp-client`) to the one trusted sender: the
+    /// room itself.
     pub safety_scores: Option<WaddleSafetyScoresFastening>,
     pub shared_files: Vec<WaddleSharedFile>,
     /// XEP-0511 link previews of the inner message.

@@ -23,6 +23,7 @@ protocol FFIMessageFields {
     var moderationReason: String? { get }
     var reactionTargetId: String? { get }
     var reactionEmojis: [String] { get }
+    var safetyScores: WaddleSafetyScoresFastening? { get }
     var thread: String? { get }
     var parentThreadId: String? { get }
     var replyToId: String? { get }
@@ -90,6 +91,7 @@ extension FFIInbound {
             isRetracted: fields.isRetracted,
             moderation: moderation(fields),
             reaction: reaction(fields),
+            safetyScores: fields.safetyScores.flatMap(safetyScoresFastening),
             thread: fields.thread,
             parentThread: fields.parentThreadId,
             reply: replyTarget(fields),

@@ -5,34 +5,34 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.R
+import social.waddle.client.ffi.WaddleSafetyCategory
 import social.waddle.client.ffi.WaddleSafetyScore
-import social.waddle.client.ffi.WaddleSafetyScoreCategory
-import social.waddle.client.ffi.WaddleSafetyScoresPayload
+import social.waddle.client.ffi.WaddleSafetyScores
 
 class SafetyScoreRowTest {
     private fun scoresOf(vararg scores: WaddleSafetyScore) =
-        WaddleSafetyScoresPayload.Scores(modelVersion = "typesafe/jev-1.13-20260917", scores = scores.toList())
+        WaddleSafetyScores(modelVersion = "typesafe/jev-1.13-20260917", scores = scores.toList())
 
     @Test
     fun `rows follow the fixed category order regardless of wire order`() {
         val rows = safetyScoreRowsOf(
             scoresOf(
-                WaddleSafetyScore(WaddleSafetyScoreCategory.SELF_HARM, 0.0, "safety-self-harm-v1"),
-                WaddleSafetyScore(WaddleSafetyScoreCategory.IS_QUESTION, 0.92, "is-question-v1"),
-                WaddleSafetyScore(WaddleSafetyScoreCategory.HATE_SPEECH, 0.03, "safety-hate-speech-v1"),
+                WaddleSafetyScore(WaddleSafetyCategory.SELF_HARM, 0.0, "safety-self-harm-v1"),
+                WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 0.92, "is-question-v1"),
+                WaddleSafetyScore(WaddleSafetyCategory.HATE_SPEECH, 0.03, "safety-hate-speech-v1"),
             ),
         )
 
         assertEquals(
             listOf(
-                WaddleSafetyScoreCategory.IS_QUESTION,
-                WaddleSafetyScoreCategory.HATE_SPEECH,
-                WaddleSafetyScoreCategory.SELF_HARM,
+                WaddleSafetyCategory.IS_QUESTION,
+                WaddleSafetyCategory.HATE_SPEECH,
+                WaddleSafetyCategory.SELF_HARM,
             ),
             rows.map { it.category },
         )
         assertEquals(
-            SafetyScoreRow(WaddleSafetyScoreCategory.IS_QUESTION, 92, 0.92f, "is-question-v1"),
+            SafetyScoreRow(WaddleSafetyCategory.IS_QUESTION, 92, 0.92f, "is-question-v1"),
             rows.first(),
         )
     }
@@ -41,9 +41,9 @@ class SafetyScoreRowTest {
     fun `percentages round to whole numbers`() {
         val rows = safetyScoreRowsOf(
             scoresOf(
-                WaddleSafetyScore(WaddleSafetyScoreCategory.VIOLENCE, 0.005, "v"),
-                WaddleSafetyScore(WaddleSafetyScoreCategory.EXPLICIT, 0.994, "v"),
-                WaddleSafetyScore(WaddleSafetyScoreCategory.HARASSMENT, 1.0, "v"),
+                WaddleSafetyScore(WaddleSafetyCategory.VIOLENCE, 0.005, "v"),
+                WaddleSafetyScore(WaddleSafetyCategory.EXPLICIT, 0.994, "v"),
+                WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 1.0, "v"),
             ),
         )
 
@@ -56,16 +56,16 @@ class SafetyScoreRowTest {
         assertFalse(hasSafetyScoreBreakdown(scoresOf()))
         assertTrue(
             hasSafetyScoreBreakdown(
-                scoresOf(WaddleSafetyScore(WaddleSafetyScoreCategory.IS_QUESTION, 0.5, "v")),
+                scoresOf(WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 0.5, "v")),
             ),
         )
     }
 
     @Test
     fun `every category has its own label`() {
-        val labels = WaddleSafetyScoreCategory.entries.map(::safetyScoreLabelRes)
+        val labels = WaddleSafetyCategory.entries.map(::safetyScoreLabelRes)
 
-        assertEquals(WaddleSafetyScoreCategory.entries.size, labels.toSet().size)
-        assertEquals(R.string.safety_score_self_harm, safetyScoreLabelRes(WaddleSafetyScoreCategory.SELF_HARM))
+        assertEquals(WaddleSafetyCategory.entries.size, labels.toSet().size)
+        assertEquals(R.string.safety_score_self_harm, safetyScoreLabelRes(WaddleSafetyCategory.SELF_HARM))
     }
 }

@@ -1,99 +1,105 @@
-//! Waddle per-message safety scores, fastened with XEP-0422.
-//!
-//! The server judges an already-archived message asynchronously (issue
-//! #1831) and broadcasts the per-category probabilities to every
-//! participant as a XEP-0422 fastening on the judged message:
+//! Waddle per-message safety scores, fastened to an already-sent message
+//! with XEP-0422 Message Fastening.
 //!
 //! ```xml
-//! <message from='room@muc.example' type='groupchat'>
-//!   <apply-to xmlns='urn:xmpp:fasten:0' id='judged-stanza-id'>
-//!     <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='…'>
-//!       <score category='is_question' probability='0.92' taxonomy-version='is-question-v1'/>
-//!     </safety-scores>
-//!   </apply-to>
-//! </message>
+//! <apply-to xmlns='urn:xmpp:fasten:0' id='TARGET_ID'>
+//!   <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='…'>
+//!     <score category='is_question' probability='0.92' taxonomy-version='is-question-v1'/>
+//!   </safety-scores>
+//! </apply-to>
 //! ```
 //!
 //! No XEP defines a moderation-score payload, so the payload lives in a
-//! Waddle namespace; the wrapper is plain XEP-0422. Per XEP-0422 a new
-//! fastening of the same qualified name replaces the sender's previous one,
-//! and `clear='true'` removes it.
+//! `urn:waddle:*` namespace; only the `<apply-to/>` wrapper is XEP-0422.
+//!
+//! XEP-0422 rules this parser applies:
+//! - a message carries at most one `<apply-to/>` (§Business Rules);
+//! - an `<apply-to shell='true'/>` has no content and is ignored
+//!   (§Interaction with stanza encryption);
+//! - `clear='true'` with an empty fastening removes the sender's previous
+//!   fastenings of that qualified name (§Removing fastenings);
+//! - unknown children of `<apply-to/>` are ignored.
+//!
+//! Waddle rules for the payload:
+//! - one `<safety-scores/>` per `<apply-to/>`;
+//! - `model-version` is required and batch-level;
+//! - unknown `category` values are skipped, so the server can add a
+//!   category without breaking older clients; a malformed or out-of-range
+//!   `<score/>` is skipped as well; a repeated category keeps its first
+//!   occurrence.
+//!
+//! [`parse_safety_scores_fastening`] itself does not decide who may send
+//! scores — it is message-type agnostic, so a direct message parses with
+//! the same shape as a room broadcast. [`parse_room_safety_scores_child`]
+//! is the trusted entry point every consumer of this shared crate (the
+//! messaging parser, and through it every FFI/wasm client) actually
+//! calls: it applies the one authority rule this payload gets, so the
+//! decision is made once, here, rather than separately — and possibly
+//! inconsistently — by each client.
 
 use minidom::Element;
 
-/// XEP-0422 Message Fastening namespace.
+use crate::request::StanzaId;
+
+/// `urn:xmpp:fasten:0` — XEP-0422 Message Fastening.
 pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
-/// Waddle safety-scores fastening payload namespace.
+
+/// `urn:waddle:safety-scores:1` — the fastened safety-score payload.
 pub const NS_WADDLE_SAFETY_SCORES: &str = "urn:waddle:safety-scores:1";
 
-const APPLY_TO: &str = "apply-to";
-const SAFETY_SCORES: &str = "safety-scores";
-const SCORE: &str = "score";
-
-/// One judgment category, keyed by the server's `judgment_name`. Unknown
-/// wire categories are skipped (the server adds categories by table entry),
-/// so this enum only lists what this client can label.
+/// A judgment category. The wire tokens are the server's
+/// `message_judgments.judgment_name` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SafetyScoreCategory {
+pub enum SafetyCategory {
+    /// `is_question`: a community-enrichment signal, not a safety one.
     IsQuestion,
+    /// `safety:hate_speech`
     HateSpeech,
+    /// `safety:explicit`
     Explicit,
+    /// `safety:harassment`
     Harassment,
+    /// `safety:violence`
     Violence,
+    /// `safety:self_harm`
     SelfHarm,
 }
 
-impl SafetyScoreCategory {
-    /// Every known category, in display order.
-    pub const ALL: [SafetyScoreCategory; 6] = [
-        SafetyScoreCategory::IsQuestion,
-        SafetyScoreCategory::HateSpeech,
-        SafetyScoreCategory::Explicit,
-        SafetyScoreCategory::Harassment,
-        SafetyScoreCategory::Violence,
-        SafetyScoreCategory::SelfHarm,
-    ];
-
-    /// Canonical wire token (the server's `judgment_name`).
-    pub fn as_token(self) -> &'static str {
+impl SafetyCategory {
+    /// The wire token, as sent in `<score category='…'/>`.
+    pub fn as_wire(self) -> &'static str {
         match self {
-            SafetyScoreCategory::IsQuestion => "is_question",
-            SafetyScoreCategory::HateSpeech => "safety:hate_speech",
-            SafetyScoreCategory::Explicit => "safety:explicit",
-            SafetyScoreCategory::Harassment => "safety:harassment",
-            SafetyScoreCategory::Violence => "safety:violence",
-            SafetyScoreCategory::SelfHarm => "safety:self_harm",
+            SafetyCategory::IsQuestion => "is_question",
+            SafetyCategory::HateSpeech => "safety:hate_speech",
+            SafetyCategory::Explicit => "safety:explicit",
+            SafetyCategory::Harassment => "safety:harassment",
+            SafetyCategory::Violence => "safety:violence",
+            SafetyCategory::SelfHarm => "safety:self_harm",
         }
     }
 
-    /// Parse a wire token; `None` for categories this client does not know.
-    pub fn parse_token(token: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|category| category.as_token() == token)
+    /// Parses a wire token; `None` for a category this client does not know.
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "is_question" => Some(SafetyCategory::IsQuestion),
+            "safety:hate_speech" => Some(SafetyCategory::HateSpeech),
+            "safety:explicit" => Some(SafetyCategory::Explicit),
+            "safety:harassment" => Some(SafetyCategory::Harassment),
+            "safety:violence" => Some(SafetyCategory::Violence),
+            "safety:self_harm" => Some(SafetyCategory::SelfHarm),
+            _ => None,
+        }
     }
 }
 
-/// A probability in `0.0..=1.0` (finite). Constructed only via [`Self::parse`]
-/// or [`Self::new`], so a value in hand is always in range.
+/// A probability in `0.0..=1.0`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SafetyProbability(f64);
 
 impl SafetyProbability {
-    pub fn new(value: f64) -> Result<Self, SafetyScoresParseError> {
-        if value.is_finite() && (0.0..=1.0).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(SafetyScoresParseError::InvalidProbability)
-        }
-    }
-
-    pub fn parse(value: &str) -> Result<Self, SafetyScoresParseError> {
-        let parsed = value
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| SafetyScoresParseError::InvalidProbability)?;
-        Self::new(parsed)
+    /// `None` unless `value` is finite and within `0.0..=1.0`.
+    pub fn new(value: f64) -> Option<Self> {
+        (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(Self(value))
     }
 
     pub fn value(self) -> f64 {
@@ -101,38 +107,14 @@ impl SafetyProbability {
     }
 }
 
-/// Opaque, non-empty version label (model or taxonomy revision).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SafetyVersion(String);
-
-impl SafetyVersion {
-    pub fn parse(value: &str) -> Result<Self, SafetyScoresParseError> {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            Err(SafetyScoresParseError::EmptyVersion)
-        } else {
-            Ok(Self(trimmed.to_owned()))
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// XEP-0422 `<apply-to id='…'/>` target: the fastened message's XEP-0359
-/// id, trimmed and non-empty.
+/// Opaque, non-empty identifier of the model run that produced a batch
+/// (for example `typesafe/jev-1.13-20260917`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FasteningTargetId(String);
+pub struct JudgmentModelVersion(String);
 
-impl FasteningTargetId {
-    pub fn parse(value: &str) -> Result<Self, SafetyScoresParseError> {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            Err(SafetyScoresParseError::MissingTargetId)
-        } else {
-            Ok(Self(trimmed.to_owned()))
-        }
+impl JudgmentModelVersion {
+    pub fn new(value: &str) -> Option<Self> {
+        non_empty(value).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -140,125 +122,136 @@ impl FasteningTargetId {
     }
 }
 
+/// Opaque, non-empty identifier of the wording a category was judged
+/// against (for example `safety-hate-speech-v1`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TaxonomyVersion(String);
+
+impl TaxonomyVersion {
+    pub fn new(value: &str) -> Option<Self> {
+        non_empty(value).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One `<score/>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScore {
-    pub category: SafetyScoreCategory,
+    pub category: SafetyCategory,
     pub probability: SafetyProbability,
-    pub taxonomy_version: SafetyVersion,
+    pub taxonomy_version: TaxonomyVersion,
 }
 
-/// One judgment batch: every score came from the same model call.
+/// One `<safety-scores/>` batch: every score one model call produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScores {
-    pub model_version: SafetyVersion,
-    /// Known categories only, wire order, first occurrence per category.
+    pub model_version: JudgmentModelVersion,
+    /// Known categories only, in document order, one per category.
     pub scores: Vec<SafetyScore>,
 }
 
+/// What a safety-scores fastening does to its target.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SafetyScoresPayload {
-    /// Replace the target's scores with these (XEP-0422 replace).
-    Scores(SafetyScores),
-    /// XEP-0422 `clear='true'`: remove the target's scores.
-    Cleared,
+pub enum SafetyScoresAction {
+    /// Replace the sender's previous scores with these (XEP-0422 §Replacing).
+    Apply(SafetyScores),
+    /// Remove the sender's previous scores (XEP-0422 §Removing).
+    Clear,
 }
 
+/// A parsed `<apply-to/>` carrying `<safety-scores/>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScoresFastening {
-    /// XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
-    pub target_id: FasteningTargetId,
-    pub payload: SafetyScoresPayload,
+    /// The `<apply-to id='…'/>` target.
+    pub target_id: StanzaId,
+    pub action: SafetyScoresAction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum SafetyScoresParseError {
-    #[error("not a XEP-0422 <apply-to/> element")]
-    NotApplyTo,
-    #[error("XEP-0422 <apply-to/> is missing a non-empty id")]
-    MissingTargetId,
-    #[error("not a urn:waddle:safety-scores:1 payload")]
-    NotSafetyScores,
-    #[error("missing required attribute '{0}'")]
-    MissingAttribute(&'static str),
-    #[error("probability is not a finite number in 0.0..=1.0")]
-    InvalidProbability,
-    #[error("version label is empty")]
-    EmptyVersion,
-}
-
-/// Parse a `<apply-to xmlns='urn:xmpp:fasten:0'>` carrying safety scores.
-///
-/// Message-type agnostic: authority checks live in the caller (see
-/// [`parse_room_safety_scores_child`]). Per XEP-0422 other children of the
-/// `<apply-to/>` (e.g. `<external/>`) are ignored.
-pub fn parse_safety_scores_fastening(
-    apply_to: &Element,
-) -> Result<SafetyScoresFastening, SafetyScoresParseError> {
-    if !apply_to.is(APPLY_TO, NS_FASTEN) {
-        return Err(SafetyScoresParseError::NotApplyTo);
+/// Extracts a safety-scores fastening from a `<message/>`, or `None` when
+/// the message carries none or carries a malformed one.
+pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFastening> {
+    let apply_to = single_apply_to(message)?;
+    let target_id = StanzaId::new(apply_to.attr("id")?.trim()).ok()?;
+    let mut payloads = apply_to
+        .children()
+        .filter(|child| child.is("safety-scores", NS_WADDLE_SAFETY_SCORES));
+    let payload = payloads.next()?;
+    if payloads.next().is_some() {
+        return None;
     }
-    let target_id = FasteningTargetId::parse(
-        apply_to
-            .attr("id")
-            .ok_or(SafetyScoresParseError::MissingTargetId)?,
-    )?;
-    let payload_element = apply_to
-        .get_child(SAFETY_SCORES, NS_WADDLE_SAFETY_SCORES)
-        .ok_or(SafetyScoresParseError::NotSafetyScores)?;
-    let payload = if is_clear(apply_to) {
-        SafetyScoresPayload::Cleared
+    let action = if is_true(apply_to.attr("clear")) {
+        parse_clear(payload)?
     } else {
-        SafetyScoresPayload::Scores(parse_safety_scores(payload_element)?)
+        SafetyScoresAction::Apply(parse_safety_scores(payload)?)
     };
-    Ok(SafetyScoresFastening { target_id, payload })
+    Some(SafetyScoresFastening { target_id, action })
 }
 
-/// Extract the safety-scores fastening from a room broadcast.
+/// Extracts a safety-scores fastening from a room broadcast, the only
+/// sender this payload trusts.
 ///
 /// Only the MUC service itself may attach scores: the stanza must be
-/// `type='groupchat'` from the bare room JID (occupants always carry a
-/// `/nick` resource), the same authenticity rule as XEP-0425 moderation.
-/// Direct-message fastenings are deliberately not accepted yet: no trusted
-/// 1:1 sender (and conversation routing) is defined for this payload.
+/// `type='groupchat'` from the bare room JID. An occupant's own message is
+/// also reflected with `type='groupchat'`, but always carries a `/nick`
+/// resource, so this is the same authenticity rule XEP-0425 moderation
+/// uses to reject an occupant's own claim of moderation. A direct-message
+/// fastening is not accepted: no trusted 1:1 sender is defined for this
+/// payload.
 pub fn parse_room_safety_scores_child(message: &Element) -> Option<SafetyScoresFastening> {
     let from = message.attr("from")?;
     if message.attr("type") != Some("groupchat") || from.contains('/') {
         return None;
     }
-    let apply_to = message.get_child(APPLY_TO, NS_FASTEN)?;
-    parse_safety_scores_fastening(apply_to).ok()
+    parse_safety_scores_fastening(message)
 }
 
-/// Parse a `<safety-scores/>` element. Unknown categories, malformed
-/// scores, and repeated categories are skipped rather than failing the
-/// whole batch; a missing `model-version` fails it.
-pub fn parse_safety_scores(element: &Element) -> Result<SafetyScores, SafetyScoresParseError> {
-    if !element.is(SAFETY_SCORES, NS_WADDLE_SAFETY_SCORES) {
-        return Err(SafetyScoresParseError::NotSafetyScores);
-    }
-    let model_version = SafetyVersion::parse(required_attr(element, "model-version")?)?;
+/// The message's one non-shell `<apply-to/>`. Two or more is a XEP-0422
+/// business-rule violation and yields nothing.
+fn single_apply_to(message: &Element) -> Option<&Element> {
+    let mut candidates = message
+        .children()
+        .filter(|child| child.is("apply-to", NS_FASTEN) && !is_true(child.attr("shell")));
+    let apply_to = candidates.next()?;
+    candidates.next().is_none().then_some(apply_to)
+}
+
+/// XEP-0422 §Removing: the fastening is sent empty, with no attributes and
+/// no children.
+fn parse_clear(payload: &Element) -> Option<SafetyScoresAction> {
+    let is_empty = payload.attrs().iter().next().is_none() && payload.children().next().is_none();
+    is_empty.then_some(SafetyScoresAction::Clear)
+}
+
+fn parse_safety_scores(payload: &Element) -> Option<SafetyScores> {
+    let model_version = JudgmentModelVersion::new(payload.attr("model-version")?)?;
     let mut scores: Vec<SafetyScore> = Vec::new();
-    for child in element.children() {
-        let Some(score) = parse_score(child) else {
-            continue;
-        };
-        if scores.iter().all(|seen| seen.category != score.category) {
+    for score in payload
+        .children()
+        .filter(|child| child.is("score", NS_WADDLE_SAFETY_SCORES))
+        .filter_map(parse_score)
+    {
+        if scores.iter().all(|kept| kept.category != score.category) {
             scores.push(score);
         }
     }
-    Ok(SafetyScores {
+    Some(SafetyScores {
         model_version,
         scores,
     })
 }
 
 fn parse_score(element: &Element) -> Option<SafetyScore> {
-    if !element.is(SCORE, NS_WADDLE_SAFETY_SCORES) {
-        return None;
-    }
-    let category = SafetyScoreCategory::parse_token(element.attr("category")?)?;
-    let probability = SafetyProbability::parse(element.attr("probability")?).ok()?;
-    let taxonomy_version = SafetyVersion::parse(element.attr("taxonomy-version")?).ok()?;
+    let category = SafetyCategory::from_wire(element.attr("category")?)?;
+    let probability = element
+        .attr("probability")?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .and_then(SafetyProbability::new)?;
+    let taxonomy_version = TaxonomyVersion::new(element.attr("taxonomy-version")?)?;
     Some(SafetyScore {
         category,
         probability,
@@ -266,16 +259,12 @@ fn parse_score(element: &Element) -> Option<SafetyScore> {
     })
 }
 
-/// XEP-0422 `clear` is an XML boolean.
-fn is_clear(apply_to: &Element) -> bool {
-    matches!(apply_to.attr("clear"), Some("true" | "1"))
+/// XML Schema boolean truth (`true` or `1`).
+fn is_true(value: Option<&str>) -> bool {
+    matches!(value, Some("true" | "1"))
 }
 
-fn required_attr<'a>(
-    element: &'a Element,
-    name: &'static str,
-) -> Result<&'a str, SafetyScoresParseError> {
-    element
-        .attr(name)
-        .ok_or(SafetyScoresParseError::MissingAttribute(name))
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }

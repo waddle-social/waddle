@@ -9,10 +9,11 @@ import org.junit.Test
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleSafetyCategory
 import social.waddle.client.ffi.WaddleSafetyScore
-import social.waddle.client.ffi.WaddleSafetyScoreCategory
+import social.waddle.client.ffi.WaddleSafetyScores
+import social.waddle.client.ffi.WaddleSafetyScoresAction
 import social.waddle.client.ffi.WaddleSafetyScoresFastening
-import social.waddle.client.ffi.WaddleSafetyScoresPayload
 
 /**
  * XEP-0422 `urn:waddle:safety-scores:1` fastenings, fed to the store as
@@ -28,16 +29,19 @@ class SafetyScoresMutationTest {
 
     private fun mucTimeline() = store.timeline(ROOM).value
 
-    private fun scores(modelVersion: String, harassment: Double = 0.02) = WaddleSafetyScoresPayload.Scores(
+    private fun scores(modelVersion: String, harassment: Double = 0.02) = WaddleSafetyScores(
         modelVersion = modelVersion,
         scores = listOf(
-            WaddleSafetyScore(WaddleSafetyScoreCategory.IS_QUESTION, 0.92, "is-question-v1"),
-            WaddleSafetyScore(WaddleSafetyScoreCategory.HARASSMENT, harassment, "safety-harassment-v1"),
+            WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 0.92, "is-question-v1"),
+            WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, harassment, "safety-harassment-v1"),
         ),
     )
 
-    private fun fastening(payload: WaddleSafetyScoresPayload, target: String = "s1") =
-        WaddleSafetyScoresFastening(targetId = target, payload = payload)
+    private fun fastening(scores: WaddleSafetyScores, target: String = "s1") =
+        WaddleSafetyScoresFastening(targetId = target, action = WaddleSafetyScoresAction.Apply(scores))
+
+    private fun clearedFastening(target: String = "s1") =
+        WaddleSafetyScoresFastening(targetId = target, action = WaddleSafetyScoresAction.Clear)
 
     private fun liveTarget(stanzaId: String = "s1"): WaddleMessage = testMessage(
         id = "orig-$stanzaId",
@@ -50,17 +54,27 @@ class SafetyScoresMutationTest {
     )
 
     private fun liveScores(
-        payload: WaddleSafetyScoresPayload,
+        scores: WaddleSafetyScores,
         from: String = ROOM,
         target: String = "s1",
     ): WaddleMessage = testMessage(
-        id = "scores-${payload.hashCode()}",
+        id = "scores-${scores.hashCode()}",
         from = from,
         to = null,
         messageType = "groupchat",
         isMuc = true,
         body = null,
-        safetyScores = fastening(payload, target),
+        safetyScores = fastening(scores, target),
+    )
+
+    private fun liveCleared(from: String = ROOM, target: String = "s1"): WaddleMessage = testMessage(
+        id = "cleared-$target-$from",
+        from = from,
+        to = null,
+        messageType = "groupchat",
+        isMuc = true,
+        body = null,
+        safetyScores = clearedFastening(target),
     )
 
     @Test
@@ -181,7 +195,7 @@ class SafetyScoresMutationTest {
         store.onLiveMessage(liveScores(scores("jev-1")))
         assertEquals(scores("jev-1"), mucTimeline().single().safetyScores)
 
-        store.onLiveMessage(liveScores(WaddleSafetyScoresPayload.Cleared))
+        store.onLiveMessage(liveCleared())
         assertNull(mucTimeline().single().safetyScores)
 
         store.onArchivedMessage(
@@ -224,7 +238,7 @@ class SafetyScoresMutationTest {
         // The fastening is the newest wire stamp seen: the live clear
         // anchors exactly at its instant.
         store.onArchivedMessage(archivedScores)
-        store.onLiveMessage(liveScores(WaddleSafetyScoresPayload.Cleared))
+        store.onLiveMessage(liveCleared())
         // Re-opening the room re-pages the same newest MAM page.
         store.onArchivedMessage(archivedScores)
 
@@ -255,7 +269,7 @@ class SafetyScoresMutationTest {
                 safetyScores = fastening(scores("jev-1")),
             ),
         )
-        store.onLiveMessage(liveScores(WaddleSafetyScoresPayload.Cleared))
+        store.onLiveMessage(liveCleared())
         // A different re-judgment the archive stamped in the same second.
         store.onArchivedMessage(
             testArchivedMessage(

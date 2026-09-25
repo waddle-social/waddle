@@ -8,7 +8,8 @@ import social.waddle.android.client.conversationKeyOf
 import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
-import social.waddle.client.ffi.WaddleSafetyScoresPayload
+import social.waddle.client.ffi.WaddleSafetyScores
+import social.waddle.client.ffi.WaddleSafetyScoresAction
 import java.time.Instant
 import java.time.OffsetDateTime
 
@@ -453,7 +454,7 @@ class TimelineStore(
         // older MAM replay cannot resurrect scores it removed.
         safetyScoresRank != null && safetyScoresRank > rank -> this
         else -> copy(
-            safetyScores = mutation.payload as? WaddleSafetyScoresPayload.Scores,
+            safetyScores = (mutation.action as? WaddleSafetyScoresAction.Apply)?.scores,
             safetyScoresRank = rank,
             appliedSafetyFastenings = appliedSafetyFastenings + mutation.fasteningIds,
         )
@@ -520,7 +521,7 @@ class TimelineStore(
         val correctedBody: String? = null,
         val correctionRank: Rank? = null,
         val tombstone: MessageTombstone? = null,
-        val safetyScores: WaddleSafetyScoresPayload.Scores? = null,
+        val safetyScores: WaddleSafetyScores? = null,
         val safetyScoresRank: Rank? = null,
         /** Wire ids of every safety-score fastening applied to the row. */
         val appliedSafetyFastenings: Set<String> = emptySet(),

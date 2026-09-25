@@ -12,9 +12,9 @@ import org.junit.runner.RunWith
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testMessage
+import social.waddle.client.ffi.WaddleSafetyCategory
 import social.waddle.client.ffi.WaddleSafetyScore
-import social.waddle.client.ffi.WaddleSafetyScoreCategory
-import social.waddle.client.ffi.WaddleSafetyScoresPayload
+import social.waddle.client.ffi.WaddleSafetyScores
 
 /** XEP-0422 safety-score affordance and breakdown sheet on a MessageCard. */
 @RunWith(AndroidJUnit4::class)
@@ -23,15 +23,15 @@ class MessageCardSafetyScoresTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
 
-    private val scores = WaddleSafetyScoresPayload.Scores(
+    private val scores = WaddleSafetyScores(
         modelVersion = "typesafe/jev-1.13-20260917",
         scores = listOf(
-            WaddleSafetyScore(WaddleSafetyScoreCategory.IS_QUESTION, 0.92, "is-question-v1"),
-            WaddleSafetyScore(WaddleSafetyScoreCategory.HARASSMENT, 0.02, "safety-harassment-v1"),
+            WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 0.92, "is-question-v1"),
+            WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.02, "safety-harassment-v1"),
         ),
     )
 
-    private fun setCard(safetyScores: WaddleSafetyScoresPayload.Scores?) {
+    private fun setCard(safetyScores: WaddleSafetyScores?) {
         val message = testMessage(
             from = "room@muc.waddle.test/alice",
             messageType = "groupchat",

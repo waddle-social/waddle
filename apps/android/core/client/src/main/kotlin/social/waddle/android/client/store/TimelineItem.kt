@@ -7,8 +7,8 @@ import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleSafetyScores
 import social.waddle.client.ffi.WaddleSafetyScoresFastening
-import social.waddle.client.ffi.WaddleSafetyScoresPayload
 import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleStanzaId
 
@@ -56,7 +56,7 @@ data class TimelineItem(
      * scores for this message, visible to every participant; `null` when
      * none were fastened or they were cleared.
      */
-    val safetyScores: WaddleSafetyScoresPayload.Scores? = null,
+    val safetyScores: WaddleSafetyScores? = null,
 ) {
     /**
      * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),

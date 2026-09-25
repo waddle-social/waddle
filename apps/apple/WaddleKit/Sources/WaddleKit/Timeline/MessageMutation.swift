@@ -2,8 +2,8 @@ import Foundation
 
 /// A stanza that changes an existing row instead of inserting one.
 /// Extraction precedence follows destructiveness: moderation and
-/// retraction are terminal, a correction replaces content, a reaction only
-/// annotates.
+/// retraction are terminal, a correction replaces content, reactions and
+/// safety scores only annotate.
 public enum MessageMutation: Hashable, Sendable {
     /// XEP-0444: `emojis` is the sender's complete current set and replaces
     /// their previous one (empty clears).
@@ -15,13 +15,17 @@ public enum MessageMutation: Hashable, Sendable {
     case retraction(targetID: String, from: JID)
     /// XEP-0425: only the room itself may moderate.
     case moderation(targetID: String, from: JID, moderatedBy: String?, reason: String?)
+    /// XEP-0422 `urn:waddle:safety-scores:1`: only the room itself may set
+    /// scores. They replace any earlier scores; nil clears them.
+    case safetyScores(targetID: String, from: JID, scores: SafetyScores?)
 
     public var targetID: String {
         switch self {
         case let .reaction(targetID, _, _, _, _),
              let .correction(targetID, _, _),
              let .retraction(targetID, _),
-             let .moderation(targetID, _, _, _):
+             let .moderation(targetID, _, _, _),
+             let .safetyScores(targetID, _, _):
             return targetID
         }
     }
@@ -31,7 +35,8 @@ public enum MessageMutation: Hashable, Sendable {
         case let .reaction(_, from, _, _, _),
              let .correction(_, from, _),
              let .retraction(_, from),
-             let .moderation(_, from, _, _):
+             let .moderation(_, from, _, _),
+             let .safetyScores(_, from, _):
             return from
         }
     }
@@ -40,7 +45,7 @@ public enum MessageMutation: Hashable, Sendable {
     var isSenderScoped: Bool {
         switch self {
         case .correction, .retraction: return true
-        case .reaction, .moderation: return false
+        case .reaction, .moderation, .safetyScores: return false
         }
     }
 
@@ -57,6 +62,11 @@ public enum MessageMutation: Hashable, Sendable {
                 moderatedBy: moderation.moderatedBy,
                 reason: moderation.reason
             )
+        }
+        // Scores are a room annotation. In 1:1 no sender is defined as
+        // trusted to set them, so a peer's claim is ignored outright.
+        if let fastening = message.safetyScores, isGroupchat {
+            return .safetyScores(targetID: fastening.targetID, from: from, scores: fastening.scores)
         }
         if let retractsID = message.retractsID {
             return .retraction(targetID: retractsID, from: from)

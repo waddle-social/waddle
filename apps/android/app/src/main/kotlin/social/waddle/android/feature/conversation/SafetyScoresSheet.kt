@@ -27,7 +27,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
-import social.waddle.client.ffi.WaddleSafetyScoresPayload
+import social.waddle.client.ffi.WaddleSafetyScores
 
 /**
  * Low-emphasis affordance under a message that carries XEP-0422 safety
@@ -69,7 +69,7 @@ fun SafetyScoresChip(onClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SafetyScoresSheet(
-    scores: WaddleSafetyScoresPayload.Scores,
+    scores: WaddleSafetyScores,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {

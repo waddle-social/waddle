@@ -17,6 +17,9 @@ enum MessageAccessibilityText {
         if replyCount > 0 {
             parts.append(replyCount == 1 ? "1 reply" : "\(replyCount) replies")
         }
+        if item.safetyScores != nil {
+            parts.append("Content signals available")
+        }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
