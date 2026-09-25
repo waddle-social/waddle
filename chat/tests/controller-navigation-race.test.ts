@@ -83,6 +83,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
     setDmChatStateHandler: noop,
     setDmDisplayedHandler: noop,
     setDmReactionHandler: noop,
+    setDmSafetyScoresHandler: noop,
     setMdsDisplayedHandler: noop,
     setPresenceUpdateHandler: noop,
     addPubsubEventHandler: noop,

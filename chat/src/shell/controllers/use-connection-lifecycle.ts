@@ -169,6 +169,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     client.setDmChatStateHandler(dmMessaging.onChatState);
     client.setDmDisplayedHandler(dmMessaging.onDisplayed);
     client.setDmReactionHandler(dmMessaging.onReaction);
+    client.setDmSafetyScoresHandler(dmMessaging.onSafetyScores);
     // XEP-0490 §3.2: another resource of this account has marked a
     // chat as displayed. Persist the stanza-id under the MDS-scoped
     // last-seen key so existing conversation-scoped readers can pick

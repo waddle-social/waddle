@@ -1,4 +1,5 @@
 import type { PinPermission } from "@/lib/chat-types";
+import type { SafetyScores } from "@/lib/safety-scores/types";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
 import {
@@ -299,6 +300,9 @@ export interface TimelineMessage {
    * carries the action when set. */
   isPinEvent?: boolean;
   pinEventAction?: "pinned" | "unpinned";
+  /** Server judgments fastened to this message (XEP-0422,
+   * `urn:waddle:safety-scores:1`); visible to every participant. */
+  safetyScores?: SafetyScores;
 }
 
 export interface CommunityFormData {

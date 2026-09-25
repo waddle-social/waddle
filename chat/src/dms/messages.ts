@@ -12,6 +12,7 @@ import type {
 import { barePeerJid, dmConversationIdentityKey, jidLocalpart } from "@/lib/xmpp-client";
 import { bareJidKey, fullJidIdentityKey, resourceOf } from "@/lib/xmpp/jid";
 import type { CatchupConversationFailure } from "@/lib/xmpp-client";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   displayedStateCanAdvance,
@@ -224,7 +225,7 @@ export function useDirectMessages(
     persistLastSeen,
     isFeedVisible,
   });
-  const { applyDisplayed, applyReaction } = liveMerge;
+  const { applyDisplayed, applyReaction, applySafetyScores } = liveMerge;
 
   // Surface a "started a call" anchor card the moment a 1:1 call becomes
   // active. The server only enriches the archived `<proceed/>` row, so this
@@ -471,6 +472,14 @@ export function useDirectMessages(
     applyReaction(event.messageId, peerNameFromJid(event.reactorJid), event.emojis, event.occurredAt);
   }
 
+  /** XEP-0422 safety scores from the account's own server. The event
+   * carries no conversation, so it applies wherever the target resolves
+   * in the open timeline (a no-op when it isn't loaded). */
+  function onSafetyScores(fastening: SafetyScoresFastening) {
+    if (!activePeerJid.value) return;
+    applySafetyScores(fastening);
+  }
+
   watch(scrollDirection, () => {
     void alignTimelineToPreference();
   });
@@ -547,6 +556,7 @@ export function useDirectMessages(
     onChatState,
     onDisplayed,
     onReaction,
+    onSafetyScores,
     onMessageQueueStatus,
     onMessageAck,
     onMessageDeliveryFailure,

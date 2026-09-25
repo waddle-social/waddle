@@ -277,6 +277,9 @@ pub struct InboundMessage {
     pub call_thread: Option<crate::xep::call_thread::CallThreadAnchor>,
     /// urn:waddle:call-thread:0 ended fastening targeting a call-thread anchor.
     pub call_thread_ended: Option<crate::xep::call_thread::CallThreadEnded>,
+    /// XEP-0422 fastening carrying `urn:waddle:safety-scores:1` judgments
+    /// for an earlier message. Sender-agnostic: consumers gate on `from`.
+    pub safety_scores: Option<crate::xep::safety_scores::SafetyScoresFastening>,
     pub is_sticker: bool,
     /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
     /// `None` when the message carries no `<pin-event/>` payload.

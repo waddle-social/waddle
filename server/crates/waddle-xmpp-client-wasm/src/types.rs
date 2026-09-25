@@ -30,6 +30,32 @@ pub struct WaddleCallThreadEnded {
     pub duration: String,
 }
 
+/// `urn:waddle:safety-scores:1` score, category as its wire token.
+#[derive(Debug, Serialize)]
+pub struct WaddleSafetyScore {
+    pub category: String,
+    pub probability: f64,
+    pub taxonomy_version: String,
+}
+
+/// XEP-0422 replace/clear semantics of a safety-scores fastening.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WaddleSafetyScoresUpdate {
+    Replace {
+        model_version: String,
+        scores: Vec<WaddleSafetyScore>,
+    },
+    Clear,
+}
+
+/// XEP-0422 safety-scores fastening targeting `target_id`.
+#[derive(Debug, Serialize)]
+pub struct WaddleSafetyScoresFastening {
+    pub target_id: String,
+    pub update: WaddleSafetyScoresUpdate,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum WaddleInCallSignal {
@@ -84,6 +110,8 @@ pub struct WaddleMessage {
     pub call_thread: Option<WaddleCallThreadAnchor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_scores: Option<WaddleSafetyScoresFastening>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     /// urn:waddle:pin:0 pin/unpin event surfaced from a system message
@@ -335,6 +363,8 @@ pub struct WaddleArchivedMessage {
     pub call_thread: Option<WaddleCallThreadAnchor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_scores: Option<WaddleSafetyScoresFastening>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,

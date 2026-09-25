@@ -5,6 +5,7 @@ import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filter
 import type { BroadcastShow } from "@/presence/effective-show";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import { $callState, applyCallEvent, clearPendingDmCallTerminate, flushPendingDmCallTerminate, reportCallError, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
 import { readvertiseMucCallPresence, setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
 import {
@@ -166,6 +167,7 @@ import { requestPlaintextLinkPreviewLookup, trustedLinkPreviewMediaOrigin, type 
 import {
   buildWasmSendOptions,
   dmMessageFromArchived,
+  dmSafetyScoresFromWasm,
   encodeBodyForSend,
   inboxEntryFromWasm,
   roomMessageFromArchived,
@@ -917,6 +919,7 @@ export class BrowserXmppClient {
   setDmChatStateHandler(h: (event: DmChatStateEvent) => void) { this.events.set("dmChatState", h); }
   setReactionHandler(h: (event: ReactionEvent) => void) { this.events.set("reaction", h); }
   setDmReactionHandler(h: (event: DmReactionEvent) => void) { this.events.set("dmReaction", h); }
+  setDmSafetyScoresHandler(h: (fastening: SafetyScoresFastening) => void) { this.events.set("dmSafetyScores", h); }
   setDisplayedHandler(h: (event: { roomJid: string; nick: string; messageId: string }) => void) { this.events.set("displayed", h); }
   setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.events.set("dmDisplayed", h); }
   setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.events.set("presenceUpdate", h); }
@@ -3359,6 +3362,7 @@ export class BrowserXmppClient {
    */
   private dispatchLiveMessage(message: InboundWasmMessage) {
     if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else { const occupant = this.mucPmOccupant(message); this.events.emit("dmDisplayed", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); } return; }
+    if (!message.is_muc && message.safety_scores) { this.dispatchDmSafetyScores(message); return; }
     if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const occupant = this.mucPmOccupant(message); const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = occupant?.occupantJid ?? (fromBare === selfBare ? toBare : fromBare); const reactorJid = (occupant && fromBare !== selfBare ? occupant.occupantJid : fromBare) || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
     this.dispatchLiveBodyMessage(message);
     // Rejections settle the retry queue immediately, even during catch-up.
@@ -3366,6 +3370,17 @@ export class BrowserXmppClient {
     if (message.id && this.outboundQueue.wasRejected(message.id)) {
       this.events.emit("messageDeliveryFailure", message.id, "rejected");
     }
+  }
+
+  /**
+   * XEP-0422 safety-scores fastening on a 1:1 message. Routed on its own
+   * event (like XEP-0444 reactions) so it never reaches the body path —
+   * the server-domain sender would otherwise surface as a phantom DM
+   * conversation, unread badge, or notification.
+   */
+  private dispatchDmSafetyScores(message: InboundWasmMessage) {
+    const fastening = dmSafetyScoresFromWasm(message, barePeerJid(this.session.jid));
+    if (fastening) this.events.emit("dmSafetyScores", fastening);
   }
 
   private dispatchLiveBodyMessage(message: InboundWasmMessage) {

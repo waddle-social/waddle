@@ -3,6 +3,7 @@ import type { PinPermission } from "@/lib/chat-types";
 import type { CallThreadAnchor, ExtensionAnnotation } from "@/lib/chat-ui";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 
 /** Shared types for the XMPP client layer. */
 
@@ -257,6 +258,9 @@ export interface LiveRoomMessage {
     ended: string;
     duration: string;
   };
+  /** Room-authored XEP-0422 `urn:waddle:safety-scores:1` fastening. Only
+   * set when the sender is the room itself (see `@/lib/safety-scores/sender`). */
+  safetyScoresFastening?: SafetyScoresFastening;
   /** Waddle thread metadata */
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;

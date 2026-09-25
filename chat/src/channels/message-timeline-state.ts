@@ -21,6 +21,8 @@ import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
 import { SenderScopedIdIndex } from "@/lib/messaging/sender-scoped-ids";
+import { findSafetyScoresTargetIndex, withSafetyScores } from "@/lib/safety-scores/apply";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -304,6 +306,7 @@ export function buildChannelTimelineFromMamResults(params: {
     payload: CorrectionPayload;
   }[] = [];
   const callThreadEndedUpdates: NonNullable<LiveRoomMessage["callThreadEnded"]>[] = [];
+  const safetyScoresUpdates: SafetyScoresFastening[] = [];
 
   for (const msg of mamResults) {
     if (msg._reactionTarget && msg._reactionEmojis) {
@@ -336,6 +339,8 @@ export function buildChannelTimelineFromMamResults(params: {
       });
     } else if (msg.callThreadEnded) {
       callThreadEndedUpdates.push(msg.callThreadEnded);
+    } else if (msg.safetyScoresFastening) {
+      safetyScoresUpdates.push(msg.safetyScoresFastening);
     } else if (
       msg.body
       || msg.isRetracted
@@ -467,6 +472,14 @@ export function buildChannelTimelineFromMamResults(params: {
     if (update.occurredAt) {
       target.reactionTimes = { ...(target.reactionTimes ?? {}), [update.senderId]: update.occurredAt };
     }
+  }
+
+  // XEP-0422: archive order is chronological, so a later fastening
+  // replaces (or clears) an earlier one on the same target.
+  for (const update of safetyScoresUpdates) {
+    const index = findSafetyScoresTargetIndex(timeline, update.targetId);
+    if (index < 0) continue;
+    timeline[index] = withSafetyScores(timeline[index]!, update);
   }
 
   return applyForumContext(timeline.sort(compareTimelineMessages), channelIsForum);
