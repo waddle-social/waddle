@@ -6,6 +6,47 @@
 
 use async_trait::async_trait;
 
+use super::store::{
+    IS_QUESTION_JUDGMENT_NAME, SAFETY_EXPLICIT_JUDGMENT_NAME, SAFETY_HARASSMENT_JUDGMENT_NAME,
+    SAFETY_HATE_SPEECH_JUDGMENT_NAME, SAFETY_SELF_HARM_JUDGMENT_NAME,
+    SAFETY_VIOLENCE_JUDGMENT_NAME,
+};
+
+/// The fixed, closed set of judgment categories this outbox asks about a
+/// message body. A typed identifier (rather than a bare `String`) for the
+/// same reason `xep::*` namespace identifiers are dedicated constants: this
+/// is structured data with a known set of values, not free-form text, so a
+/// typo or an unrecognized name is a compile error here instead of a
+/// silent runtime mismatch. Converts to `&'static str` only at the two
+/// genuine I/O boundaries that need one: the Jev Decisions API's JSON
+/// question/answer keys, and the `message_judgments.judgment_name` SQL
+/// column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JudgmentKind {
+    IsQuestion,
+    SafetyHateSpeech,
+    SafetyExplicit,
+    SafetyHarassment,
+    SafetyViolence,
+    SafetySelfHarm,
+}
+
+impl JudgmentKind {
+    /// The `message_judgments.judgment_name` value this kind is stored
+    /// under, and the key it's asked/answered under in Jev's Decisions API
+    /// `questions`/`answers` objects.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JudgmentKind::IsQuestion => IS_QUESTION_JUDGMENT_NAME,
+            JudgmentKind::SafetyHateSpeech => SAFETY_HATE_SPEECH_JUDGMENT_NAME,
+            JudgmentKind::SafetyExplicit => SAFETY_EXPLICIT_JUDGMENT_NAME,
+            JudgmentKind::SafetyHarassment => SAFETY_HARASSMENT_JUDGMENT_NAME,
+            JudgmentKind::SafetyViolence => SAFETY_VIOLENCE_JUDGMENT_NAME,
+            JudgmentKind::SafetySelfHarm => SAFETY_SELF_HARM_JUDGMENT_NAME,
+        }
+    }
+}
+
 /// One named judgment's result, from whichever call in [`JudgmentBatch`]
 /// produced it.
 ///
@@ -18,9 +59,8 @@ use async_trait::async_trait;
 /// answered in the same call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedJudgment {
-    /// The `message_judgments.judgment_name` this result is stored under
-    /// (e.g. `"is_question"`, `"safety:hate_speech"`).
-    pub judgment_name: String,
+    /// The judgment category this result is for.
+    pub judgment_name: JudgmentKind,
     /// Probability, in `0.0..=1.0`, that the named condition holds. Every
     /// judgment this outbox asks is a Jev "Noul" (yes/no) question, whose
     /// answer is a bare probability — no separate confidence value (unlike

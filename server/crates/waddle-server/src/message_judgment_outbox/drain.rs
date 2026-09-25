@@ -257,7 +257,9 @@ pub async fn run_drain_loop(db: Database, judge: Arc<dyn MessageJudge>, poll_int
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message_judgment_outbox::judge::{JudgeError, JudgmentBatch, NamedJudgment};
+    use crate::message_judgment_outbox::judge::{
+        JudgeError, JudgmentBatch, JudgmentKind, NamedJudgment,
+    };
     use crate::message_judgment_outbox::store::{
         enqueue_pending, fetch_due_batch, PendingJudgmentInput,
     };
@@ -333,7 +335,7 @@ mod tests {
     fn ok_judgment() -> Result<JudgmentBatch, JudgeError> {
         Ok(JudgmentBatch {
             judgments: vec![NamedJudgment {
-                judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                judgment_name: JudgmentKind::IsQuestion,
                 probability: 0.75,
                 taxonomy_version: "v1".to_string(),
             }],
@@ -410,17 +412,17 @@ mod tests {
             Ok(JudgmentBatch {
                 judgments: vec![
                     NamedJudgment {
-                        judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                        judgment_name: JudgmentKind::IsQuestion,
                         probability: 0.05,
                         taxonomy_version: "is-question-v1".to_string(),
                     },
                     NamedJudgment {
-                        judgment_name: store::SAFETY_HARASSMENT_JUDGMENT_NAME.to_string(),
+                        judgment_name: JudgmentKind::SafetyHarassment,
                         probability: 0.87,
                         taxonomy_version: "safety-harassment-v1".to_string(),
                     },
                     NamedJudgment {
-                        judgment_name: store::SAFETY_HATE_SPEECH_JUDGMENT_NAME.to_string(),
+                        judgment_name: JudgmentKind::SafetyHateSpeech,
                         probability: 0.1,
                         taxonomy_version: "safety-hate-speech-v1".to_string(),
                     },
@@ -658,7 +660,7 @@ mod tests {
             JudgmentRecord {
                 waddle_id: waddle_id(),
                 stanza_id: stanza("stanza-partial"),
-                judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                judgment_name: JudgmentKind::IsQuestion,
                 taxonomy_version: "v1".to_string(),
                 model_version: "jev-1".to_string(),
                 probability: 0.05,
@@ -674,7 +676,7 @@ mod tests {
             Ok(JudgmentBatch {
                 judgments: vec![
                     NamedJudgment {
-                        judgment_name: store::IS_QUESTION_JUDGMENT_NAME.to_string(),
+                        judgment_name: JudgmentKind::IsQuestion,
                         // Different from the pre-seeded value: the idempotent
                         // insert must keep the pre-seeded row untouched, not
                         // overwrite it with this one.
@@ -682,7 +684,7 @@ mod tests {
                         taxonomy_version: "v1".to_string(),
                     },
                     NamedJudgment {
-                        judgment_name: store::SAFETY_HATE_SPEECH_JUDGMENT_NAME.to_string(),
+                        judgment_name: JudgmentKind::SafetyHateSpeech,
                         probability: 0.9,
                         taxonomy_version: "safety-hate-speech-v1".to_string(),
                     },

@@ -30,7 +30,7 @@ pub use drain::{
     MAX_RETRY_DELAY_MS,
 };
 pub use jev_client::{JevClient, JevClientConfig, JevClientConfigError};
-pub use judge::{JudgeError, JudgmentBatch, MessageJudge, NamedJudgment};
+pub use judge::{JudgeError, JudgmentBatch, JudgmentKind, MessageJudge, NamedJudgment};
 pub use store::{
     dead_letter, enqueue_pending, fetch_due_batch, insert_judgment,
     insert_judgment_batch_and_mark_done, mark_done, record_failure, JudgmentRecord,

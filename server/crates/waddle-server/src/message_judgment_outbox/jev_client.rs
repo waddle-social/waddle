@@ -51,12 +51,7 @@ use reqwest::{redirect, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::judge::{JudgeError, JudgmentBatch, MessageJudge, NamedJudgment};
-use super::store::{
-    IS_QUESTION_JUDGMENT_NAME, SAFETY_EXPLICIT_JUDGMENT_NAME, SAFETY_HARASSMENT_JUDGMENT_NAME,
-    SAFETY_HATE_SPEECH_JUDGMENT_NAME, SAFETY_SELF_HARM_JUDGMENT_NAME,
-    SAFETY_VIOLENCE_JUDGMENT_NAME,
-};
+use super::judge::{JudgeError, JudgmentBatch, JudgmentKind, MessageJudge, NamedJudgment};
 
 /// Jev's Decisions API endpoint, confirmed from OpenRouter's own docs (see
 /// module docs). Not a guess: this is the one and only documented endpoint
@@ -88,10 +83,10 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// changes, so a stored judgment's `taxonomy_version` shows the question's
 /// wording drifted even though `model_version` didn't.
 struct JudgmentQuestionSpec {
-    /// The `message_judgments.judgment_name` this question's answer is
-    /// stored under, and the key it's asked under in the Decisions API
-    /// request/response (`questions`/`answers`).
-    judgment_name: &'static str,
+    /// The judgment category this question's answer is stored under, and
+    /// the key it's asked under in the Decisions API request/response
+    /// (`questions`/`answers`) via [`JudgmentKind::as_str`].
+    judgment_name: JudgmentKind,
     taxonomy_version: &'static str,
     instructions: &'static str,
     criteria_true: &'static str,
@@ -104,42 +99,42 @@ struct JudgmentQuestionSpec {
 /// entry here — no other code in this file changes.
 const JUDGMENT_QUESTIONS: &[JudgmentQuestionSpec] = &[
     JudgmentQuestionSpec {
-        judgment_name: IS_QUESTION_JUDGMENT_NAME,
+        judgment_name: JudgmentKind::IsQuestion,
         taxonomy_version: "is-question-v1",
         instructions: "Is this chat message phrased as a question that expects an answer or response from someone else in the conversation?",
         criteria_true: "The message asks something and expects a reply from someone else.",
         criteria_false: "The message is a statement, reaction, or does not expect a reply.",
     },
     JudgmentQuestionSpec {
-        judgment_name: SAFETY_HATE_SPEECH_JUDGMENT_NAME,
+        judgment_name: JudgmentKind::SafetyHateSpeech,
         taxonomy_version: "safety-hate-speech-v1",
         instructions: "Does this chat message contain hate speech: content that attacks, demeans, or incites hatred or violence against people based on a protected characteristic such as race, ethnicity, religion, gender, sexual orientation, or disability?",
         criteria_true: "The message attacks, demeans, or incites hatred or violence against people based on a protected characteristic.",
         criteria_false: "The message does not attack, demean, or incite hatred or violence based on a protected characteristic.",
     },
     JudgmentQuestionSpec {
-        judgment_name: SAFETY_EXPLICIT_JUDGMENT_NAME,
+        judgment_name: JudgmentKind::SafetyExplicit,
         taxonomy_version: "safety-explicit-v1",
         instructions: "Does this chat message contain sexually explicit content: graphic sexual descriptions or explicit sexual solicitation, as distinct from casual, non-graphic references?",
         criteria_true: "The message contains graphic sexual content or explicit sexual solicitation.",
         criteria_false: "The message does not contain graphic sexual content or explicit sexual solicitation.",
     },
     JudgmentQuestionSpec {
-        judgment_name: SAFETY_HARASSMENT_JUDGMENT_NAME,
+        judgment_name: JudgmentKind::SafetyHarassment,
         taxonomy_version: "safety-harassment-v1",
         instructions: "Does this chat message harass, bully, insult, or demean a specific person in the conversation, as distinct from criticizing a public figure's actions or ideas in general?",
         criteria_true: "The message directly targets a specific individual with insults, bullying, or demeaning language.",
         criteria_false: "The message does not directly target a specific individual this way.",
     },
     JudgmentQuestionSpec {
-        judgment_name: SAFETY_VIOLENCE_JUDGMENT_NAME,
+        judgment_name: JudgmentKind::SafetyViolence,
         taxonomy_version: "safety-violence-v1",
         instructions: "Does this chat message threaten violence, or describe or glorify graphic violence against a person, animal, or group?",
         criteria_true: "The message threatens violence, or describes or glorifies graphic violence.",
         criteria_false: "The message does not threaten, describe, or glorify graphic violence.",
     },
     JudgmentQuestionSpec {
-        judgment_name: SAFETY_SELF_HARM_JUDGMENT_NAME,
+        judgment_name: JudgmentKind::SafetySelfHarm,
         taxonomy_version: "safety-self-harm-v1",
         instructions: "Does this chat message express intent toward self-harm or suicide, or encourage self-harm or suicide in someone else?",
         criteria_true: "The message expresses intent toward self-harm or suicide, or encourages it in someone else.",
@@ -485,7 +480,7 @@ fn build_request_body(model: &str, body: &str) -> Value {
             },
         };
         questions.insert(
-            spec.judgment_name.to_string(),
+            spec.judgment_name.as_str().to_string(),
             serde_json::to_value(question).expect("NoulQuestion always serializes"),
         );
     }
@@ -544,21 +539,24 @@ fn parse_response(
 ) -> Result<JudgmentBatch, JudgeError> {
     let mut judgments = Vec::with_capacity(JUDGMENT_QUESTIONS.len());
     for spec in JUDGMENT_QUESTIONS {
-        let answer = response.answers.get(spec.judgment_name).ok_or_else(|| {
-            JudgeError::InvalidResponse(format!(
-                "jev response did not include an answer for \"{}\"",
-                spec.judgment_name
-            ))
-        })?;
+        let answer = response
+            .answers
+            .get(spec.judgment_name.as_str())
+            .ok_or_else(|| {
+                JudgeError::InvalidResponse(format!(
+                    "jev response did not include an answer for \"{}\"",
+                    spec.judgment_name.as_str()
+                ))
+            })?;
         let probability = answer.noul;
         if !(0.0..=1.0).contains(&probability) {
             return Err(JudgeError::InvalidResponse(format!(
                 "jev \"{}\" probability {probability} was outside 0.0..=1.0",
-                spec.judgment_name
+                spec.judgment_name.as_str()
             )));
         }
         judgments.push(NamedJudgment {
-            judgment_name: spec.judgment_name.to_string(),
+            judgment_name: spec.judgment_name,
             probability,
             taxonomy_version: spec.taxonomy_version.to_string(),
         });
@@ -632,7 +630,7 @@ mod tests {
     /// [`JUDGMENT_QUESTIONS`], defaulting every probability to `0.1` except
     /// the overrides given. Keeps individual tests from having to spell out
     /// all six judgments just to exercise one of them.
-    fn full_answers(overrides: &[(&str, f64)]) -> Value {
+    fn full_answers(overrides: &[(JudgmentKind, f64)]) -> Value {
         let mut answers = serde_json::Map::new();
         for spec in JUDGMENT_QUESTIONS {
             let probability = overrides
@@ -641,14 +639,14 @@ mod tests {
                 .map(|(_, probability)| *probability)
                 .unwrap_or(0.1);
             answers.insert(
-                spec.judgment_name.to_string(),
+                spec.judgment_name.as_str().to_string(),
                 serde_json::json!({ "noul": probability, "type": "noul" }),
             );
         }
         Value::Object(answers)
     }
 
-    fn full_response(overrides: &[(&str, f64)], model: &str, cost: f64) -> Value {
+    fn full_response(overrides: &[(JudgmentKind, f64)], model: &str, cost: f64) -> Value {
         serde_json::json!({
             "answers": full_answers(overrides),
             "id": "gen-dec-1789738314-X5e5eKGQdvR9rblyX250",
@@ -658,12 +656,12 @@ mod tests {
         })
     }
 
-    fn judgment(batch: &JudgmentBatch, judgment_name: &str) -> f64 {
+    fn judgment(batch: &JudgmentBatch, judgment_name: JudgmentKind) -> f64 {
         batch
             .judgments
             .iter()
             .find(|j| j.judgment_name == judgment_name)
-            .unwrap_or_else(|| panic!("no judgment named {judgment_name} in batch"))
+            .unwrap_or_else(|| panic!("no judgment named {} in batch", judgment_name.as_str()))
             .probability
     }
 
@@ -679,9 +677,9 @@ mod tests {
         assert_eq!(body.get("state").expect("state field"), "are we there yet?");
         assert_eq!(questions.len(), JUDGMENT_QUESTIONS.len());
         for spec in JUDGMENT_QUESTIONS {
-            let question = questions
-                .get(spec.judgment_name)
-                .unwrap_or_else(|| panic!("missing question for {}", spec.judgment_name));
+            let question = questions.get(spec.judgment_name.as_str()).unwrap_or_else(|| {
+                panic!("missing question for {}", spec.judgment_name.as_str())
+            });
             assert_eq!(question.get("type").expect("type field"), "noul");
             assert_eq!(
                 question.get("instructions").expect("instructions field"),
@@ -704,12 +702,12 @@ mod tests {
         let client = client_with(|_request| {
             Ok(ok_response(full_response(
                 &[
-                    (IS_QUESTION_JUDGMENT_NAME, 0.92),
-                    (SAFETY_HATE_SPEECH_JUDGMENT_NAME, 0.03),
-                    (SAFETY_EXPLICIT_JUDGMENT_NAME, 0.01),
-                    (SAFETY_HARASSMENT_JUDGMENT_NAME, 0.02),
-                    (SAFETY_VIOLENCE_JUDGMENT_NAME, 0.0),
-                    (SAFETY_SELF_HARM_JUDGMENT_NAME, 0.0),
+                    (JudgmentKind::IsQuestion, 0.92),
+                    (JudgmentKind::SafetyHateSpeech, 0.03),
+                    (JudgmentKind::SafetyExplicit, 0.01),
+                    (JudgmentKind::SafetyHarassment, 0.02),
+                    (JudgmentKind::SafetyViolence, 0.0),
+                    (JudgmentKind::SafetySelfHarm, 0.0),
                 ],
                 "typesafe/jev-1.13-20260917",
                 0.000019992,
@@ -722,9 +720,9 @@ mod tests {
             .expect("well-formed response should parse");
 
         assert_eq!(batch.judgments.len(), JUDGMENT_QUESTIONS.len());
-        assert_eq!(judgment(&batch, IS_QUESTION_JUDGMENT_NAME), 0.92);
-        assert_eq!(judgment(&batch, SAFETY_HATE_SPEECH_JUDGMENT_NAME), 0.03);
-        assert_eq!(judgment(&batch, SAFETY_EXPLICIT_JUDGMENT_NAME), 0.01);
+        assert_eq!(judgment(&batch, JudgmentKind::IsQuestion), 0.92);
+        assert_eq!(judgment(&batch, JudgmentKind::SafetyHateSpeech), 0.03);
+        assert_eq!(judgment(&batch, JudgmentKind::SafetyExplicit), 0.01);
         assert_eq!(batch.model_version, "typesafe/jev-1.13-20260917");
         assert_eq!(batch.cost_usd, 0.000019992);
         // Every judgment carries its own taxonomy_version, independent of
@@ -732,7 +730,7 @@ mod tests {
         let hate_speech_taxonomy = batch
             .judgments
             .iter()
-            .find(|j| j.judgment_name == SAFETY_HATE_SPEECH_JUDGMENT_NAME)
+            .find(|j| j.judgment_name == JudgmentKind::SafetyHateSpeech)
             .expect("hate speech judgment")
             .taxonomy_version
             .clone();
@@ -773,7 +771,7 @@ mod tests {
         // whole batch must fail rather than storing a partial result.
         let client = client_with(|_request| {
             Ok(ok_response(serde_json::json!({
-                "answers": { IS_QUESTION_JUDGMENT_NAME: { "noul": 0.5, "type": "noul" } },
+                "answers": { (JudgmentKind::IsQuestion.as_str()): { "noul": 0.5, "type": "noul" } },
                 "model": "typesafe/jev-1.13-20260917",
                 "usage": { "cost": 0.0, "input_tokens": 1, "output_tokens": 1 }
             })))
@@ -791,7 +789,7 @@ mod tests {
     async fn judge_rejects_probability_out_of_range() {
         let client = client_with(|_request| {
             Ok(ok_response(full_response(
-                &[(SAFETY_VIOLENCE_JUDGMENT_NAME, 1.5)],
+                &[(JudgmentKind::SafetyViolence, 1.5)],
                 "typesafe/jev-1.13-20260917",
                 0.0,
             )))
@@ -960,7 +958,7 @@ mod tests {
             Mock::given(method("POST"))
                 .and(header("authorization", "Bearer test-api-key"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(full_response(
-                    &[(SAFETY_HATE_SPEECH_JUDGMENT_NAME, 0.9)],
+                    &[(JudgmentKind::SafetyHateSpeech, 0.9)],
                     "typesafe/jev-1.13-20260917",
                     0.00002,
                 )))
@@ -973,7 +971,7 @@ mod tests {
                 .await
                 .expect("well-formed response over real HTTP must parse");
 
-            assert_eq!(judgment(&batch, SAFETY_HATE_SPEECH_JUDGMENT_NAME), 0.9);
+            assert_eq!(judgment(&batch, JudgmentKind::SafetyHateSpeech), 0.9);
             assert_eq!(batch.model_version, "typesafe/jev-1.13-20260917");
             assert_eq!(batch.cost_usd, 0.00002);
         }

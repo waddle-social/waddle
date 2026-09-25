@@ -9,6 +9,7 @@ use jid::Jid;
 use waddle_xmpp::muc::durable::WaddleId;
 use waddle_xmpp_core::xep0359::StanzaId;
 
+use super::judge::JudgmentKind;
 use super::MessageJudgmentOutboxError;
 use crate::db::{Database, DatabaseDriver, Row};
 
@@ -81,7 +82,7 @@ pub struct PendingJudgmentRow {
 pub struct JudgmentRecord {
     pub waddle_id: WaddleId,
     pub stanza_id: StanzaId,
-    pub judgment_name: String,
+    pub judgment_name: JudgmentKind,
     pub taxonomy_version: String,
     pub model_version: String,
     pub probability: f64,
@@ -290,6 +291,18 @@ pub async fn insert_judgment(
 /// failure partway through inserting them could leave some recorded and
 /// others silently missing while the row is still marked done.
 ///
+/// On a `(stanza_id, judgment_name, model_version)` conflict (a backfill
+/// call re-judging a row that already has this exact judgment recorded),
+/// every column except `cost_usd` is left at its first-written value —
+/// but `cost_usd` is *added* to, not discarded: the batch this row's cost
+/// is attributed to (see `drain.rs`'s cost-attribution comment) really did
+/// cost money even when its result collides with an existing row, and
+/// dropping that cost via a plain `DO NOTHING` would silently undercount
+/// `SUM(cost_usd)` for exactly the calls a partial-backfill makes. This
+/// keeps the invariant true unconditionally: `SUM(cost_usd)` always equals
+/// the total cost of every Jev call ever made, whether or not its
+/// judgments turned out to be new.
+///
 /// Guarded on `NOT done`, checked *before* any judgment is inserted, for
 /// the same reason as [`dead_letter`]/[`record_failure`]: this outbox
 /// tolerates more than one drain worker running concurrently, so a
@@ -305,21 +318,17 @@ pub async fn insert_judgment_batch_and_mark_done(
     records: &[JudgmentRecord],
     outbox_id: &MessageJudgmentOutboxId,
 ) -> Result<bool, MessageJudgmentOutboxError> {
-    let insert_sql = match db.driver() {
-        DatabaseDriver::Postgres => {
-            "INSERT INTO message_judgments \
-             (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
-              model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT (stanza_id, judgment_name, model_version) DO NOTHING"
-        }
-        DatabaseDriver::Sqlite => {
-            "INSERT OR IGNORE INTO message_judgments \
-             (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
-              model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        }
-    };
+    // Both drivers support the same upsert grammar here, so one query
+    // string covers both: on conflict, only `cost_usd` is touched (see the
+    // doc comment above), and referencing it unqualified in the `SET`
+    // clause (rather than `message_judgments.cost_usd`) is valid in both
+    // Postgres and SQLite.
+    let insert_sql = "INSERT INTO message_judgments \
+         (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
+          model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (stanza_id, judgment_name, model_version) \
+         DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd";
     let mut tx = db.begin().await?;
     let claimed = tx
         .execute(
@@ -589,7 +598,7 @@ mod tests {
         JudgmentRecord {
             waddle_id: waddle_id(),
             stanza_id: stanza(stanza_id),
-            judgment_name: IS_QUESTION_JUDGMENT_NAME.to_string(),
+            judgment_name: JudgmentKind::IsQuestion,
             taxonomy_version: "v1".to_string(),
             model_version: model_version.to_string(),
             probability: 0.9,
@@ -811,6 +820,101 @@ mod tests {
         assert_eq!(
             count, 0,
             "no judgment must be inserted when the row was already done"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_judgment_batch_and_mark_done_accumulates_cost_on_conflict() {
+        // Simulates a backfill: a row already has an `is_question` judgment
+        // recorded (e.g. from before a new safety category was added), so a
+        // later batch answering it again collides on
+        // (stanza_id, judgment_name, model_version). That later call still
+        // cost real money -- its cost must be added to the existing row's
+        // cost_usd, not silently discarded.
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-cost-accum"),
+                body: "body".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue");
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        let first_id = due[0].id.clone();
+
+        let mut first_record = judgment("stanza-cost-accum", "model-a");
+        first_record.cost_usd = 0.00002;
+        let first_applied = insert_judgment_batch_and_mark_done(&db, &[first_record], &first_id)
+            .await
+            .expect("first insert must not error");
+        assert!(first_applied, "first insert must apply");
+
+        // A second outbox row for the same stanza+judgment+model (as a
+        // backfill re-judge would produce), carrying a different cost.
+        enqueue_pending(
+            &db,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-cost-accum"),
+                body: "body".to_string(),
+                now_ms: 2_000,
+            },
+        )
+        .await
+        .expect("enqueue second");
+        let due_second = fetch_due_batch(&db, 10, 2_000)
+            .await
+            .expect("fetch")
+            .into_iter()
+            .find(|row| row.id != first_id)
+            .expect("second row");
+        let mut second_record = judgment("stanza-cost-accum", "model-a");
+        second_record.probability = 0.5; // Different value: must not overwrite the first.
+        second_record.cost_usd = 0.00003;
+        let applied =
+            insert_judgment_batch_and_mark_done(&db, &[second_record], &due_second.id)
+                .await
+                .expect("second insert must not error on a conflicting judgment identity");
+        assert!(
+            applied,
+            "the outbox row itself is claimed and marked done even though its judgment collided"
+        );
+
+        let connection = db.guard().await.expect("guard");
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*), probability, cost_usd FROM message_judgments \
+                 WHERE stanza_id = ? AND judgment_name = ? AND model_version = ?",
+                crate::db_params![
+                    "stanza-cost-accum",
+                    IS_QUESTION_JUDGMENT_NAME,
+                    "model-a"
+                ],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("row present");
+        assert_eq!(
+            row.get::<i64>(0).expect("count"),
+            1,
+            "the conflicting judgment must not create a second row"
+        );
+        assert_eq!(
+            row.get::<f64>(1).expect("probability"),
+            0.9,
+            "the first-written probability must survive the conflict, not the second call's"
+        );
+        assert_eq!(
+            row.get::<f64>(2).expect("cost_usd"),
+            0.00002 + 0.00003,
+            "the second call's cost must be added, not discarded, even though its judgment collided"
         );
     }
 }
