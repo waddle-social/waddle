@@ -178,10 +178,13 @@ async fn process_row(
                     taxonomy_version: named.taxonomy_version,
                     model_version: batch.model_version.clone(),
                     probability: named.probability,
-                    // Attribute the whole call's cost to exactly the first
-                    // judgment row; every other row from this same call
-                    // gets 0.0, so a later SUM(cost_usd) never double- (or
-                    // N-times-) counts one Jev call as if it cost N times.
+                    // Attribute the whole call's cost to exactly one
+                    // judgment row (index 0 in this batch, whichever
+                    // judgment that happens to be -- there's nothing
+                    // semantically special about it); every other row from
+                    // this same call gets 0.0, so a later SUM(cost_usd)
+                    // never double- (or N-times-) counts one Jev call as
+                    // if it cost N times.
                     cost_usd: if index == 0 { batch.cost_usd } else { 0.0 },
                     decided_at_ms: now_ms,
                     created_at_ms: now_ms,
