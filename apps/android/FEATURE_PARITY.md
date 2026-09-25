@@ -34,6 +34,7 @@ compares user-facing capability per area, verified against both codebases as of
 | Corrections | 0308 | ✅ | ✅ | Edit action in `MessageActionSheet.kt` |
 | Retraction | 0424 | ✅ | ✅ | `send_retraction` FFI verb |
 | Reactions | 0444 | ✅ | ✅ | Emoji reactions on both |
+| Automated safety scores | 0422 + urn:waddle:safety-scores:1 | ❌ | 🟡 | Android parses and renders room-broadcast scores (`SafetyScoresSheet.kt`); inert until the server broadcasts them (#1831), DMs pending a defined trusted sender |
 | Replies | 0461 | ✅ | ✅ | Android sends 0461 reply metadata with the XEP-0428 fallback prefix (`buildReplyFallbackPrefix`, web parity) |
 | Threads | 0201 | ✅ | ✅ | Android has dedicated `ThreadScreen.kt`, thread overview list, per-message reply counts |
 | Delivery acks / receipts | 0184, 0198 | ✅ | ✅ | Ack-driven delivery states on both |

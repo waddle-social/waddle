@@ -5649,7 +5649,9 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
      */
     public var callThreadEnded: WaddleCallThreadEnded?
     /**
-     * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+     * server-side (`waddle-xmpp-client`) to the one trusted sender: the
+     * room itself.
      */
     public var safetyScores: WaddleSafetyScoresFastening?
     public var sharedFiles: [WaddleSharedFile]
@@ -5725,7 +5727,9 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
          * urn:waddle:call-thread:0 ended fastening, if present.
          */callThreadEnded: WaddleCallThreadEnded?,
         /**
-         * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+         * XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+         * server-side (`waddle-xmpp-client`) to the one trusted sender: the
+         * room itself.
          */safetyScores: WaddleSafetyScoresFastening?, sharedFiles: [WaddleSharedFile],
         /**
          * XEP-0511 link previews of the inner message.
@@ -8708,7 +8712,9 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var callThreadEnded: WaddleCallThreadEnded?
     /**
-     * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+     * server-side (`waddle-xmpp-client`) to the one trusted sender: the
+     * room itself.
      */
     public var safetyScores: WaddleSafetyScoresFastening?
     /**
@@ -8831,7 +8837,9 @@ public struct WaddleMessage: Equatable, Hashable {
          * call-thread anchor.
          */callThreadEnded: WaddleCallThreadEnded?,
         /**
-         * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+         * XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+         * server-side (`waddle-xmpp-client`) to the one trusted sender: the
+         * room itself.
          */safetyScores: WaddleSafetyScoresFastening?,
         /**
          * XEP-0280: direction of the carbon envelope this message was
@@ -10483,8 +10491,8 @@ public func FfiConverterTypeWaddleSafetyScores_lower(_ value: WaddleSafetyScores
 /**
  * XEP-0422 fastening carrying `urn:waddle:safety-scores:1`. Mirrors
  * `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`. The
- * sender is unverified: consumers MUST only trust scores from the room
- * itself (bare room JID).
+ * sender is already verified server-side: only a room broadcast (bare
+ * room JID, `type='groupchat'`) ever reaches this record.
  */
 public struct WaddleSafetyScoresFastening: Equatable, Hashable {
     /**

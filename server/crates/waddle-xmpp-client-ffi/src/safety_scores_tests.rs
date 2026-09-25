@@ -95,6 +95,24 @@ fn a_plain_message_carries_no_fastening() {
     assert!(ffi.safety_scores.is_none());
 }
 
+/// The shared crate's room-authority check (issue #1831 Android/Apple
+/// reconciliation) must hold across the FFI boundary too: an occupant's
+/// own claim, reflected with `type='groupchat'` but the occupant's own
+/// `/nick` resource, never reaches a UniFFI consumer as scores.
+#[test]
+fn safety_scores_from_an_occupant_do_not_reach_ffi() {
+    let ffi = inbound_to_ffi(parse_message(
+        "<message xmlns='jabber:client' type='groupchat' from='room@conference.example.org/mallory'>\
+           <apply-to xmlns='urn:xmpp:fasten:0' id='stanza-1'>\
+             <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='m'>\
+               <score category='safety:harassment' probability='0.99' taxonomy-version='t'/>\
+             </safety-scores>\
+           </apply-to>\
+         </message>",
+    ));
+    assert!(ffi.safety_scores.is_none());
+}
+
 #[test]
 fn archived_fastening_survives_conversion() {
     let archived = archived_to_ffi(parse_mam_archived(

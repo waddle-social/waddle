@@ -97,7 +97,9 @@ pub struct WaddleMessage {
     /// urn:waddle:call-thread:0 ended fastening targeting a
     /// call-thread anchor.
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
-    /// XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+    /// XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+    /// server-side (`waddle-xmpp-client`) to the one trusted sender: the
+    /// room itself.
     pub safety_scores: Option<WaddleSafetyScoresFastening>,
     /// XEP-0280: direction of the carbon envelope this message was
     /// unwrapped from. Only stamped after the runtime verified the
@@ -146,8 +148,8 @@ pub struct WaddleCallThreadEnded {
 
 /// XEP-0422 fastening carrying `urn:waddle:safety-scores:1`. Mirrors
 /// `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`. The
-/// sender is unverified: consumers MUST only trust scores from the room
-/// itself (bare room JID).
+/// sender is already verified server-side: only a room broadcast (bare
+/// room JID, `type='groupchat'`) ever reaches this record.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct WaddleSafetyScoresFastening {
     /// XEP-0422 `<apply-to id='…'/>` target.
@@ -565,7 +567,9 @@ pub struct WaddleArchivedMessage {
     pub call_thread: Option<WaddleCallThreadAnchor>,
     /// urn:waddle:call-thread:0 ended fastening, if present.
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
-    /// XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+    /// XEP-0422 `urn:waddle:safety-scores:1` fastening. Already filtered
+    /// server-side (`waddle-xmpp-client`) to the one trusted sender: the
+    /// room itself.
     pub safety_scores: Option<WaddleSafetyScoresFastening>,
     pub shared_files: Vec<WaddleSharedFile>,
     /// XEP-0511 link previews of the inner message.

@@ -28,9 +28,14 @@
 //!   `<score/>` is skipped as well; a repeated category keeps its first
 //!   occurrence.
 //!
-//! The parser does not decide who may send scores. Consumers MUST check
-//! the sender (the room itself, for a room message) before trusting them,
-//! just as they check the `by` of a XEP-0359 stanza id.
+//! [`parse_safety_scores_fastening`] itself does not decide who may send
+//! scores — it is message-type agnostic, so a direct message parses with
+//! the same shape as a room broadcast. [`parse_room_safety_scores_child`]
+//! is the trusted entry point every consumer of this shared crate (the
+//! messaging parser, and through it every FFI/wasm client) actually
+//! calls: it applies the one authority rule this payload gets, so the
+//! decision is made once, here, rather than separately — and possibly
+//! inconsistently — by each client.
 
 use minidom::Element;
 
@@ -183,6 +188,24 @@ pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFa
         SafetyScoresAction::Apply(parse_safety_scores(payload)?)
     };
     Some(SafetyScoresFastening { target_id, action })
+}
+
+/// Extracts a safety-scores fastening from a room broadcast, the only
+/// sender this payload trusts.
+///
+/// Only the MUC service itself may attach scores: the stanza must be
+/// `type='groupchat'` from the bare room JID. An occupant's own message is
+/// also reflected with `type='groupchat'`, but always carries a `/nick`
+/// resource, so this is the same authenticity rule XEP-0425 moderation
+/// uses to reject an occupant's own claim of moderation. A direct-message
+/// fastening is not accepted: no trusted 1:1 sender is defined for this
+/// payload.
+pub fn parse_room_safety_scores_child(message: &Element) -> Option<SafetyScoresFastening> {
+    let from = message.attr("from")?;
+    if message.attr("type") != Some("groupchat") || from.contains('/') {
+        return None;
+    }
+    parse_safety_scores_fastening(message)
 }
 
 /// The message's one non-shell `<apply-to/>`. Two or more is a XEP-0422

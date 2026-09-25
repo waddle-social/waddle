@@ -11,12 +11,18 @@
 //! Payload obligations covered: batch-level `model-version` is required;
 //! unknown categories and malformed scores are skipped without failing
 //! the batch; a repeated category keeps its first score.
+//!
+//! Authority obligations covered: only a room broadcast (bare room JID,
+//! `type='groupchat'`) is trusted; an occupant's own claim (same JID with
+//! a `/nick` resource) and a direct-message claim are both rejected, by
+//! [`parse_room_safety_scores_child`] directly and by the shared inbound
+//! message parser that every client (Apple, Android, web) consumes.
 
 use minidom::Element;
 use waddle_xmpp_client::messaging::{parse, MessagingEvent, NS_CLIENT};
 use waddle_xmpp_client::xep::safety_scores::{
-    parse_safety_scores_fastening, SafetyCategory, SafetyScores, SafetyScoresAction,
-    SafetyScoresFastening, NS_FASTEN, NS_WADDLE_SAFETY_SCORES,
+    parse_room_safety_scores_child, parse_safety_scores_fastening, SafetyCategory, SafetyScores,
+    SafetyScoresAction, SafetyScoresFastening, NS_FASTEN, NS_WADDLE_SAFETY_SCORES,
 };
 
 const FULL_BATCH: &str = r#"<message xmlns='jabber:client' from='room@conference.example.org' to='alice@example.org/phone' type='groupchat'>
@@ -60,6 +66,19 @@ fn room_message(children: &[&str]) -> Element {
 
 fn fastened(children: &[&str]) -> Option<SafetyScoresFastening> {
     parse_safety_scores_fastening(&room_message(children))
+}
+
+/// A message with an explicit `from`/`type`, for authority tests.
+fn message_from(from: &str, message_type: &str, children: &[&str]) -> Element {
+    children
+        .iter()
+        .fold(
+            Element::builder("message", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("from").to_owned(), from)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), message_type),
+            |builder, child| builder.append(element(child)),
+        )
+        .build()
 }
 
 fn applied(apply_to: &str) -> SafetyScores {
@@ -345,4 +364,68 @@ fn other_fastenings_are_not_safety_scores() {
         fastening("<message xmlns='jabber:client' type='groupchat'><body>hi</body></message>")
             .is_none()
     );
+}
+
+// ─── Authority: only a room broadcast is trusted (issue #1831) ───────────
+
+const AUTHORITY_APPLY_TO: &str = "<apply-to xmlns='urn:xmpp:fasten:0' id='judged-1'>\
+       <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='m1'>\
+         <score category='is_question' probability='0.5' taxonomy-version='v1'/>\
+       </safety-scores>\
+     </apply-to>";
+
+#[test]
+fn room_bare_jid_groupchat_broadcast_is_accepted() {
+    let message = message_from(
+        "room@conference.example.org",
+        "groupchat",
+        &[AUTHORITY_APPLY_TO],
+    );
+    let fastening = parse_room_safety_scores_child(&message).expect("room broadcast is accepted");
+    assert_eq!(fastening.target_id.as_str(), "judged-1");
+}
+
+#[test]
+fn occupant_authored_scores_are_rejected() {
+    // Reflected occupant traffic is also `type='groupchat'`, but always
+    // carries the occupant's nick as a resource — not the room itself.
+    let message = message_from(
+        "room@conference.example.org/mallory",
+        "groupchat",
+        &[AUTHORITY_APPLY_TO],
+    );
+    assert!(parse_room_safety_scores_child(&message).is_none());
+}
+
+#[test]
+fn direct_message_scores_are_not_accepted() {
+    for message_type in ["chat", "normal"] {
+        let message = message_from("peer@example.org", message_type, &[AUTHORITY_APPLY_TO]);
+        assert!(parse_room_safety_scores_child(&message).is_none());
+    }
+    // The wrapper itself is type-agnostic: the same apply-to still parses
+    // via the lower-level, non-authority-checked function.
+    assert!(parse_safety_scores_fastening(&message_from(
+        "peer@example.org",
+        "chat",
+        &[AUTHORITY_APPLY_TO],
+    ))
+    .is_some());
+}
+
+#[test]
+fn inbound_message_parser_drops_spoofed_scores() {
+    // The shared `messaging::parse` entry point every client (Apple,
+    // Android, web) consumes must apply the same authority rule as
+    // `parse_room_safety_scores_child`, not leave it to each client to
+    // reimplement (see issue #1831 Android/Apple reconciliation).
+    let message = message_from(
+        "room@conference.example.org/mallory",
+        "groupchat",
+        &[AUTHORITY_APPLY_TO],
+    );
+    let Some(MessagingEvent::Message(inbound)) = parse(&message) else {
+        panic!("expected a parsed message");
+    };
+    assert!(inbound.safety_scores.is_none());
 }

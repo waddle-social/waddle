@@ -247,6 +247,13 @@ private fun StoredMessageCard(
                 onToggle = { emoji -> onToggleReaction(item, emoji) },
             )
         }
+        item.safetyScores?.takeIf(::hasSafetyScoreBreakdown)?.let { scores ->
+            var scoresOpen by remember { mutableStateOf(false) }
+            SafetyScoresChip(onClick = { scoresOpen = true })
+            if (scoresOpen) {
+                SafetyScoresSheet(scores = scores, onDismiss = { scoresOpen = false })
+            }
+        }
         if (threadReplyCount > 0 && onOpenThread != null) {
             TextButton(onClick = { onOpenThread(item) }) {
                 Text(

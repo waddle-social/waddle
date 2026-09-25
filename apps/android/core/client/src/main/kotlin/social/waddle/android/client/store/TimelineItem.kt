@@ -7,6 +7,8 @@ import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleSafetyScores
+import social.waddle.client.ffi.WaddleSafetyScoresFastening
 import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleStanzaId
 
@@ -49,6 +51,12 @@ data class TimelineItem(
     val tombstone: MessageTombstone? = null,
     /** A validated stanza error rejected this outbound send. */
     val rejected: Boolean = false,
+    /**
+     * XEP-0422 `urn:waddle:safety-scores:1`: the room's latest automated
+     * scores for this message, visible to every participant; `null` when
+     * none were fastened or they were cleared.
+     */
+    val safetyScores: WaddleSafetyScores? = null,
 ) {
     /**
      * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),
@@ -190,6 +198,9 @@ sealed interface TimelineSource {
     /** `urn:waddle:call-thread:0` call-ended marker payload. */
     val callThreadEndedMarker: WaddleCallThreadEnded?
 
+    /** XEP-0422 `urn:waddle:safety-scores:1` fastening payload. */
+    val safetyScores: WaddleSafetyScoresFastening?
+
     /** `urn:waddle:call-thread:0` anchor riding this message. */
     val hasCallThread: Boolean get() = callThreadAnchor != null
 
@@ -236,6 +247,7 @@ sealed interface TimelineSource {
         override val reactionEmojis: List<String> get() = message.reactionEmojis
         override val callThreadAnchor: WaddleCallThreadAnchor? get() = message.callThread
         override val callThreadEndedMarker: WaddleCallThreadEnded? get() = message.callThreadEnded
+        override val safetyScores: WaddleSafetyScoresFastening? get() = message.safetyScores
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention
@@ -267,6 +279,7 @@ sealed interface TimelineSource {
         override val reactionEmojis: List<String> get() = message.reactionEmojis
         override val callThreadAnchor: WaddleCallThreadAnchor? get() = message.callThread
         override val callThreadEndedMarker: WaddleCallThreadEnded? get() = message.callThreadEnded
+        override val safetyScores: WaddleSafetyScoresFastening? get() = message.safetyScores
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention
