@@ -39,8 +39,6 @@
 
 use minidom::Element;
 
-use crate::request::StanzaId;
-
 /// `urn:xmpp:fasten:0` — XEP-0422 Message Fastening.
 pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 
@@ -162,11 +160,40 @@ pub enum SafetyScoresAction {
     Clear,
 }
 
+/// The `<apply-to id='…'/>` target: an opaque, non-empty reference to the
+/// message this fastening applies to.
+///
+/// This is deliberately its own type, not a reuse of either existing
+/// `StanzaId` in this crate: `crate::request::StanzaId` is documented as a
+/// client-side IQ-correlation id, not a protocol reference, and
+/// `waddle_xmpp_core::xep0359::StanzaId` requires a server-assigned `by`
+/// JID that isn't available here — `apply-to/@id` carries only a bare
+/// string, and per XEP-0422's own ambiguous wording (see the module docs)
+/// callers resolve it against a room-assigned stanza-id, an origin-id, or a
+/// message id depending on context, so it isn't safe to assume it's any one
+/// of those at parse time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FastenTargetId(String);
+
+impl FastenTargetId {
+    fn new(id: &str) -> Option<Self> {
+        let id = id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        Some(Self(id.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A parsed `<apply-to/>` carrying `<safety-scores/>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScoresFastening {
     /// The `<apply-to id='…'/>` target.
-    pub target_id: StanzaId,
+    pub target_id: FastenTargetId,
     pub action: SafetyScoresAction,
 }
 
@@ -174,7 +201,7 @@ pub struct SafetyScoresFastening {
 /// the message carries none or carries a malformed one.
 pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFastening> {
     let apply_to = single_apply_to(message)?;
-    let target_id = StanzaId::new(apply_to.attr("id")?.trim()).ok()?;
+    let target_id = FastenTargetId::new(apply_to.attr("id")?)?;
     let mut payloads = apply_to
         .children()
         .filter(|child| child.is("safety-scores", NS_WADDLE_SAFETY_SCORES));
