@@ -22,12 +22,42 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
+use jid::BareJid;
+use waddle_xmpp_core::xep0359::StanzaId;
 
 use crate::db::Database;
 
 use super::judge::MessageJudge;
 use super::store::{self, JudgmentRecord, PendingJudgmentRow};
+
+/// Delivers a durably-recorded judgment batch to the room/conversation it
+/// judged, as a XEP-0422 safety-scores fastening. Best-effort: called only
+/// after the judgment is already durably persisted (`RowOutcome::Judged`),
+/// so a delivery failure here (no live room actor, transport error) never
+/// affects the row's done/durable status — it stays exactly as reliable as
+/// it was before wire delivery existed, just with an added (best-effort)
+/// broadcast.
+#[async_trait]
+pub trait ScoreBroadcaster: Send + Sync {
+    async fn broadcast(&self, archive: &BareJid, stanza_id: &StanzaId, records: &[JudgmentRecord]);
+}
+
+/// Default broadcaster: does nothing. Used by tests, and as a safe
+/// placeholder anywhere a real broadcaster hasn't been wired in yet.
+pub struct NoopScoreBroadcaster;
+
+#[async_trait]
+impl ScoreBroadcaster for NoopScoreBroadcaster {
+    async fn broadcast(
+        &self,
+        _archive: &BareJid,
+        _stanza_id: &StanzaId,
+        _records: &[JudgmentRecord],
+    ) {
+    }
+}
 
 /// Retry/backoff constants — generic exponential-backoff math, copied
 /// verbatim from `room_effect_outbox::store` (nothing clustering-specific).
@@ -81,6 +111,7 @@ pub struct DrainOutcome {
 pub async fn drain_once(
     db: &Database,
     judge: &dyn MessageJudge,
+    broadcaster: &dyn ScoreBroadcaster,
     now_ms: i64,
     batch_limit: i64,
 ) -> DrainOutcome {
@@ -100,7 +131,7 @@ pub async fn drain_once(
     // each row's own outcome is folded into `outcome` afterward rather than
     // mutated concurrently.
     let deltas: Vec<RowOutcome> = stream::iter(batch)
-        .map(|row| process_row(db, judge, row, now_ms))
+        .map(|row| process_row(db, judge, broadcaster, row, now_ms))
         .buffer_unordered(MAX_CONCURRENT_JUDGE_CALLS)
         .collect()
         .await;
@@ -138,6 +169,7 @@ enum RowOutcome {
 async fn process_row(
     db: &Database,
     judge: &dyn MessageJudge,
+    broadcaster: &dyn ScoreBroadcaster,
     row: PendingJudgmentRow,
     now_ms: i64,
 ) -> RowOutcome {
@@ -173,7 +205,12 @@ async fn process_row(
                 })
                 .collect();
             match store::insert_judgment_batch_and_mark_done(db, &records, &row.id).await {
-                Ok(true) => RowOutcome::Judged,
+                Ok(true) => {
+                    broadcaster
+                        .broadcast(&row.archive, &row.stanza_id, &records)
+                        .await;
+                    RowOutcome::Judged
+                }
                 Ok(false) => {
                     // Lost the race: a concurrent drain worker (or an
                     // earlier dead-letter/record_failure call racing this
@@ -257,12 +294,24 @@ async fn process_row(
 ///
 /// Assumes [`super::initialize`] has already run against `db` (schema
 /// bootstrap is not repeated here on every tick).
-pub async fn run_drain_loop(db: Database, judge: Arc<dyn MessageJudge>, poll_interval: Duration) {
+pub async fn run_drain_loop(
+    db: Database,
+    judge: Arc<dyn MessageJudge>,
+    broadcaster: Arc<dyn ScoreBroadcaster>,
+    poll_interval: Duration,
+) {
     let mut interval = tokio::time::interval(poll_interval);
     loop {
         interval.tick().await;
         let now_ms = crate::time::now_ms();
-        drain_once(&db, judge.as_ref(), now_ms, DEFAULT_BATCH_LIMIT).await;
+        drain_once(
+            &db,
+            judge.as_ref(),
+            broadcaster.as_ref(),
+            now_ms,
+            DEFAULT_BATCH_LIMIT,
+        )
+        .await;
     }
 }
 
@@ -376,7 +425,7 @@ mod tests {
         .expect("enqueue");
 
         let judge = FakeJudge::new(|_body| ok_judgment());
-        let outcome = drain_once(&db, &judge, 1_000, 10).await;
+        let outcome = drain_once(&db, &judge, &NoopScoreBroadcaster, 1_000, 10).await;
 
         assert_eq!(outcome.fetched, 1);
         assert_eq!(outcome.judged, 1);
@@ -443,7 +492,7 @@ mod tests {
                 cost_usd: 0.00003,
             })
         });
-        let outcome = drain_once(&db, &judge, 1_000, 10).await;
+        let outcome = drain_once(&db, &judge, &NoopScoreBroadcaster, 1_000, 10).await;
 
         assert_eq!(
             outcome.judged, 1,
@@ -506,7 +555,7 @@ mod tests {
         .expect("enqueue");
 
         let judge = FakeJudge::new(|_body| err_judgment());
-        let outcome = drain_once(&db, &judge, 1_000, 10).await;
+        let outcome = drain_once(&db, &judge, &NoopScoreBroadcaster, 1_000, 10).await;
 
         assert_eq!(outcome.fetched, 1);
         assert_eq!(outcome.judged, 0);
@@ -583,7 +632,7 @@ mod tests {
         };
         let mut now_ms = 0_i64;
         for attempt in 1..=MAX_ATTEMPTS {
-            let outcome = drain_once(&db, &judge, now_ms, 10).await;
+            let outcome = drain_once(&db, &judge, &NoopScoreBroadcaster, now_ms, 10).await;
             if attempt == 1 {
                 // Both rows are due together on the first pass: the
                 // healthy one is judged and marked done immediately, the
@@ -705,7 +754,7 @@ mod tests {
                 cost_usd: 0.00003,
             })
         });
-        let outcome = drain_once(&db, &judge, 0, 10).await;
+        let outcome = drain_once(&db, &judge, &NoopScoreBroadcaster, 0, 10).await;
 
         assert_eq!(outcome.judged, 1);
         assert_eq!(outcome.failed, 0);

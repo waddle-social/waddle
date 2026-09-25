@@ -37,8 +37,8 @@ mod schema;
 mod store;
 
 pub use drain::{
-    drain_once, retry_delay_ms, run_drain_loop, DrainOutcome, BASE_RETRY_DELAY_MS, MAX_ATTEMPTS,
-    MAX_RETRY_DELAY_MS,
+    drain_once, retry_delay_ms, run_drain_loop, DrainOutcome, NoopScoreBroadcaster,
+    ScoreBroadcaster, BASE_RETRY_DELAY_MS, MAX_ATTEMPTS, MAX_RETRY_DELAY_MS,
 };
 pub use jev_client::{JevClient, JevClientConfig, JevClientConfigError};
 pub use judge::{JudgeError, JudgmentBatch, JudgmentKind, MessageJudge, NamedJudgment};
