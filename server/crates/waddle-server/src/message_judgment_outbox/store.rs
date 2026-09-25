@@ -878,10 +878,9 @@ mod tests {
         let mut second_record = judgment("stanza-cost-accum", "model-a");
         second_record.probability = 0.5; // Different value: must not overwrite the first.
         second_record.cost_usd = 0.00003;
-        let applied =
-            insert_judgment_batch_and_mark_done(&db, &[second_record], &due_second.id)
-                .await
-                .expect("second insert must not error on a conflicting judgment identity");
+        let applied = insert_judgment_batch_and_mark_done(&db, &[second_record], &due_second.id)
+            .await
+            .expect("second insert must not error on a conflicting judgment identity");
         assert!(
             applied,
             "the outbox row itself is claimed and marked done even though its judgment collided"
@@ -892,11 +891,7 @@ mod tests {
             .query(
                 "SELECT COUNT(*), probability, cost_usd FROM message_judgments \
                  WHERE stanza_id = ? AND judgment_name = ? AND model_version = ?",
-                crate::db_params![
-                    "stanza-cost-accum",
-                    IS_QUESTION_JUDGMENT_NAME,
-                    "model-a"
-                ],
+                crate::db_params!["stanza-cost-accum", IS_QUESTION_JUDGMENT_NAME, "model-a"],
             )
             .await
             .expect("query");

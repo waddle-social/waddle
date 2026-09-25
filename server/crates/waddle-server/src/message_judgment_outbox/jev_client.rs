@@ -677,9 +677,9 @@ mod tests {
         assert_eq!(body.get("state").expect("state field"), "are we there yet?");
         assert_eq!(questions.len(), JUDGMENT_QUESTIONS.len());
         for spec in JUDGMENT_QUESTIONS {
-            let question = questions.get(spec.judgment_name.as_str()).unwrap_or_else(|| {
-                panic!("missing question for {}", spec.judgment_name.as_str())
-            });
+            let question = questions
+                .get(spec.judgment_name.as_str())
+                .unwrap_or_else(|| panic!("missing question for {}", spec.judgment_name.as_str()));
             assert_eq!(question.get("type").expect("type field"), "noul");
             assert_eq!(
                 question.get("instructions").expect("instructions field"),
