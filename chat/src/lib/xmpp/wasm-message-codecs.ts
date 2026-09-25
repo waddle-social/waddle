@@ -19,6 +19,9 @@ import {
 } from "./send-types";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
 import { dmCallAnchorId } from "../calls/dm-call-anchor";
+import { safetyScoresFasteningFromWasm } from "@/lib/safety-scores/decode";
+import { isTrustedDmSafetyScoresSender, isTrustedRoomSafetyScoresSender } from "@/lib/safety-scores/sender";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import type { LiveDmMessage, LiveRoomMessage, OccupantPresence, PresenceUpdateEvent, SharedFileInfo } from "./types";
 import type {
   WasmArchivedMessage,
@@ -512,6 +515,26 @@ export function roomMessageFromArchived(
       ...(message.author_real_jid ? { _reactionSenderId: message.author_real_jid } : {}),
     };
   }
+  if (message.safety_scores) {
+    // XEP-0422 fastening: only the room itself may attach judgments; an
+    // occupant-sent copy is dropped rather than rendered as a ghost row.
+    const fastening = isTrustedRoomSafetyScoresSender(fromJid, roomJid)
+      ? safetyScoresFasteningFromWasm(message.safety_scores)
+      : null;
+    if (!fastening) return null;
+    return {
+      id: roomPrimaryId,
+      archiveId: message.mam_id,
+      fromJid,
+      roomJid,
+      nick,
+      body: "",
+      createdAt,
+      createdAtSource,
+      type: "message",
+      safetyScoresFastening: fastening,
+    };
+  }
   // #414: pin-event system messages from the room bare JID render
   // distinctly so users see "alice pinned a message" inline without
   // it looking like a normal user post.
@@ -638,6 +661,18 @@ export function roomMessageFromArchived(
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
 
+/**
+ * XEP-0422 safety-scores fastening on a 1:1 stanza, accepted only from
+ * the account's own server (see `@/lib/safety-scores/sender`).
+ */
+export function dmSafetyScoresFromWasm(
+  message: Pick<WasmMessage, "from" | "safety_scores">,
+  selfBareJid: string,
+): SafetyScoresFastening | null {
+  if (!message.safety_scores || !isTrustedDmSafetyScoresSender(message.from ?? "", selfBareJid)) return null;
+  return safetyScoresFasteningFromWasm(message.safety_scores);
+}
+
 export function dmMessageFromArchived(
   message: WasmArchivedMessage,
   selfBareJid: string,
@@ -657,6 +692,9 @@ export function dmMessageFromArchived(
   const nick = jidLocalpart(fromJid);
   const { createdAt, createdAtSource } = deriveCreatedAt(message.timestamp, source);
   const dmPrimaryId = message.id ?? message.origin_id ?? message.mam_id;
+  // XEP-0422 fastenings are metadata on another message, never a row of
+  // their own; trusted ones arrive via `dmSafetyScoresFromWasm`.
+  if (message.safety_scores) return null;
   if (message.retracts_id) {
     return {
       id: dmPrimaryId,

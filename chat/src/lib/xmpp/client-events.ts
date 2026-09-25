@@ -35,6 +35,7 @@ import type {
   XmppErrorEvent,
   XmppStatusSnapshot,
 } from "./types";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import type { InboxEntry } from "./inbox-types";
 import type { TerminalMucJoinCondition } from "./room-auto-join-policy";
 import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
@@ -121,6 +122,7 @@ export type ClientEvents = {
   chatState: [event: ChatStateEvent];
   dmChatState: [event: DmChatStateEvent];
   dmReaction: [event: DmReactionEvent];
+  dmSafetyScores: [fastening: SafetyScoresFastening];
   dmDisplayed: [event: DmDisplayedEvent];
   presenceUpdate: [event: PresenceUpdateEvent];
   memberJid: [nick: string, bareJid: string];

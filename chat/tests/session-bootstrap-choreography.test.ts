@@ -67,6 +67,7 @@ function makeHarness(options: {
     setDmChatStateHandler: () => {},
     setDmDisplayedHandler: () => {},
     setDmReactionHandler: () => {},
+    setDmSafetyScoresHandler: () => {},
     setMdsDisplayedHandler: (handler: typeof mdsDisplayedHandler) => { mdsDisplayedHandler = handler; },
     setPresenceUpdateHandler: () => {},
     addPubsubEventHandler: () => {},

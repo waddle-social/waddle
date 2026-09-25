@@ -242,6 +242,21 @@ fn scores_in_a_foreign_namespace_are_ignored() {
 }
 
 #[test]
+fn a_payload_in_a_foreign_namespace_is_not_safety_scores() {
+    // The `<safety-scores/>` qualified name is namespace-scoped: a
+    // same-named element in a different (or unversioned) namespace is not
+    // our payload, and the fastening carries none.
+    assert!(
+        fastened(&["<apply-to xmlns='urn:xmpp:fasten:0' id='stanza-1'>
+           <safety-scores xmlns='urn:waddle:safety-scores:0' model-version='m1'>
+             <score category='is_question' probability='0.4' taxonomy-version='v1'/>
+           </safety-scores>
+         </apply-to>",])
+        .is_none()
+    );
+}
+
+#[test]
 fn a_batch_without_model_version_is_rejected() {
     assert!(
         fastened(&["<apply-to xmlns='urn:xmpp:fasten:0' id='stanza-1'>

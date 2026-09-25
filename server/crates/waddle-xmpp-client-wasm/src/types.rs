@@ -1,4 +1,8 @@
 use super::*;
+use serde::ser::SerializeStruct;
+use waddle_xmpp_client::xep::safety_scores::{
+    SafetyScore, SafetyScoresAction, SafetyScoresFastening,
+};
 
 #[derive(Debug, Serialize)]
 pub struct WaddleMarkupSpan {
@@ -28,6 +32,57 @@ pub struct WaddleCallThreadEnded {
     pub anchor_id: String,
     pub ended: String,
     pub duration: String,
+}
+
+/// XEP-0422 `urn:waddle:safety-scores:1` fastening. The payload stays typed
+/// on the Rust side; `Serialize` (the JS boundary) writes the wire shape
+/// `{ target_id, update: { kind: "replace", model_version, scores: [{ category,
+/// probability, taxonomy_version }] } | { kind: "clear" } }`.
+#[derive(Debug)]
+pub struct WaddleSafetyScoresFastening(pub SafetyScoresFastening);
+
+impl Serialize for WaddleSafetyScoresFastening {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut out = serializer.serialize_struct("WaddleSafetyScoresFastening", 2)?;
+        out.serialize_field("target_id", self.0.target_id.as_str())?;
+        out.serialize_field("update", &SafetyScoresActionView(&self.0.action))?;
+        out.end()
+    }
+}
+
+struct SafetyScoresActionView<'a>(&'a SafetyScoresAction);
+
+impl Serialize for SafetyScoresActionView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            SafetyScoresAction::Apply(scores) => {
+                let views: Vec<SafetyScoreView<'_>> =
+                    scores.scores.iter().map(SafetyScoreView).collect();
+                let mut out = serializer.serialize_struct("Replace", 3)?;
+                out.serialize_field("kind", "replace")?;
+                out.serialize_field("model_version", scores.model_version.as_str())?;
+                out.serialize_field("scores", &views)?;
+                out.end()
+            }
+            SafetyScoresAction::Clear => {
+                let mut out = serializer.serialize_struct("Clear", 1)?;
+                out.serialize_field("kind", "clear")?;
+                out.end()
+            }
+        }
+    }
+}
+
+struct SafetyScoreView<'a>(&'a SafetyScore);
+
+impl Serialize for SafetyScoreView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut out = serializer.serialize_struct("SafetyScore", 3)?;
+        out.serialize_field("category", self.0.category.as_wire())?;
+        out.serialize_field("probability", &self.0.probability.value())?;
+        out.serialize_field("taxonomy_version", self.0.taxonomy_version.as_str())?;
+        out.end()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +139,8 @@ pub struct WaddleMessage {
     pub call_thread: Option<WaddleCallThreadAnchor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_scores: Option<WaddleSafetyScoresFastening>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     /// urn:waddle:pin:0 pin/unpin event surfaced from a system message
@@ -335,6 +392,8 @@ pub struct WaddleArchivedMessage {
     pub call_thread: Option<WaddleCallThreadAnchor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_thread_ended: Option<WaddleCallThreadEnded>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_scores: Option<WaddleSafetyScoresFastening>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,

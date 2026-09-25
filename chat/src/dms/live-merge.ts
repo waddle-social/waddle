@@ -13,6 +13,8 @@ import { applyDisplayedMarker } from "@/lib/messaging/displayed";
 import { applyReactionUpdate, type ReactionPolicy } from "@/lib/messaging/reactions";
 import { applyRetraction as applyRetractionUpdate, retractTimelineMessage } from "@/lib/messaging/retraction";
 import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
+import { applySafetyScoresFastening } from "@/lib/safety-scores/apply";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 
 // Inbound merge composable for DMs: applies incoming retractions
@@ -127,6 +129,16 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
   }
 
   /**
+   * XEP-0422 safety-scores fastening (`urn:waddle:safety-scores:1`),
+   * sender already gated by the decoder. A target outside the loaded
+   * timeline is a no-op, like reactions to unloaded messages.
+   */
+  function applySafetyScores(fastening: SafetyScoresFastening) {
+    const next = applySafetyScoresFastening(messages.value, fastening, "dm");
+    if (next) messages.value = next;
+  }
+
+  /**
    * Plain inbound message via the shared insert — reconciles self-echo if
    * pending, else appends. No finalize pass (the DM side has no forum
    * concept — divergence 7 is channel-only).
@@ -178,6 +190,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     applyDisplayed,
     applyReaction,
     applyRetraction,
+    applySafetyScores,
     applyCorrection,
     mergeLiveMessage,
     handleIncomingMessage,

@@ -19,6 +19,7 @@ import MessageActionSheet from "@/components/chat/MessageActionSheet.vue";
 import MessageEditForm from "@/components/chat/MessageEditForm.vue";
 import MessageHoverToolbar from "@/components/chat/MessageHoverToolbar.vue";
 import MessageReactionChips from "@/components/chat/MessageReactionChips.vue";
+import MessageSafetyScores from "@/components/chat/MessageSafetyScores.vue";
 import MessageSystemBand from "@/components/chat/MessageSystemBand.vue";
 import type {
   TimelineMessage,
@@ -37,6 +38,7 @@ import { resolveThreadActionTarget } from "@/lib/thread-action-target";
 import type { CallMedia } from "@/lib/calls/types";
 import { authorBadge as authorBadgeFor, authorBadgeTooltip as authorBadgeTooltipFor } from "./message-card-badges";
 import { eventBandsFor, rendersAsSystemBand } from "./message-system-band";
+import { visibleSafetyScores } from "./message-safety-scores";
 import { formatThreadRecency } from "./message-thread-recency";
 import { useMessageActionSurfaces } from "./composables/use-message-action-surfaces";
 import { useMessageGestures } from "./composables/use-message-gestures";
@@ -105,6 +107,7 @@ const emit = defineEmits<{
 }>();
 
 const authorBadge = computed(() => authorBadgeFor(props.authority, props.hats));
+const safetyScores = computed(() => visibleSafetyScores(props.message));
 const authorBadgeTooltip = computed(() => authorBadgeTooltipFor(props.authority, props.hats));
 
 const eventBands = computed(() => eventBandsFor(props.message.extensionAnnotations));
@@ -664,6 +667,12 @@ const swipe = gestures.swipe;
       :reactions="message.reactions"
       :current-user="currentUser"
       @react="(emoji) => emit('react', message.id, emoji)"
+    />
+
+    <MessageSafetyScores
+      v-if="safetyScores"
+      :scores="safetyScores"
+      :message-id="message.id"
     />
 
     <MessageHoverToolbar

@@ -251,6 +251,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         is_sticker: message.is_sticker,
         call_thread: message.call_thread.map(call_thread_to_js),
         call_thread_ended: message.call_thread_ended.map(call_thread_ended_to_js),
+        safety_scores: message.safety_scores.map(WaddleSafetyScoresFastening),
         shared_files: message
             .shared_files
             .into_iter()
@@ -388,6 +389,7 @@ pub(crate) fn inbox_push_to_js(
         is_sticker: false,
         call_thread: None,
         call_thread_ended: None,
+        safety_scores: None,
         shared_files: Vec::new(),
         link_previews: Vec::new(),
         pin_event: None,
@@ -518,6 +520,9 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
         call_thread_ended: parsed
             .and_then(|message| message.call_thread_ended.clone())
             .map(call_thread_ended_to_js),
+        safety_scores: parsed
+            .and_then(|message| message.safety_scores.clone())
+            .map(WaddleSafetyScoresFastening),
         shared_files: parsed
             .map(|message| {
                 message
@@ -1198,6 +1203,95 @@ mod inbound_to_js_tests {
         assert_eq!(ended.anchor_id, "anchor-stanza-id");
         assert_eq!(ended.ended, "2026-06-07T14:35:00+00:00");
         assert_eq!(ended.duration, "PT5M");
+    }
+
+    #[test]
+    fn inbound_to_js_serializes_safety_scores_fastening() {
+        let inbound = parse_message_element(
+            "<message xmlns='jabber:client' type='groupchat' id='f-1' \
+                      from='general@muc.waddle.test' to='alice@waddle.test/web'>\
+               <apply-to xmlns='urn:xmpp:fasten:0' id='judged-stanza-id'>\
+                 <safety-scores xmlns='urn:waddle:safety-scores:1' \
+                                model-version='typesafe/jev-1.13-20260917'>\
+                   <score category='is_question' probability='0.92' \
+                          taxonomy-version='is-question-v1'/>\
+                   <score category='safety:future' probability='0.5' \
+                          taxonomy-version='safety-future-v1'/>\
+                   <score category='safety:self_harm' probability='0' \
+                          taxonomy-version='safety-self-harm-v1'/>\
+                 </safety-scores>\
+               </apply-to>\
+             </message>",
+        );
+
+        let js = inbound_to_js(inbound);
+        let value = serde_json::to_value(js.safety_scores.expect("fastening converts"))
+            .expect("serializes");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "target_id": "judged-stanza-id",
+                "update": {
+                    "kind": "replace",
+                    "model_version": "typesafe/jev-1.13-20260917",
+                    "scores": [
+                        {
+                            "category": "is_question",
+                            "probability": 0.92,
+                            "taxonomy_version": "is-question-v1",
+                        },
+                        {
+                            "category": "safety:self_harm",
+                            "probability": 0.0,
+                            "taxonomy_version": "safety-self-harm-v1",
+                        },
+                    ],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn archived_to_js_preserves_safety_scores_clear_for_room_reload() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-scores' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-09-25T10:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='scores-1' \
+                            from='general@muc.waddle.test' to='alice@waddle.test/web'>\
+                     <apply-to xmlns='urn:xmpp:fasten:0' id='judged-stanza-id' clear='true'>\
+                       <safety-scores xmlns='urn:waddle:safety-scores:1'/>\
+                     </apply-to>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("safety-scores MAM row should convert");
+        let value = serde_json::to_value(js.safety_scores.expect("fastening survives archive"))
+            .expect("serializes");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "target_id": "judged-stanza-id",
+                "update": { "kind": "clear" },
+            })
+        );
+    }
+
+    #[test]
+    fn plain_message_omits_safety_scores_key() {
+        let inbound = parse_message_element(
+            "<message xmlns='jabber:client' type='groupchat' id='plain'>\
+               <body>hello</body>\
+             </message>",
+        );
+        let value = serde_json::to_value(inbound_to_js(inbound)).expect("serializes");
+        assert!(value.get("safety_scores").is_none());
     }
 
     #[test]

@@ -19,6 +19,8 @@ import { applyReactionUpdate, type ReactionPolicy } from "@/lib/messaging/reacti
 import { applyRetraction as applyRetractionUpdate, retractTimelineMessage } from "@/lib/messaging/retraction";
 import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import { classifyRoomMessage } from "@/lib/xmpp/classify-room-message";
+import { applySafetyScoresFastening } from "@/lib/safety-scores/apply";
+import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 
 // Inbound merge composable for the channel side: applies incoming
@@ -142,6 +144,16 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     if (next) messages.value = next;
   }
 
+  /**
+   * XEP-0422 safety-scores fastening (`urn:waddle:safety-scores:1`),
+   * sender already gated by the decoder. A target outside the loaded
+   * timeline is a no-op, like reactions to unloaded messages.
+   */
+  function applySafetyScores(fastening: SafetyScoresFastening, at?: string) {
+    const next = applySafetyScoresFastening(messages.value, fastening, "room", at);
+    if (next) messages.value = next;
+  }
+
   function applyCallThreadEnded(ended: NonNullable<LiveRoomMessage["callThreadEnded"]>) {
     const index = messages.value.findIndex((message) =>
       !!message.callThread
@@ -200,6 +212,10 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
       applyCallThreadEnded(msg.callThreadEnded);
       return { kind: "ignore" as const };
     }
+    if (msg.safetyScoresFastening) {
+      applySafetyScores(msg.safetyScoresFastening, msg.createdAt);
+      return { kind: "ignore" as const };
+    }
     const classified = classifyRoomMessage(msg);
     switch (classified.kind) {
       case "retraction":
@@ -236,6 +252,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     applyRetraction,
     applyCorrection,
     applyCallThreadEnded,
+    applySafetyScores,
     mergeLiveMessage,
     handleRoomMessage,
   };

@@ -75,6 +75,21 @@ interface WasmCallThreadEnded {
   duration: string;
 }
 
+interface WasmSafetyScore {
+  category: string;
+  probability: number;
+  taxonomy_version: string;
+}
+
+/** `urn:waddle:safety-scores:1` XEP-0422 fastening, as the wasm bridge
+ * serializes it (`WaddleSafetyScoresFastening`). */
+export interface WasmSafetyScoresFastening {
+  target_id: string;
+  update:
+    | { kind: "replace"; model_version: string; scores: WasmSafetyScore[] }
+    | { kind: "clear" };
+}
+
 export interface WasmExtensionEnvelope {
   version: number;
   enrichments: WasmExtensionEnrichment[];
@@ -169,6 +184,8 @@ export interface WasmMessage {
   is_sticker: boolean;
   call_thread?: WasmCallThreadAnchor;
   call_thread_ended?: WasmCallThreadEnded;
+  /** XEP-0422 `urn:waddle:safety-scores:1` fastening (sender-agnostic). */
+  safety_scores?: WasmSafetyScoresFastening;
   shared_files: WasmSharedFile[];
   link_previews: WasmLinkPreview[];
   call_event?: CallEvent;
