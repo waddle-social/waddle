@@ -94,31 +94,6 @@ pub(crate) fn call_thread_ended_to_js(
     }
 }
 
-pub(crate) fn safety_scores_to_js(
-    fastening: waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening,
-) -> WaddleSafetyScoresFastening {
-    use waddle_xmpp_client::xep::safety_scores::SafetyScoresUpdate;
-    let update = match fastening.update {
-        SafetyScoresUpdate::Replace(scores) => WaddleSafetyScoresUpdate::Replace {
-            model_version: scores.model_version.as_str().to_owned(),
-            scores: scores
-                .scores
-                .into_iter()
-                .map(|score| WaddleSafetyScore {
-                    category: score.category.as_wire().to_owned(),
-                    probability: score.probability.value(),
-                    taxonomy_version: score.taxonomy_version.as_str().to_owned(),
-                })
-                .collect(),
-        },
-        SafetyScoresUpdate::Clear => WaddleSafetyScoresUpdate::Clear,
-    };
-    WaddleSafetyScoresFastening {
-        target_id: fastening.target_id.as_str().to_owned(),
-        update,
-    }
-}
-
 pub(crate) fn extension_envelope_to_js(
     envelope: messaging::ExtensionEnvelopeData,
 ) -> WaddleExtensionEnvelope {
@@ -276,7 +251,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         is_sticker: message.is_sticker,
         call_thread: message.call_thread.map(call_thread_to_js),
         call_thread_ended: message.call_thread_ended.map(call_thread_ended_to_js),
-        safety_scores: message.safety_scores.map(safety_scores_to_js),
+        safety_scores: message.safety_scores.map(WaddleSafetyScoresFastening),
         shared_files: message
             .shared_files
             .into_iter()
@@ -547,7 +522,7 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
             .map(call_thread_ended_to_js),
         safety_scores: parsed
             .and_then(|message| message.safety_scores.clone())
-            .map(safety_scores_to_js),
+            .map(WaddleSafetyScoresFastening),
         shared_files: parsed
             .map(|message| {
                 message

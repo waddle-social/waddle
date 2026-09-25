@@ -1,4 +1,8 @@
 use super::*;
+use serde::ser::SerializeStruct;
+use waddle_xmpp_client::xep::safety_scores::{
+    SafetyScore, SafetyScoresFastening, SafetyScoresUpdate,
+};
 
 #[derive(Debug, Serialize)]
 pub struct WaddleMarkupSpan {
@@ -30,30 +34,55 @@ pub struct WaddleCallThreadEnded {
     pub duration: String,
 }
 
-/// `urn:waddle:safety-scores:1` score, category as its wire token.
-#[derive(Debug, Serialize)]
-pub struct WaddleSafetyScore {
-    pub category: String,
-    pub probability: f64,
-    pub taxonomy_version: String,
+/// XEP-0422 `urn:waddle:safety-scores:1` fastening. The payload stays typed
+/// on the Rust side; `Serialize` (the JS boundary) writes the wire shape
+/// `{ target_id, update: { kind: "replace", model_version, scores: [{ category,
+/// probability, taxonomy_version }] } | { kind: "clear" } }`.
+#[derive(Debug)]
+pub struct WaddleSafetyScoresFastening(pub SafetyScoresFastening);
+
+impl Serialize for WaddleSafetyScoresFastening {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut out = serializer.serialize_struct("WaddleSafetyScoresFastening", 2)?;
+        out.serialize_field("target_id", self.0.target_id.as_str())?;
+        out.serialize_field("update", &SafetyScoresUpdateView(&self.0.update))?;
+        out.end()
+    }
 }
 
-/// XEP-0422 replace/clear semantics of a safety-scores fastening.
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum WaddleSafetyScoresUpdate {
-    Replace {
-        model_version: String,
-        scores: Vec<WaddleSafetyScore>,
-    },
-    Clear,
+struct SafetyScoresUpdateView<'a>(&'a SafetyScoresUpdate);
+
+impl Serialize for SafetyScoresUpdateView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            SafetyScoresUpdate::Replace(scores) => {
+                let views: Vec<SafetyScoreView<'_>> =
+                    scores.scores.iter().map(SafetyScoreView).collect();
+                let mut out = serializer.serialize_struct("Replace", 3)?;
+                out.serialize_field("kind", "replace")?;
+                out.serialize_field("model_version", scores.model_version.as_str())?;
+                out.serialize_field("scores", &views)?;
+                out.end()
+            }
+            SafetyScoresUpdate::Clear => {
+                let mut out = serializer.serialize_struct("Clear", 1)?;
+                out.serialize_field("kind", "clear")?;
+                out.end()
+            }
+        }
+    }
 }
 
-/// XEP-0422 safety-scores fastening targeting `target_id`.
-#[derive(Debug, Serialize)]
-pub struct WaddleSafetyScoresFastening {
-    pub target_id: String,
-    pub update: WaddleSafetyScoresUpdate,
+struct SafetyScoreView<'a>(&'a SafetyScore);
+
+impl Serialize for SafetyScoreView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut out = serializer.serialize_struct("SafetyScore", 3)?;
+        out.serialize_field("category", self.0.category.as_wire())?;
+        out.serialize_field("probability", &self.0.probability.value())?;
+        out.serialize_field("taxonomy_version", self.0.taxonomy_version.as_str())?;
+        out.end()
+    }
 }
 
 #[derive(Debug, Serialize)]
