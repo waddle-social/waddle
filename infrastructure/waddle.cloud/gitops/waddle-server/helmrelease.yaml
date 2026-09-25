@@ -128,6 +128,14 @@ spec:
         value: CJR7U5CXHP
       - name: WADDLE_APNS_BUNDLE_ID
         value: p4x.waddle.social
+      # #1831 Phase 1/2: per-message community/safety judgments via Jev
+      # (TypeSafe AI), reusing the same OpenRouter account/secret as the
+      # ai-chatbot extension (see the openrouter-api-key volume above).
+      # Measurement-only: annotation, no inline moderation/blocking.
+      - name: WADDLE_MESSAGE_JUDGMENT_OUTBOX_ENABLED
+        value: "true"
+      - name: WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH
+        value: /var/run/secrets/waddle-ai/api_key
       - name: WADDLE_PROVIDER_GITHUB_WEBHOOK_EVENT_HEADER
         value: x-github-event
       - name: WADDLE_PROVIDER_GITHUB_WEBHOOK_DELIVERY_HEADER
