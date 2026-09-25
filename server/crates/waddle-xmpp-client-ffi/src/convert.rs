@@ -19,6 +19,7 @@ use waddle_xmpp_client::{
     MessagingEvent,
 };
 
+use crate::safety_scores::safety_scores_fastening_to_ffi;
 use crate::{
     WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
     WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonDirection, WaddleChatState,
@@ -796,7 +797,7 @@ pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> WaddleCallEvent {
 /// Convert a parsed inbound message into the UniFFI record, flattening the
 /// XEP-0428 char range into two optional `u32` fields (UniFFI has no tuple
 /// support).
-fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
+pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
     let is_muc = msg.message_type == "groupchat";
     let (fb_start, fb_end) = match msg.reply_fallback {
         Some((s, e)) => (Some(s), Some(e)),
@@ -849,6 +850,7 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         link_previews: link_previews_to_ffi(msg.link_previews),
         pin_event: msg.pin_event.map(pin_event_to_ffi),
         call_thread_ended: msg.call_thread_ended.map(call_thread_ended_to_ffi),
+        safety_scores: msg.safety_scores.map(safety_scores_fastening_to_ffi),
         carbon: msg.carbon.map(carbon_to_ffi),
         reply_to_id: msg.reply_to_id,
         reply_to_sender: msg.reply_to_sender,
@@ -976,6 +978,9 @@ pub(crate) fn archived_to_ffi(
         call_thread_ended: parsed
             .and_then(|m| m.call_thread_ended.clone())
             .map(call_thread_ended_to_ffi),
+        safety_scores: parsed
+            .and_then(|m| m.safety_scores.clone())
+            .map(safety_scores_fastening_to_ffi),
         shared_files: parsed
             .map(|m| {
                 m.shared_files

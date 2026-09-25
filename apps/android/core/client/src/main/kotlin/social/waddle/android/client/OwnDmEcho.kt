@@ -60,6 +60,7 @@ internal fun ownDmEcho(
     linkPreviews = emptyList(),
     pinEvent = null,
     callThreadEnded = null,
+    safetyScores = null,
     carbon = null,
     replyToId = options.reply?.messageId,
     replyToSender = options.reply?.authorJid,

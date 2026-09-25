@@ -381,6 +381,8 @@ public final class TimelineStore {
         }
         item.tombstone = state.tombstone
         item.reactions = aggregate(state.reactionsBySender, isGroupchat: item.conversation.isRoom)
+        // Scores annotate content; a removed message shows none.
+        item.safetyScores = state.tombstone == nil ? state.safetyScores : nil
         return item
     }
 
@@ -465,6 +467,8 @@ private struct MutationState: Hashable {
     var correction: CorrectedContent?
     var correctionRank: Rank?
     var tombstone: Tombstone?
+    var safetyScores: SafetyScores?
+    var safetyScoresRank: Rank?
 }
 
 private struct Entry: Hashable {
@@ -531,6 +535,16 @@ private struct Entry: Hashable {
                   from.bare == conversation.jid
             else { return self }
             next.mutations.tombstone = .moderated(by: moderatedBy, reason: reason)
+        case let .safetyScores(_, from, scores):
+            // Only the room itself (bare room JID) judges its messages; an
+            // occupant claiming to is a spoof. XEP-0422: the newest
+            // fastening replaces the previous one, a clear included.
+            guard from.resource == nil, from.bare == conversation.jid else { return self }
+            if let current = mutations.safetyScoresRank, current > ranked.rank {
+                return self
+            }
+            next.mutations.safetyScores = scores
+            next.mutations.safetyScoresRank = ranked.rank
         }
         return next
     }

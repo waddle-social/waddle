@@ -5648,6 +5648,10 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
      * urn:waddle:call-thread:0 ended fastening, if present.
      */
     public var callThreadEnded: WaddleCallThreadEnded?
+    /**
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+     */
+    public var safetyScores: WaddleSafetyScoresFastening?
     public var sharedFiles: [WaddleSharedFile]
     /**
      * XEP-0511 link previews of the inner message.
@@ -5719,7 +5723,10 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
          */callThread: WaddleCallThreadAnchor?,
         /**
          * urn:waddle:call-thread:0 ended fastening, if present.
-         */callThreadEnded: WaddleCallThreadEnded?, sharedFiles: [WaddleSharedFile],
+         */callThreadEnded: WaddleCallThreadEnded?,
+        /**
+         * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+         */safetyScores: WaddleSafetyScoresFastening?, sharedFiles: [WaddleSharedFile],
         /**
          * XEP-0511 link previews of the inner message.
          */linkPreviews: [WaddleLinkPreview], callEvent: WaddleCallEvent?) {
@@ -5761,6 +5768,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
         self.authorRealJid = authorRealJid
         self.callThread = callThread
         self.callThreadEnded = callThreadEnded
+        self.safetyScores = safetyScores
         self.sharedFiles = sharedFiles
         self.linkPreviews = linkPreviews
         self.callEvent = callEvent
@@ -5820,6 +5828,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 authorRealJid: FfiConverterOptionString.read(from: &buf),
                 callThread: FfiConverterOptionTypeWaddleCallThreadAnchor.read(from: &buf),
                 callThreadEnded: FfiConverterOptionTypeWaddleCallThreadEnded.read(from: &buf),
+                safetyScores: FfiConverterOptionTypeWaddleSafetyScoresFastening.read(from: &buf),
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
                 linkPreviews: FfiConverterSequenceTypeWaddleLinkPreview.read(from: &buf),
                 callEvent: FfiConverterOptionTypeWaddleCallEvent.read(from: &buf)
@@ -5865,6 +5874,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.authorRealJid, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadAnchor.write(value.callThread, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadEnded.write(value.callThreadEnded, into: &buf)
+        FfiConverterOptionTypeWaddleSafetyScoresFastening.write(value.safetyScores, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
         FfiConverterSequenceTypeWaddleLinkPreview.write(value.linkPreviews, into: &buf)
         FfiConverterOptionTypeWaddleCallEvent.write(value.callEvent, into: &buf)
@@ -8698,6 +8708,10 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var callThreadEnded: WaddleCallThreadEnded?
     /**
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+     */
+    public var safetyScores: WaddleSafetyScoresFastening?
+    /**
      * XEP-0280: direction of the carbon envelope this message was
      * unwrapped from. Only stamped after the runtime verified the
      * wrapping stanza came from the account's own bare JID (§11
@@ -8817,6 +8831,9 @@ public struct WaddleMessage: Equatable, Hashable {
          * call-thread anchor.
          */callThreadEnded: WaddleCallThreadEnded?,
         /**
+         * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+         */safetyScores: WaddleSafetyScoresFastening?,
+        /**
          * XEP-0280: direction of the carbon envelope this message was
          * unwrapped from. Only stamped after the runtime verified the
          * wrapping stanza came from the account's own bare JID (§11
@@ -8882,6 +8899,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.linkPreviews = linkPreviews
         self.pinEvent = pinEvent
         self.callThreadEnded = callThreadEnded
+        self.safetyScores = safetyScores
         self.carbon = carbon
         self.replyToId = replyToId
         self.replyToSender = replyToSender
@@ -8944,6 +8962,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 linkPreviews: FfiConverterSequenceTypeWaddleLinkPreview.read(from: &buf),
                 pinEvent: FfiConverterOptionTypeWaddlePinEvent.read(from: &buf),
                 callThreadEnded: FfiConverterOptionTypeWaddleCallThreadEnded.read(from: &buf),
+                safetyScores: FfiConverterOptionTypeWaddleSafetyScoresFastening.read(from: &buf),
                 carbon: FfiConverterOptionTypeWaddleCarbonDirection.read(from: &buf),
                 replyToId: FfiConverterOptionString.read(from: &buf),
                 replyToSender: FfiConverterOptionString.read(from: &buf),
@@ -8992,6 +9011,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterSequenceTypeWaddleLinkPreview.write(value.linkPreviews, into: &buf)
         FfiConverterOptionTypeWaddlePinEvent.write(value.pinEvent, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadEnded.write(value.callThreadEnded, into: &buf)
+        FfiConverterOptionTypeWaddleSafetyScoresFastening.write(value.safetyScores, into: &buf)
         FfiConverterOptionTypeWaddleCarbonDirection.write(value.carbon, into: &buf)
         FfiConverterOptionString.write(value.replyToId, into: &buf)
         FfiConverterOptionString.write(value.replyToSender, into: &buf)
@@ -10321,6 +10341,208 @@ public func FfiConverterTypeWaddleRoomMemberEntry_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeWaddleRoomMemberEntry_lower(_ value: WaddleRoomMemberEntry) -> RustBuffer {
     return FfiConverterTypeWaddleRoomMemberEntry.lower(value)
+}
+
+
+/**
+ * One `<score/>`.
+ */
+public struct WaddleSafetyScore: Equatable, Hashable {
+    public var category: WaddleSafetyCategory
+    /**
+     * In `0.0..=1.0`, validated by the parser.
+     */
+    public var probability: Double
+    public var taxonomyVersion: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(category: WaddleSafetyCategory,
+        /**
+         * In `0.0..=1.0`, validated by the parser.
+         */probability: Double, taxonomyVersion: String) {
+        self.category = category
+        self.probability = probability
+        self.taxonomyVersion = taxonomyVersion
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSafetyScore: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSafetyScore: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSafetyScore {
+        return
+            try WaddleSafetyScore(
+                category: FfiConverterTypeWaddleSafetyCategory.read(from: &buf),
+                probability: FfiConverterDouble.read(from: &buf),
+                taxonomyVersion: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleSafetyScore, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleSafetyCategory.write(value.category, into: &buf)
+        FfiConverterDouble.write(value.probability, into: &buf)
+        FfiConverterString.write(value.taxonomyVersion, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScore_lift(_ buf: RustBuffer) throws -> WaddleSafetyScore {
+    return try FfiConverterTypeWaddleSafetyScore.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScore_lower(_ value: WaddleSafetyScore) -> RustBuffer {
+    return FfiConverterTypeWaddleSafetyScore.lower(value)
+}
+
+
+/**
+ * One `<safety-scores/>` batch.
+ */
+public struct WaddleSafetyScores: Equatable, Hashable {
+    /**
+     * Batch-level model identifier (`model-version`).
+     */
+    public var modelVersion: String
+    /**
+     * Known categories only, one per category, in document order.
+     */
+    public var scores: [WaddleSafetyScore]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Batch-level model identifier (`model-version`).
+         */modelVersion: String,
+        /**
+         * Known categories only, one per category, in document order.
+         */scores: [WaddleSafetyScore]) {
+        self.modelVersion = modelVersion
+        self.scores = scores
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSafetyScores: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSafetyScores: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSafetyScores {
+        return
+            try WaddleSafetyScores(
+                modelVersion: FfiConverterString.read(from: &buf),
+                scores: FfiConverterSequenceTypeWaddleSafetyScore.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleSafetyScores, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.modelVersion, into: &buf)
+        FfiConverterSequenceTypeWaddleSafetyScore.write(value.scores, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScores_lift(_ buf: RustBuffer) throws -> WaddleSafetyScores {
+    return try FfiConverterTypeWaddleSafetyScores.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScores_lower(_ value: WaddleSafetyScores) -> RustBuffer {
+    return FfiConverterTypeWaddleSafetyScores.lower(value)
+}
+
+
+/**
+ * XEP-0422 fastening carrying `urn:waddle:safety-scores:1`. Mirrors
+ * `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`. The
+ * sender is unverified: consumers MUST only trust scores from the room
+ * itself (bare room JID).
+ */
+public struct WaddleSafetyScoresFastening: Equatable, Hashable {
+    /**
+     * XEP-0422 `<apply-to id='…'/>` target.
+     */
+    public var targetId: String
+    public var action: WaddleSafetyScoresAction
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * XEP-0422 `<apply-to id='…'/>` target.
+         */targetId: String, action: WaddleSafetyScoresAction) {
+        self.targetId = targetId
+        self.action = action
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSafetyScoresFastening: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSafetyScoresFastening: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSafetyScoresFastening {
+        return
+            try WaddleSafetyScoresFastening(
+                targetId: FfiConverterString.read(from: &buf),
+                action: FfiConverterTypeWaddleSafetyScoresAction.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleSafetyScoresFastening, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.targetId, into: &buf)
+        FfiConverterTypeWaddleSafetyScoresAction.write(value.action, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScoresFastening_lift(_ buf: RustBuffer) throws -> WaddleSafetyScoresFastening {
+    return try FfiConverterTypeWaddleSafetyScoresFastening.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScoresFastening_lower(_ value: WaddleSafetyScoresFastening) -> RustBuffer {
+    return FfiConverterTypeWaddleSafetyScoresFastening.lower(value)
 }
 
 
@@ -13886,6 +14108,178 @@ public func FfiConverterTypeWaddleReferenceType_lower(_ value: WaddleReferenceTy
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Judgment categories. Unknown wire categories never reach this enum:
+ * the parser skips them.
+ */
+
+public enum WaddleSafetyCategory: Equatable, Hashable {
+
+    case isQuestion
+    case hateSpeech
+    case explicit
+    case harassment
+    case violence
+    case selfHarm
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSafetyCategory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSafetyCategory: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSafetyCategory
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSafetyCategory {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .isQuestion
+
+        case 2: return .hateSpeech
+
+        case 3: return .explicit
+
+        case 4: return .harassment
+
+        case 5: return .violence
+
+        case 6: return .selfHarm
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSafetyCategory, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .isQuestion:
+            writeInt(&buf, Int32(1))
+
+
+        case .hateSpeech:
+            writeInt(&buf, Int32(2))
+
+
+        case .explicit:
+            writeInt(&buf, Int32(3))
+
+
+        case .harassment:
+            writeInt(&buf, Int32(4))
+
+
+        case .violence:
+            writeInt(&buf, Int32(5))
+
+
+        case .selfHarm:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyCategory_lift(_ buf: RustBuffer) throws -> WaddleSafetyCategory {
+    return try FfiConverterTypeWaddleSafetyCategory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyCategory_lower(_ value: WaddleSafetyCategory) -> RustBuffer {
+    return FfiConverterTypeWaddleSafetyCategory.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Replace the sender's scores, or clear them (XEP-0422 `clear='true'`).
+ */
+
+public enum WaddleSafetyScoresAction: Equatable, Hashable {
+
+    case apply(scores: WaddleSafetyScores
+    )
+    case clear
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSafetyScoresAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSafetyScoresAction: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSafetyScoresAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSafetyScoresAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .apply(scores: try FfiConverterTypeWaddleSafetyScores.read(from: &buf)
+        )
+
+        case 2: return .clear
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSafetyScoresAction, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .apply(scores):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeWaddleSafetyScores.write(scores, into: &buf)
+
+
+        case .clear:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScoresAction_lift(_ buf: RustBuffer) throws -> WaddleSafetyScoresAction {
+    return try FfiConverterTypeWaddleSafetyScoresAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSafetyScoresAction_lower(_ value: WaddleSafetyScoresAction) -> RustBuffer {
+    return FfiConverterTypeWaddleSafetyScoresAction.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * RFC 6120 §6.5 SASL failure conditions. Mirrors the client crate's
  * `SaslFailureCondition`; `Unknown` marks an unrecognised wire value.
  */
@@ -15308,6 +15702,30 @@ fileprivate struct FfiConverterOptionTypeWaddleReplyTarget: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleSafetyScoresFastening: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSafetyScoresFastening?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleSafetyScoresFastening.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleSafetyScoresFastening.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleSendOptions: FfiConverterRustBuffer {
     typealias SwiftType = WaddleSendOptions?
 
@@ -16456,6 +16874,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleRoomMemberEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleSafetyScore: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleSafetyScore]
+
+    public static func write(_ value: [WaddleSafetyScore], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleSafetyScore.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleSafetyScore] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleSafetyScore]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleSafetyScore.read(from: &buf))
         }
         return seq
     }

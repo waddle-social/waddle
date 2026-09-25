@@ -32,6 +32,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Corrections | 0308 | 🟡 | ✅ | Full-stanza re-send per XEP-0308, keeping the original's mentions and markup; received corrections replace markup and references. Baseline: rendered, never sent |
 | Retraction | 0424 | ❌ | ✅ | Room retractions wait for the reflection. Baseline: `retractMessage` was an empty stub |
 | Reactions | 0444 | 🟡 | ✅ | XEP-0444 replace-set semantics, room-assigned ids only in rooms. Baseline: rendered, never sent |
+| Safety scores | 0422 | ❌ | 🟡 | Receives the room's `urn:waddle:safety-scores:1` fastening (room-assigned ids only; only the bare room JID may set them; latest wins; `clear='true'` removes) and shows a gauge on scored rows that opens the per-category breakdown. Inert until the server broadcasts scores (#1831); 1:1 fastenings are ignored until the contract names a trusted DM sender |
 | Replies | 0461, 0428 | ✅ | ✅ | Reply ids follow XEP-0461 (room-assigned ids in rooms) |
 | Threads | 0201 | 🟡 | ✅ | Thread panel (inspector on iPad/Mac), reply counts |
 | Delivery acks | 0198 | ❌ | ✅ | Sending / queued / sent / acknowledged / failed with retry and discard; unsent and unconfirmed messages survive the app being killed and resend with the same origin-id. Baseline: acks were logged and dropped |
