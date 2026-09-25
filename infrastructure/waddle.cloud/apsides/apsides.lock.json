@@ -1,0 +1,70 @@
+{
+  "entry": "program.tsx",
+  "inputs": [
+    {
+      "path": ".aps/crds/certificate.ts",
+      "sha256": "a599f048d812d2e2b8ae3da9affd4c570ee5bb41ccd2506a4a6064fa64d322b1"
+    },
+    {
+      "path": ".aps/crds/cnpg-cluster.ts",
+      "sha256": "220187fae814370fc42f3ee5bcd4f930dd01866c324e0ee274e620595b3b7a9a"
+    },
+    {
+      "path": ".aps/crds/external-secret.ts",
+      "sha256": "d9ea79f64ca488b7f7ef44d10db8cc745aced6888c60402d91e24141f943b262"
+    },
+    {
+      "path": ".aps/crds/httproute.ts",
+      "sha256": "2d84648af1cb6044c9ef9ad73aa7757456ea0b69fd88d7d8f5e7fda90dcc03af"
+    },
+    {
+      "path": ".aps/crds/referencegrant.ts",
+      "sha256": "3d17123f2626793d5b1870b6ad0cfd16618546f74ad6737426abd5d3fe6ed458"
+    },
+    {
+      "path": ".aps/crds/spicedb-cluster.ts",
+      "sha256": "a6e562830f82754a5835b667e01670c2f3cba4c1a98fff04082ac74c0ce1cc98"
+    },
+    {
+      "path": ".aps/generated/monitoring-queries.ts",
+      "sha256": "1dad7b6fda66b1f863a9d1f4e1973a165cd064ca9916bbd8aaead722294bd844"
+    },
+    {
+      "path": "builtin-resources.ts",
+      "sha256": "d5c1e968561bfbeced00887bce2f7a81774e4ddcc86bd6e5c2d147b247590f95"
+    },
+    {
+      "path": "ingress.tsx",
+      "sha256": "c5f733f332e7b542dadb2d1c765f4e5669f24a00d2e569a73e8562ad16deb3da"
+    },
+    {
+      "path": "postgres.tsx",
+      "sha256": "90d4941d95b990275d1f1bb8f036d66fc9bafa23b0cb696adf579e799312479a"
+    },
+    {
+      "path": "program.tsx",
+      "sha256": "557133716eecb2b68182c69af821a5c2ee1cda77c68f238393b935902f5937d6"
+    },
+    {
+      "path": "release.ts",
+      "sha256": "b0e6a6297c7493519b8a4f1fe615888c3e1f25e44b20dfa453acd39c918f951a"
+    },
+    {
+      "path": "runtime-secrets.tsx",
+      "sha256": "5b710c3b2600ad3df0d350f39754b1a4d296db2f75a757defb8c6ef70cac1b02"
+    },
+    {
+      "path": "site.ts",
+      "sha256": "39693ff4aa74b454a89de8a50dc0a73e957cf6a1cab8827ff4014261a0ed7bfa"
+    },
+    {
+      "path": "spicedb.tsx",
+      "sha256": "74be3a3c1a48f58a143e90034e273b2aee850047edea3b4a3fe0d93ca60173bb"
+    },
+    {
+      "path": "waddle-server.tsx",
+      "sha256": "cd5be1972c40bffa903beaad2bf2a03c6b7ed5c7c70ad050e235140395f16f54"
+    }
+  ],
+  "schemaVersion": "apsides.dev/source-lock/v1"
+}
