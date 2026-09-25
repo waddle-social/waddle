@@ -91,7 +91,8 @@ internal class XmppEventRouter(
             return
         }
         // Mutation stanzas (reactions/corrections/retractions/
-        // moderation) alter existing rows via the timeline store; they
+        // moderation/safety-score fastenings) alter existing rows via
+        // the timeline store; they
         // are not new DM activity and must not reorder or re-persist
         // recency.
         val isMutation = message.isTimelineMutation()

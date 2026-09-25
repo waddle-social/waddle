@@ -23,6 +23,7 @@ import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddlePresenceHat
 import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleSafetyScoresFastening
 import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleVCard4
@@ -96,6 +97,7 @@ fun testMessage(
     sharedFiles: List<WaddleSharedFile> = emptyList(),
     callThread: WaddleCallThreadAnchor? = null,
     callThreadEnded: WaddleCallThreadEnded? = null,
+    safetyScores: WaddleSafetyScoresFastening? = null,
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -133,7 +135,7 @@ fun testMessage(
     linkPreviews = linkPreviews,
     pinEvent = pinEvent,
     callThreadEnded = callThreadEnded,
-    safetyScores = null,
+    safetyScores = safetyScores,
     carbon = null,
     replyToId = null,
     replyToSender = null,
@@ -163,6 +165,7 @@ fun testArchivedMessage(
     reactionTargetId: String? = null,
     reactionEmojis: List<String> = emptyList(),
     stanzaIdBy: String? = null,
+    safetyScores: WaddleSafetyScoresFastening? = null,
 ): WaddleArchivedMessage = WaddleArchivedMessage(
     mamId = mamId,
     queryId = null,
@@ -202,7 +205,7 @@ fun testArchivedMessage(
     authorRealJid = null,
     callThread = null,
     callThreadEnded = null,
-    safetyScores = null,
+    safetyScores = safetyScores,
     sharedFiles = emptyList(),
     linkPreviews = emptyList(),
     callEvent = null,

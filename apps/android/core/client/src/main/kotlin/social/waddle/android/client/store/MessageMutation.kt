@@ -4,13 +4,15 @@ import social.waddle.android.client.bareJid
 import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleSafetyScoresAction
 
 /**
  * A message that mutates an existing timeline row instead of inserting a
  * new one: XEP-0444 reactions, XEP-0308 corrections, XEP-0424
- * retractions, and XEP-0425 moderation. Extraction precedence follows
- * destructiveness — moderation and retraction are terminal, a correction
- * replaces content, a reaction only annotates.
+ * retractions, XEP-0425 moderation, and XEP-0422 safety-score
+ * fastenings. Extraction precedence follows destructiveness —
+ * moderation and retraction are terminal, a correction replaces
+ * content, a reaction or safety-score fastening only annotates.
  */
 sealed interface MessageMutation {
     /** The id of the row this mutation targets (any XEP-0359 identity). */
@@ -53,6 +55,21 @@ sealed interface MessageMutation {
         val moderatedBy: String?,
         val reason: String?,
     ) : MessageMutation
+
+    /**
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening: the room's
+     * automated per-category scores for the target. [action] replaces
+     * the previous scores (XEP-0422 replace) or clears them; only the
+     * room itself (bare room JID) may apply it. [fasteningIds] are the
+     * fastening stanza's own wire identities, so a MAM re-delivery of a
+     * fastening already applied is recognised as a replay.
+     */
+    data class SafetyScores(
+        override val targetId: String,
+        override val from: String,
+        val action: WaddleSafetyScoresAction,
+        val fasteningIds: Set<String>,
+    ) : MessageMutation
 }
 
 /**
@@ -68,7 +85,7 @@ fun WaddleArchivedMessage.isTimelineMutation(): Boolean =
 
 private fun TimelineSource.isTimelineMutation(): Boolean =
     moderationTargetId != null || retractsId != null || replacesId != null ||
-        reactionTargetId != null
+        reactionTargetId != null || safetyScores != null
 
 internal fun mutationOf(message: WaddleMessage, isGroupchat: Boolean, mine: Boolean): MessageMutation? =
     mutationOf(TimelineSource.Live(message), isGroupchat = isGroupchat, mine = mine)
@@ -86,6 +103,7 @@ private fun mutationOf(source: TimelineSource, isGroupchat: Boolean, mine: Boole
     val retractsId = source.retractsId
     val replacesId = source.replacesId
     val reactionTargetId = source.reactionTargetId
+    val safetyScores = source.safetyScores
     // A correction of a reply re-sends the quoted fallback prefix; strip
     // it like the insert path does or edits render the quote twice.
     val body = source.body?.let {
@@ -113,6 +131,15 @@ private fun mutationOf(source: TimelineSource, isGroupchat: Boolean, mine: Boole
             senderKey = if (isGroupchat) from else bareJid(from),
             mine = mine,
             emojis = source.reactionEmojis,
+        )
+        // Room-only, like XEP-0425: no 1:1 sender is trusted to score
+        // messages yet (the Rust parser already drops non-room senders).
+        safetyScores != null && isGroupchat -> MessageMutation.SafetyScores(
+            targetId = safetyScores.targetId,
+            from = from,
+            action = safetyScores.action,
+            fasteningIds = setOfNotNull(source.stanzaId, source.originId, source.messageId) +
+                source.stanzaIds.map { it.id },
         )
         else -> null
     }
