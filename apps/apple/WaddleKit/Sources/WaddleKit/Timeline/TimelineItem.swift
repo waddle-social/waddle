@@ -40,6 +40,10 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
     public var isEdited: Bool
     public var tombstone: Tombstone?
     public var reactions: [ReactionGroup]
+    /// Scores the room fastened to this message (XEP-0422,
+    /// `urn:waddle:safety-scores:1`), visible to every participant. Nil
+    /// until judged, after a clear, and on removed messages.
+    public var safetyScores: SafetyScores?
     /// Local send not yet reflected or archived.
     public var isLocalEcho: Bool
     /// When this client first saw the row. Live stanzas carry no timestamp,
@@ -55,6 +59,7 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         isEdited: Bool = false,
         tombstone: Tombstone? = nil,
         reactions: [ReactionGroup] = [],
+        safetyScores: SafetyScores? = nil,
         isLocalEcho: Bool = false,
         receivedAt: Date = Date()
     ) {
@@ -66,6 +71,7 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         self.isEdited = isEdited
         self.tombstone = tombstone
         self.reactions = reactions
+        self.safetyScores = safetyScores
         self.isLocalEcho = isLocalEcho
         self.receivedAt = receivedAt
     }

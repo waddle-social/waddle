@@ -27,6 +27,7 @@ mod ping;
 mod profile_verbs;
 mod push;
 mod room_admin;
+mod safety_scores;
 mod send_outcome;
 mod stanza;
 mod sticker_verbs;
@@ -56,6 +57,8 @@ mod ping_tests;
 mod profile_verbs_tests;
 #[cfg(test)]
 mod room_admin_tests;
+#[cfg(test)]
+mod safety_scores_tests;
 #[cfg(test)]
 mod sticker_verbs_tests;
 

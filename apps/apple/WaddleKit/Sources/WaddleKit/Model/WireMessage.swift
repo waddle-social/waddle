@@ -59,6 +59,8 @@ public struct WireMessage: Hashable, Sendable {
     public var isRetracted: Bool
     public var moderation: Moderation?
     public var reaction: Reaction?
+    /// XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+    public var safetyScores: SafetyScoresFastening?
     public var chatState: ChatState?
     public var displayedMarkerRequested: Bool
     public var displayedMarkerID: String?
@@ -91,6 +93,7 @@ public struct WireMessage: Hashable, Sendable {
         isRetracted: Bool = false,
         moderation: Moderation? = nil,
         reaction: Reaction? = nil,
+        safetyScores: SafetyScoresFastening? = nil,
         chatState: ChatState? = nil,
         displayedMarkerRequested: Bool = false,
         displayedMarkerID: String? = nil,
@@ -121,6 +124,7 @@ public struct WireMessage: Hashable, Sendable {
         self.isRetracted = isRetracted
         self.moderation = moderation
         self.reaction = reaction
+        self.safetyScores = safetyScores
         self.chatState = chatState
         self.displayedMarkerRequested = displayedMarkerRequested
         self.displayedMarkerID = displayedMarkerID
@@ -144,10 +148,10 @@ public struct WireMessage: Hashable, Sendable {
     public var isLive: Bool { source == .live }
 
     /// True when the message only mutates another row (reaction,
-    /// correction, retraction, moderation). Such stanzas never notify,
-    /// never bump unread and never reorder recency.
+    /// correction, retraction, moderation, safety scores). Such stanzas
+    /// never notify, never bump unread and never reorder recency.
     public var isMutation: Bool {
-        moderation != nil || retractsID != nil || replacesID != nil || reaction != nil
+        moderation != nil || retractsID != nil || replacesID != nil || reaction != nil || safetyScores != nil
     }
 
     /// True when the message is a thread reply that renders only inside its

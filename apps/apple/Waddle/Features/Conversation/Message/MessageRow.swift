@@ -61,6 +61,11 @@ private struct MessageRowContent: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            if item.safetyScores != nil {
+                MessageSafetyScoresButton {
+                    actions.showSafetyScores(for: item)
+                }
+            }
         }
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.top, topPadding)

@@ -7230,6 +7230,11 @@ data class WaddleArchivedMessage (
      */
     var `callThreadEnded`: WaddleCallThreadEnded?
     ,
+    /**
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+     */
+    var `safetyScores`: WaddleSafetyScoresFastening?
+    ,
     var `sharedFiles`: List<WaddleSharedFile>
     ,
     /**
@@ -7292,6 +7297,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadAnchor.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadEnded.read(buf),
+            FfiConverterOptionalTypeWaddleSafetyScoresFastening.read(buf),
             FfiConverterSequenceTypeWaddleSharedFile.read(buf),
             FfiConverterSequenceTypeWaddleLinkPreview.read(buf),
             FfiConverterOptionalTypeWaddleCallEvent.read(buf),
@@ -7337,6 +7343,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalString.allocationSize(value.`authorRealJid`) +
             FfiConverterOptionalTypeWaddleCallThreadAnchor.allocationSize(value.`callThread`) +
             FfiConverterOptionalTypeWaddleCallThreadEnded.allocationSize(value.`callThreadEnded`) +
+            FfiConverterOptionalTypeWaddleSafetyScoresFastening.allocationSize(value.`safetyScores`) +
             FfiConverterSequenceTypeWaddleSharedFile.allocationSize(value.`sharedFiles`) +
             FfiConverterSequenceTypeWaddleLinkPreview.allocationSize(value.`linkPreviews`) +
             FfiConverterOptionalTypeWaddleCallEvent.allocationSize(value.`callEvent`)
@@ -7381,6 +7388,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalString.write(value.`authorRealJid`, buf)
             FfiConverterOptionalTypeWaddleCallThreadAnchor.write(value.`callThread`, buf)
             FfiConverterOptionalTypeWaddleCallThreadEnded.write(value.`callThreadEnded`, buf)
+            FfiConverterOptionalTypeWaddleSafetyScoresFastening.write(value.`safetyScores`, buf)
             FfiConverterSequenceTypeWaddleSharedFile.write(value.`sharedFiles`, buf)
             FfiConverterSequenceTypeWaddleLinkPreview.write(value.`linkPreviews`, buf)
             FfiConverterOptionalTypeWaddleCallEvent.write(value.`callEvent`, buf)
@@ -9586,6 +9594,11 @@ data class WaddleMessage (
     var `callThreadEnded`: WaddleCallThreadEnded?
     ,
     /**
+     * XEP-0422 `urn:waddle:safety-scores:1` fastening, sender unverified.
+     */
+    var `safetyScores`: WaddleSafetyScoresFastening?
+    ,
+    /**
      * XEP-0280: direction of the carbon envelope this message was
      * unwrapped from. Only stamped after the runtime verified the
      * wrapping stanza came from the account's own bare JID (§11
@@ -9682,6 +9695,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterSequenceTypeWaddleLinkPreview.read(buf),
             FfiConverterOptionalTypeWaddlePinEvent.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadEnded.read(buf),
+            FfiConverterOptionalTypeWaddleSafetyScoresFastening.read(buf),
             FfiConverterOptionalTypeWaddleCarbonDirection.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -9730,6 +9744,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterSequenceTypeWaddleLinkPreview.allocationSize(value.`linkPreviews`) +
             FfiConverterOptionalTypeWaddlePinEvent.allocationSize(value.`pinEvent`) +
             FfiConverterOptionalTypeWaddleCallThreadEnded.allocationSize(value.`callThreadEnded`) +
+            FfiConverterOptionalTypeWaddleSafetyScoresFastening.allocationSize(value.`safetyScores`) +
             FfiConverterOptionalTypeWaddleCarbonDirection.allocationSize(value.`carbon`) +
             FfiConverterOptionalString.allocationSize(value.`replyToId`) +
             FfiConverterOptionalString.allocationSize(value.`replyToSender`) +
@@ -9777,6 +9792,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterSequenceTypeWaddleLinkPreview.write(value.`linkPreviews`, buf)
             FfiConverterOptionalTypeWaddlePinEvent.write(value.`pinEvent`, buf)
             FfiConverterOptionalTypeWaddleCallThreadEnded.write(value.`callThreadEnded`, buf)
+            FfiConverterOptionalTypeWaddleSafetyScoresFastening.write(value.`safetyScores`, buf)
             FfiConverterOptionalTypeWaddleCarbonDirection.write(value.`carbon`, buf)
             FfiConverterOptionalString.write(value.`replyToId`, buf)
             FfiConverterOptionalString.write(value.`replyToSender`, buf)
@@ -10765,6 +10781,149 @@ public object FfiConverterTypeWaddleRoomMemberEntry: FfiConverterRustBuffer<Wadd
             FfiConverterTypeWaddleMucAffiliation.write(value.`affiliation`, buf)
             FfiConverterOptionalString.write(value.`nick`, buf)
             FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+/**
+ * One `<score/>`.
+ */
+data class WaddleSafetyScore (
+    var `category`: WaddleSafetyCategory
+    ,
+    /**
+     * In `0.0..=1.0`, validated by the parser.
+     */
+    var `probability`: kotlin.Double
+    ,
+    var `taxonomyVersion`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSafetyScore: FfiConverterRustBuffer<WaddleSafetyScore> {
+    override fun read(buf: ByteBuffer): WaddleSafetyScore {
+        return WaddleSafetyScore(
+            FfiConverterTypeWaddleSafetyCategory.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleSafetyScore) = (
+            FfiConverterTypeWaddleSafetyCategory.allocationSize(value.`category`) +
+            FfiConverterDouble.allocationSize(value.`probability`) +
+            FfiConverterString.allocationSize(value.`taxonomyVersion`)
+    )
+
+    override fun write(value: WaddleSafetyScore, buf: ByteBuffer) {
+            FfiConverterTypeWaddleSafetyCategory.write(value.`category`, buf)
+            FfiConverterDouble.write(value.`probability`, buf)
+            FfiConverterString.write(value.`taxonomyVersion`, buf)
+    }
+}
+
+
+
+/**
+ * One `<safety-scores/>` batch.
+ */
+data class WaddleSafetyScores (
+    /**
+     * Batch-level model identifier (`model-version`).
+     */
+    var `modelVersion`: kotlin.String
+    ,
+    /**
+     * Known categories only, one per category, in document order.
+     */
+    var `scores`: List<WaddleSafetyScore>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSafetyScores: FfiConverterRustBuffer<WaddleSafetyScores> {
+    override fun read(buf: ByteBuffer): WaddleSafetyScores {
+        return WaddleSafetyScores(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeWaddleSafetyScore.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleSafetyScores) = (
+            FfiConverterString.allocationSize(value.`modelVersion`) +
+            FfiConverterSequenceTypeWaddleSafetyScore.allocationSize(value.`scores`)
+    )
+
+    override fun write(value: WaddleSafetyScores, buf: ByteBuffer) {
+            FfiConverterString.write(value.`modelVersion`, buf)
+            FfiConverterSequenceTypeWaddleSafetyScore.write(value.`scores`, buf)
+    }
+}
+
+
+
+/**
+ * XEP-0422 fastening carrying `urn:waddle:safety-scores:1`. Mirrors
+ * `waddle_xmpp_client::xep::safety_scores::SafetyScoresFastening`. The
+ * sender is unverified: consumers MUST only trust scores from the room
+ * itself (bare room JID).
+ */
+data class WaddleSafetyScoresFastening (
+    /**
+     * XEP-0422 `<apply-to id='…'/>` target.
+     */
+    var `targetId`: kotlin.String
+    ,
+    var `action`: WaddleSafetyScoresAction
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSafetyScoresFastening: FfiConverterRustBuffer<WaddleSafetyScoresFastening> {
+    override fun read(buf: ByteBuffer): WaddleSafetyScoresFastening {
+        return WaddleSafetyScoresFastening(
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleSafetyScoresAction.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleSafetyScoresFastening) = (
+            FfiConverterString.allocationSize(value.`targetId`) +
+            FfiConverterTypeWaddleSafetyScoresAction.allocationSize(value.`action`)
+    )
+
+    override fun write(value: WaddleSafetyScoresFastening, buf: ByteBuffer) {
+            FfiConverterString.write(value.`targetId`, buf)
+            FfiConverterTypeWaddleSafetyScoresAction.write(value.`action`, buf)
     }
 }
 
@@ -13515,6 +13674,124 @@ public object FfiConverterTypeWaddleReferenceType : FfiConverterRustBuffer<Waddl
 
 
 /**
+ * Judgment categories. Unknown wire categories never reach this enum:
+ * the parser skips them.
+ */
+
+enum class WaddleSafetyCategory {
+
+    IS_QUESTION,
+    HATE_SPEECH,
+    EXPLICIT,
+    HARASSMENT,
+    VIOLENCE,
+    SELF_HARM;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSafetyCategory: FfiConverterRustBuffer<WaddleSafetyCategory> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleSafetyCategory.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleSafetyCategory) = 4UL
+
+    override fun write(value: WaddleSafetyCategory, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Replace the sender's scores, or clear them (XEP-0422 `clear='true'`).
+ */
+sealed class WaddleSafetyScoresAction {
+
+    data class Apply(
+        val `scores`: social.waddle.client.ffi.WaddleSafetyScores) : WaddleSafetyScoresAction()
+
+    {
+
+
+        companion object
+    }
+
+    object Clear : WaddleSafetyScoresAction()
+
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSafetyScoresAction : FfiConverterRustBuffer<WaddleSafetyScoresAction>{
+    override fun read(buf: ByteBuffer): WaddleSafetyScoresAction {
+        return when(buf.getInt()) {
+            1 -> WaddleSafetyScoresAction.Apply(
+                FfiConverterTypeWaddleSafetyScores.read(buf),
+                )
+            2 -> WaddleSafetyScoresAction.Clear
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleSafetyScoresAction) = when(value) {
+        is WaddleSafetyScoresAction.Apply -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleSafetyScores.allocationSize(value.`scores`)
+            )
+        }
+        is WaddleSafetyScoresAction.Clear -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: WaddleSafetyScoresAction, buf: ByteBuffer) {
+        when(value) {
+            is WaddleSafetyScoresAction.Apply -> {
+                buf.putInt(1)
+                FfiConverterTypeWaddleSafetyScores.write(value.`scores`, buf)
+                Unit
+            }
+            is WaddleSafetyScoresAction.Clear -> {
+                buf.putInt(2)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
  * RFC 6120 §6.5 SASL failure conditions. Mirrors the client crate's
  * `SaslFailureCondition`; `Unknown` marks an unrecognised wire value.
  */
@@ -14958,6 +15235,38 @@ public object FfiConverterOptionalTypeWaddleReplyTarget: FfiConverterRustBuffer<
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleSafetyScoresFastening: FfiConverterRustBuffer<WaddleSafetyScoresFastening?> {
+    override fun read(buf: ByteBuffer): WaddleSafetyScoresFastening? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleSafetyScoresFastening.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleSafetyScoresFastening?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleSafetyScoresFastening.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleSafetyScoresFastening?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleSafetyScoresFastening.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSendOptions?> {
     override fun read(buf: ByteBuffer): WaddleSendOptions? {
         if (buf.get().toInt() == 0) {
@@ -16340,6 +16649,34 @@ public object FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRustBuf
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleRoomMemberEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleSafetyScore: FfiConverterRustBuffer<List<WaddleSafetyScore>> {
+    override fun read(buf: ByteBuffer): List<WaddleSafetyScore> {
+        val len = buf.getInt()
+        return List<WaddleSafetyScore>(len) {
+            FfiConverterTypeWaddleSafetyScore.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleSafetyScore>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleSafetyScore.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleSafetyScore>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleSafetyScore.write(it, buf)
         }
     }
 }
