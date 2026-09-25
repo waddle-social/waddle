@@ -3,7 +3,6 @@
 // expands inline into the per-category breakdown.
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import {
   formatSafetyProbability,
   orderedSafetyScores,
@@ -74,7 +73,7 @@ describe("MessageSafetyScores", () => {
   test("the expanded panel lists each category, its percent, and the model", async () => {
     // Render the same SFC with its disclosure state flipped open; SSR has
     // no click, and the component deliberately exposes no prop for it.
-    const source = readFileSync(componentUrl, "utf8").replace(
+    const source = (await Bun.file(componentUrl).text()).replace(
       "const expanded = ref(false);",
       "const expanded = ref(true);",
     );
@@ -106,20 +105,29 @@ describe("MessageCard safety-scores affordance", () => {
     isSelf: false,
   };
 
-  async function renderCard(message: TimelineMessage, grouped = false): Promise<string> {
-    return renderVueComponent(
-      "../src/components/chat/MessageCard.vue",
-      { message, hats: [], grouped },
-      import.meta.url,
-    );
-  }
+  // One wrapper renders all three cards so MessageCard compiles once.
+  const wrapper = `<script setup lang="ts">
+import MessageCard from "@/components/chat/MessageCard.vue";
+import type { TimelineMessage } from "@/lib/chat-ui";
+defineProps<{ scored: TimelineMessage; grouped: TimelineMessage; plain: TimelineMessage }>();
+</script>
+<template>
+  <div>
+    <MessageCard :message="scored" :hats="[]" />
+    <MessageCard :message="grouped" :hats="[]" :grouped="true" />
+    <MessageCard :message="plain" :hats="[]" />
+  </div>
+</template>
+`;
 
-  test("every scored message shows the chip, including grouped rows", async () => {
-    expect(await renderCard({ ...base, safetyScores: SCORES })).toContain('aria-controls="safety-scores-m-1"');
-    expect(await renderCard({ ...base, safetyScores: SCORES }, true)).toContain('aria-controls="safety-scores-m-1"');
-  });
-
-  test("unscored messages render no chip", async () => {
-    expect(await renderCard(base)).not.toContain("safety-scores-m-1");
-  });
+  test("every scored message shows the chip, including grouped rows; unscored rows show none", async () => {
+    const html = await renderVueComponentSource(wrapper, {
+      scored: { ...base, id: "scored", safetyScores: SCORES },
+      grouped: { ...base, id: "grouped", safetyScores: SCORES },
+      plain: { ...base, id: "plain" },
+    });
+    expect(html).toContain('aria-controls="safety-scores-scored"');
+    expect(html).toContain('aria-controls="safety-scores-grouped"');
+    expect(html).not.toContain("safety-scores-plain");
+  }, 30_000);
 });

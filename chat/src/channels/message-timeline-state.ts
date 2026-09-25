@@ -21,7 +21,7 @@ import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
 import { SenderScopedIdIndex } from "@/lib/messaging/sender-scoped-ids";
-import { findSafetyScoresTargetIndex, withSafetyScores } from "@/lib/safety-scores/apply";
+import { safetyScoresTargetIndex, withSafetyScores } from "@/lib/safety-scores/apply";
 import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 
 function mergeReplyToMetadata(
@@ -306,7 +306,7 @@ export function buildChannelTimelineFromMamResults(params: {
     payload: CorrectionPayload;
   }[] = [];
   const callThreadEndedUpdates: NonNullable<LiveRoomMessage["callThreadEnded"]>[] = [];
-  const safetyScoresUpdates: SafetyScoresFastening[] = [];
+  const safetyScoresUpdates: { fastening: SafetyScoresFastening; at: string }[] = [];
 
   for (const msg of mamResults) {
     if (msg._reactionTarget && msg._reactionEmojis) {
@@ -340,7 +340,7 @@ export function buildChannelTimelineFromMamResults(params: {
     } else if (msg.callThreadEnded) {
       callThreadEndedUpdates.push(msg.callThreadEnded);
     } else if (msg.safetyScoresFastening) {
-      safetyScoresUpdates.push(msg.safetyScoresFastening);
+      safetyScoresUpdates.push({ fastening: msg.safetyScoresFastening, at: msg.createdAt });
     } else if (
       msg.body
       || msg.isRetracted
@@ -474,12 +474,13 @@ export function buildChannelTimelineFromMamResults(params: {
     }
   }
 
-  // XEP-0422: archive order is chronological, so a later fastening
-  // replaces (or clears) an earlier one on the same target.
-  for (const update of safetyScoresUpdates) {
-    const index = findSafetyScoresTargetIndex(timeline, update.targetId);
+  // XEP-0422: a later fastening replaces (or clears) an earlier one on the
+  // same target. Pages arrive in archive order; the stamp check also keeps
+  // an older page from reverting a newer judgment already applied.
+  for (const { fastening, at } of safetyScoresUpdates) {
+    const index = safetyScoresTargetIndex(timeline, fastening, "room", at);
     if (index < 0) continue;
-    timeline[index] = withSafetyScores(timeline[index]!, update);
+    timeline[index] = withSafetyScores(timeline[index]!, fastening, at);
   }
 
   return applyForumContext(timeline.sort(compareTimelineMessages), channelIsForum);

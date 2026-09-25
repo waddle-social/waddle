@@ -149,8 +149,8 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * sender already gated by the decoder. A target outside the loaded
    * timeline is a no-op, like reactions to unloaded messages.
    */
-  function applySafetyScores(fastening: SafetyScoresFastening) {
-    const next = applySafetyScoresFastening(messages.value, fastening);
+  function applySafetyScores(fastening: SafetyScoresFastening, at?: string) {
+    const next = applySafetyScoresFastening(messages.value, fastening, "room", at);
     if (next) messages.value = next;
   }
 
@@ -213,7 +213,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
       return { kind: "ignore" as const };
     }
     if (msg.safetyScoresFastening) {
-      applySafetyScores(msg.safetyScoresFastening);
+      applySafetyScores(msg.safetyScoresFastening, msg.createdAt);
       return { kind: "ignore" as const };
     }
     const classified = classifyRoomMessage(msg);

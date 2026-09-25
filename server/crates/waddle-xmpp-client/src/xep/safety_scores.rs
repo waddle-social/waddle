@@ -162,10 +162,26 @@ pub enum SafetyScoresUpdate {
     Clear,
 }
 
+/// XEP-0422 `apply-to@id`: the non-empty XEP-0359 id (stanza-id or
+/// origin-id) of the judged message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FastenTargetId(String);
+
+impl FastenTargetId {
+    pub fn parse(value: &str) -> Result<Self, SafetyScoresParseError> {
+        non_empty(value)
+            .map(Self)
+            .ok_or(SafetyScoresParseError::MissingAttribute("id"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScoresFastening {
-    /// XEP-0422 `apply-to@id`: the XEP-0359 id of the judged message.
-    pub target_id: String,
+    pub target_id: FastenTargetId,
     pub update: SafetyScoresUpdate,
 }
 
@@ -206,10 +222,7 @@ pub fn parse_safety_scores_fastening(
     let payload = apply_to
         .get_child(SAFETY_SCORES, NS_WADDLE_SAFETY_SCORES)
         .ok_or(SafetyScoresParseError::NotSafetyScores)?;
-    let target_id = apply_to
-        .attr("id")
-        .and_then(non_empty)
-        .ok_or(SafetyScoresParseError::MissingAttribute("id"))?;
+    let target_id = FastenTargetId::parse(apply_to.attr("id").unwrap_or_default())?;
     let update = if is_xs_true(apply_to.attr("clear")) {
         SafetyScoresUpdate::Clear
     } else {

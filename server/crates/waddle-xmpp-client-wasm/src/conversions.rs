@@ -114,7 +114,7 @@ pub(crate) fn safety_scores_to_js(
         SafetyScoresUpdate::Clear => WaddleSafetyScoresUpdate::Clear,
     };
     WaddleSafetyScoresFastening {
-        target_id: fastening.target_id,
+        target_id: fastening.target_id.as_str().to_owned(),
         update,
     }
 }

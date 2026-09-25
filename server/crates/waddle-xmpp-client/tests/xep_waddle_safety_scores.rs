@@ -13,60 +13,110 @@
 //!   counts, and other fastening types in the apply-to are not ours;
 //! - forward compatibility: unknown categories and malformed scores are
 //!   skipped without failing the rest of the payload.
+//!
+//! Fixtures are built with `minidom` builders (no string-built XML).
 
-use minidom::Element;
+use minidom::{rxml::NcName, Element};
 use waddle_xmpp_client::{
-    messaging::{parse, InboundMessage, MessagingEvent},
+    messaging::{parse, InboundMessage, MessagingEvent, NS_CLIENT},
     xep::safety_scores::{
-        JudgmentCategory, SafetyScores, SafetyScoresFastening, SafetyScoresUpdate,
+        JudgmentCategory, SafetyScores, SafetyScoresFastening, SafetyScoresUpdate, NS_FASTEN,
         NS_WADDLE_SAFETY_SCORES,
     },
 };
 
 const MODEL: &str = "typesafe/jev-1.13-20260917";
+const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 
-fn inbound(xml: &str) -> InboundMessage {
-    let element: Element = xml.parse().expect("fixture XML parses");
-    match parse(&element) {
+const CONTRACT_SCORES: [(&str, &str, &str); 6] = [
+    ("is_question", "0.92", "is-question-v1"),
+    ("safety:hate_speech", "0.03", "safety-hate-speech-v1"),
+    ("safety:explicit", "0.01", "safety-explicit-v1"),
+    ("safety:harassment", "0.02", "safety-harassment-v1"),
+    ("safety:violence", "0.0", "safety-violence-v1"),
+    ("safety:self_harm", "0.0", "safety-self-harm-v1"),
+];
+
+fn name(value: &str) -> NcName {
+    NcName::try_from(value).expect("valid attribute name")
+}
+
+fn with_attrs(builder: minidom::ElementBuilder, attrs: &[(&str, &str)]) -> Element {
+    attrs
+        .iter()
+        .fold(builder, |builder, (key, value)| {
+            builder.attr(name(key), *value)
+        })
+        .build()
+}
+
+fn score(attrs: &[(&str, &str)]) -> Element {
+    with_attrs(Element::builder("score", NS_WADDLE_SAFETY_SCORES), attrs)
+}
+
+fn full_score((category, probability, taxonomy): (&str, &str, &str)) -> Element {
+    score(&[
+        ("category", category),
+        ("probability", probability),
+        ("taxonomy-version", taxonomy),
+    ])
+}
+
+fn safety_scores_in(ns: &str, attrs: &[(&str, &str)], scores: Vec<Element>) -> Element {
+    let mut payload = with_attrs(Element::builder("safety-scores", ns), attrs);
+    for child in scores {
+        payload.append_child(child);
+    }
+    payload
+}
+
+fn safety_scores(scores: Vec<Element>) -> Element {
+    safety_scores_in(NS_WADDLE_SAFETY_SCORES, &[("model-version", MODEL)], scores)
+}
+
+fn contract_payload() -> Element {
+    safety_scores(CONTRACT_SCORES.into_iter().map(full_score).collect())
+}
+
+fn apply_to(attrs: &[(&str, &str)], payload: Element) -> Element {
+    let mut apply_to = with_attrs(Element::builder("apply-to", NS_FASTEN), attrs);
+    apply_to.append_child(payload);
+    apply_to
+}
+
+fn message(message_type: &str, child: Element) -> Element {
+    let mut message = with_attrs(
+        Element::builder("message", NS_CLIENT),
+        &[
+            ("from", "room@conference.example.org"),
+            ("to", "alice@example.org/web"),
+            ("type", message_type),
+        ],
+    );
+    message.append_child(child);
+    message
+}
+
+fn inbound(element: &Element) -> InboundMessage {
+    match parse(element) {
         Some(MessagingEvent::Message(message)) => *message,
         other => panic!("expected an inbound message, got {other:?}"),
     }
 }
 
-fn fastening(xml: &str) -> Option<SafetyScoresFastening> {
-    inbound(xml).safety_scores
+fn fastening(element: &Element) -> Option<SafetyScoresFastening> {
+    inbound(element).safety_scores
 }
 
-fn replaced(xml: &str) -> (String, SafetyScores) {
-    match fastening(xml) {
+fn replaced(element: &Element) -> (String, SafetyScores) {
+    match fastening(element) {
         Some(SafetyScoresFastening {
             target_id,
             update: SafetyScoresUpdate::Replace(scores),
-        }) => (target_id, scores),
+        }) => (target_id.as_str().to_owned(), scores),
         other => panic!("expected a replace fastening, got {other:?}"),
     }
 }
-
-fn wrap(message_type: &str, apply_to_attrs: &str, payload: &str) -> String {
-    format!(
-        "<message xmlns='jabber:client' from='room@conference.example.org' \
-         to='alice@example.org/web' type='{message_type}'>\
-         <apply-to xmlns='urn:xmpp:fasten:0' {apply_to_attrs}>{payload}</apply-to>\
-         </message>"
-    )
-}
-
-fn scores_payload(scores: &str) -> String {
-    format!("<safety-scores xmlns='{NS_WADDLE_SAFETY_SCORES}' model-version='{MODEL}'>{scores}</safety-scores>")
-}
-
-const CONTRACT_SCORES: &str = "\
-    <score category='is_question' probability='0.92' taxonomy-version='is-question-v1'/>\
-    <score category='safety:hate_speech' probability='0.03' taxonomy-version='safety-hate-speech-v1'/>\
-    <score category='safety:explicit' probability='0.01' taxonomy-version='safety-explicit-v1'/>\
-    <score category='safety:harassment' probability='0.02' taxonomy-version='safety-harassment-v1'/>\
-    <score category='safety:violence' probability='0.0' taxonomy-version='safety-violence-v1'/>\
-    <score category='safety:self_harm' probability='0.0' taxonomy-version='safety-self-harm-v1'/>";
 
 fn summary(scores: &SafetyScores) -> Vec<(JudgmentCategory, f64, String)> {
     scores
@@ -84,15 +134,16 @@ fn summary(scores: &SafetyScores) -> Vec<(JudgmentCategory, f64, String)> {
 
 #[test]
 fn contract_fixture_parses_for_groupchat() {
-    let xml = wrap(
+    let element = message(
         "groupchat",
-        "id='stanza-1'",
-        &scores_payload(CONTRACT_SCORES),
+        apply_to(&[("id", "stanza-1")], contract_payload()),
     );
-    let message = inbound(&xml);
-    assert!(message.body.is_none(), "a fastening carries no body");
+    assert!(
+        inbound(&element).body.is_none(),
+        "a fastening carries no body"
+    );
 
-    let (target, scores) = replaced(&xml);
+    let (target, scores) = replaced(&element);
     assert_eq!(target, "stanza-1");
     assert_eq!(scores.model_version.as_str(), MODEL);
     assert_eq!(
@@ -134,8 +185,8 @@ fn contract_fixture_parses_for_groupchat() {
 
 #[test]
 fn same_shape_parses_for_direct_chat() {
-    let xml = wrap("chat", "id='dm-stanza'", &scores_payload(CONTRACT_SCORES));
-    let (target, scores) = replaced(&xml);
+    let element = message("chat", apply_to(&[("id", "dm-stanza")], contract_payload()));
+    let (target, scores) = replaced(&element);
     assert_eq!(target, "dm-stanza");
     assert_eq!(scores.scores.len(), 6);
 }
@@ -153,15 +204,17 @@ fn every_known_category_round_trips_its_wire_token() {
 
 #[test]
 fn unknown_categories_are_skipped_not_fatal() {
-    let xml = wrap(
+    let element = message(
         "groupchat",
-        "id='t'",
-        &scores_payload(
-            "<score category='safety:spam' probability='0.5' taxonomy-version='safety-spam-v1'/>\
-             <score category='is_question' probability='0.4' taxonomy-version='is-question-v1'/>",
+        apply_to(
+            &[("id", "t")],
+            safety_scores(vec![
+                full_score(("safety:spam", "0.5", "safety-spam-v1")),
+                full_score(("is_question", "0.4", "is-question-v1")),
+            ]),
         ),
     );
-    let (_, scores) = replaced(&xml);
+    let (_, scores) = replaced(&element);
     assert_eq!(
         summary(&scores),
         vec![(
@@ -174,21 +227,23 @@ fn unknown_categories_are_skipped_not_fatal() {
 
 #[test]
 fn malformed_scores_are_skipped_individually() {
-    let xml = wrap(
+    let element = message(
         "groupchat",
-        "id='t'",
-        &scores_payload(
-            "<score category='safety:hate_speech' probability='1.5' taxonomy-version='v'/>\
-             <score category='safety:explicit' probability='NaN' taxonomy-version='v'/>\
-             <score category='safety:harassment' probability='-0.1' taxonomy-version='v'/>\
-             <score category='safety:violence' probability='high' taxonomy-version='v'/>\
-             <score category='safety:self_harm' probability='0.2'/>\
-             <score probability='0.2' taxonomy-version='v'/>\
-             <score category='is_question' taxonomy-version='v'/>\
-             <score category='safety:violence' probability='1' taxonomy-version='safety-violence-v1'/>",
+        apply_to(
+            &[("id", "t")],
+            safety_scores(vec![
+                full_score(("safety:hate_speech", "1.5", "v")),
+                full_score(("safety:explicit", "NaN", "v")),
+                full_score(("safety:harassment", "-0.1", "v")),
+                full_score(("safety:violence", "high", "v")),
+                score(&[("category", "safety:self_harm"), ("probability", "0.2")]),
+                score(&[("probability", "0.2"), ("taxonomy-version", "v")]),
+                score(&[("category", "is_question"), ("taxonomy-version", "v")]),
+                full_score(("safety:violence", "1", "safety-violence-v1")),
+            ]),
         ),
     );
-    let (_, scores) = replaced(&xml);
+    let (_, scores) = replaced(&element);
     assert_eq!(
         summary(&scores),
         vec![(
@@ -201,15 +256,17 @@ fn malformed_scores_are_skipped_individually() {
 
 #[test]
 fn duplicate_category_keeps_the_first_score() {
-    let xml = wrap(
+    let element = message(
         "groupchat",
-        "id='t'",
-        &scores_payload(
-            "<score category='is_question' probability='0.1' taxonomy-version='is-question-v1'/>\
-             <score category='is_question' probability='0.9' taxonomy-version='is-question-v2'/>",
+        apply_to(
+            &[("id", "t")],
+            safety_scores(vec![
+                full_score(("is_question", "0.1", "is-question-v1")),
+                full_score(("is_question", "0.9", "is-question-v2")),
+            ]),
         ),
     );
-    let (_, scores) = replaced(&xml);
+    let (_, scores) = replaced(&element);
     assert_eq!(
         summary(&scores),
         vec![(
@@ -222,48 +279,44 @@ fn duplicate_category_keeps_the_first_score() {
 
 #[test]
 fn payload_with_no_known_scores_is_an_empty_replace() {
-    let xml = wrap("groupchat", "id='t'", &scores_payload(""));
-    let (_, scores) = replaced(&xml);
+    let element = message("groupchat", apply_to(&[("id", "t")], safety_scores(vec![])));
+    let (_, scores) = replaced(&element);
     assert!(scores.scores.is_empty());
 }
 
 #[test]
 fn clear_true_removes_the_fastening() {
-    let xml = wrap(
+    let element = message(
         "groupchat",
-        "id='t' clear='true'",
-        &format!("<safety-scores xmlns='{NS_WADDLE_SAFETY_SCORES}'/>"),
+        apply_to(
+            &[("id", "t"), ("clear", "true")],
+            safety_scores_in(NS_WADDLE_SAFETY_SCORES, &[], vec![]),
+        ),
     );
-    assert_eq!(
-        fastening(&xml),
-        Some(SafetyScoresFastening {
-            target_id: "t".to_owned(),
-            update: SafetyScoresUpdate::Clear,
-        })
-    );
+    let parsed = fastening(&element).expect("clear fastening parses");
+    assert_eq!(parsed.target_id.as_str(), "t");
+    assert_eq!(parsed.update, SafetyScoresUpdate::Clear);
 }
 
 #[test]
 fn encryption_shell_is_ignored() {
-    let xml = wrap(
+    let element = message(
         "groupchat",
-        "id='t' shell='true'",
-        &scores_payload(CONTRACT_SCORES),
+        apply_to(&[("id", "t"), ("shell", "true")], contract_payload()),
     );
-    assert_eq!(fastening(&xml), None);
+    assert_eq!(fastening(&element), None);
 }
 
 #[test]
 fn missing_or_empty_target_id_is_rejected() {
     assert_eq!(
-        fastening(&wrap("groupchat", "", &scores_payload(CONTRACT_SCORES))),
+        fastening(&message("groupchat", apply_to(&[], contract_payload()))),
         None
     );
     assert_eq!(
-        fastening(&wrap(
+        fastening(&message(
             "groupchat",
-            "id=''",
-            &scores_payload(CONTRACT_SCORES)
+            apply_to(&[("id", "")], contract_payload())
         )),
         None
     );
@@ -271,39 +324,42 @@ fn missing_or_empty_target_id_is_rejected() {
 
 #[test]
 fn missing_model_version_is_rejected() {
-    let payload = format!(
-        "<safety-scores xmlns='{NS_WADDLE_SAFETY_SCORES}'>{CONTRACT_SCORES}</safety-scores>"
+    let payload = safety_scores_in(
+        NS_WADDLE_SAFETY_SCORES,
+        &[],
+        CONTRACT_SCORES.into_iter().map(full_score).collect(),
     );
-    assert_eq!(fastening(&wrap("groupchat", "id='t'", &payload)), None);
+    assert_eq!(
+        fastening(&message("groupchat", apply_to(&[("id", "t")], payload))),
+        None
+    );
 }
 
 #[test]
 fn other_fastening_types_are_not_safety_scores() {
-    let xml = wrap(
-        "groupchat",
-        "id='anchor'",
-        "<call-thread-ended xmlns='urn:waddle:call-thread:0' ended='2026-06-07T15:00:00Z' duration='PT30M'/>",
+    let ended = with_attrs(
+        Element::builder("call-thread-ended", NS_CALL_THREAD),
+        &[("ended", "2026-06-07T15:00:00Z"), ("duration", "PT30M")],
     );
-    let message = inbound(&xml);
-    assert!(message.safety_scores.is_none());
-    assert!(message.call_thread_ended.is_some());
+    let parsed = inbound(&message("groupchat", apply_to(&[("id", "anchor")], ended)));
+    assert!(parsed.safety_scores.is_none());
+    assert!(parsed.call_thread_ended.is_some());
 }
 
 #[test]
 fn payload_in_the_wrong_namespace_is_ignored() {
-    let xml = wrap(
-        "groupchat",
-        "id='t'",
-        &format!("<safety-scores xmlns='urn:waddle:safety-scores:0' model-version='{MODEL}'>{CONTRACT_SCORES}</safety-scores>"),
+    let payload = safety_scores_in(
+        "urn:waddle:safety-scores:0",
+        &[("model-version", MODEL)],
+        CONTRACT_SCORES.into_iter().map(full_score).collect(),
     );
-    assert_eq!(fastening(&xml), None);
+    assert_eq!(
+        fastening(&message("groupchat", apply_to(&[("id", "t")], payload))),
+        None
+    );
 }
 
 #[test]
 fn unwrapped_payload_is_not_a_fastening() {
-    let xml = format!(
-        "<message xmlns='jabber:client' from='room@conference.example.org' type='groupchat'>{}</message>",
-        scores_payload(CONTRACT_SCORES)
-    );
-    assert_eq!(fastening(&xml), None);
+    assert_eq!(fastening(&message("groupchat", contract_payload())), None);
 }

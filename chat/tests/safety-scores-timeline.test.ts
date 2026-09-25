@@ -9,7 +9,7 @@ import { buildChannelTimelineFromMamResults } from "../src/channels/message-time
 import { useDmLiveMerge } from "../src/dms/live-merge";
 import {
   applySafetyScoresFastening,
-  findSafetyScoresTargetIndex,
+  safetyScoresTargetIndex,
 } from "../src/lib/safety-scores/apply";
 import type { SafetyScores, SafetyScoresFastening } from "../src/lib/safety-scores/types";
 import type { TimelineMessage } from "../src/lib/chat-ui";
@@ -95,35 +95,65 @@ function fasteningRecord(id: string, fastening: SafetyScoresFastening, createdAt
 }
 
 describe("safety-scores target resolution", () => {
+  const target = (timeline: TimelineMessage[], id: string, scope: "room" | "dm") =>
+    safetyScoresTargetIndex(timeline, replace(id, scores(0.5)), scope);
+
   test("the room-assigned stanza-id wins over a colliding sender-chosen alias", () => {
     const timeline = [
       row({ id: "a", wireIds: ["shared-id"] }),
       row({ id: "b", stanzaId: "shared-id" }),
     ];
-    expect(findSafetyScoresTargetIndex(timeline, "shared-id")).toBe(1);
+    expect(target(timeline, "shared-id", "room")).toBe(1);
   });
 
-  test("falls back to the XEP-0359 origin-id alias (XEP-0422 §Wrapped Payloads)", () => {
+  test("room: falls back to a unique origin-id alias (XEP-0422 §Wrapped Payloads)", () => {
     const timeline = [row({ id: "a", stanzaId: "a", wireIds: ["origin-1"] })];
-    expect(findSafetyScoresTargetIndex(timeline, "origin-1")).toBe(0);
+    expect(target(timeline, "origin-1", "room")).toBe(0);
+  });
+
+  test("room: an alias carried by two rows is ambiguous and applies nowhere", () => {
+    const timeline = [
+      row({ id: "a", stanzaId: "a", wireIds: ["origin-dup"] }),
+      row({ id: "b", stanzaId: "b", wireIds: ["origin-dup"] }),
+    ];
+    expect(target(timeline, "origin-dup", "room")).toBe(-1);
+  });
+
+  test("dm: only the account's own archive stanza-id resolves", () => {
+    const timeline = [row({ id: "client-id", stanzaId: "dm-stanza", wireIds: ["origin-1"] })];
+    expect(target(timeline, "dm-stanza", "dm")).toBe(0);
+    expect(target(timeline, "origin-1", "dm")).toBe(-1);
+    expect(target(timeline, "client-id", "dm")).toBe(-1);
   });
 
   test("replace sets, a later replace overwrites, clear removes", () => {
-    const initial = [row()];
-    const scored = applySafetyScoresFastening(initial, replace("stanza-1", scores(0.4)));
+    const initial = [row({ stanzaId: "stanza-1" })];
+    const scored = applySafetyScoresFastening(initial, replace("stanza-1", scores(0.4)), "room");
     expect(scored?.[0]?.safetyScores).toEqual(scores(0.4));
     expect(initial[0]?.safetyScores).toBeUndefined();
 
-    const rescored = applySafetyScoresFastening(scored!, replace("stanza-1", scores(0.9, "jev-next")));
+    const rescored = applySafetyScoresFastening(scored!, replace("stanza-1", scores(0.9, "jev-next")), "room");
     expect(rescored?.[0]?.safetyScores).toEqual(scores(0.9, "jev-next"));
 
-    const cleared = applySafetyScoresFastening(rescored!, { targetId: "stanza-1", kind: "clear" });
+    const cleared = applySafetyScoresFastening(rescored!, { targetId: "stanza-1", kind: "clear" }, "room");
     expect(cleared?.[0]).not.toHaveProperty("safetyScores");
     expect(cleared?.[0]?.body).toBe("is anyone around?");
   });
 
+  test("an older fastening never overwrites a newer one (replace or clear)", () => {
+    const initial = [row({ stanzaId: "stanza-1" })];
+    const newer = applySafetyScoresFastening(initial, replace("stanza-1", scores(0.9)), "room", "2026-09-25T10:05:00Z");
+    expect(applySafetyScoresFastening(newer!, replace("stanza-1", scores(0.1)), "room", "2026-09-25T10:00:00Z"))
+      .toBeNull();
+
+    const cleared = applySafetyScoresFastening(newer!, { targetId: "stanza-1", kind: "clear" }, "room", "2026-09-25T10:06:00Z");
+    expect(cleared?.[0]?.safetyScoresAt).toBe("2026-09-25T10:06:00Z");
+    expect(applySafetyScoresFastening(cleared!, replace("stanza-1", scores(0.9)), "room", "2026-09-25T10:05:00Z"))
+      .toBeNull();
+  });
+
   test("an unknown target is a no-op", () => {
-    expect(applySafetyScoresFastening([row()], replace("missing", scores(0.5)))).toBeNull();
+    expect(applySafetyScoresFastening([row()], replace("missing", scores(0.5)), "room")).toBeNull();
   });
 });
 
@@ -175,6 +205,26 @@ describe("channel MAM rebuild", () => {
     });
     expect(timeline.map((message) => message.id)).toEqual(["stanza-1"]);
     expect(timeline[0]?.safetyScores).toEqual(scores(0.8));
+  });
+
+  test("an older archive page cannot revert a newer judgment already applied", () => {
+    const latest = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessage(),
+        fasteningRecord("f-2", replace("stanza-1", scores(0.8)), "2026-09-25T10:02:00Z"),
+      ],
+    });
+    const withOlderPage = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        fasteningRecord("f-1", replace("stanza-1", scores(0.2)), "2026-09-25T10:00:00Z"),
+      ],
+      existing: latest,
+    });
+    expect(withOlderPage[0]?.safetyScores).toEqual(scores(0.8));
   });
 
   test("scores survive a rebuild over an existing, already-scored row", () => {
