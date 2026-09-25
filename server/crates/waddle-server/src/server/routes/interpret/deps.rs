@@ -199,7 +199,7 @@ impl HostOwnedResources {
 /// churn small.
 #[derive(Clone)]
 pub struct Deps<'a> {
-    /// Shared across all delivery effects and socket checks in one ingress pass.
+    /// Shared allowance for fair recheck rounds within one ingress pass.
     pub(crate) dispatch_probe_budget: Option<crate::ingress::DispatchProbeBudget>,
     pub(crate) delivery_execution_context: DeliveryExecutionContext,
     /// Owned receipt context scoped to one recorded direct-route resource attempt.

@@ -439,11 +439,20 @@ impl OrderedRelayDeliveryBridge {
                 };
                 let stream = entry.sm_stream_id();
                 let context = obligation.clone().into_context();
+                // This receiver has no enclosing execution round to recheck a
+                // transient predecessor. Keep its bounded probes request-local
+                // while retaining the captured socket owner until enqueue.
+                let probe_budget = crate::ingress::DispatchProbeBudget::default();
                 match state
                     .deps
                     .protocol
                     .ingress
-                    .socket_delivery_readiness(&context, &msg.frame.jid, stream.as_ref(), None)
+                    .socket_delivery_readiness(
+                        &context,
+                        &msg.frame.jid,
+                        stream.as_ref(),
+                        Some(&probe_budget),
+                    )
                     .await
                 {
                     Ok(crate::ingress_uow::DispatchReadiness::Completed) => {

@@ -15,7 +15,7 @@ struct Hooks {
     pause: Option<Arc<TerminalizationGate>>,
     recovery_freeze: Option<Arc<TerminalizationGate>>,
     delivery_append: Option<(jid::FullJid, Arc<TerminalizationGate>)>,
-    blocked_dispatch: Option<Arc<TerminalizationGate>>,
+    blocked_dispatch: Option<(Option<jid::FullJid>, Arc<TerminalizationGate>)>,
     timeout: AtomicBool,
     receipt_failure: Option<super::EffectReceiptKey>,
 }
@@ -132,16 +132,40 @@ pub(crate) fn pause_after_blocked_dispatch(key: MessageKey) -> Arc<Terminalizati
         .expect("dispatch hooks")
         .entry(key)
         .or_default()
-        .blocked_dispatch = Some(Arc::clone(&gate));
+        .blocked_dispatch = Some((None, Arc::clone(&gate)));
     gate
 }
 
-pub(crate) async fn after_blocked_dispatch(key: MessageKey) {
+pub(crate) fn pause_after_blocked_dispatch_for_resource(
+    key: MessageKey,
+    resource: jid::FullJid,
+) -> Arc<TerminalizationGate> {
+    let gate = Arc::new(TerminalizationGate::default());
+    HOOKS
+        .lock()
+        .expect("dispatch hooks")
+        .entry(key)
+        .or_default()
+        .blocked_dispatch = Some((Some(resource), Arc::clone(&gate)));
+    gate
+}
+
+pub(crate) async fn after_blocked_dispatch(key: MessageKey, resource: Option<&jid::FullJid>) {
     let pause = HOOKS
         .lock()
         .expect("dispatch hooks")
         .get_mut(&key)
-        .and_then(|hooks| hooks.blocked_dispatch.take());
+        .and_then(|hooks| {
+            if hooks
+                .blocked_dispatch
+                .as_ref()
+                .is_some_and(|(target, _)| target.is_none() || target.as_ref() == resource)
+            {
+                hooks.blocked_dispatch.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        });
     if let Some(gate) = pause {
         gate.reached.notify_one();
         gate.release.notified().await;

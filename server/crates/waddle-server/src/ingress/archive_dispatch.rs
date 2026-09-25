@@ -24,14 +24,14 @@ use crate::{
 
 use super::{EffectReceiptKey, IngressDecision};
 
-/// One bounded allowance shared by every effect and socket probe in a pass.
+/// Bounded backoffs for fair execution rounds or one remote admission request.
 #[derive(Clone, Default)]
 pub(crate) struct DispatchProbeBudget {
     used: Arc<AtomicU8>,
 }
 
 impl DispatchProbeBudget {
-    fn next_backoff(&self) -> Option<Duration> {
+    pub(super) fn next_backoff(&self) -> Option<Duration> {
         self.used
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 (used < 4).then_some(used + 1)
@@ -56,7 +56,7 @@ impl super::IngressAuthority {
         stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
         budget: Option<&DispatchProbeBudget>,
     ) -> Result<DispatchReadiness, IngressUowError> {
-        resource_ready(
+        resource_ready_with_rechecks(
             &self.uow,
             context.message_key,
             &context.receipt,
@@ -184,10 +184,9 @@ fn identity_matches(
     }
 }
 
-/// Give in-flight predecessor receipts a brief chance to finish, without
-/// retaining a transaction or executing predecessor work. Persistent barriers
-/// still defer to maintenance; the enclosing execution deadline also applies.
-pub(super) async fn resource_ready(
+/// A standalone receiver can recheck its single target. Local execution uses
+/// single probes and revisits deferred effects together between fair rounds.
+async fn resource_ready_with_rechecks(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     receipt: &EffectReceiptKey,
@@ -196,7 +195,7 @@ pub(super) async fn resource_ready(
     budget: Option<&DispatchProbeBudget>,
 ) -> Result<DispatchReadiness, IngressUowError> {
     loop {
-        let readiness = resource_ready_once(uow, key, receipt, resource, stream).await?;
+        let readiness = resource_ready(uow, key, receipt, resource, stream).await?;
         // An empty predecessor list denotes an independent pending-delivery
         // barrier, which can require client acknowledgement rather than an
         // in-flight canonical receipt. Do not delay that connection's loop.
@@ -210,7 +209,8 @@ pub(super) async fn resource_ready(
     }
 }
 
-async fn resource_ready_once(
+/// One fresh transaction; callers own retry scheduling after it is released.
+pub(super) async fn resource_ready(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     receipt: &EffectReceiptKey,
@@ -225,7 +225,7 @@ async fn resource_ready_once(
     tx.commit().await?;
     #[cfg(test)]
     if matches!(&readiness, DispatchReadiness::Blocked(_)) {
-        super::execute::test_hooks::after_blocked_dispatch(key).await;
+        super::execute::test_hooks::after_blocked_dispatch(key, resource).await;
     }
     Ok(readiness)
 }
@@ -288,16 +288,7 @@ pub(super) async fn effect_ready(
             continue;
         }
         checked = true;
-        match resource_ready(
-            uow,
-            key,
-            receipt,
-            target,
-            stream.as_ref(),
-            deps.dispatch_probe_budget.as_ref(),
-        )
-        .await?
-        {
+        match resource_ready(uow, key, receipt, target, stream.as_ref()).await? {
             blocked @ DispatchReadiness::Blocked(_) => return Ok((blocked, None)),
             DispatchReadiness::Ready => readiness = DispatchReadiness::Ready,
             DispatchReadiness::Completed => {}

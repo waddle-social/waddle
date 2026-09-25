@@ -82,7 +82,6 @@ pub(super) async fn execute(
             &progress.receipt,
             Some(resource),
             dispatch_stream.as_ref(),
-            deps.dispatch_probe_budget.as_ref(),
         )
         .await
         {
@@ -94,9 +93,13 @@ pub(super) async fn execute(
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Delivered));
                 continue;
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) => {
+            Ok(crate::ingress_uow::DispatchReadiness::Blocked(predecessors)) => {
                 if completion != SettledCompletion::Uncertain {
-                    completion = SettledCompletion::Deferred;
+                    if !predecessors.is_empty() {
+                        completion = SettledCompletion::Deferred;
+                    } else if completion != SettledCompletion::Deferred {
+                        completion = SettledCompletion::DeferredPending;
+                    }
                 }
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
                 continue;

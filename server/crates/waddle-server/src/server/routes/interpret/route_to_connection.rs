@@ -1381,12 +1381,7 @@ pub(crate) async fn deliver_ordered_local_copy(
         .deps
         .protocol
         .ingress
-        .socket_delivery_readiness(
-            context,
-            target,
-            stream.as_ref(),
-            deps.dispatch_probe_budget.as_ref(),
-        )
+        .socket_delivery_readiness(context, target, stream.as_ref(), None)
         .await
     {
         Ok(crate::ingress_uow::DispatchReadiness::Completed) => {

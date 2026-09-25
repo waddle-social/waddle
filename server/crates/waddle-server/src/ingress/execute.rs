@@ -35,6 +35,9 @@ mod observers;
 #[path = "execute_muc_fanout.rs"]
 mod muc_fanout;
 
+#[path = "execute_dispatch_rounds.rs"]
+mod dispatch_rounds;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalOutcome {
     Done,
@@ -371,9 +374,10 @@ pub async fn execute_effects(
     budget: Duration,
 ) -> ExecutionReport {
     let mut scoped_deps = deps.clone();
-    scoped_deps
+    let probe_budget = scoped_deps
         .dispatch_probe_budget
-        .get_or_insert_with(Default::default);
+        .get_or_insert_with(Default::default)
+        .clone();
     let deps = &scoped_deps;
     let mut report = ExecutionReport::new(deps.delivery_execution_context.into());
     if !decision.class.advances() {
@@ -384,6 +388,7 @@ pub async fn execute_effects(
     let mut recorded = Vec::new();
     let mut proven = vec![Vec::new(); decision.external.len()];
     let mut completed = vec![None; decision.external.len()];
+    let mut recheck = vec![false; decision.external.len()];
     let mut discharged_invite_deliveries = vec![false; decision.external.len()];
     let mut planned = decision
         .external
@@ -406,7 +411,19 @@ pub async fn execute_effects(
         .cloned()
         .map(|effect| (effect, ExternalOutcome::Failed))
         .collect();
-    while completed.iter().any(Option::is_none) {
+    loop {
+        if completed.iter().all(Option::is_some)
+            && !dispatch_rounds::resume_deferred(
+                &report.outcomes,
+                &recheck,
+                &mut completed,
+                &probe_budget,
+                deadline,
+            )
+            .await
+        {
+            break;
+        }
         let next = planned.iter().enumerate().find_map(|(index, effect)| {
             if completed[index].is_some() {
                 return None;
@@ -434,6 +451,7 @@ pub async fn execute_effects(
             index
         };
         let effect = &decision.external[index];
+        recheck[index] = false;
         if ready && observers::is_observer(effect) {
             observers::execute_ready(
                 observers::Batch {
@@ -493,15 +511,20 @@ pub async fn execute_effects(
             ExternalOutcome::Done
         } else if !ready || tokio::time::Instant::now() >= deadline {
             completed[index] = Some(false);
-            ExternalOutcome::Failed
+            if report.outcomes[index].1 == ExternalOutcome::AwaitingPredecessor {
+                ExternalOutcome::AwaitingPredecessor
+            } else {
+                ExternalOutcome::Failed
+            }
         } else {
             match tokio::time::timeout_at(
                 deadline,
                 async {
                     let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
                         Ok((crate::ingress_uow::DispatchReadiness::Ready, stream)) => stream,
-                        Ok((crate::ingress_uow::DispatchReadiness::Blocked(_), _)) => return EffectOutcome::Settled(SettledOutcome {
-                            refusal: None, persisted: Vec::new(), detached: None, completion: SettledCompletion::Deferred,
+                        Ok((crate::ingress_uow::DispatchReadiness::Blocked(predecessors), _)) => return EffectOutcome::Settled(SettledOutcome {
+                            refusal: None, persisted: Vec::new(), detached: None,
+                            completion: if predecessors.is_empty() { SettledCompletion::DeferredPending } else { SettledCompletion::Deferred },
                         }),
                         Ok((crate::ingress_uow::DispatchReadiness::Completed, _)) => return EffectOutcome::Settled(SettledOutcome {
                             refusal: None, persisted: Vec::new(), detached: None, completion: SettledCompletion::Complete,
@@ -581,6 +604,11 @@ pub async fn execute_effects(
             .await
             {
                 Ok(result) => {
+                    recheck[index] = matches!(
+                        &result,
+                        EffectOutcome::Settled(settled)
+                            if settled.completion == SettledCompletion::Deferred
+                    );
                     if let EffectOutcome::Settled(settled) = &result {
                         report.refusal = report.refusal.or(settled.refusal);
                     }
@@ -672,7 +700,10 @@ pub async fn execute_effects(
             }
         };
         report.outcomes[index].1 = outcome;
-        if outcome == ExternalOutcome::AwaitingFrameDelivery {
+        if matches!(
+            outcome,
+            ExternalOutcome::AwaitingFrameDelivery | ExternalOutcome::AwaitingPredecessor
+        ) {
             continue;
         }
         if outcome != ExternalOutcome::Done {
@@ -726,6 +757,13 @@ pub async fn execute_effects(
                     report.outcomes[index].1 = ExternalOutcome::Uncertain;
                 }
             }
+        }
+    }
+    // Intermediate ordering deferrals may have completed in a later round.
+    // Only final deferrals contribute unresolved-effect diagnostics.
+    for (effect, outcome) in &report.outcomes {
+        if *outcome == ExternalOutcome::AwaitingPredecessor {
+            meter_unresolved(effect, report.phase);
         }
     }
     // Compute receipts that become provable only when all prepared frames are written.
@@ -951,7 +989,7 @@ fn classify_outcome(
                 SettledCompletion::Complete => ExternalOutcome::Done,
                 SettledCompletion::Incomplete => ExternalOutcome::Failed,
                 SettledCompletion::Uncertain => ExternalOutcome::Uncertain,
-                SettledCompletion::Deferred => ExternalOutcome::AwaitingPredecessor,
+                SettledCompletion::Deferred | SettledCompletion::DeferredPending => ExternalOutcome::AwaitingPredecessor,
             }
         }
         #[cfg(feature = "clustering")]
