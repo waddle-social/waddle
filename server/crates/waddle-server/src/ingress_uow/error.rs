@@ -66,6 +66,13 @@ pub enum IngressUowError {
     MamStore(waddle_xmpp::mam::MamTxStoreError),
     #[error(transparent)]
     Inbox(#[from] crate::inbox::InboxTxError),
+    /// A `message_judgment_outbox` insert failed inside the same
+    /// transaction as the archive write it accompanies (#1831 Phase 2).
+    /// Propagating this — rather than swallowing it — is what makes the
+    /// enqueue a real transactional outbox: a failure here rolls back the
+    /// archive write too, so the two can never observably diverge.
+    #[error(transparent)]
+    MessageJudgmentOutbox(#[from] crate::message_judgment_outbox::MessageJudgmentOutboxError),
     #[error(transparent)]
     Substrate(#[from] IngressSubstrateError),
     #[error("ingress effect-intent encoding failed")]
@@ -116,6 +123,9 @@ impl IngressUowError {
             Self::Inbox(crate::inbox::InboxTxError::Database(error)) => {
                 DbRetryClass::from_database_error(error)
             }
+            Self::MessageJudgmentOutbox(
+                crate::message_judgment_outbox::MessageJudgmentOutboxError::Database(error),
+            ) => DbRetryClass::from_database_error(error),
             _ => DbRetryClass::NotRetryable,
         }
     }

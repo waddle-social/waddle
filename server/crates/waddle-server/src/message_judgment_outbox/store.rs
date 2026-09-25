@@ -97,9 +97,20 @@ pub struct JudgmentRecord {
 const OUTBOX_SELECT_COLUMNS: &str = "id, waddle_id, stanza_id, stanza_by, body_snapshot, \
      available_at_ms, attempt_count, last_error, created_at_ms";
 
+const ENQUEUE_SQL: &str = "INSERT INTO message_judgment_outbox \
+     (id, waddle_id, stanza_id, stanza_by, body_snapshot, available_at_ms, \
+      attempt_count, last_error, done, created_at_ms) \
+     VALUES (?, ?, ?, ?, ?, ?, 0, NULL, FALSE, ?)";
+
 /// Enqueue one message for judgment. Plain insert, no dedup — the queue
 /// itself may carry duplicates (e.g. a retried enqueue); `message_judgments`
 /// is where idempotency is enforced (see [`insert_judgment`]).
+///
+/// Used by this module's own tests and by any future caller outside a live
+/// ingress transaction. The real production enqueue site
+/// (`ingress::durable::apply_durable`) uses [`enqueue_pending_in_tx`]
+/// instead, so the row and the archive write it accompanies commit or roll
+/// back together (#1831 Phase 2) — see that function's docs.
 pub async fn enqueue_pending(
     db: &Database,
     input: PendingJudgmentInput,
@@ -109,10 +120,7 @@ pub async fn enqueue_pending(
     let connection = db.guard().await?;
     connection
         .execute(
-            "INSERT INTO message_judgment_outbox \
-             (id, waddle_id, stanza_id, stanza_by, body_snapshot, available_at_ms, \
-              attempt_count, last_error, done, created_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, 0, NULL, FALSE, ?)",
+            ENQUEUE_SQL,
             crate::db_params![
                 id.as_str(),
                 input.waddle_id.as_str(),
@@ -124,6 +132,43 @@ pub async fn enqueue_pending(
             ],
         )
         .await?;
+    Ok(())
+}
+
+/// Enqueue one message for judgment inside the caller's own transaction.
+///
+/// This is the real transactional-outbox seam (#1831 Phase 2): called from
+/// `ingress::durable::apply_durable` (via
+/// `ingress_uow::MessageJudgmentOutboxRepository::enqueue_in_tx`) on the
+/// exact same [`crate::db::Transaction`] that just wrote the archive row,
+/// before that transaction commits. Dropping the transaction without
+/// committing — the same rollback-on-drop behaviour every other
+/// `ingress_uow` repository write relies on — undoes this insert together
+/// with the archive write, so the two can never observably diverge:
+/// no crash window exists where one is durable and the other is not.
+///
+/// Mirrors [`enqueue_pending`] exactly (same columns, same no-dedup
+/// semantics) but executes against a transaction handle instead of
+/// checking out a pooled connection.
+pub async fn enqueue_pending_in_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    input: PendingJudgmentInput,
+) -> Result<(), MessageJudgmentOutboxError> {
+    let id = MessageJudgmentOutboxId::generate();
+    let body_snapshot: String = input.body.chars().take(MAX_BODY_SNAPSHOT_CHARS).collect();
+    tx.execute(
+        ENQUEUE_SQL,
+        crate::db_params![
+            id.as_str(),
+            input.waddle_id.as_str(),
+            input.stanza_id.id.as_str(),
+            input.stanza_id.by.to_string(),
+            body_snapshot,
+            input.now_ms,
+            input.now_ms,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
@@ -910,6 +955,73 @@ mod tests {
             row.get::<f64>(2).expect("cost_usd"),
             0.00002 + 0.00003,
             "the second call's cost must be added, not discarded, even though its judgment collided"
+        );
+    }
+
+    // #1831 Phase 2: `enqueue_pending_in_tx` is the real production seam
+    // (called from `ingress::durable::apply_durable` via
+    // `ingress_uow::MessageJudgmentOutboxRepository`). These two tests
+    // prove it round-trips identically to `enqueue_pending` when
+    // committed, and — the whole point of moving this onto a caller-owned
+    // transaction — that it rolls back cleanly when that transaction
+    // never commits, exactly like every other ingress repository write.
+
+    #[tokio::test]
+    async fn enqueue_pending_in_tx_is_visible_once_committed() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+
+        let mut tx = db.begin().await.expect("begin");
+        enqueue_pending_in_tx(
+            &mut tx,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-tx-commit"),
+                body: "is this committed?".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue in tx");
+        tx.commit().await.expect("commit");
+
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].stanza_id.as_str(), "stanza-tx-commit");
+        assert_eq!(due[0].body_snapshot, "is this committed?");
+    }
+
+    #[tokio::test]
+    async fn enqueue_pending_in_tx_is_absent_when_the_transaction_rolls_back() {
+        let db = test_db().await;
+        super::super::schema::initialize(&db)
+            .await
+            .expect("initialize");
+
+        let mut tx = db.begin().await.expect("begin");
+        enqueue_pending_in_tx(
+            &mut tx,
+            PendingJudgmentInput {
+                waddle_id: waddle_id(),
+                stanza_id: stanza("stanza-tx-rollback"),
+                body: "never committed".to_string(),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("enqueue in tx");
+        // No `tx.commit()`: dropping the transaction rolls it back, the
+        // same behaviour `ingress_uow::IngressUowTransaction` documents
+        // and relies on for every other repository write in the same
+        // ingress transaction as an archive write.
+        drop(tx);
+
+        let due = fetch_due_batch(&db, 10, 1_000).await.expect("fetch");
+        assert!(
+            due.is_empty(),
+            "a row enqueued on a rolled-back transaction must not persist"
         );
     }
 }

@@ -121,6 +121,20 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    /// Opt this authority's ingress transactions into enqueueing a
+    /// `message_judgment_outbox` row alongside every freshly archived
+    /// direct/groupchat message, in the same transaction that commits the
+    /// archive write (#1831 Phase 2). Chain this onto [`Self::new`] at the
+    /// single production construction site
+    /// (`server::http::open_ingress_authority`), passing
+    /// `ServerConfig::message_judgment_outbox.enabled`; every other
+    /// (test) caller of [`Self::new`] keeps building an authority whose
+    /// transactions never enqueue, unmodified.
+    pub fn with_judgment_outbox_enabled(mut self, enabled: bool) -> Self {
+        self.uow.set_judgment_outbox_enabled(enabled);
+        self
+    }
+
     /// Resolve a provider's configured room authority without minting a grant.
     pub(crate) async fn active_extension_room_grant(
         &self,
