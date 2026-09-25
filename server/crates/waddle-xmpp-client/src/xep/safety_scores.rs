@@ -120,6 +120,26 @@ impl SafetyVersion {
     }
 }
 
+/// XEP-0422 `<apply-to id='…'/>` target: the fastened message's XEP-0359
+/// id, trimmed and non-empty.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FasteningTargetId(String);
+
+impl FasteningTargetId {
+    pub fn parse(value: &str) -> Result<Self, SafetyScoresParseError> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            Err(SafetyScoresParseError::MissingTargetId)
+        } else {
+            Ok(Self(trimmed.to_owned()))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScore {
     pub category: SafetyScoreCategory,
@@ -146,7 +166,7 @@ pub enum SafetyScoresPayload {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScoresFastening {
     /// XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
-    pub target_id: String,
+    pub target_id: FasteningTargetId,
     pub payload: SafetyScoresPayload,
 }
 
@@ -171,12 +191,11 @@ pub fn parse_safety_scores_fastening(
     if !apply_to.is(APPLY_TO, NS_FASTEN) {
         return Err(SafetyScoresParseError::NotApplyTo);
     }
-    let target_id = apply_to
-        .attr("id")
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .ok_or(SafetyScoresParseError::MissingTargetId)?
-        .to_owned();
+    let target_id = FasteningTargetId::parse(
+        apply_to
+            .attr("id")
+            .ok_or(SafetyScoresParseError::MissingTargetId)?,
+    )?;
     let payload_element = apply_to
         .get_child(SAFETY_SCORES, NS_WADDLE_SAFETY_SCORES)
         .ok_or(SafetyScoresParseError::NotSafetyScores)?;

@@ -685,7 +685,7 @@ fn call_thread_ended_to_ffi(ended: CallThreadEnded) -> WaddleCallThreadEnded {
 
 fn safety_scores_to_ffi(fastening: SafetyScoresFastening) -> WaddleSafetyScoresFastening {
     WaddleSafetyScoresFastening {
-        target_id: fastening.target_id,
+        target_id: fastening.target_id.as_str().to_owned(),
         payload: match fastening.payload {
             SafetyScoresPayload::Scores(batch) => WaddleSafetyScoresPayload::Scores {
                 model_version: batch.model_version.as_str().to_owned(),

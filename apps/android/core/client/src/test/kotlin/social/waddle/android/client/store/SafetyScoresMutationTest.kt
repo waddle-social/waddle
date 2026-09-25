@@ -200,6 +200,38 @@ class SafetyScoresMutationTest {
     }
 
     @Test
+    fun `a live clear survives a re-page of the fastening it anchored to`() {
+        val archivedScores = testArchivedMessage(
+            mamId = "m2",
+            id = "f1",
+            from = ROOM,
+            to = null,
+            messageType = "groupchat",
+            body = null,
+            timestamp = "2026-09-25T10:01:00Z",
+            safetyScores = fastening(scores("jev-1")),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "m1",
+                stanzaId = "s1",
+                from = "$ROOM/alice",
+                to = null,
+                messageType = "groupchat",
+                timestamp = "2026-09-25T10:00:00Z",
+            ),
+        )
+        // The fastening is the newest wire stamp seen: the live clear
+        // anchors exactly at its instant.
+        store.onArchivedMessage(archivedScores)
+        store.onLiveMessage(liveScores(WaddleSafetyScoresPayload.Cleared))
+        // Re-opening the room re-pages the same newest MAM page.
+        store.onArchivedMessage(archivedScores)
+
+        assertNull(mucTimeline().single().safetyScores)
+    }
+
+    @Test
     fun `scores survive the live record superseding its archived twin`() {
         store.onArchivedMessage(
             testArchivedMessage(

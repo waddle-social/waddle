@@ -94,7 +94,7 @@ fn category_tokens_match_server_judgment_names() {
 fn parses_the_full_contract_batch_in_wire_order() {
     let fastening =
         parse_safety_scores_fastening(&element(FULL_BATCH)).expect("contract batch parses");
-    assert_eq!(fastening.target_id, "judged-1");
+    assert_eq!(fastening.target_id.as_str(), "judged-1");
     let scores = scores_of(fastening);
     assert_eq!(scores.model_version.as_str(), "typesafe/jev-1.13-20260917");
     let categories: Vec<_> = scores.scores.iter().map(|s| s.category).collect();
@@ -198,6 +198,15 @@ fn apply_to_requires_a_target_id_and_the_safety_scores_payload() {
         parse_safety_scores_fastening(&no_id),
         Err(SafetyScoresParseError::MissingTargetId)
     );
+    let blank_id = element(
+        "<apply-to xmlns='urn:xmpp:fasten:0' id='  '>\
+           <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='m'/>\
+         </apply-to>",
+    );
+    assert_eq!(
+        parse_safety_scores_fastening(&blank_id),
+        Err(SafetyScoresParseError::MissingTargetId)
+    );
     let other_payload = element(
         "<apply-to xmlns='urn:xmpp:fasten:0' id='x'>\
            <call-thread-ended xmlns='urn:waddle:call-thread:0' ended='2026-06-07T14:35:00Z' duration='PT5M'/>\
@@ -242,7 +251,7 @@ fn xep0422_clear_removes_the_fastening() {
             .append(Element::builder("safety-scores", NS_WADDLE_SAFETY_SCORES).build())
             .build();
         let fastening = parse_safety_scores_fastening(&apply_to).expect("clear parses");
-        assert_eq!(fastening.target_id, "judged-1");
+        assert_eq!(fastening.target_id.as_str(), "judged-1");
         assert_eq!(fastening.payload, SafetyScoresPayload::Cleared);
     }
     let not_clear = element(
@@ -274,7 +283,7 @@ fn probability_bounds_are_inclusive() {
 fn room_bare_jid_groupchat_broadcast_is_accepted() {
     let message = room_message(ROOM, "groupchat", FULL_BATCH);
     let fastening = parse_room_safety_scores_child(&message).expect("room broadcast accepted");
-    assert_eq!(fastening.target_id, "judged-1");
+    assert_eq!(fastening.target_id.as_str(), "judged-1");
 }
 
 #[test]
@@ -306,7 +315,7 @@ fn inbound_message_parser_surfaces_room_scores() {
     let fastening = inbound
         .safety_scores
         .expect("scores on the inbound message");
-    assert_eq!(fastening.target_id, "judged-1");
+    assert_eq!(fastening.target_id.as_str(), "judged-1");
     assert!(inbound.body.is_none());
     assert!(inbound.call_thread_ended.is_none());
 }

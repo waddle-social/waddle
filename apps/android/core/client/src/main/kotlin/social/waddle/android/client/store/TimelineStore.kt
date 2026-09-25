@@ -294,6 +294,7 @@ class TimelineStore(
                 rank = Rank(
                     instant = instant ?: newestWireInstant[conversation],
                     order = insertionCounter++,
+                    anchored = instant == null,
                 ),
                 isGroupchat = isGroupchat,
             )
@@ -487,13 +488,23 @@ class TimelineStore(
      * (archived mutations always are); live mutations are anchored to
      * the newest wire instant seen at apply time (see [applyMutation]),
      * so a null instant only means "nothing wire-stamped seen yet" and
-     * sorts oldest. Insertion order breaks ties (a live apply outranks
-     * the wire stamp it was anchored to).
+     * sorts oldest. At an equal instant a live ([anchored]) apply
+     * outranks any wire-stamped mutation — the stamp it was anchored to
+     * was already seen, so a stamped mutation at that same instant is a
+     * replay of history, even when it arrives later (a MAM re-page must
+     * not resurrect what a live apply replaced or cleared). Insertion
+     * order breaks the remaining ties.
      */
-    private data class Rank(val instant: Instant?, val order: Long) : Comparable<Rank> {
+    private data class Rank(
+        val instant: Instant?,
+        val order: Long,
+        val anchored: Boolean,
+    ) : Comparable<Rank> {
         override fun compareTo(other: Rank): Int {
             val byInstant = (instant ?: Instant.MIN).compareTo(other.instant ?: Instant.MIN)
-            return if (byInstant != 0) byInstant else order.compareTo(other.order)
+            if (byInstant != 0) return byInstant
+            if (anchored != other.anchored) return if (anchored) 1 else -1
+            return order.compareTo(other.order)
         }
     }
 
