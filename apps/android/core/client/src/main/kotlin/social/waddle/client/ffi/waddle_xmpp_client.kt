@@ -10795,12 +10795,12 @@ data class WaddleSafetyScore (
     /**
      * Validated probability in `0.0..=1.0`.
      */
-    var `probability`: kotlin.Double
+    var `probability`: SafetyProbability
     ,
     /**
      * Revision of this category's question wording.
      */
-    var `taxonomyVersion`: kotlin.String
+    var `taxonomyVersion`: SafetyVersion
 
 ){
 
@@ -10818,21 +10818,21 @@ public object FfiConverterTypeWaddleSafetyScore: FfiConverterRustBuffer<WaddleSa
     override fun read(buf: ByteBuffer): WaddleSafetyScore {
         return WaddleSafetyScore(
             FfiConverterTypeWaddleSafetyScoreCategory.read(buf),
-            FfiConverterDouble.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeSafetyProbability.read(buf),
+            FfiConverterTypeSafetyVersion.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleSafetyScore) = (
             FfiConverterTypeWaddleSafetyScoreCategory.allocationSize(value.`category`) +
-            FfiConverterDouble.allocationSize(value.`probability`) +
-            FfiConverterString.allocationSize(value.`taxonomyVersion`)
+            FfiConverterTypeSafetyProbability.allocationSize(value.`probability`) +
+            FfiConverterTypeSafetyVersion.allocationSize(value.`taxonomyVersion`)
     )
 
     override fun write(value: WaddleSafetyScore, buf: ByteBuffer) {
             FfiConverterTypeWaddleSafetyScoreCategory.write(value.`category`, buf)
-            FfiConverterDouble.write(value.`probability`, buf)
-            FfiConverterString.write(value.`taxonomyVersion`, buf)
+            FfiConverterTypeSafetyProbability.write(value.`probability`, buf)
+            FfiConverterTypeSafetyVersion.write(value.`taxonomyVersion`, buf)
     }
 }
 
@@ -10846,7 +10846,7 @@ data class WaddleSafetyScoresFastening (
     /**
      * XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
      */
-    var `targetId`: kotlin.String
+    var `targetId`: FasteningTargetId
     ,
     var `payload`: WaddleSafetyScoresPayload
 
@@ -10865,18 +10865,18 @@ data class WaddleSafetyScoresFastening (
 public object FfiConverterTypeWaddleSafetyScoresFastening: FfiConverterRustBuffer<WaddleSafetyScoresFastening> {
     override fun read(buf: ByteBuffer): WaddleSafetyScoresFastening {
         return WaddleSafetyScoresFastening(
-            FfiConverterString.read(buf),
+            FfiConverterTypeFasteningTargetId.read(buf),
             FfiConverterTypeWaddleSafetyScoresPayload.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleSafetyScoresFastening) = (
-            FfiConverterString.allocationSize(value.`targetId`) +
+            FfiConverterTypeFasteningTargetId.allocationSize(value.`targetId`) +
             FfiConverterTypeWaddleSafetyScoresPayload.allocationSize(value.`payload`)
     )
 
     override fun write(value: WaddleSafetyScoresFastening, buf: ByteBuffer) {
-            FfiConverterString.write(value.`targetId`, buf)
+            FfiConverterTypeFasteningTargetId.write(value.`targetId`, buf)
             FfiConverterTypeWaddleSafetyScoresPayload.write(value.`payload`, buf)
     }
 }
@@ -13679,7 +13679,7 @@ sealed class WaddleSafetyScoresPayload {
      * Replace the target's scores (one model call produced all of them).
      */
     data class Scores(
-        val `modelVersion`: kotlin.String,
+        val `modelVersion`: social.waddle.client.ffi.SafetyVersion,
         val `scores`: List<social.waddle.client.ffi.WaddleSafetyScore>) : WaddleSafetyScoresPayload()
 
     {
@@ -13711,7 +13711,7 @@ public object FfiConverterTypeWaddleSafetyScoresPayload : FfiConverterRustBuffer
     override fun read(buf: ByteBuffer): WaddleSafetyScoresPayload {
         return when(buf.getInt()) {
             1 -> WaddleSafetyScoresPayload.Scores(
-                FfiConverterString.read(buf),
+                FfiConverterTypeSafetyVersion.read(buf),
                 FfiConverterSequenceTypeWaddleSafetyScore.read(buf),
                 )
             2 -> WaddleSafetyScoresPayload.Cleared
@@ -13724,7 +13724,7 @@ public object FfiConverterTypeWaddleSafetyScoresPayload : FfiConverterRustBuffer
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterString.allocationSize(value.`modelVersion`)
+                + FfiConverterTypeSafetyVersion.allocationSize(value.`modelVersion`)
                 + FfiConverterSequenceTypeWaddleSafetyScore.allocationSize(value.`scores`)
             )
         }
@@ -13740,7 +13740,7 @@ public object FfiConverterTypeWaddleSafetyScoresPayload : FfiConverterRustBuffer
         when(value) {
             is WaddleSafetyScoresPayload.Scores -> {
                 buf.putInt(1)
-                FfiConverterString.write(value.`modelVersion`, buf)
+                FfiConverterTypeSafetyVersion.write(value.`modelVersion`, buf)
                 FfiConverterSequenceTypeWaddleSafetyScore.write(value.`scores`, buf)
                 Unit
             }
@@ -16877,8 +16877,38 @@ public object FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBuffer<
  * is needed because the UDL type name is used in function/method signatures.
  * It's also what we have an external type that references a custom type.
  */
+public typealias FasteningTargetId = kotlin.String
+public typealias FfiConverterTypeFasteningTargetId = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
 public typealias Jid = kotlin.String
 public typealias FfiConverterTypeJid = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias SafetyProbability = kotlin.Double
+public typealias FfiConverterTypeSafetyProbability = FfiConverterDouble
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias SafetyVersion = kotlin.String
+public typealias FfiConverterTypeSafetyVersion = FfiConverterString
 
 
 

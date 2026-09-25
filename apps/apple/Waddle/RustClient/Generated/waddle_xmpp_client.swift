@@ -10352,21 +10352,21 @@ public struct WaddleSafetyScore: Equatable, Hashable {
     /**
      * Validated probability in `0.0..=1.0`.
      */
-    public var probability: Double
+    public var probability: SafetyProbability
     /**
      * Revision of this category's question wording.
      */
-    public var taxonomyVersion: String
+    public var taxonomyVersion: SafetyVersion
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(category: WaddleSafetyScoreCategory,
         /**
          * Validated probability in `0.0..=1.0`.
-         */probability: Double,
+         */probability: SafetyProbability,
         /**
          * Revision of this category's question wording.
-         */taxonomyVersion: String) {
+         */taxonomyVersion: SafetyVersion) {
         self.category = category
         self.probability = probability
         self.taxonomyVersion = taxonomyVersion
@@ -10389,15 +10389,15 @@ public struct FfiConverterTypeWaddleSafetyScore: FfiConverterRustBuffer {
         return
             try WaddleSafetyScore(
                 category: FfiConverterTypeWaddleSafetyScoreCategory.read(from: &buf),
-                probability: FfiConverterDouble.read(from: &buf),
-                taxonomyVersion: FfiConverterString.read(from: &buf)
+                probability: FfiConverterTypeSafetyProbability.read(from: &buf),
+                taxonomyVersion: FfiConverterTypeSafetyVersion.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleSafetyScore, into buf: inout [UInt8]) {
         FfiConverterTypeWaddleSafetyScoreCategory.write(value.category, into: &buf)
-        FfiConverterDouble.write(value.probability, into: &buf)
-        FfiConverterString.write(value.taxonomyVersion, into: &buf)
+        FfiConverterTypeSafetyProbability.write(value.probability, into: &buf)
+        FfiConverterTypeSafetyVersion.write(value.taxonomyVersion, into: &buf)
     }
 }
 
@@ -10425,7 +10425,7 @@ public struct WaddleSafetyScoresFastening: Equatable, Hashable {
     /**
      * XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
      */
-    public var targetId: String
+    public var targetId: FasteningTargetId
     public var payload: WaddleSafetyScoresPayload
 
     // Default memberwise initializers are never public by default, so we
@@ -10433,7 +10433,7 @@ public struct WaddleSafetyScoresFastening: Equatable, Hashable {
     public init(
         /**
          * XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
-         */targetId: String, payload: WaddleSafetyScoresPayload) {
+         */targetId: FasteningTargetId, payload: WaddleSafetyScoresPayload) {
         self.targetId = targetId
         self.payload = payload
     }
@@ -10454,13 +10454,13 @@ public struct FfiConverterTypeWaddleSafetyScoresFastening: FfiConverterRustBuffe
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSafetyScoresFastening {
         return
             try WaddleSafetyScoresFastening(
-                targetId: FfiConverterString.read(from: &buf),
+                targetId: FfiConverterTypeFasteningTargetId.read(from: &buf),
                 payload: FfiConverterTypeWaddleSafetyScoresPayload.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleSafetyScoresFastening, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.targetId, into: &buf)
+        FfiConverterTypeFasteningTargetId.write(value.targetId, into: &buf)
         FfiConverterTypeWaddleSafetyScoresPayload.write(value.payload, into: &buf)
     }
 }
@@ -14151,7 +14151,7 @@ public enum WaddleSafetyScoresPayload: Equatable, Hashable {
     /**
      * Replace the target's scores (one model call produced all of them).
      */
-    case scores(modelVersion: String, scores: [WaddleSafetyScore]
+    case scores(modelVersion: SafetyVersion, scores: [WaddleSafetyScore]
     )
     /**
      * XEP-0422 `clear='true'`: remove the target's scores.
@@ -14178,7 +14178,7 @@ public struct FfiConverterTypeWaddleSafetyScoresPayload: FfiConverterRustBuffer 
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        case 1: return .scores(modelVersion: try FfiConverterString.read(from: &buf), scores: try FfiConverterSequenceTypeWaddleSafetyScore.read(from: &buf)
+        case 1: return .scores(modelVersion: try FfiConverterTypeSafetyVersion.read(from: &buf), scores: try FfiConverterSequenceTypeWaddleSafetyScore.read(from: &buf)
         )
 
         case 2: return .cleared
@@ -14193,7 +14193,7 @@ public struct FfiConverterTypeWaddleSafetyScoresPayload: FfiConverterRustBuffer 
 
         case let .scores(modelVersion,scores):
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(modelVersion, into: &buf)
+            FfiConverterTypeSafetyVersion.write(modelVersion, into: &buf)
             FfiConverterSequenceTypeWaddleSafetyScore.write(scores, into: &buf)
 
 
@@ -17052,6 +17052,50 @@ fileprivate struct FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBu
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
  */
+public typealias FasteningTargetId = String
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFasteningTargetId: FfiConverter {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FasteningTargetId {
+        return try FfiConverterString.read(from: &buf)
+    }
+
+    public static func write(_ value: FasteningTargetId, into buf: inout [UInt8]) {
+        return FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func lift(_ value: RustBuffer) throws -> FasteningTargetId {
+        return try FfiConverterString.lift(value)
+    }
+
+    public static func lower(_ value: FasteningTargetId) -> RustBuffer {
+        return FfiConverterString.lower(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFasteningTargetId_lift(_ value: RustBuffer) throws -> FasteningTargetId {
+    return try FfiConverterTypeFasteningTargetId.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFasteningTargetId_lower(_ value: FasteningTargetId) -> RustBuffer {
+    return FfiConverterTypeFasteningTargetId.lower(value)
+}
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
 public typealias Jid = String
 
 #if swift(>=5.8)
@@ -17088,6 +17132,94 @@ public func FfiConverterTypeJid_lift(_ value: RustBuffer) throws -> Jid {
 #endif
 public func FfiConverterTypeJid_lower(_ value: Jid) -> RustBuffer {
     return FfiConverterTypeJid.lower(value)
+}
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
+public typealias SafetyProbability = Double
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSafetyProbability: FfiConverter {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SafetyProbability {
+        return try FfiConverterDouble.read(from: &buf)
+    }
+
+    public static func write(_ value: SafetyProbability, into buf: inout [UInt8]) {
+        return FfiConverterDouble.write(value, into: &buf)
+    }
+
+    public static func lift(_ value: Double) throws -> SafetyProbability {
+        return try FfiConverterDouble.lift(value)
+    }
+
+    public static func lower(_ value: SafetyProbability) -> Double {
+        return FfiConverterDouble.lower(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSafetyProbability_lift(_ value: Double) throws -> SafetyProbability {
+    return try FfiConverterTypeSafetyProbability.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSafetyProbability_lower(_ value: SafetyProbability) -> Double {
+    return FfiConverterTypeSafetyProbability.lower(value)
+}
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
+public typealias SafetyVersion = String
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSafetyVersion: FfiConverter {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SafetyVersion {
+        return try FfiConverterString.read(from: &buf)
+    }
+
+    public static func write(_ value: SafetyVersion, into buf: inout [UInt8]) {
+        return FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func lift(_ value: RustBuffer) throws -> SafetyVersion {
+        return try FfiConverterString.lift(value)
+    }
+
+    public static func lower(_ value: SafetyVersion) -> RustBuffer {
+        return FfiConverterString.lower(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSafetyVersion_lift(_ value: RustBuffer) throws -> SafetyVersion {
+    return try FfiConverterTypeSafetyVersion.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSafetyVersion_lower(_ value: SafetyVersion) -> RustBuffer {
+    return FfiConverterTypeSafetyVersion.lower(value)
 }
 
 

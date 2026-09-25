@@ -294,7 +294,6 @@ class TimelineStore(
                 rank = Rank(
                     instant = instant ?: newestWireInstant[conversation],
                     order = insertionCounter++,
-                    anchored = instant == null,
                 ),
                 isGroupchat = isGroupchat,
             )
@@ -446,12 +445,17 @@ class TimelineStore(
         // Same authenticity rule as XEP-0425: only the room service
         // itself (bare room JID, no occupant resource) scores messages.
         mutation.from != item.conversationJid -> this
+        // A re-delivery (MAM re-page, reconnect catch-up) of a fastening
+        // already applied is history, never an update — even when its
+        // stamp ties the anchor of a later live replace or clear.
+        mutation.fasteningIds.any { it in appliedSafetyFastenings } -> this
         // XEP-0422 replace is latest-wins; a clear keeps its rank so an
         // older MAM replay cannot resurrect scores it removed.
         safetyScoresRank != null && safetyScoresRank > rank -> this
         else -> copy(
             safetyScores = mutation.payload as? WaddleSafetyScoresPayload.Scores,
             safetyScoresRank = rank,
+            appliedSafetyFastenings = appliedSafetyFastenings + mutation.fasteningIds,
         )
     }
 
@@ -488,23 +492,13 @@ class TimelineStore(
      * (archived mutations always are); live mutations are anchored to
      * the newest wire instant seen at apply time (see [applyMutation]),
      * so a null instant only means "nothing wire-stamped seen yet" and
-     * sorts oldest. At an equal instant a live ([anchored]) apply
-     * outranks any wire-stamped mutation — the stamp it was anchored to
-     * was already seen, so a stamped mutation at that same instant is a
-     * replay of history, even when it arrives later (a MAM re-page must
-     * not resurrect what a live apply replaced or cleared). Insertion
-     * order breaks the remaining ties.
+     * sorts oldest. Insertion order breaks ties (a live apply outranks
+     * the wire stamp it was anchored to).
      */
-    private data class Rank(
-        val instant: Instant?,
-        val order: Long,
-        val anchored: Boolean,
-    ) : Comparable<Rank> {
+    private data class Rank(val instant: Instant?, val order: Long) : Comparable<Rank> {
         override fun compareTo(other: Rank): Int {
             val byInstant = (instant ?: Instant.MIN).compareTo(other.instant ?: Instant.MIN)
-            if (byInstant != 0) return byInstant
-            if (anchored != other.anchored) return if (anchored) 1 else -1
-            return order.compareTo(other.order)
+            return if (byInstant != 0) byInstant else order.compareTo(other.order)
         }
     }
 
@@ -528,6 +522,8 @@ class TimelineStore(
         val tombstone: MessageTombstone? = null,
         val safetyScores: WaddleSafetyScoresPayload.Scores? = null,
         val safetyScoresRank: Rank? = null,
+        /** Wire ids of every safety-score fastening applied to the row. */
+        val appliedSafetyFastenings: Set<String> = emptySet(),
     )
 
     private companion object {

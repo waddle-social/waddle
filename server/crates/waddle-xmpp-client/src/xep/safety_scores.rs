@@ -170,13 +170,19 @@ pub struct SafetyScoresFastening {
     pub payload: SafetyScoresPayload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SafetyScoresParseError {
+    #[error("not a XEP-0422 <apply-to/> element")]
     NotApplyTo,
+    #[error("XEP-0422 <apply-to/> is missing a non-empty id")]
     MissingTargetId,
+    #[error("not a urn:waddle:safety-scores:1 payload")]
     NotSafetyScores,
+    #[error("missing required attribute '{0}'")]
     MissingAttribute(&'static str),
+    #[error("probability is not a finite number in 0.0..=1.0")]
     InvalidProbability,
+    #[error("version label is empty")]
     EmptyVersion,
 }
 

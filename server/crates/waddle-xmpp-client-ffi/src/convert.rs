@@ -685,10 +685,10 @@ fn call_thread_ended_to_ffi(ended: CallThreadEnded) -> WaddleCallThreadEnded {
 
 fn safety_scores_to_ffi(fastening: SafetyScoresFastening) -> WaddleSafetyScoresFastening {
     WaddleSafetyScoresFastening {
-        target_id: fastening.target_id.as_str().to_owned(),
+        target_id: fastening.target_id,
         payload: match fastening.payload {
             SafetyScoresPayload::Scores(batch) => WaddleSafetyScoresPayload::Scores {
-                model_version: batch.model_version.as_str().to_owned(),
+                model_version: batch.model_version,
                 scores: batch.scores.into_iter().map(safety_score_to_ffi).collect(),
             },
             SafetyScoresPayload::Cleared => WaddleSafetyScoresPayload::Cleared,
@@ -699,8 +699,8 @@ fn safety_scores_to_ffi(fastening: SafetyScoresFastening) -> WaddleSafetyScoresF
 fn safety_score_to_ffi(score: SafetyScore) -> WaddleSafetyScore {
     WaddleSafetyScore {
         category: safety_score_category_to_ffi(score.category),
-        probability: score.probability.value(),
-        taxonomy_version: score.taxonomy_version.as_str().to_owned(),
+        probability: score.probability,
+        taxonomy_version: score.taxonomy_version,
     }
 }
 
@@ -1154,6 +1154,7 @@ mod tests {
     //!    presence extension carries the `preparing` / `active`
     //!    flags through unchanged.
     use super::*;
+    use crate::{FasteningTargetId, SafetyProbability, SafetyVersion};
     use minidom::Element;
 
     fn assert_audio_video(media: &WaddleCallMedia) {
@@ -2265,24 +2266,38 @@ mod tests {
              </message>",
         ));
         let fastening = ffi.safety_scores.expect("safety scores survive conversion");
-        assert_eq!(fastening.target_id, "judged-stanza-id");
+        assert_eq!(fastening.target_id.as_str(), "judged-stanza-id");
+        let version = |value: &str| SafetyVersion::parse(value).expect("version");
+        let probability = |value: f64| SafetyProbability::new(value).expect("probability");
         assert_eq!(
             fastening.payload,
             WaddleSafetyScoresPayload::Scores {
-                model_version: "typesafe/jev-1.13-20260917".to_owned(),
+                model_version: version("typesafe/jev-1.13-20260917"),
                 scores: vec![
                     WaddleSafetyScore {
                         category: WaddleSafetyScoreCategory::IsQuestion,
-                        probability: 0.92,
-                        taxonomy_version: "is-question-v1".to_owned(),
+                        probability: probability(0.92),
+                        taxonomy_version: version("is-question-v1"),
                     },
                     WaddleSafetyScore {
                         category: WaddleSafetyScoreCategory::SelfHarm,
-                        probability: 0.0,
-                        taxonomy_version: "safety-self-harm-v1".to_owned(),
+                        probability: probability(0.0),
+                        taxonomy_version: version("safety-self-harm-v1"),
                     },
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn safety_scores_custom_types_reject_invalid_abi_values() {
+        let blank = <String as uniffi::Lower<crate::UniFfiTag>>::lower("  ".into());
+        assert!(<FasteningTargetId as uniffi::Lift<crate::UniFfiTag>>::try_lift(blank).is_err());
+        let blank = <String as uniffi::Lower<crate::UniFfiTag>>::lower("  ".into());
+        assert!(<SafetyVersion as uniffi::Lift<crate::UniFfiTag>>::try_lift(blank).is_err());
+        let out_of_range = <f64 as uniffi::Lower<crate::UniFfiTag>>::lower(1.5);
+        assert!(
+            <SafetyProbability as uniffi::Lift<crate::UniFfiTag>>::try_lift(out_of_range).is_err()
         );
     }
 
@@ -2321,7 +2336,7 @@ mod tests {
         .expect("scores row must convert")
         .safety_scores
         .expect("safety-scores clear survives archive conversion");
-        assert_eq!(cleared.target_id, "judged-stanza-id");
+        assert_eq!(cleared.target_id.as_str(), "judged-stanza-id");
         assert_eq!(cleared.payload, WaddleSafetyScoresPayload::Cleared);
     }
 

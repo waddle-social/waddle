@@ -2,6 +2,9 @@
 
 pub use jid::Jid;
 pub use waddle_xmpp_client::request::StanzaId;
+pub use waddle_xmpp_client::xep::safety_scores::{
+    FasteningTargetId, SafetyProbability, SafetyVersion,
+};
 
 // Keep validated protocol values in Rust. Only the UniFFI ABI lowers them
 // to strings; lifting validates them with the same core constructors.
@@ -14,6 +17,21 @@ uniffi::custom_type!(StanzaId, String, {
     remote,
     lower: |id| id.to_string(),
     try_lift: |value| Ok(StanzaId::new(value)?),
+});
+uniffi::custom_type!(FasteningTargetId, String, {
+    remote,
+    lower: |id| id.as_str().to_owned(),
+    try_lift: |value| Ok(FasteningTargetId::parse(&value)?),
+});
+uniffi::custom_type!(SafetyProbability, f64, {
+    remote,
+    lower: |probability| probability.value(),
+    try_lift: |value| Ok(SafetyProbability::new(value)?),
+});
+uniffi::custom_type!(SafetyVersion, String, {
+    remote,
+    lower: |version| version.as_str().to_owned(),
+    try_lift: |value| Ok(SafetyVersion::parse(&value)?),
 });
 
 #[derive(uniffi::Record, Clone)]
@@ -162,9 +180,9 @@ pub enum WaddleSafetyScoreCategory {
 pub struct WaddleSafetyScore {
     pub category: WaddleSafetyScoreCategory,
     /// Validated probability in `0.0..=1.0`.
-    pub probability: f64,
+    pub probability: SafetyProbability,
     /// Revision of this category's question wording.
-    pub taxonomy_version: String,
+    pub taxonomy_version: SafetyVersion,
 }
 
 /// XEP-0422 payload of a safety-scores fastening.
@@ -172,7 +190,7 @@ pub struct WaddleSafetyScore {
 pub enum WaddleSafetyScoresPayload {
     /// Replace the target's scores (one model call produced all of them).
     Scores {
-        model_version: String,
+        model_version: SafetyVersion,
         scores: Vec<WaddleSafetyScore>,
     },
     /// XEP-0422 `clear='true'`: remove the target's scores.
@@ -184,7 +202,7 @@ pub enum WaddleSafetyScoresPayload {
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct WaddleSafetyScoresFastening {
     /// XEP-0422 `<apply-to id='…'/>`: the judged message's XEP-0359 id.
-    pub target_id: String,
+    pub target_id: FasteningTargetId,
     pub payload: WaddleSafetyScoresPayload,
 }
 

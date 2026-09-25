@@ -232,6 +232,48 @@ class SafetyScoresMutationTest {
     }
 
     @Test
+    fun `a distinct fastening stamped at the live anchor still applies`() {
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "m1",
+                stanzaId = "s1",
+                from = "$ROOM/alice",
+                to = null,
+                messageType = "groupchat",
+                timestamp = "2026-09-25T10:00:00Z",
+            ),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "m2",
+                id = "f1",
+                from = ROOM,
+                to = null,
+                messageType = "groupchat",
+                body = null,
+                timestamp = "2026-09-25T10:01:00Z",
+                safetyScores = fastening(scores("jev-1")),
+            ),
+        )
+        store.onLiveMessage(liveScores(WaddleSafetyScoresPayload.Cleared))
+        // A different re-judgment the archive stamped in the same second.
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "m3",
+                id = "f2",
+                from = ROOM,
+                to = null,
+                messageType = "groupchat",
+                body = null,
+                timestamp = "2026-09-25T10:01:00Z",
+                safetyScores = fastening(scores("jev-2")),
+            ),
+        )
+
+        assertEquals(scores("jev-2"), mucTimeline().single().safetyScores)
+    }
+
+    @Test
     fun `scores survive the live record superseding its archived twin`() {
         store.onArchivedMessage(
             testArchivedMessage(

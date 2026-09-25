@@ -60,12 +60,15 @@ sealed interface MessageMutation {
      * XEP-0422 `urn:waddle:safety-scores:1` fastening: the room's
      * automated per-category scores for the target. [payload] replaces
      * the previous scores (XEP-0422 replace) or clears them; only the
-     * room itself (bare room JID) may apply it.
+     * room itself (bare room JID) may apply it. [fasteningIds] are the
+     * fastening stanza's own wire identities, so a MAM re-delivery of a
+     * fastening already applied is recognised as a replay.
      */
     data class SafetyScores(
         override val targetId: String,
         override val from: String,
         val payload: WaddleSafetyScoresPayload,
+        val fasteningIds: Set<String>,
     ) : MessageMutation
 }
 
@@ -135,6 +138,8 @@ private fun mutationOf(source: TimelineSource, isGroupchat: Boolean, mine: Boole
             targetId = safetyScores.targetId,
             from = from,
             payload = safetyScores.payload,
+            fasteningIds = setOfNotNull(source.stanzaId, source.originId, source.messageId) +
+                source.stanzaIds.map { it.id },
         )
         else -> null
     }
