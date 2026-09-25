@@ -1,7 +1,7 @@
 use super::*;
 use serde::ser::SerializeStruct;
 use waddle_xmpp_client::xep::safety_scores::{
-    SafetyScore, SafetyScoresFastening, SafetyScoresUpdate,
+    SafetyScore, SafetyScoresAction, SafetyScoresFastening,
 };
 
 #[derive(Debug, Serialize)]
@@ -45,17 +45,17 @@ impl Serialize for WaddleSafetyScoresFastening {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut out = serializer.serialize_struct("WaddleSafetyScoresFastening", 2)?;
         out.serialize_field("target_id", self.0.target_id.as_str())?;
-        out.serialize_field("update", &SafetyScoresUpdateView(&self.0.update))?;
+        out.serialize_field("update", &SafetyScoresActionView(&self.0.action))?;
         out.end()
     }
 }
 
-struct SafetyScoresUpdateView<'a>(&'a SafetyScoresUpdate);
+struct SafetyScoresActionView<'a>(&'a SafetyScoresAction);
 
-impl Serialize for SafetyScoresUpdateView<'_> {
+impl Serialize for SafetyScoresActionView<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self.0 {
-            SafetyScoresUpdate::Replace(scores) => {
+            SafetyScoresAction::Apply(scores) => {
                 let views: Vec<SafetyScoreView<'_>> =
                     scores.scores.iter().map(SafetyScoreView).collect();
                 let mut out = serializer.serialize_struct("Replace", 3)?;
@@ -64,7 +64,7 @@ impl Serialize for SafetyScoresUpdateView<'_> {
                 out.serialize_field("scores", &views)?;
                 out.end()
             }
-            SafetyScoresUpdate::Clear => {
+            SafetyScoresAction::Clear => {
                 let mut out = serializer.serialize_struct("Clear", 1)?;
                 out.serialize_field("kind", "clear")?;
                 out.end()

@@ -4,8 +4,8 @@ use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 
 use crate::{
     ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, DeliveryProgressRepository, IngressUnitOfWork,
-        IngressUowError,
+        run_with_retry, settle_recorded, CanonicalMessageRepository, DeliveryProgressRepository,
+        IngressUnitOfWork, IngressUowError,
     },
     server::routes::interpret::{
         close_call_setup_from_outcome, deliver_direct_to_full_locally,
@@ -24,6 +24,7 @@ use super::super::{decision::IngressDecision, recorded::RouteProgress};
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static FAIL_DELIVERY_PROGRESS_TX: bool;
+    pub(crate) static CONTEND_DELIVERY_PROGRESS_ONCE: std::sync::Arc<std::sync::atomic::AtomicBool>;
     pub(crate) static STALL_DELIVERY_RESOURCE: (FullJid, std::sync::Arc<std::sync::atomic::AtomicBool>);
 }
 
@@ -92,9 +93,13 @@ pub(super) async fn execute(
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Delivered));
                 continue;
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) => {
+            Ok(crate::ingress_uow::DispatchReadiness::Blocked(predecessors)) => {
                 if completion != SettledCompletion::Uncertain {
-                    completion = SettledCompletion::Deferred;
+                    if !predecessors.is_empty() {
+                        completion = SettledCompletion::Deferred;
+                    } else if completion != SettledCompletion::Deferred {
+                        completion = SettledCompletion::DeferredPending;
+                    }
                 }
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
                 continue;
@@ -152,8 +157,16 @@ pub(super) async fn execute(
             completion = SettledCompletion::Uncertain;
         }
         if accepted(outcome) {
-            match record_delivery_progress(uow, key, progress, std::slice::from_ref(resource), None)
-                .await
+            #[cfg(test)]
+            crate::ingress::execute::test_hooks::after_delivery_append(key, resource).await;
+            // Retry only the progress transaction after proven database contention.
+            // The socket already accepted this copy: retrying the append would
+            // duplicate delivery. The enclosing execution deadline still applies.
+            match run_with_retry(5, || {
+                record_delivery_progress(uow, key, progress, std::slice::from_ref(resource), None)
+            })
+            .await
+            .map_err(|failure| failure.last_error)
             {
                 Ok(settled) => {
                     if !settled.is_empty() {
@@ -327,6 +340,15 @@ pub(in crate::ingress) async fn record_delivery_progress(
     #[cfg(not(feature = "clustering"))]
     let _ = room_fence;
     DeliveryProgressRepository::record(&mut tx, key, &progress.receipt, resources).await?;
+    #[cfg(test)]
+    if CONTEND_DELIVERY_PROGRESS_ONCE
+        .try_with(|pending| pending.swap(false, std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(false)
+    {
+        return Err(IngressUowError::Database {
+            retry_class: crate::ingress_uow::DbRetryClass::SqliteContention,
+        });
+    }
     #[cfg(test)]
     if FAIL_DELIVERY_PROGRESS_TX
         .try_with(|fail| *fail)

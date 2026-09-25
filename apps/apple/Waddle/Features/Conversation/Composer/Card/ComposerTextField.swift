@@ -52,28 +52,10 @@ struct ComposerTextField: View {
     @ViewBuilder
     private var field: some View {
         if #available(iOS 18.0, macOS 15.0, *) {
-            TextField(placeholder, text: $text, selection: textSelection, axis: .vertical)
+            ComposerSelectableField(text: $text, selection: $selection, placeholder: placeholder)
         } else {
             TextField(placeholder, text: $text, axis: .vertical)
         }
-    }
-
-    @available(iOS 18.0, macOS 15.0, *)
-    private var textSelection: Binding<TextSelection?> {
-        Binding(
-            get: { ComposerTextSelection.selection(for: selection, in: text) },
-            set: { newValue in
-                guard let newValue else {
-                    selection = nil
-                    return
-                }
-                // A selection reported before its text arrives keeps the
-                // previous one until the next report.
-                if let range = ComposerTextSelection.range(of: newValue, in: text) {
-                    selection = range
-                }
-            }
-        )
     }
 
     #if os(macOS)
@@ -98,4 +80,84 @@ struct ComposerTextField: View {
         return .handled
     }
     #endif
+}
+
+/// The text field with its own `TextSelection`, bridged to the composer's
+/// scalar offsets.
+///
+/// The field owns the caret. Every selection it reports is translated to
+/// offsets for the composer; the composer's `selection` is written back
+/// into the field only when the composer moved the caret itself (a
+/// formatting edit, an inserted emoji, a completed mention). The field is
+/// never handed a selection derived from state it did not write: SwiftUI
+/// reports `text` and `selection` separately, and a render between the
+/// two would otherwise push the previous keystroke's caret back into the
+/// field, so the next character lands before the last one.
+@available(iOS 18.0, macOS 15.0, *)
+private struct ComposerSelectableField: View {
+    @Binding var text: String
+    @Binding var selection: Range<Int>?
+    let placeholder: String
+
+    /// What the field holds; the field moves it as it edits.
+    @State private var fieldSelection: TextSelection?
+    /// The offsets last passed between the field and the composer in
+    /// either direction. A `selection` equal to this is an echo of the
+    /// field's own report, not a request to move the caret.
+    @State private var applied: Range<Int>?
+    /// A selection the field reported for text that has not arrived yet;
+    /// resolved when it does.
+    @State private var unresolved: TextSelection?
+
+    var body: some View {
+        TextField(placeholder, text: $text, selection: $fieldSelection, axis: .vertical)
+            .onChange(of: fieldSelection) { _, reported in
+                report(reported)
+            }
+            .onChange(of: text) { _, _ in
+                textChanged()
+            }
+            .onChange(of: selection) { _, requested in
+                guard requested != applied else { return }
+                applied = requested
+                unresolved = nil
+                fieldSelection = ComposerTextSelection.selection(for: requested, in: text)
+            }
+    }
+
+    private func report(_ reported: TextSelection?) {
+        unresolved = nil
+        guard let reported else {
+            guard applied != nil else { return }
+            applied = nil
+            selection = nil
+            return
+        }
+        guard case .selection = reported.indices else { return }
+        guard let range = ComposerTextSelection.range(of: reported, in: text) else {
+            unresolved = reported
+            return
+        }
+        pass(range)
+    }
+
+    private func textChanged() {
+        if let unresolved {
+            guard let range = ComposerTextSelection.range(of: unresolved, in: text) else { return }
+            self.unresolved = nil
+            pass(range)
+        } else if let fieldSelection, ComposerTextSelection.range(of: fieldSelection, in: text) == nil {
+            // The composer replaced the draft under a caret the field had
+            // placed in the old one. Put the field on the composer's
+            // offsets, clamped to the new text, so it never holds indices
+            // the text cannot.
+            self.fieldSelection = ComposerTextSelection.selection(for: applied, in: text)
+        }
+    }
+
+    private func pass(_ range: Range<Int>) {
+        guard range != applied else { return }
+        applied = range
+        selection = range
+    }
 }

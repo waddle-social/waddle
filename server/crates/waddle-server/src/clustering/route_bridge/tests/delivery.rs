@@ -345,6 +345,214 @@ async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum RemotePredecessorCase {
+    Completes,
+    Persists,
+    ReplacedSocket,
+}
+
+async fn remote_socket_rechecks_archive_predecessor(case: RemotePredecessorCase) {
+    use crate::ingress::{
+        commit::commit_submission, execute::test_hooks, identity::IngressAppendObligationRef,
+        test_support::IngressFixture,
+    };
+    use crate::ingress_uow::{
+        ArchiveDispatchRepository, CanonicalMessageRepository, EffectReceiptRepository,
+    };
+    use crate::server::routes::interpret::effects::{
+        direct::DurableDirectEffect, DurableEffect, Effect, PlannedEffect,
+    };
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress;
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+
+    let fixture = IngressFixture::sqlite().await;
+    let pool = crate::db::DatabasePool::new(
+        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("shared database");
+    let state = create_test_websocket_state_with_db_pool_and_ingress(
+        Arc::new(pool),
+        Arc::new(fixture.authority().await),
+    )
+    .await;
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    let services = Arc::new(services);
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
+    let (sender, mut receiver) = mpsc::channel(2);
+    let entry = ConnectionEntry::new(sender);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            owner,
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration_id = bridge.remote_socket_resources.lock().await[&target].registration_id;
+    let route = IngressEffectIntent::RouteDirect {
+        recipient: target.to_bare(),
+        fanout: vec![target.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
+    };
+    let receipt = crate::ingress::receipt_key(&route).expect("route receipt");
+    let mut copies = Vec::new();
+    for body in ["older", "newer"] {
+        let mut submission = fixture.submission(Some(body), body);
+        let stamp = waddle_xmpp_core::xep0359::StanzaId::new(body, target.to_bare().into());
+        waddle_xmpp_core::xep0359::add_stanza_id(&mut submission.plan.sanitized_message, &stamp);
+        let archived = waddle_xmpp::mam::projection::build_direct_archived_message(
+            &target.to_bare().into(),
+            submission.sender.clone().into(),
+            target.to_bare().into(),
+            &submission.plan.sanitized_message,
+        );
+        submission.plan.intents = vec![
+            route.clone(),
+            IngressEffectIntent::ArchiveAuthoritative {
+                ordinal: None,
+                archive: target.to_bare(),
+                by: target.to_bare(),
+                stanza_id: stamp,
+                archived_at: archived.timestamp,
+            },
+        ];
+        submission
+            .plan
+            .plan
+            .push(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
+                DurableDirectEffect::ArchiveDirect {
+                    archive: target.to_bare(),
+                    message: Box::new(archived),
+                    archive_expectation: waddle_xmpp::mam::ArchiveExpectation::Fresh,
+                },
+            ))));
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("commit archived message");
+        let message_key = decision.message_key.expect("canonical key");
+        let archive_positions =
+            ArchiveDispatchRepository::positions_pooled(&fixture.db, message_key, &receipt)
+                .await
+                .expect("archive positions");
+        assert!(
+            !archive_positions.is_empty(),
+            "exercise the socket ordering gate"
+        );
+        copies.push((
+            Stanza::Message(submission.plan.sanitized_message),
+            IngressAppendObligationRef {
+                archive_positions,
+                dispatch_stream: None,
+                message_key,
+                sender_bare: submission.sender.to_bare(),
+                receipt: receipt.clone(),
+                received_at: None,
+            },
+        ));
+    }
+    let (stanza, obligation) = copies.pop().expect("successor");
+    let predecessor = copies.pop().expect("predecessor").1;
+    let blocked = test_hooks::pause_after_blocked_dispatch(obligation.message_key);
+    let (replacement_sender, mut replacement_receiver) = mpsc::channel(2);
+    let delivery =
+        bridge.deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
+            frame: RemoteResourceOutboundFrame {
+                jid: target.clone(),
+                registration_id,
+                stanza: RemoteStanza(stanza),
+                kind: DeliveryKind::PeerStanza,
+                ingress_append: Some(obligation),
+            },
+            trace: RelayTraceContext::default(),
+        });
+    let settle_predecessor = async {
+        blocked.wait_until_reached().await;
+        if !matches!(case, RemotePredecessorCase::Persists) {
+            let mut tx = fixture.uow.begin().await.expect("complete predecessor");
+            assert!(
+                CanonicalMessageRepository::lock(&mut tx, predecessor.message_key)
+                    .await
+                    .expect("lock predecessor")
+            );
+            EffectReceiptRepository::record_receipt(
+                &mut tx,
+                predecessor.message_key,
+                receipt.kind,
+                &receipt.semantic_identity_hash,
+            )
+            .await
+            .expect("predecessor receipt");
+            tx.commit().await.expect("commit predecessor receipt");
+        }
+        if matches!(case, RemotePredecessorCase::ReplacedSocket) {
+            services
+                .connection_registry
+                .register_entry(target.clone(), ConnectionEntry::new(replacement_sender));
+        }
+        blocked.release();
+    };
+    let (reply, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(delivery, settle_predecessor)
+    })
+    .await
+    .expect("remote request probes finish without recovery maintenance");
+    let expected = match case {
+        RemotePredecessorCase::Completes => RelayRemoteResourceFrameStatus::Delivered,
+        RemotePredecessorCase::Persists => RelayRemoteResourceFrameStatus::Backpressure,
+        RemotePredecessorCase::ReplacedSocket => RelayRemoteResourceFrameStatus::Unavailable,
+    };
+    assert_eq!(reply.status, expected);
+    if matches!(case, RemotePredecessorCase::Completes) {
+        let outbound = receiver.try_recv().expect("successor delivered promptly");
+        let Stanza::Message(message) = outbound.stanza else {
+            panic!("message stanza");
+        };
+        assert_eq!(message.bodies.values().next().expect("body"), "newer");
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "no extra or blocked socket writes"
+    );
+    assert!(
+        replacement_receiver.try_recv().is_err(),
+        "owner witness survives every wait"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn remote_socket_xep0313_rechecks_in_flight_predecessor_without_recovery() {
+    remote_socket_rechecks_archive_predecessor(RemotePredecessorCase::Completes).await;
+}
+
+#[tokio::test]
+async fn remote_socket_xep0313_persistent_predecessor_returns_bounded_backpressure() {
+    remote_socket_rechecks_archive_predecessor(RemotePredecessorCase::Persists).await;
+}
+
+#[tokio::test]
+async fn remote_socket_xep0313_rechecks_retain_the_original_connection_owner() {
+    remote_socket_rechecks_archive_predecessor(RemotePredecessorCase::ReplacedSocket).await;
+}
+
 /// Issue #1789: the frame to a registered remote socket carries the executor's
 /// ingress obligation, bound to the stanza's sender, so the socket node can key a
 /// later detach drain. Only an append-eligible message obligation crosses the wire.

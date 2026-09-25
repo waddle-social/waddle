@@ -1,8 +1,8 @@
 //! Durable predecessors for archive-bearing delivery copies.
 //!
 //! Registration shares the archive insert transaction and its counter lock.
-//! Readiness never acquires canonical locks or waits for another delivery;
-//! callers defer blocked work to recovery, outside the connection loop.
+//! Readiness never acquires canonical locks or executes predecessor work;
+//! callers bound any re-probes and defer persistent barriers to recovery.
 use jid::{BareJid, FullJid};
 use waddle_xmpp::{ingress::MessageKey, mam::ArchiveOrdinal, pending_delivery::PendingRowId};
 

@@ -199,6 +199,8 @@ impl HostOwnedResources {
 /// churn small.
 #[derive(Clone)]
 pub struct Deps<'a> {
+    /// Shared allowance for fair recheck rounds within one ingress pass.
+    pub(crate) dispatch_probe_budget: Option<crate::ingress::DispatchProbeBudget>,
     pub(crate) delivery_execution_context: DeliveryExecutionContext,
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
@@ -333,6 +335,7 @@ impl<'a> Deps<'a> {
     /// Callers attach the storage and actor handles required by their effects.
     pub fn new(connection_registry: &'a ConnectionRegistry, local_domain: &'a str) -> Self {
         Self {
+            dispatch_probe_budget: None,
             delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,
@@ -375,6 +378,7 @@ impl<'a> Deps<'a> {
         user_registry: &'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     ) -> Self {
         Self {
+            dispatch_probe_budget: None,
             delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,
@@ -409,6 +413,7 @@ impl<'a> Deps<'a> {
         inbox_storage: &'a Arc<dyn InboxStorage>,
     ) -> Self {
         Self {
+            dispatch_probe_budget: None,
             delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,
@@ -441,6 +446,7 @@ impl<'a> Deps<'a> {
         extension_manager: &'a Arc<ExtensionManager>,
     ) -> Self {
         Self {
+            dispatch_probe_budget: None,
             delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,

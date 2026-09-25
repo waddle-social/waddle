@@ -264,3 +264,6 @@ async fn postgres_detached_resumed_resource_live_retry_completes_receipt() {
         detached_receipts(fixture, false, true).await;
     }
 }
+
+#[path = "execute_detached_rounds_tests.rs"]
+mod rounds;

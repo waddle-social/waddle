@@ -3,6 +3,7 @@ use crate::server::routes::interpret::DeliveryExecutionContext;
 pub(crate) mod append_authority;
 mod archive_authority;
 mod archive_dispatch;
+pub(crate) use archive_dispatch::DispatchProbeBudget;
 mod capture;
 mod pending_dispatch;
 mod reflection_dispatch;

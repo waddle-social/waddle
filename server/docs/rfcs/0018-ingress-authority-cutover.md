@@ -653,7 +653,22 @@ so other resources do not wait indefinitely on a quiet client. The gate also con
 by SM promotion. Retention cannot remove a canonical pending barrier while its
 pending row remains.
 
-A blocked executor returns without waiting for its predecessor. An ordering
+A live execution first considers every effect with single readiness probes.
+It then revisits only effects deferred by canonical predecessors in up to four
+rounds, sharing one transaction-free backoff (2, 4, 8, then 16 ms) before each
+round. Every eligible recipient gets a check before the next backoff; an early
+persistent blocker cannot consume all rechecks before later recipients run.
+Completed effects, uncertain sends, observers, and prepared frames are not
+replayed. For a partially accepted multi-resource effect, fresh durable progress
+checks skip the resources already accepted. The original execution deadline
+bounds every round and sleep, and only final deferrals count as unresolved.
+
+A remote socket request has its own bounded four-backoff window for its single
+target, retaining the original connection-owner witness through the rechecks
+and final enqueue. Neither path executes predecessor work or bypasses ordering.
+Barriers without a canonical predecessor do not trigger retry rounds or sleeps.
+A persistent barrier still returns to maintenance rather than waiting
+indefinitely on the connection loop. An ordering
 deferral does not accrue a stalled-row cooldown; predecessor progress can release
 it on the next maintenance pass. The existing maintenance pump replays frozen effects off the connection loop, preserving
 SM acknowledgement progress and avoiding the carbon/backpressure cycle. Partial

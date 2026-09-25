@@ -66,6 +66,8 @@ pub enum SettledCompletion {
     Uncertain,
     /// A committed predecessor can still make progress independently.
     Deferred,
+    /// An independent pending-delivery barrier may require client input.
+    DeferredPending,
 }
 
 impl super::PlannedEffect {

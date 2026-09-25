@@ -1,8 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// Row context menu: quick reactions, reply, thread, copy, pin, edit,
-/// delete and moderator removal. Actions that target the message on the
+/// Row context menu: quick reactions, reply, thread, copy, pin, safety
+/// scores, edit, delete and moderator removal. Actions that target the message on the
 /// wire are disabled until it has an id others know (a local echo not yet
 /// reflected has none). Dependencies are passed in rather than read from
 /// the environment, which menu content does not reliably inherit.
@@ -53,6 +53,13 @@ struct MessageContextMenu: View {
             }
             if item.conversation.isRoom {
                 pinButton
+            }
+            if item.safetyScores != nil {
+                Button {
+                    actions.showSafetyScores(for: item)
+                } label: {
+                    Label(MessageSafetyScoresButton.title + "…", systemImage: MessageSafetyScoresButton.symbol)
+                }
             }
             ownActions
             moderatorActions
@@ -122,6 +129,9 @@ struct MessageAccessibilityActions: ViewModifier {
             }
             if replyCount > 0 {
                 Button("Open thread", action: openThread)
+            }
+            if item.safetyScores != nil {
+                Button("Show \(MessageSafetyScoresButton.title.lowercased())") { actions.showSafetyScores(for: item) }
             }
             if let file = item.message.sharedFiles.first, file.encrypted == nil {
                 Button("Open attachment") {

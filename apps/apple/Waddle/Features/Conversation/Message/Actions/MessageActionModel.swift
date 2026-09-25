@@ -17,6 +17,8 @@ final class MessageActionModel {
     var removalReason = ""
     /// The row whose full emoji picker is open.
     var reactionTarget: TimelineItem?
+    /// The row whose safety-score breakdown is open.
+    var safetyScoresTarget: TimelineItem?
     var errorMessage: String?
     /// A row the timeline should scroll to, then clear.
     var scrollRequest: String?
@@ -45,6 +47,10 @@ final class MessageActionModel {
 
     func pickReaction(for item: TimelineItem) {
         reactionTarget = item
+    }
+
+    func showSafetyScores(for item: TimelineItem) {
+        safetyScoresTarget = item
     }
 
     func requestDeletion(of item: TimelineItem) {
