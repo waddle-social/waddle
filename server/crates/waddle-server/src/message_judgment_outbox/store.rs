@@ -74,7 +74,10 @@ pub struct JudgmentRecord {
     pub taxonomy_version: String,
     pub model_version: String,
     pub probability: f64,
-    pub confidence: f64,
+    /// USD cost of the request that produced this judgment (Jev's
+    /// `usage.cost`). Recorded per row rather than only sampled, since
+    /// measuring cost-per-thousand-messages is this phase's stated purpose.
+    pub cost_usd: f64,
     pub decided_at_ms: i64,
     pub created_at_ms: i64,
 }
@@ -260,14 +263,14 @@ pub async fn insert_judgment(
         DatabaseDriver::Postgres => {
             "INSERT INTO message_judgments \
              (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
-              model_version, probability, confidence, decided_at_ms, created_at_ms) \
+              model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (stanza_id, judgment_name, model_version) DO NOTHING"
         }
         DatabaseDriver::Sqlite => {
             "INSERT OR IGNORE INTO message_judgments \
              (id, waddle_id, stanza_id, stanza_by, judgment_name, taxonomy_version, \
-              model_version, probability, confidence, decided_at_ms, created_at_ms) \
+              model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         }
     };
@@ -284,7 +287,7 @@ pub async fn insert_judgment(
                 record.taxonomy_version.as_str(),
                 record.model_version.as_str(),
                 record.probability,
-                record.confidence,
+                record.cost_usd,
                 record.decided_at_ms,
                 record.created_at_ms,
             ],
@@ -527,7 +530,7 @@ mod tests {
             taxonomy_version: "v1".to_string(),
             model_version: model_version.to_string(),
             probability: 0.9,
-            confidence: 0.8,
+            cost_usd: 0.00002,
             decided_at_ms: 1_000,
             created_at_ms: 1_000,
         }

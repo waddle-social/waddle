@@ -168,7 +168,7 @@ async fn process_row(
                 taxonomy_version: judgment.taxonomy_version,
                 model_version: judgment.model_version,
                 probability: judgment.probability,
-                confidence: judgment.confidence,
+                cost_usd: judgment.cost_usd,
                 decided_at_ms: now_ms,
                 created_at_ms: now_ms,
             };
@@ -329,9 +329,9 @@ mod tests {
     fn ok_judgment() -> Result<IsQuestionJudgment, JudgeError> {
         Ok(IsQuestionJudgment {
             probability: 0.75,
-            confidence: 0.6,
             taxonomy_version: "v1".to_string(),
             model_version: "jev-1".to_string(),
+            cost_usd: 0.00002,
         })
     }
 
@@ -371,7 +371,7 @@ mod tests {
         let connection = db.guard().await.expect("guard");
         let mut rows = connection
             .query(
-                "SELECT probability, confidence, taxonomy_version, model_version \
+                "SELECT probability, cost_usd, taxonomy_version, model_version \
                  FROM message_judgments WHERE stanza_id = ?",
                 crate::db_params!["stanza-ok"],
             )
@@ -379,7 +379,7 @@ mod tests {
             .expect("query");
         let row = rows.next().await.expect("row").expect("row present");
         assert_eq!(row.get::<f64>(0).expect("probability"), 0.75);
-        assert_eq!(row.get::<f64>(1).expect("confidence"), 0.6);
+        assert_eq!(row.get::<f64>(1).expect("cost_usd"), 0.00002);
         assert_eq!(row.get::<String>(2).expect("taxonomy_version"), "v1");
         assert_eq!(row.get::<String>(3).expect("model_version"), "jev-1");
     }
@@ -568,7 +568,7 @@ mod tests {
                 taxonomy_version: "v1".to_string(),
                 model_version: "jev-1".to_string(),
                 probability: 0.75,
-                confidence: 0.6,
+                cost_usd: 0.00002,
                 decided_at_ms: 0,
                 created_at_ms: 0,
             },

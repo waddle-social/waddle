@@ -9,15 +9,22 @@ use async_trait::async_trait;
 ///
 /// `taxonomy_version` and `model_version` are recorded on every judgment so a
 /// later change to either shows up as schema drift in the stored rows, not as
-/// unexplained model drift when judgments are compared over time.
+/// unexplained model drift when judgments are compared over time. There is
+/// no `confidence` field: `is_question` is a Jev "Noul" (yes/no) judgment,
+/// and Jev's Decisions API reports only a probability for Noul answers, no
+/// separate confidence value (unlike its "Choice"/"Score" primitives, which
+/// do) — see `jev_client.rs`'s module docs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IsQuestionJudgment {
     /// Probability, in `0.0..=1.0`, that the body is a question.
     pub probability: f64,
-    /// Model-reported confidence, in `0.0..=1.0`, in that probability.
-    pub confidence: f64,
     pub taxonomy_version: String,
     pub model_version: String,
+    /// USD cost of the request that produced this judgment, from the
+    /// provider's own `usage.cost` field — this Phase's stated purpose is
+    /// measuring cost-per-thousand-messages, so this is recorded per
+    /// judgment rather than only sampled or logged.
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -72,7 +72,7 @@ async fn postgres(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
             taxonomy_version TEXT NOT NULL, \
             model_version TEXT NOT NULL, \
             probability DOUBLE PRECISION NOT NULL, \
-            confidence DOUBLE PRECISION NOT NULL, \
+            cost_usd DOUBLE PRECISION NOT NULL, \
             decided_at_ms BIGINT NOT NULL, \
             created_at_ms BIGINT NOT NULL \
         )",
@@ -126,7 +126,7 @@ async fn sqlite(db: &Database) -> Result<(), MessageJudgmentOutboxError> {
                 taxonomy_version TEXT NOT NULL, \
                 model_version TEXT NOT NULL, \
                 probability REAL NOT NULL, \
-                confidence REAL NOT NULL, \
+                cost_usd REAL NOT NULL, \
                 decided_at_ms INTEGER NOT NULL, \
                 created_at_ms INTEGER NOT NULL \
             )",

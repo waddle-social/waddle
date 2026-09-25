@@ -1,45 +1,64 @@
-//! HTTP client for Jev, a decision-model service from a vendor called
-//! TypeSafe AI (publicly launched 2026-09-15), used to answer the
-//! `is_question` judgment defined by [`super::judge::MessageJudge`].
+//! HTTP client for Jev, TypeSafe AI's "System One" structured decision
+//! model, used to answer the `is_question` judgment defined by
+//! [`super::judge::MessageJudge`]. Jev is available through this codebase's
+//! existing OpenRouter account (the same `OPENROUTER_API_KEY`/secret already
+//! deployed for the `ai-chatbot` extension's provider calls — see
+//! `server/extensions/ai-chatbot/src/provider.rs` — so wiring this in is not
+//! a new vendor integration).
 //!
-//! # The wire format below is an unverified best guess
+//! # Wire format: per OpenRouter's official Decisions API docs
 //!
-//! At the time this module was written there was no official Jev/TypeSafe
-//! API documentation and no test credentials available. Everything about
-//! the request/response JSON shape came from third-party sources (an
-//! OpenRouter community doc page, TypeSafe's own launch blog post, and a
-//! community-written gist) that disagree with each other on details such as
-//! the exact endpoint path. **Do not treat [`build_request_body`] or
-//! [`parse_response`] as ground truth.** They are deliberately kept as small,
-//! separately testable pure functions so that when this is checked against a
-//! real Jev account, only this file (and its tests) needs to change — no
-//! caller outside this module knows or cares about the wire shape, because
-//! everything is mediated through the [`super::judge::MessageJudge`] trait.
+//! Jev is *not* a chat-completions model: it has its own typed "Decisions"
+//! API, confirmed from OpenRouter's own documentation
+//! (<https://openrouter.ai/docs/guides/community/jev> and
+//! <https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request>,
+//! fetched 2026-09-25):
 //!
-//! Candidate endpoints seen in third-party sources (none verified):
-//! `https://openrouter.ai/api/alpha/decisions`,
-//! `https://openrouter.ai/api/v1/systemone`,
-//! `https://api.typesafe.ai/v1/systemone`. This is exactly why
-//! [`JevClientConfig::endpoint`] is a required, non-defaulted config value
-//! rather than a hardcoded constant: a wrong guess here is a config change,
-//! not a code change.
+//! - `POST https://openrouter.ai/api/alpha/decisions`, `Authorization: Bearer
+//!   <OpenRouter API key>` — the same key, same account, as the existing
+//!   OpenRouter usage in this repo.
+//! - Request: `{"model": "typesafe/jev-1.13", "questions": {"<key>": {"type":
+//!   "noul"|"choice"|"score", "instructions": "...", "criteria": ...}},
+//!   "state": <the content to evaluate>}`. `is_question` is a "Noul"
+//!   question (a yes/no condition), so `criteria` is `{"true": "...",
+//!   "false": "..."}`.
+//! - Response: `{"answers": {"<key>": {"noul": <0.0..=1.0>, "type":
+//!   "noul"}}, "model": "typesafe/jev-1.13-<date>", "usage": {"cost": <USD>,
+//!   "input_tokens": N, "output_tokens": N}, ...}`. **A Noul answer has no
+//!   `confidence` field** — only `Choice`/`Score` answers do — which is why
+//!   [`super::judge::IsQuestionJudgment`] does not carry one.
+//! - Errors: `{"error": {"code": <status>, "message": "..."}}` for every
+//!   non-2xx status the docs enumerate (400/401/402/403/404/413/429/5xx).
 //!
-//! This client MUST NOT be enabled against production traffic until someone
-//! with real Jev/TypeSafe API access has verified the request/response shape
-//! against the actual service.
+//! This has not yet been exercised against a live Jev/OpenRouter account
+//! from this codebase — it is built directly from OpenRouter's published API
+//! reference, not from guessing — so [`build_request_body`] and
+//! [`parse_response`] are still kept as small, separately testable pure
+//! functions: if a live call ever turns up a documentation/reality mismatch,
+//! only this file (and its tests) needs to change.
 
 use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::{redirect, Client, Url};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::judge::{IsQuestionJudgment, JudgeError, MessageJudge};
 
-/// Default model identifier sent to Jev when the caller does not override
-/// it. Unverified — Jev may use a different alias scheme entirely.
-const DEFAULT_MODEL: &str = "jev-latest";
+/// Jev's Decisions API endpoint, confirmed from OpenRouter's own docs (see
+/// module docs). Not a guess: this is the one and only documented endpoint
+/// for the Decisions surface.
+const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
+
+/// Pinned model identifier, rather than the `~typesafe/jev-latest` alias
+/// OpenRouter also documents: a judgment feature that records `model_version`
+/// on every row (to detect model drift, see [`IsQuestionJudgment`]'s docs)
+/// should not have its underlying model silently change out from under a
+/// fixed config value. Bump this deliberately when moving to a newer Jev
+/// release.
+const DEFAULT_MODEL: &str = "typesafe/jev-1.13";
 
 /// This is meant to be a fast, synchronous-feeling judgment call (that is
 /// the whole premise of the feature), so the timeout is short.
@@ -50,30 +69,38 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 /// bounds a misbehaving or compromised endpoint.
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
-/// Best-guess prompt sent for the yes/no ("Noul", per one source) primitive
-/// backing `is_question`.
-const IS_QUESTION_PROMPT: &str =
-    "Is this message asking a question that expects an answer from someone else in the conversation?";
+/// Version tag for the exact `instructions`/`criteria` wording below —
+/// Waddle's own concept, not part of Jev's response. Bump it whenever that
+/// wording changes, so a stored judgment's `taxonomy_version` shows the
+/// question's wording drifted even though `model_version` didn't.
+const TAXONOMY_VERSION: &str = "is-question-v1";
+
+const IS_QUESTION_INSTRUCTIONS: &str =
+    "Is this chat message phrased as a question that expects an answer or response from someone else in the conversation?";
+const IS_QUESTION_CRITERIA_TRUE: &str =
+    "The message asks something and expects a reply from someone else.";
+const IS_QUESTION_CRITERIA_FALSE: &str =
+    "The message is a statement, reaction, or does not expect a reply.";
 
 /// Configuration for a [`JevClient`].
 ///
-/// `endpoint` and `api_key` have no meaningful default — they must come from
-/// real deployment configuration/secrets, never a hardcoded guess. `Default`
-/// exists only so callers can start from a template and override fields; a
+/// `endpoint` and `model` default to Jev's documented Decisions API and a
+/// pinned model version (see the constants above) — both confirmed from
+/// OpenRouter's published docs, not guessed. `api_key` has no meaningful
+/// default: it must come from real deployment configuration/secrets, and a
 /// `JevClient` built from `JevClientConfig::default()` unmodified always
-/// fails validation in [`JevClient::new`], because an empty `api_key` and
-/// empty `endpoint` mean "unconfigured", not "use some fallback".
+/// fails validation in [`JevClient::new`], because an empty `api_key` means
+/// "unconfigured", not "use some fallback".
 #[derive(Clone)]
 pub struct JevClientConfig {
-    /// Base HTTPS URL for the Jev decision endpoint. Required; must come
-    /// from real config. See the module docs for why the exact path is not
-    /// hardcoded.
+    /// Base HTTPS URL for the Jev decision endpoint.
     pub endpoint: String,
     /// Model identifier passed in every request body.
     pub model: String,
-    /// Jev API key. Never logged, never included in `Display`/`Debug`
-    /// output, never included in an error message. Empty means
-    /// "unconfigured".
+    /// OpenRouter API key (the same key/secret already deployed for
+    /// `ai-chatbot`'s OpenRouter usage). Never logged, never included in
+    /// `Display`/`Debug` output, never included in an error message. Empty
+    /// means "unconfigured".
     pub api_key: String,
     /// Per-request timeout (connect + total). A few seconds — this call is
     /// meant to be fast.
@@ -83,9 +110,7 @@ pub struct JevClientConfig {
 impl Default for JevClientConfig {
     fn default() -> Self {
         Self {
-            // Empty means "unconfigured": there is no safe default endpoint
-            // to guess at (see module docs on candidate URLs disagreeing).
-            endpoint: String::new(),
+            endpoint: DEFAULT_ENDPOINT.to_string(),
             model: DEFAULT_MODEL.to_string(),
             // Empty means "unconfigured": never a placeholder secret.
             api_key: String::new(),
@@ -310,20 +335,28 @@ impl MessageJudge for JevClient {
                 &response.body,
             )));
         }
-        let document = serde_json::from_slice::<Value>(&response.body).map_err(|error| {
-            JudgeError::InvalidResponse(format!("jev response was not valid JSON: {error}"))
-        })?;
-        parse_response(&document, &self.model)
+        let decoded =
+            serde_json::from_slice::<DecisionsResponse>(&response.body).map_err(|error| {
+                JudgeError::InvalidResponse(format!(
+                    "jev response did not match the documented Decisions API shape: {error}"
+                ))
+            })?;
+        parse_response(decoded, &self.model)
     }
 }
 
-/// Non-secret-leaking message for a non-2xx Jev response: status code plus a
-/// short, control-character-stripped snippet of the body. The body is never
-/// the API key (that only ever appears in the outbound `Authorization`
-/// header this client sends, never in what Jev sends back), but is still
-/// capped and sanitized as defense in depth against a misbehaving endpoint.
+/// Non-secret-leaking message for a non-2xx Jev response: status code plus
+/// either the documented `{"error":{"message":...}}` text, or (if the body
+/// doesn't match that shape) a short, control-character-stripped snippet of
+/// the raw body. The body is never the API key (that only ever appears in
+/// the outbound `Authorization` header this client sends, never in what Jev
+/// sends back), but is still capped and sanitized as defense in depth
+/// against a misbehaving endpoint.
 fn transport_error_message(status: u16, body: &[u8]) -> String {
     const MAX_SNIPPET_BYTES: usize = 256;
+    if let Some(message) = documented_error_message(body) {
+        return format!("jev returned HTTP {status}: {message}");
+    }
     let snippet: String = String::from_utf8_lossy(body)
         .chars()
         .filter(|character| !character.is_control() || character.is_whitespace())
@@ -338,125 +371,133 @@ fn transport_error_message(status: u16, body: &[u8]) -> String {
     }
 }
 
+/// Extracts `error.message` per the Decisions API's documented error shape
+/// (`{"error": {"code": <status>, "message": "..."}}`, confirmed for every
+/// non-2xx status the docs enumerate). `None` if the body doesn't match —
+/// callers fall back to a raw snippet rather than failing.
+fn documented_error_message(body: &[u8]) -> Option<String> {
+    let document = serde_json::from_slice::<Value>(body).ok()?;
+    document
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Request shape confirmed from OpenRouter's Decisions API reference (see
+/// module docs) — one named "Noul" (yes/no) question per request.
+#[derive(Serialize)]
+struct DecisionsRequest<'a> {
+    model: &'a str,
+    questions: DecisionsQuestions<'a>,
+    state: &'a str,
+}
+
+#[derive(Serialize)]
+struct DecisionsQuestions<'a> {
+    is_question: NoulQuestion<'a>,
+}
+
+#[derive(Serialize)]
+struct NoulQuestion<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    instructions: &'a str,
+    criteria: NoulCriteria<'a>,
+}
+
+#[derive(Serialize)]
+struct NoulCriteria<'a> {
+    #[serde(rename = "true")]
+    when_true: &'a str,
+    #[serde(rename = "false")]
+    when_false: &'a str,
+}
+
 /// Pure, separately testable request-body builder — analogous to
 /// `provider_request_json_from_parts` in `ai-chatbot/src/provider.rs`. Kept
 /// free of any I/O so its exact shape can be exercised with plain
 /// assertions and adjusted without touching the transport.
-///
-/// Best-guess shape (unverified, see module docs): a single named question
-/// using the yes/no primitive, alongside the free-text `state` the question
-/// is asked about.
 fn build_request_body(model: &str, body: &str) -> Value {
-    serde_json::json!({
-        "model": model,
-        "state": body,
-        "questions": {
-            "is_question": {
-                "type": "yes_no",
-                "prompt": IS_QUESTION_PROMPT,
-            }
-        }
-    })
+    let request = DecisionsRequest {
+        model,
+        questions: DecisionsQuestions {
+            is_question: NoulQuestion {
+                kind: "noul",
+                instructions: IS_QUESTION_INSTRUCTIONS,
+                criteria: NoulCriteria {
+                    when_true: IS_QUESTION_CRITERIA_TRUE,
+                    when_false: IS_QUESTION_CRITERIA_FALSE,
+                },
+            },
+        },
+        state: body,
+    };
+    serde_json::to_value(request).expect("DecisionsRequest always serializes")
 }
 
-/// Plausible JSON pointers (tried in order) for each field of the
-/// `is_question` answer. Multiple shapes are tried because three
-/// third-party sources disagreed on naming, and none were an official spec.
-/// This is the one place raw JSON navigation is acceptable per this
-/// repository's typed-payloads rule — the *result* is always the typed
-/// [`IsQuestionJudgment`], and failure is always the typed [`JudgeError`].
-const PROBABILITY_POINTERS: &[&str] = &[
-    "/answers/is_question/probability",
-    "/is_question/probability",
-    "/answers/is_question/yes",
-    "/questions/is_question/probability",
-    "/probability",
-];
-
-const CONFIDENCE_POINTERS: &[&str] = &[
-    "/answers/is_question/confidence",
-    "/is_question/confidence",
-    "/answers/is_question/certainty",
-    "/questions/is_question/confidence",
-    "/confidence",
-];
-
-const TAXONOMY_VERSION_POINTERS: &[&str] = &[
-    "/answers/is_question/taxonomy_version",
-    "/is_question/taxonomy_version",
-    "/taxonomy_version",
-    "/taxonomyVersion",
-];
-
-const MODEL_VERSION_POINTERS: &[&str] = &[
-    "/answers/is_question/model_version",
-    "/is_question/model_version",
-    "/model_version",
-    "/modelVersion",
-    "/model",
-];
-
-fn first_f64_at(document: &Value, pointers: &[&str]) -> Option<f64> {
-    pointers
-        .iter()
-        .find_map(|pointer| document.pointer(pointer).and_then(Value::as_f64))
+/// Response shape confirmed from OpenRouter's Decisions API reference (see
+/// module docs). Deliberately does not derive `deny_unknown_fields`: fields
+/// this client doesn't need (`id`, `provider`, per-answer `type`,
+/// `usage.input_tokens`/`output_tokens`) are ignored rather than rejected,
+/// so an additive change on Jev's side doesn't break this client.
+#[derive(Deserialize)]
+struct DecisionsResponse {
+    answers: DecisionsAnswers,
+    /// The actual model snapshot that answered (e.g.
+    /// `"typesafe/jev-1.13-20260917"`), distinct from the requested `model`
+    /// in [`DecisionsRequest`] (e.g. `"typesafe/jev-1.13"`, no date suffix).
+    model: String,
+    usage: DecisionsUsage,
 }
 
-fn first_str_at(document: &Value, pointers: &[&str]) -> Option<String> {
-    pointers
-        .iter()
-        .find_map(|pointer| document.pointer(pointer).and_then(Value::as_str))
-        .map(str::to_string)
+#[derive(Deserialize)]
+struct DecisionsAnswers {
+    is_question: NoulAnswer,
+}
+
+#[derive(Deserialize)]
+struct NoulAnswer {
+    /// Probability, in `0.0..=1.0`, that the Noul condition holds. No
+    /// `confidence` field exists for this primitive — see module docs.
+    noul: f64,
+}
+
+#[derive(Deserialize)]
+struct DecisionsUsage {
+    /// USD cost of this request, per the Decisions API's documented
+    /// `usage.cost` field.
+    cost: f64,
 }
 
 /// Pure, separately testable response parser — analogous to
 /// `parse_provider_answer_from_document` in `ai-chatbot/src/provider.rs`.
-/// Probes several plausible response shapes (see the `*_POINTERS`
-/// constants) rather than assuming any single one is correct, and never
-/// panics on unexpected shapes: everything not found or out of range
-/// becomes a typed [`JudgeError::InvalidResponse`].
+/// Never panics on an out-of-range value: that becomes a typed
+/// [`JudgeError::InvalidResponse`], never a stored garbage value.
 ///
-/// `fallback_model_version` is the configured model identifier, used when
-/// the response itself does not report one back. `taxonomy_version` falls
-/// back to the literal string `"unknown"` rather than failing the whole
-/// judgment, since its absence does not by itself mean the probability is
-/// untrustworthy — but it is recorded as literally `"unknown"`, never
-/// silently as a real-looking version string, so schema drift stays
-/// visible in stored rows exactly as the field's own doc comment intends.
+/// `fallback_model_version` is the configured model identifier, used only
+/// if the response's own `model` field is empty (not expected per the
+/// documented shape, but cheaper to guard than to trust blindly).
 fn parse_response(
-    document: &Value,
+    response: DecisionsResponse,
     fallback_model_version: &str,
 ) -> Result<IsQuestionJudgment, JudgeError> {
-    let probability = first_f64_at(document, PROBABILITY_POINTERS).ok_or_else(|| {
-        JudgeError::InvalidResponse(
-            "jev response did not contain a recognizable is_question probability".to_string(),
-        )
-    })?;
+    let probability = response.answers.is_question.noul;
     if !(0.0..=1.0).contains(&probability) {
         return Err(JudgeError::InvalidResponse(format!(
             "jev is_question probability {probability} was outside 0.0..=1.0"
         )));
     }
-    let confidence = first_f64_at(document, CONFIDENCE_POINTERS).ok_or_else(|| {
-        JudgeError::InvalidResponse(
-            "jev response did not contain a recognizable is_question confidence".to_string(),
-        )
-    })?;
-    if !(0.0..=1.0).contains(&confidence) {
-        return Err(JudgeError::InvalidResponse(format!(
-            "jev is_question confidence {confidence} was outside 0.0..=1.0"
-        )));
-    }
-    let taxonomy_version =
-        first_str_at(document, TAXONOMY_VERSION_POINTERS).unwrap_or_else(|| "unknown".to_string());
-    let model_version = first_str_at(document, MODEL_VERSION_POINTERS)
-        .unwrap_or_else(|| fallback_model_version.to_string());
+    let model_version = if response.model.is_empty() {
+        fallback_model_version.to_string()
+    } else {
+        response.model
+    };
 
     Ok(IsQuestionJudgment {
         probability,
-        confidence,
-        taxonomy_version,
+        taxonomy_version: TAXONOMY_VERSION.to_string(),
         model_version,
+        cost_usd: response.usage.cost,
     })
 }
 
@@ -506,34 +547,44 @@ mod tests {
     }
 
     #[test]
-    fn build_request_body_matches_expected_shape() {
-        let body = build_request_body("jev-latest", "are we there yet?");
+    fn build_request_body_matches_documented_decisions_api_shape() {
+        let body = build_request_body("typesafe/jev-1.13", "are we there yet?");
         assert_eq!(
             body,
             serde_json::json!({
-                "model": "jev-latest",
-                "state": "are we there yet?",
+                "model": "typesafe/jev-1.13",
                 "questions": {
                     "is_question": {
-                        "type": "yes_no",
-                        "prompt": IS_QUESTION_PROMPT,
+                        "type": "noul",
+                        "instructions": IS_QUESTION_INSTRUCTIONS,
+                        "criteria": {
+                            "true": IS_QUESTION_CRITERIA_TRUE,
+                            "false": IS_QUESTION_CRITERIA_FALSE,
+                        }
                     }
-                }
+                },
+                "state": "are we there yet?",
             })
         );
     }
 
     #[tokio::test]
-    async fn is_question_parses_successful_primary_shape_response() {
+    async fn is_question_parses_documented_response_shape() {
         let client = client_with(|_request| {
             Ok(ok_response(serde_json::json!({
                 "answers": {
                     "is_question": {
-                        "probability": 0.92,
-                        "confidence": 0.81,
-                        "taxonomy_version": "tax-2026-09-01",
-                        "model_version": "jev-2026-09-15",
+                        "noul": 0.92,
+                        "type": "noul"
                     }
+                },
+                "id": "gen-dec-1789738314-X5e5eKGQdvR9rblyX250",
+                "model": "typesafe/jev-1.13-20260917",
+                "provider": "TypeSafe",
+                "usage": {
+                    "cost": 0.000019992,
+                    "input_tokens": 476,
+                    "output_tokens": 70
                 }
             })))
         });
@@ -547,34 +598,28 @@ mod tests {
             judgment,
             IsQuestionJudgment {
                 probability: 0.92,
-                confidence: 0.81,
-                taxonomy_version: "tax-2026-09-01".to_string(),
-                model_version: "jev-2026-09-15".to_string(),
+                taxonomy_version: TAXONOMY_VERSION.to_string(),
+                model_version: "typesafe/jev-1.13-20260917".to_string(),
+                cost_usd: 0.000019992,
             }
         );
     }
 
     #[tokio::test]
-    async fn is_question_parses_successful_flat_fallback_shape_response() {
+    async fn is_question_falls_back_to_configured_model_when_response_omits_it() {
         let client = client_with(|_request| {
             Ok(ok_response(serde_json::json!({
-                "is_question": {
-                    "probability": 0.1,
-                    "confidence": 0.5,
-                }
+                "answers": { "is_question": { "noul": 0.1, "type": "noul" } },
+                "model": "",
+                "usage": { "cost": 0.0, "input_tokens": 10, "output_tokens": 1 }
             })))
         });
 
         let judgment = client
             .is_question("hello there")
             .await
-            .expect("flat fallback shape should still parse");
+            .expect("empty model field should still parse, using the fallback");
 
-        assert_eq!(judgment.probability, 0.1);
-        assert_eq!(judgment.confidence, 0.5);
-        // Neither version field was present, so both fall back rather than
-        // erroring, per parse_response's documented fallback behavior.
-        assert_eq!(judgment.taxonomy_version, "unknown");
         assert_eq!(judgment.model_version, "jev-test-model");
     }
 
@@ -589,7 +634,7 @@ mod tests {
         let error = client
             .is_question("does this even parse")
             .await
-            .expect_err("shape with no recognizable probability must be rejected");
+            .expect_err("a response missing the documented fields must be rejected");
 
         assert!(matches!(error, JudgeError::InvalidResponse(_)));
     }
@@ -598,7 +643,9 @@ mod tests {
     async fn is_question_rejects_probability_out_of_range() {
         let client = client_with(|_request| {
             Ok(ok_response(serde_json::json!({
-                "is_question": { "probability": 1.5, "confidence": 0.5 }
+                "answers": { "is_question": { "noul": 1.5, "type": "noul" } },
+                "model": "typesafe/jev-1.13-20260917",
+                "usage": { "cost": 0.0, "input_tokens": 1, "output_tokens": 1 }
             })))
         });
 
@@ -628,11 +675,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_question_maps_non_2xx_status_to_transport_error() {
+    async fn is_question_maps_non_2xx_status_using_documented_error_shape() {
         let client = client_with(|_request| {
             Ok(JevHttpResponse {
                 status: 503,
-                body: b"{\"error\":\"upstream overloaded\"}".to_vec(),
+                body: br#"{"error":{"code":503,"message":"Service temporarily unavailable"}}"#
+                    .to_vec(),
             })
         });
 
@@ -644,7 +692,7 @@ mod tests {
         match error {
             JudgeError::Transport(message) => {
                 assert!(message.contains("503"));
-                assert!(message.contains("upstream overloaded"));
+                assert!(message.contains("Service temporarily unavailable"));
             }
             other => panic!("expected Transport error, got {other:?}"),
         }
@@ -669,8 +717,8 @@ mod tests {
     #[test]
     fn config_debug_output_redacts_api_key() {
         let config = JevClientConfig {
-            endpoint: "https://api.typesafe.ai/v1/systemone".to_string(),
-            model: "jev-latest".to_string(),
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+            model: DEFAULT_MODEL.to_string(),
             api_key: "super-secret-value".to_string(),
             request_timeout: Duration::from_secs(3),
         };
@@ -682,8 +730,8 @@ mod tests {
     #[test]
     fn new_rejects_non_https_endpoint() {
         let config = JevClientConfig {
-            endpoint: "http://api.typesafe.ai/v1/systemone".to_string(),
-            model: "jev-latest".to_string(),
+            endpoint: "http://openrouter.ai/api/alpha/decisions".to_string(),
+            model: DEFAULT_MODEL.to_string(),
             api_key: "some-key".to_string(),
             request_timeout: Duration::from_secs(3),
         };
@@ -694,8 +742,8 @@ mod tests {
     #[test]
     fn new_rejects_missing_api_key() {
         let config = JevClientConfig {
-            endpoint: "https://api.typesafe.ai/v1/systemone".to_string(),
-            model: "jev-latest".to_string(),
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+            model: DEFAULT_MODEL.to_string(),
             api_key: String::new(),
             request_timeout: Duration::from_secs(3),
         };
@@ -704,16 +752,14 @@ mod tests {
     }
 
     #[test]
-    fn default_config_is_unconfigured() {
+    fn default_config_has_real_endpoint_and_model_but_no_api_key() {
         let config = JevClientConfig::default();
-        assert!(config.endpoint.is_empty());
-        assert!(config.api_key.is_empty());
+        assert_eq!(config.endpoint, DEFAULT_ENDPOINT);
         assert_eq!(config.model, DEFAULT_MODEL);
-        let error = JevClient::new(config).expect_err("default config must not silently be usable");
-        assert!(matches!(
-            error,
-            JevClientConfigError::MissingApiKey | JevClientConfigError::InvalidEndpoint
-        ));
+        assert!(config.api_key.is_empty());
+        let error = JevClient::new(config)
+            .expect_err("default config must not silently be usable without an api key");
+        assert!(matches!(error, JevClientConfigError::MissingApiKey));
     }
 
     // The tests above exercise `build_request_body`/`parse_response` and
@@ -750,11 +796,16 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "answers": {
                         "is_question": {
-                            "probability": 0.9,
-                            "confidence": 0.7,
-                            "taxonomy_version": "tax-1",
-                            "model_version": "jev-real-1",
+                            "noul": 0.9,
+                            "type": "noul"
                         }
+                    },
+                    "model": "typesafe/jev-1.13-20260917",
+                    "provider": "TypeSafe",
+                    "usage": {
+                        "cost": 0.00002,
+                        "input_tokens": 100,
+                        "output_tokens": 10
                     }
                 })))
                 .mount(&server)
@@ -767,7 +818,8 @@ mod tests {
                 .expect("well-formed response over real HTTP must parse");
 
             assert_eq!(judgment.probability, 0.9);
-            assert_eq!(judgment.model_version, "jev-real-1");
+            assert_eq!(judgment.model_version, "typesafe/jev-1.13-20260917");
+            assert_eq!(judgment.cost_usd, 0.00002);
         }
 
         #[tokio::test]
@@ -775,10 +827,12 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/"))
-                .respond_with(
-                    ResponseTemplate::new(503)
-                        .set_body_string("{\"error\":\"upstream overloaded\"}"),
-                )
+                .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                    "error": {
+                        "code": 503,
+                        "message": "Service temporarily unavailable"
+                    }
+                })))
                 .mount(&server)
                 .await;
 
@@ -791,7 +845,7 @@ mod tests {
             match error {
                 JudgeError::Transport(message) => {
                     assert!(message.contains("503"));
-                    assert!(message.contains("upstream overloaded"));
+                    assert!(message.contains("Service temporarily unavailable"));
                 }
                 other => panic!("expected Transport error, got {other:?}"),
             }
