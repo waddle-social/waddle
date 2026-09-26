@@ -233,7 +233,12 @@ schema.#Project & {
 
 	tasks: {
 		checkCiDrift: schema.#Task & {
-			command: "bash"
+			// Reads sibling projects through ../ inputs and shells out to cuenv,
+			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
+			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
+			// this in the live checkout with the ambient environment.
+			hermetic: false
+			command:  "bash"
 			args: ["-c", #"""
 					set -euo pipefail
 					cd ..
@@ -280,7 +285,12 @@ schema.#Project & {
 		}
 
 		checkRootSyncDrift: schema.#Task & {
-			command: "bash"
+			// Reads sibling projects through ../ inputs and shells out to cuenv,
+			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
+			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
+			// this in the live checkout with the ambient environment.
+			hermetic: false
+			command:  "bash"
 			args: ["-c", #"""
 					set -euo pipefail
 					cuenv sync vcs
@@ -297,7 +307,12 @@ schema.#Project & {
 		}
 
 		checkSwitchableAlternativeProgram: schema.#Task & {
-			command: "bash"
+			// Reads sibling projects through ../ inputs and shells out to cuenv,
+			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
+			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
+			// this in the live checkout with the ambient environment.
+			hermetic: false
+			command:  "bash"
 			args: ["-c", #"""
 					set -euo pipefail
 					cuenv sync vcs
@@ -494,7 +509,12 @@ schema.#Project & {
 		}
 
 		checkXmppClientFfiBindings: schema.#Task & {
-			command: "bash"
+			// Reads sibling projects through ../ inputs and shells out to cuenv,
+			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
+			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
+			// this in the live checkout with the ambient environment.
+			hermetic: false
+			command:  "bash"
 			args: ["scripts/check-xmpp-client-ffi-bindings.sh"]
 			inputs: list.Concat([
 				_rustInputs,
@@ -543,7 +563,12 @@ schema.#Project & {
 		}
 
 		renderDeployment: schema.#Task & {
-			command: "bash"
+			// Reads sibling projects through ../ inputs and shells out to cuenv,
+			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
+			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
+			// this in the live checkout with the ambient environment.
+			hermetic: false
+			command:  "bash"
 			args: ["-c", #"""
 					set -euo pipefail
 
@@ -935,7 +960,12 @@ schema.#Project & {
 		}
 
 		publishContainerImage: schema.#Task & {
-			command: "bash"
+			// Reads sibling projects through ../ inputs and shells out to cuenv,
+			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
+			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run
+			// this in the live checkout with the ambient environment.
+			hermetic: false
+			command:  "bash"
 			env: {
 				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
 				CI_GITHUB_ACTOR: schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
