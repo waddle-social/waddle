@@ -59,8 +59,6 @@ public struct ThreadHistory: Equatable, Sendable {
 public final class ThreadHistoryStore {
     public private(set) var histories: [ThreadKey: ThreadHistory] = [:]
 
-    public init() {}
-
     public func history(for thread: ThreadKey) -> ThreadHistory? {
         histories[thread]
     }

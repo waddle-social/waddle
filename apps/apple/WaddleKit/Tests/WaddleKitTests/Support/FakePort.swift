@@ -130,7 +130,7 @@ final class FakePort: XmppPort {
     var failingThreads: Set<String> = []
     var threadRequests: [(room: BareJID, threadID: String, max: Int)] = []
 
-    func fetchThreadHistory(in room: BareJID, threadID: String, before cursor: String?, max: Int) async throws -> ArchivePage {
+    func fetchThreadHistory(in room: BareJID, threadID: String, before _: String?, max: Int) async throws -> ArchivePage {
         threadRequests.append((room, threadID, max))
         if failingThreads.contains(threadID) { throw PortError.failed }
         return threadPages[threadID] ?? ArchivePage(messages: [], first: nil, isComplete: true)

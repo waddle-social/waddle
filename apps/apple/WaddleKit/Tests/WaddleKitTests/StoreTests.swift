@@ -6,7 +6,7 @@ import Testing
 @Suite("Session stores")
 struct StoreTests {
     private func entry(_ unread: Int, last: String, updated: Int64) -> InboxEntry {
-        InboxEntry(partner: bob, kind: .direct, lastStanzaID: last, lastUpdated: updated, unread: unread, preview: nil, threadID: nil)
+        InboxEntry(partner: bob, kind: .direct, lastStanzaID: last, lastUpdated: updated, unread: unread, preview: nil)
     }
 
     @Test func inboxDropsStaleEntries() {

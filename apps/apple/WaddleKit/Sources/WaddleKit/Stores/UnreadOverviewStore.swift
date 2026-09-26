@@ -25,8 +25,6 @@ public final class UnreadOverviewStore {
     @ObservationIgnored private var serial = 0
     @ObservationIgnored private(set) var cache: [UnreadOverviewSection: [TimelineItem]] = [:]
 
-    public init() {}
-
     /// Starts a refresh; results carrying an older serial are dropped.
     func begin() -> Int {
         serial += 1

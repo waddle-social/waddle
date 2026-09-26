@@ -6,7 +6,7 @@ private let other = bare("random@muc.waddle.test")
 private let thread = ThreadKey(room: room, threadID: "root-1")
 
 private func roomRow(_ partner: BareJID = room, unread: Int, last: String, updated: Int64, preview: String? = nil) -> InboxEntry {
-    InboxEntry(partner: partner, kind: .room, lastStanzaID: last, lastUpdated: updated, unread: unread, preview: preview, threadID: nil)
+    InboxEntry(partner: partner, kind: .room, lastStanzaID: last, lastUpdated: updated, unread: unread, preview: preview)
 }
 
 private func threadRow(
@@ -25,8 +25,7 @@ private func threadRow(
         lastUpdated: updated,
         unread: unread,
         preview: preview,
-        threadID: key.threadID,
-        threadTitle: title
+        thread: InboxEntry.Thread(id: key.threadID, title: title)
     )
 }
 
@@ -66,7 +65,7 @@ struct UnreadOverviewTests {
 
     @Test func directThreadRowNeverOverwritesTheConversationBadge() {
         let (coordinator, _) = online()
-        coordinator.handle(.inboxPush(InboxEntry(partner: bob, kind: .direct, lastStanzaID: "d1", lastUpdated: 5, unread: 2, preview: nil, threadID: nil)))
+        coordinator.handle(.inboxPush(InboxEntry(partner: bob, kind: .direct, lastStanzaID: "d1", lastUpdated: 5, unread: 2, preview: nil)))
         coordinator.handle(.inboxPush(threadRow(ThreadKey(room: bob, threadID: "call"), unread: 9, last: "d2", updated: 6, kind: .direct)))
         #expect(coordinator.unread.count(for: bobConversation) == 2)
         #expect(coordinator.unread.threadCounts.isEmpty)

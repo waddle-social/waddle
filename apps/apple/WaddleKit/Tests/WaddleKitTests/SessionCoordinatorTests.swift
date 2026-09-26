@@ -150,7 +150,7 @@ struct SessionCoordinatorTests {
 
     @Test func inboxPushSetsUnreadAndSuppressesDoubleCount() {
         let (coordinator, _) = online()
-        coordinator.handle(.inboxPush(InboxEntry(partner: room, kind: .room, lastStanzaID: "s7", lastUpdated: 7, unread: 4, preview: nil, threadID: nil)))
+        coordinator.handle(.inboxPush(InboxEntry(partner: room, kind: .room, lastStanzaID: "s7", lastUpdated: 7, unread: 4, preview: nil)))
         #expect(coordinator.unread.count(for: roomConversation) == 4)
         coordinator.route(roomMessage("counted already", from: "bob", stanzaID: "s7"))
         #expect(coordinator.unread.count(for: roomConversation) == 4)
