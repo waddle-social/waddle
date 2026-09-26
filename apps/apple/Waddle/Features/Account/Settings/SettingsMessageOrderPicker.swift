@@ -56,7 +56,7 @@ struct SettingsMessageOrderPicker: View {
         .animation(.snappy(duration: 0.2), value: isSelected)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(order.title), \(order.subtitle)"))
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 }
 

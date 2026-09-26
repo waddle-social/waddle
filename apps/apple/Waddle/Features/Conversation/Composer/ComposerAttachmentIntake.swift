@@ -89,11 +89,12 @@ struct ComposerAttachmentIntake {
     private static func imageType(of provider: NSItemProvider) -> UTType? {
         if provider.hasItemConformingToTypeIdentifier(UTType.gif.identifier) { return .gif }
         return provider.registeredTypeIdentifiers.lazy
-            .compactMap(UTType.init)
+            .compactMap { UTType($0) }
             .first { $0.conforms(to: .image) }
     }
 
-    private static func fileURL(from provider: NSItemProvider) async -> URL? {
+    // Nonisolated: the providers call back off the main thread.
+    private nonisolated static func fileURL(from provider: NSItemProvider) async -> URL? {
         await withCheckedContinuation { continuation in
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 continuation.resume(returning: url.flatMap { $0.isFileURL ? $0 : nil })
@@ -101,7 +102,7 @@ struct ComposerAttachmentIntake {
         }
     }
 
-    private static func data(of type: UTType, from provider: NSItemProvider) async -> Data? {
+    private nonisolated static func data(of type: UTType, from provider: NSItemProvider) async -> Data? {
         await withCheckedContinuation { continuation in
             _ = provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
                 continuation.resume(returning: data)
