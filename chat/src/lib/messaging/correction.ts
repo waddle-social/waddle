@@ -17,7 +17,7 @@ export type CorrectionPayload = Pick<
   | "linkPreviews"
   | "extensionAnnotations"
   | "extensionBodyFallback"
-> & { sourceRevisionId?: string };
+> & { sourceRevisionId?: string; sourceRevisionAt?: string };
 
 export interface CorrectionPolicy {
   /** Divergence 3: sender identity key (occupant JID vs bare JID). */
@@ -37,9 +37,14 @@ export function assignCorrectionFields(
 ): void {
   target.body = payload.body;
   target.isEdited = true;
-  target.sourceRevisionId = payload.sourceRevisionId ?? "";
-  delete target.safetyScores;
-  delete target.safetyScoresAt;
+  const revision = payload.sourceRevisionId ?? "";
+  if (!revision || (target.sourceRevisionId ?? target.stanzaId) !== revision) {
+    delete target.safetyScores;
+    delete target.safetyScoresAt;
+  }
+  target.sourceRevisionId = revision;
+  if (payload.sourceRevisionAt) target.sourceRevisionAt = payload.sourceRevisionAt;
+  else delete target.sourceRevisionAt;
   if (payload.markup && payload.markup.length > 0) target.markup = payload.markup;
   else delete target.markup;
   if (payload.references && payload.references.length > 0) target.references = payload.references;

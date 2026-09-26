@@ -88,44 +88,54 @@ class SafetyScoresMutationTest {
     }
 
     @Test fun archivedResultBeforeSourceIsParked() {
-        store.onArchivedMessage(testArchivedMessage(
-            mamId = "score-mam",
-            from = room,
-            to = null,
-            messageType = "groupchat",
-            body = null,
-            safetyScores = fastening(),
-        ))
-        store.onArchivedMessage(testArchivedMessage(
-            mamId = "source-mam",
-            id = "origin-1",
-            originId = "origin-1",
-            stanzaId = "s1",
-            stanzaIdBy = room,
-            from = "$room/alice",
-            to = null,
-            messageType = "groupchat",
-            body = "is anyone around?",
-        ))
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "score-mam",
+                from = room,
+                to = null,
+                messageType = "groupchat",
+                body = null,
+                safetyScores = fastening(),
+            ),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "source-mam",
+                id = "origin-1",
+                originId = "origin-1",
+                stanzaId = "s1",
+                stanzaIdBy = room,
+                from = "$room/alice",
+                to = null,
+                messageType = "groupchat",
+                body = "is anyone around?",
+            ),
+        )
         assertEquals(scores("jev-1"), row().safetyScores)
     }
 
     @Test fun newestFirstArchiveKeepsScoreUntilCorrectionArrives() {
-        store.onArchivedMessage(testArchivedMessage(
-            mamId = "score-mam", from = room, to = null, messageType = "groupchat", body = null,
-            safetyScores = fastening(version = "jev-2", revisionId = "edit-1"),
-            timestamp = "2026-09-25T10:02:00Z",
-        ))
-        store.onArchivedMessage(testArchivedMessage(
-            mamId = "edit-mam", id = "edit-origin", stanzaId = "edit-1", stanzaIdBy = room,
-            from = "$room/alice", to = null, messageType = "groupchat", body = "edited",
-            replacesId = "origin-1", timestamp = "2026-09-25T10:01:00Z",
-        ))
-        store.onArchivedMessage(testArchivedMessage(
-            mamId = "source-mam", id = "origin-1", originId = "origin-1",
-            stanzaId = "s1", stanzaIdBy = room, from = "$room/alice", to = null,
-            messageType = "groupchat", body = "original", timestamp = "2026-09-25T10:00:00Z",
-        ))
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "score-mam", from = room, to = null, messageType = "groupchat", body = null,
+                safetyScores = fastening(version = "jev-2", revisionId = "edit-1"),
+                timestamp = "2026-09-25T10:02:00Z",
+            ),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "edit-mam", id = "edit-origin", stanzaId = "edit-1", stanzaIdBy = room,
+                from = "$room/alice", to = null, messageType = "groupchat", body = "edited",
+                replacesId = "origin-1", timestamp = "2026-09-25T10:01:00Z",
+            ),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "source-mam", id = "origin-1", originId = "origin-1",
+                stanzaId = "s1", stanzaIdBy = room, from = "$room/alice", to = null,
+                messageType = "groupchat", body = "original", timestamp = "2026-09-25T10:00:00Z",
+            ),
+        )
         assertEquals("edited", row().body)
         assertEquals(scores("jev-2"), row().safetyScores)
     }
@@ -133,17 +143,19 @@ class SafetyScoresMutationTest {
     @Test fun correctionClearsAndOldRevisionCannotReattach() {
         store.onLiveMessage(source())
         store.onLiveMessage(result(fastening()))
-        store.onLiveMessage(testMessage(
-            id = "edit-origin",
-            stanzaId = "edit-1",
-            stanzaIdBy = room,
-            from = "$room/alice",
-            to = null,
-            messageType = "groupchat",
-            isMuc = true,
-            body = "edited",
-            replacesId = "origin-1",
-        ))
+        store.onLiveMessage(
+            testMessage(
+                id = "edit-origin",
+                stanzaId = "edit-1",
+                stanzaIdBy = room,
+                from = "$room/alice",
+                to = null,
+                messageType = "groupchat",
+                isMuc = true,
+                body = "edited",
+                replacesId = "origin-1",
+            ),
+        )
         assertNull(row().safetyScores)
         store.onLiveMessage(result(fastening()))
         assertNull(row().safetyScores)

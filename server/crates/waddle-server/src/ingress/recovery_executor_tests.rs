@@ -689,13 +689,12 @@ mod family_tests {
         drop(state);
         fixture.close().await;
     }
-    async fn observer_plugin_recovers_once(fixture: IngressFixture) {
+    async fn observer_recovery_remains_pending_for_durable_scheduler(fixture: IngressFixture) {
         observer_recovery(fixture, false).await;
     }
 
-    /// `warning == true` models a plugin whose only outcome is an error reply
-    /// to the original sender: recovery has no such socket, so the row is
-    /// evaluated once, cached as unsupported and the plugin is not re-invoked.
+    /// Recovery preserves observer work for the durable scheduler, regardless
+    /// of the legacy plugin's synchronous behavior.
     async fn observer_recovery(fixture: IngressFixture, warning: bool) {
         use waddle_extensions::{
             observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
@@ -708,9 +707,8 @@ mod family_tests {
             ObserverTestBehavior::Success
         };
         let plugin = ObserverTestPlugin::new(plugin_id.clone(), behavior);
-        // A sibling plugin that succeeds: its receipt commits during the same
-        // attempt, and the cached evidence must reflect that so the warning
-        // plugin is not re-invoked on the next scan.
+        // A second frozen observer and a synthetic MUC copy exercise recovery
+        // when one obligation can settle while observers remain pending.
         let sibling_id = PluginId::new("recovery-observer-sibling").expect("sibling id");
         let sibling = ObserverTestPlugin::new(sibling_id.clone(), ObserverTestBehavior::Success);
         let mut plugins = vec![plugin.clone()];
@@ -771,7 +769,7 @@ mod family_tests {
             );
             // This synthetic legacy MUC sibling uses CaptureOrdinal rather than
             // a room stanza ID, so it lacks recoverable canonical provenance.
-            // The warning-only observer must still be cached alongside it.
+            // Both frozen observers remain pending beside the MUC copy.
             submission
                 .plan
                 .intents
@@ -807,41 +805,18 @@ mod family_tests {
                 family_pass(&fixture, &state, &cursor).await,
                 MaintenanceOutcome::Complete
             );
-            assert_eq!(plugin.invocations().len(), 1);
-            assert_eq!(
-                plugin.invocations()[0].body.as_str(),
-                "frozen observer body"
-            );
+            assert!(plugin.invocations().is_empty());
             if warning {
                 super::assert_pending(&fixture, key).await;
-                assert_eq!(
-                    crate::ingress::recovery_executor::attempt_count(key),
-                    1,
-                    "a warning-only observer is cached as unsupported, not re-invoked"
-                );
-                assert_eq!(
-                    sibling.invocations().len(),
-                    1,
-                    "the successful sibling ran once and its receipt is part of the cached evidence"
-                );
+                assert!(sibling.invocations().is_empty());
                 assert_eq!(
                     fixture.count("ingress_effect_receipts").await,
-                    2,
-                    // #1803: the synthetic legacy MUC sibling names a room NO
-                    // node hosts, and its single frozen occupant is reachable
-                    // nowhere, so maintenance settles that copy and the
-                    // fanout's aggregate receipt lands on the first pass. The
-                    // warning-only observer is still the reason the row stays
-                    // pending, and is still cached rather than re-invoked.
-                    //
-                    // This is the CONTROL for the owed-occupant rule: the
-                    // aggregate receipt below proves the route has no owed
-                    // occupant left, so nothing keeps the row retryable and it
-                    // is cached exactly as it was before that rule.
-                    "the successful sibling's receipt, plus the settled legacy MUC fanout's"
+                    1,
+                    "only the settled legacy MUC fanout receipts during ingress recovery"
                 );
             } else {
-                family_recovered(&fixture, key, 1).await;
+                super::assert_pending(&fixture, key).await;
+                assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
             }
         }
         drop(state);
@@ -909,13 +884,9 @@ mod family_tests {
         drop(state);
         fixture.close().await;
     }
-    /// A warning-only observer sharing a row with a delegated groupchat
-    /// notification recovery: the delegation settles in the same attempt, and
-    /// the row must be classified unsupported only after that settlement, so
-    /// the plugin is invoked exactly once across passes. [R6 P2]
-    async fn warning_observer_with_delegated_recovery_is_cached_after_settlement(
-        fixture: IngressFixture,
-    ) {
+    /// An observer sharing a row with delegated groupchat notification
+    /// recovery remains pending for the durable scheduler after delegation.
+    async fn deferred_observer_with_delegated_recovery_remains_pending(fixture: IngressFixture) {
         use waddle_extensions::{
             observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
             ExtensionManager, PluginId,
@@ -988,12 +959,7 @@ mod family_tests {
                 1,
                 "the delegated recovery settled during the first attempt"
             );
-            assert_eq!(plugin.invocations().len(), 1, "warning observer runs once");
-            assert_eq!(
-                crate::ingress::recovery_executor::attempt_count(key),
-                1,
-                "classified unsupported after the delegation settled, so no re-attempt"
-            );
+            assert!(plugin.invocations().is_empty());
             super::assert_pending(&fixture, key).await;
         }
         drop(state);
@@ -1168,38 +1134,37 @@ mod family_tests {
         }
     }
     #[tokio::test]
-    async fn sqlite_observer_warning_is_evaluated_once_and_left_pending() {
+    async fn sqlite_two_observers_remain_pending_after_muc_recovery() {
         observer_recovery(IngressFixture::sqlite().await, true).await;
     }
     #[tokio::test]
-    async fn postgres_observer_warning_is_evaluated_once_and_left_pending() {
+    async fn postgres_two_observers_remain_pending_after_muc_recovery() {
         if let Some(fixture) = IngressFixture::postgres("recovery_observer_warning").await {
             observer_recovery(fixture, true).await;
         }
     }
     #[tokio::test]
-    async fn sqlite_observer_plugin_recovers_once() {
-        observer_plugin_recovers_once(IngressFixture::sqlite().await).await;
+    async fn sqlite_observer_recovery_remains_pending_for_durable_scheduler() {
+        observer_recovery_remains_pending_for_durable_scheduler(IngressFixture::sqlite().await)
+            .await;
     }
     #[tokio::test]
-    async fn postgres_observer_plugin_recovers_once() {
+    async fn postgres_observer_recovery_remains_pending_for_durable_scheduler() {
         if let Some(fixture) = IngressFixture::postgres("family_1").await {
-            observer_plugin_recovers_once(fixture).await;
+            observer_recovery_remains_pending_for_durable_scheduler(fixture).await;
         }
     }
     #[tokio::test]
-    async fn sqlite_warning_observer_with_delegated_recovery_is_cached_after_settlement() {
-        warning_observer_with_delegated_recovery_is_cached_after_settlement(
-            IngressFixture::sqlite().await,
-        )
-        .await;
+    async fn sqlite_deferred_observer_with_delegated_recovery_remains_pending() {
+        deferred_observer_with_delegated_recovery_remains_pending(IngressFixture::sqlite().await)
+            .await;
     }
     #[tokio::test]
-    async fn postgres_warning_observer_with_delegated_recovery_is_cached_after_settlement() {
+    async fn postgres_deferred_observer_with_delegated_recovery_remains_pending() {
         if let Some(fixture) =
             IngressFixture::postgres("recovery_warning_observer_delegation").await
         {
-            warning_observer_with_delegated_recovery_is_cached_after_settlement(fixture).await;
+            deferred_observer_with_delegated_recovery_remains_pending(fixture).await;
         }
     }
     #[tokio::test]

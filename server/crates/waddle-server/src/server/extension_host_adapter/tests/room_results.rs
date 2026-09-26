@@ -335,7 +335,7 @@ async fn real_client_room_archive_captures_observer_source(f: IngressFixture) {
     let fixture = GroupchatFixture::new(&f).await;
     let configured = observer(&fixture.room);
     let mut tx = f.uow.begin().await.expect("observer config");
-    RoomObservationRepository::sync_configured(&mut tx, &[configured.clone()])
+    RoomObservationRepository::sync_configured(&mut tx, std::slice::from_ref(&configured))
         .await
         .expect("sync observer");
     tx.commit().await.expect("config commit");

@@ -15,13 +15,12 @@ import {
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
-import { assignCorrectionFields, type CorrectionPayload } from "@/lib/messaging/correction";
+import { ChannelPendingUpdates, type PendingChannelCorrection } from "@/channels/pending-updates";
 import { isStaleReactionUpdate } from "@/lib/messaging/reactions";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
 import { SenderScopedIdIndex } from "@/lib/messaging/sender-scoped-ids";
-import { safetyScoresTargetIndex, withSafetyScores } from "@/lib/safety-scores/apply";
 import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 
 function mergeReplyToMetadata(
@@ -292,8 +291,9 @@ export function buildChannelTimelineFromMamResults(params: {
   mamResults: LiveRoomMessage[];
   existing?: TimelineMessage[];
   options?: TimelineBuildOptions;
+  pendingUpdates?: ChannelPendingUpdates;
 }): TimelineMessage[] {
-  const { session, channelIsForum, mamResults, existing = [], options = {} } = params;
+  const { session, channelIsForum, mamResults, existing = [], options = {}, pendingUpdates = new ChannelPendingUpdates() } = params;
   const regularMessages: LiveRoomMessage[] = [];
   const reactionUpdates: { targetId: string; nick: string; senderId: string; emojis: string[]; occurredAt?: string }[] = [];
   const retractionUpdates: {
@@ -301,11 +301,7 @@ export function buildChannelTimelineFromMamResults(params: {
     retractionSender: { authorJid: string; authorRealJid?: string };
     isModeration: boolean;
   }[] = [];
-  const correctionUpdates: {
-    targetId: string;
-    correctionSender: { authorJid: string; authorRealJid?: string };
-    payload: CorrectionPayload;
-  }[] = [];
+  const correctionUpdates: PendingChannelCorrection[] = [];
   const callThreadEndedUpdates: NonNullable<LiveRoomMessage["callThreadEnded"]>[] = [];
   const safetyScoresUpdates: { fastening: SafetyScoresFastening; at: string }[] = [];
 
@@ -337,6 +333,7 @@ export function buildChannelTimelineFromMamResults(params: {
           extensionAnnotations: msg.extensionAnnotations,
           extensionBodyFallback: msg.extensionBodyFallback,
           sourceRevisionId: msg.stanzaId,
+          sourceRevisionAt: msg.createdAt,
         },
       });
     } else if (msg.callThreadEnded) {
@@ -369,7 +366,7 @@ export function buildChannelTimelineFromMamResults(params: {
     byId.add(message);
   }
   const identityIndex = new SenderScopedIdIndex(existing);
-  const timeline = options.seedExistingOnly ? [] : [...existing];
+  let timeline = options.seedExistingOnly ? [] : [...existing];
   // #1182: rows whose primary id had to be fabricated (id-less live
   // stanzas) can only reconcile by content. Each is consumable once so
   // two identical archive hits can't both collapse into it.
@@ -423,15 +420,8 @@ export function buildChannelTimelineFromMamResults(params: {
     };
   }
 
-  for (const update of correctionUpdates) {
-    const target = findMessageById(
-      timeline,
-      update.targetId,
-      (candidate) => isSameMucCorrectionSender(candidate, update.correctionSender),
-    );
-    if (!target || target.isRetracted) continue;
-    assignCorrectionFields(target, update.payload);
-  }
+  pendingUpdates.addArchivedCorrections(correctionUpdates);
+  timeline = pendingUpdates.applyCorrections(timeline, isSameMucCorrectionSender);
 
   for (const update of retractionUpdates) {
     const target = findMessageById(timeline, update.targetId);
@@ -476,14 +466,8 @@ export function buildChannelTimelineFromMamResults(params: {
     }
   }
 
-  // XEP-0422: a later fastening replaces (or clears) an earlier one on the
-  // same target. Pages arrive in archive order; the stamp check also keeps
-  // an older page from reverting a newer judgment already applied.
-  for (const { fastening, at } of safetyScoresUpdates) {
-    const index = safetyScoresTargetIndex(timeline, fastening, at);
-    if (index < 0) continue;
-    timeline[index] = withSafetyScores(timeline[index]!, fastening, at);
-  }
+  for (const { fastening, at } of safetyScoresUpdates) pendingUpdates.addScores(fastening, at);
+  timeline = pendingUpdates.applyScores(timeline);
 
   return applyForumContext(timeline.sort(compareTimelineMessages), channelIsForum);
 }

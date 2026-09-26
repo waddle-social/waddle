@@ -50,6 +50,7 @@ import {
 import { useChannelMamPaging } from "@/channels/mam-paging";
 import { useMucSend } from "@/channels/muc-send";
 import { useChannelMessageActions } from "@/channels/message-actions";
+import { ChannelPendingUpdates } from "@/channels/pending-updates";
 import { useChannelLiveMerge } from "@/channels/live-merge";
 import { useChannelChatStates } from "@/channels/chat-states";
 import { useChannelReadMarkers } from "@/channels/read-markers";
@@ -543,7 +544,9 @@ export function useChannelMessages(
     onMessageDeliveryFailure,
   } = send;
 
+  const pendingUpdates = new ChannelPendingUpdates();
   const liveMerge = useChannelLiveMerge({
+    pendingUpdates,
     session,
     messages,
     activeChannelId,
@@ -573,6 +576,7 @@ export function useChannelMessages(
   } = actions;
 
   const paging = useChannelMamPaging({
+    pendingUpdates,
     session,
     xmppClient,
     activeSpaceId,

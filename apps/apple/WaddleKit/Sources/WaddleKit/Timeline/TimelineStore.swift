@@ -197,7 +197,7 @@ public final class TimelineStore {
                 updated = marked
             }
             if let replaced = updated {
-                list[index] = replaced
+                list[index] = drainParked(into: replaced, conversation: conversation)
                 list.sort(by: Entry.precedes)
                 entries[conversation] = list
                 publish(conversation)

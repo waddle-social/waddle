@@ -1,13 +1,15 @@
 // XEP-0422 score result resolution in the web timeline.
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
+import { ChannelPendingUpdates } from "../src/channels/pending-updates";
+import { useChannelMamPaging } from "../src/channels/mam-paging";
 import { useChannelLiveMerge } from "../src/channels/live-merge";
 import { buildChannelTimelineFromMamResults } from "../src/channels/message-timeline-state";
 import { applySafetyScoresFastening, safetyScoresTargetIndex } from "../src/lib/safety-scores/apply";
 import type { SafetyScores, SafetyScoresFastening } from "../src/lib/safety-scores/types";
 import type { TimelineMessage } from "../src/lib/chat-ui";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { LiveRoomMessage } from "../src/lib/xmpp-client";
+import type { BrowserXmppClient, LiveRoomMessage } from "../src/lib/xmpp-client";
 import { __setFaroForTesting } from "../src/lib/telemetry";
 
 afterEach(() => __setFaroForTesting(null));
@@ -87,13 +89,20 @@ describe("safety score identity", () => {
 describe("channel score handling", () => {
   function harness(initial: TimelineMessage[]) {
     const messages = ref<TimelineMessage[]>(initial);
+    const pendingUpdates = new ChannelPendingUpdates();
     const live = useChannelLiveMerge({
+      pendingUpdates,
       session: ref(session), messages, activeChannelId: ref("general"),
       pendingEchoClientIds: new Set<string>(),
       scrollToPinnedEdgeAndPin: mock(async () => true),
       persistLastSeen: mock(() => {}),
     });
-    return { messages, live };
+    const mam = (mamResults: LiveRoomMessage[]) => {
+      messages.value = buildChannelTimelineFromMamResults({
+        session, channelIsForum: false, mamResults, existing: messages.value, pendingUpdates,
+      });
+    };
+    return { messages, live, mam, pendingUpdates };
   }
 
   test("a live result annotates without inserting", () => {
@@ -136,6 +145,107 @@ describe("channel score handling", () => {
     h.live.handleRoomMessage(message());
     expect(h.messages.value).toHaveLength(1);
     expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.9));
+  });
+
+  test("three reverse MAM pages retain score and correction until the source arrives", () => {
+    const h = harness([]);
+    h.mam([scoreMessage("new-score", result(0.4, { sourceRevisionId: "edit-2" }))]);
+    h.mam([message({ id: "edit-2", stanzaId: "edit-2", originId: "edit-origin",
+      replacesId: "origin-1", body: "edited", createdAt: "2026-09-25T10:01:00Z" })]);
+    expect(h.messages.value).toHaveLength(0);
+    h.mam([message()]);
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.body).toBe("edited");
+    expect(h.messages.value[0]?.sourceRevisionId).toBe("edit-2");
+    expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.4));
+  });
+
+  test("live score waiting for a source is drained by MAM", () => {
+    const h = harness([]);
+    h.live.handleRoomMessage(scoreMessage("score-1", result(0.9)));
+    h.mam([message()]);
+    expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.9));
+  });
+
+  test("MAM score waiting for a source is drained by live delivery", () => {
+    const h = harness([]);
+    h.mam([scoreMessage("score-1", result(0.9))]);
+    h.live.handleRoomMessage(message());
+    expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.9));
+  });
+
+  test("same correction replay preserves the accepted revision score", () => {
+    const h = harness([row()]);
+    const correction = message({ id: "edit-2", stanzaId: "edit-2", originId: "edit-origin",
+      replacesId: "origin-1", body: "edited", createdAt: "2026-09-25T10:01:00Z" });
+    h.live.handleRoomMessage(correction);
+    h.live.handleRoomMessage(scoreMessage("new-score", result(0.4, { sourceRevisionId: "edit-2" })));
+    h.mam([correction]);
+    expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.4));
+    h.live.handleRoomMessage(correction);
+    expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.4));
+  });
+
+  test("older MAM corrections cannot replace the scored revision, including timestamp ties", () => {
+    for (const olderAt of ["2026-09-25T10:00:00Z", "2026-09-25T10:01:00Z"]) {
+      const h = harness([]);
+      h.mam([scoreMessage("new-score", result(0.4, { sourceRevisionId: "edit-2" }))]);
+      h.mam([message({ id: "edit-2", stanzaId: "edit-2", replacesId: "origin-1",
+        body: "new edit", createdAt: "2026-09-25T10:01:00Z" })]);
+      h.mam([message({ id: "edit-1", stanzaId: "edit-1", replacesId: "origin-1",
+        body: "old edit", createdAt: olderAt }), message()]);
+      expect(h.messages.value[0]?.body).toBe("new edit");
+      expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.4));
+      h.mam([message({ id: "edit-1", stanzaId: "edit-1", replacesId: "origin-1",
+        body: "old edit", createdAt: olderAt })]);
+      expect(h.messages.value[0]?.body).toBe("new edit");
+      expect(h.messages.value[0]?.safetyScores).toEqual(scores(0.4));
+    }
+  });
+
+  test("a pending score cannot annotate an archived tombstone or another room", () => {
+    const h = harness([]);
+    h.live.handleRoomMessage(scoreMessage("score-1", result(0.9)));
+    h.mam([message({ isRetracted: true })]);
+    expect(h.messages.value[0]?.safetyScores).toBeUndefined();
+    h.messages.value = [];
+    h.mam([message({ roomJid: "other@conference.example.org", stanzaIdBy: "other@conference.example.org" })]);
+    expect(h.messages.value[0]?.safetyScores).toBeUndefined();
+  });
+
+  test("pending scores are bounded to the latest 100", () => {
+    const h = harness([]);
+    h.live.handleRoomMessage(scoreMessage("score-1", result(0.9)));
+    for (let i = 0; i < 100; i++) {
+      h.live.handleRoomMessage(scoreMessage(`score-${i + 2}`, result(0.4, { targetStanzaId: `other-${i}` })));
+    }
+    h.mam([message()]);
+    expect(h.messages.value[0]?.safetyScores).toBeUndefined();
+  });
+
+  test("paging reset and a fresh room load clear shared pending state", async () => {
+    const h = harness([]);
+    const paging = useChannelMamPaging({
+      pendingUpdates: h.pendingUpdates,
+      session: ref(session), messages: h.messages,
+      xmppClient: ref({ queryMamPage: async () => ({ messages: [], complete: true }) } as unknown as BrowserXmppClient),
+      activeSpaceId: ref("space"), activeChannelId: ref("general"),
+      currentChannel: ref(null), firstUnseenId: ref(null), timelineEl: ref(null),
+      scrollDirection: ref("bottom"), pinnedEdgeScroller: { cancelSettleLock: () => {} },
+      actionError: ref(""), clearActionError: () => {}, normalizeError: String,
+      pendingEchoClientIds: new Set(), appendQueuedMessages: (timeline) => timeline,
+      roomJidForChannel: () => ROOM, isRoomAccessRequired: () => false,
+      scrollToPinnedEdgeAndPin: async () => true, persistLastSeen: () => {},
+    });
+    for (const reset of [() => paging.reset(), () => paging.loadMessages("space", "general")]) {
+      h.messages.value = [];
+      h.live.handleRoomMessage(scoreMessage("score-1", result(0.9)));
+      h.live.handleRoomMessage(message({ id: "edit-2", stanzaId: "edit-2", replacesId: "origin-1", body: "edited" }));
+      await reset();
+      h.mam([message()]);
+      expect(h.messages.value[0]?.body).toBe("original");
+      expect(h.messages.value[0]?.safetyScores).toBeUndefined();
+    }
   });
 
   test("retraction clears the visible score", () => {

@@ -235,6 +235,7 @@ export interface TimelineMessage {
   stanzaIdBy?: string;
   /** Room stanza-id of the currently displayed body revision. */
   sourceRevisionId?: string;
+  sourceRevisionAt?: string;
   /** Author-chosen XEP-0359 origin-id of the original source message. */
   originId?: string;
   body: string;

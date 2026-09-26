@@ -42,7 +42,7 @@ export function safetyScoresTargetIndex(
   return index;
 }
 
-export function withSafetyScores(
+function withSafetyScores(
   row: TimelineMessage,
   fastening: SafetyScoresFastening,
   at?: string,

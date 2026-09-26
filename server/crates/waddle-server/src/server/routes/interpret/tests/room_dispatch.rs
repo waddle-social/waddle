@@ -606,7 +606,14 @@ pub(crate) async fn room_observer_test_manager(
     };
     let modules = capability
         .map(|capability| ExtensionModuleConfig {
-            room_observation: None,
+            room_observation: (capability == ExtensionCapability::MessageObserve).then_some(
+                waddle_extensions::RoomObservationConfig {
+                    generation: waddle_extensions::ObservationGeneration::new(1)
+                        .expect("generation"),
+                    scope: waddle_extensions::RoomObservationScope::AllHostedRooms,
+                    max_concurrent: 1,
+                },
+            ),
             runtime_limits: Default::default(),
             name: "message-hook-fixture".to_owned(),
             namespace: "urn:test:message-hook".to_owned(),
@@ -749,7 +756,13 @@ async fn assert_room_observer_planning(configuration: ObserverConfiguration, exp
             plugin: plugin.clone(),
             correction_target: None,
             generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+            identity: state
+                .deps
+                .protocol
+                .extension_manager
+                .configured_room_observers()[0]
+                .identity
+                .clone(),
         }
     );
 }

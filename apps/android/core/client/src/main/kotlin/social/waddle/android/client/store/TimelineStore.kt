@@ -389,8 +389,9 @@ class TimelineStore(
             val mutation = it.mutation
             if (mutation is MessageMutation.SafetyScores) {
                 safetyScoreTargets(entry.item, mutation) && scoreRevisionMatches(entry, mutation)
+            } else {
+                mutation.targetId in entry.item.identityIds
             }
-            else mutation.targetId in entry.item.identityIds
         }
         if (matching.isEmpty()) return entry
         queue.removeAll(matching.toSet())
@@ -398,8 +399,11 @@ class TimelineStore(
         val applied = matching
             .sortedBy { it.rank }
             .fold(entry) { acc, ranked -> acc.applying(ranked.copy(isGroupchat = isGroupchat)) }
-        return if (pendingMutations[conversation] == null) applied
-            else drainPendingMutationsInto(conversation, applied, isGroupchat)
+        return if (pendingMutations[conversation] == null) {
+            applied
+        } else {
+            drainPendingMutationsInto(conversation, applied, isGroupchat)
+        }
     }
 
     private fun Entry.applying(ranked: RankedMutation): Entry {
@@ -444,9 +448,12 @@ class TimelineStore(
             correctedBody = mutation.newBody,
             correctionRank = ranked.rank,
             correctionRevisionId = mutation.sourceRevisionId ?: "",
-            safetyScores = if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScores else null,
-            safetyScoresRank = if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScoresRank else null,
-            safetyScoresRevisionId = if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScoresRevisionId else null,
+            safetyScores =
+                if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScores else null,
+            safetyScoresRank =
+                if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScoresRank else null,
+            safetyScoresRevisionId =
+                if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScoresRevisionId else null,
         )
     }
 
@@ -487,7 +494,8 @@ class TimelineStore(
         mutation.from != item.conversationJid -> this
         !safetyScoreTargets(item, mutation) -> this
         tombstone != null -> this
-        (correctionRevisionId ?: item.assignedStanzaId(item.conversationJid)?.id) != mutation.fastening.sourceRevisionId -> this
+        (correctionRevisionId ?: item.assignedStanzaId(item.conversationJid)?.id) !=
+            mutation.fastening.sourceRevisionId -> this
         // A re-delivery (MAM re-page, reconnect catch-up) of a fastening
         // already applied is history, never an update — even when its
         // stamp ties the anchor of a later live replace or clear.

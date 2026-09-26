@@ -120,6 +120,25 @@ struct SafetyScoresTests {
         #expect(row(store)?.safetyScores == firstBatch)
     }
 
+    @Test func parkedScoresApplyWhenCanonicalCopyReplacesLocalEcho() {
+        let sources: [WireMessage.Source] = [.live, .archive(mamID: "s1")]
+        for source in sources {
+            let store = store()
+            var echo = scoredRoomMessage("msg", from: "alice", stanzaID: "unused")
+            echo.identity = MessageIdentity(messageID: "origin-1", originID: "origin-1")
+            store.insertLocalEcho(echo, in: roomConversation)
+            store.ingest(scoresFastening(to: "s1", firstBatch))
+            #expect(row(store)?.safetyScores == nil)
+            #expect(row(store)?.isLocalEcho == true)
+
+            store.ingest(scoredRoomMessage("msg", from: "alice", stanzaID: "s1", source: source))
+            #expect(store.timeline(for: roomConversation).items.count == 1)
+            #expect(row(store)?.isLocalEcho == false)
+            #expect(row(store)?.roomStanzaID == "s1")
+            #expect(row(store)?.safetyScores == firstBatch)
+        }
+    }
+
     @Test func newestFirstArchiveKeepsScoreUntilItsCorrectionArrives() {
         let store = store()
         store.ingest(scoresFastening(to: "s1", secondBatch, revisionID: "edit-1", at: date(10)))

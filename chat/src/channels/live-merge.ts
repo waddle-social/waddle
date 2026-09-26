@@ -13,13 +13,12 @@ import {
   isValidMucRetractionTarget,
   mucCorrectionSender,
 } from "@/channels/message-timeline-state";
-import { applyCorrection as applyCorrectionUpdate } from "@/lib/messaging/correction";
+import { ChannelPendingUpdates } from "@/channels/pending-updates";
 import { applyDisplayedMarker } from "@/lib/messaging/displayed";
 import { applyReactionUpdate, type ReactionPolicy } from "@/lib/messaging/reactions";
 import { applyRetraction as applyRetractionUpdate, retractTimelineMessage } from "@/lib/messaging/retraction";
 import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import { classifyRoomMessage } from "@/lib/xmpp/classify-room-message";
-import { applySafetyScoresFastening } from "@/lib/safety-scores/apply";
 import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 
@@ -37,6 +36,7 @@ import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 // #351's plan), the classifier becomes redundant.
 
 type UseChannelLiveMergeDeps = {
+  pendingUpdates?: ChannelPendingUpdates;
   session: Ref<WaddleSession | null>;
   messages: Ref<TimelineMessage[]>;
   activeChannelId: Ref<string | null>;
@@ -56,6 +56,7 @@ const channelReactionPolicy: ReactionPolicy = {
 
 export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
   const {
+    pendingUpdates = new ChannelPendingUpdates(),
     session,
     messages,
     activeChannelId,
@@ -63,19 +64,10 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     scrollToPinnedEdgeAndPin,
     persistLastSeen,
   } = deps;
-  const pendingScores: Array<{ fastening: SafetyScoresFastening; at?: string }> = [];
-
-  function drainPendingScores() {
-    for (let index = 0; index < pendingScores.length;) {
-      const pending = pendingScores[index]!;
-      const next = applySafetyScoresFastening(messages.value, pending.fastening, pending.at);
-      if (!next) {
-        index += 1;
-        continue;
-      }
-      messages.value = next;
-      pendingScores.splice(index, 1);
-    }
+  function drainPendingUpdates() {
+    messages.value = pendingUpdates.applyScores(
+      pendingUpdates.applyCorrections(messages.value, isSameMucCorrectionSender),
+    );
   }
 
   /** XEP-0333 displayed marker — shared merge, no channel divergences. */
@@ -149,17 +141,14 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     extensionBodyFallback?: boolean,
     linkPreviews?: LiveRoomMessage["linkPreviews"],
     sourceRevisionId?: string,
+    sourceRevisionAt?: string,
   ) {
-    const next = applyCorrectionUpdate(
-      messages.value,
-      replacesId,
-      { body: newBody, markup, references, linkPreviews, extensionAnnotations, extensionBodyFallback, sourceRevisionId },
-      { senderMatches: (target) => isSameMucCorrectionSender(target, correctionSender) },
-    );
-    if (next) {
-      messages.value = next;
-      drainPendingScores();
-    }
+    pendingUpdates.addCorrection({
+      targetId: replacesId,
+      correctionSender,
+      payload: { body: newBody, markup, references, linkPreviews, extensionAnnotations, extensionBodyFallback, sourceRevisionId, sourceRevisionAt },
+    });
+    drainPendingUpdates();
   }
 
   /**
@@ -168,13 +157,8 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * before the source or its correction; retry those when either arrives.
    */
   function applySafetyScores(fastening: SafetyScoresFastening, at?: string) {
-    const next = applySafetyScoresFastening(messages.value, fastening, at);
-    if (next) {
-      messages.value = next;
-    } else {
-      if (pendingScores.length === 100) pendingScores.shift();
-      pendingScores.push({ fastening, at });
-    }
+    pendingUpdates.addScores(fastening, at);
+    drainPendingUpdates();
   }
 
   function applyCallThreadEnded(ended: NonNullable<LiveRoomMessage["callThreadEnded"]>) {
@@ -217,7 +201,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
       finalize: (timeline) => applyForumContext(timeline),
     });
     messages.value = result.messages;
-    drainPendingScores();
+    drainPendingUpdates();
     if (!result.appended) return;
     void scrollToPinnedEdgeAndPin();
     if (channelId && isFeedVisible(msg)) {
@@ -256,6 +240,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
           classified.extensionBodyFallback,
           classified.linkPreviews,
           classified.sourceRevisionId,
+          msg.createdAt,
         );
         break;
       case "live":
