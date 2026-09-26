@@ -140,6 +140,20 @@ const JUDGMENT_QUESTIONS: &[JudgmentQuestionSpec] = &[
         criteria_true: "The message expresses intent toward self-harm or suicide, or encourages it in someone else.",
         criteria_false: "The message does not express or encourage self-harm or suicide.",
     },
+    JudgmentQuestionSpec {
+        judgment_name: JudgmentKind::SafetySpam,
+        taxonomy_version: "safety-spam-v1",
+        instructions: "Is this chat message spam: unsolicited bulk, promotional, or advertising content that is not part of a genuine conversation, such as product plugs, affiliate links, repeated mass postings, or automated advertising?",
+        criteria_true: "The message is unsolicited promotional, advertising, or bulk content rather than genuine conversation.",
+        criteria_false: "The message is genuine conversation, not unsolicited promotion or bulk posting.",
+    },
+    JudgmentQuestionSpec {
+        judgment_name: JudgmentKind::SafetyScam,
+        taxonomy_version: "safety-scam-v1",
+        instructions: "Is this chat message a scam: an attempt to deceive readers into sending money or cryptocurrency, revealing credentials or personal information, or visiting a malicious link, including phishing, fake giveaways, impersonation, and fraudulent investment offers?",
+        criteria_true: "The message tries to deceive readers for money, credentials, personal information, or a malicious link.",
+        criteria_false: "The message does not try to deceive readers for money, credentials, personal information, or a malicious link.",
+    },
 ];
 
 /// Configuration for a [`JevClient`].
@@ -645,7 +659,7 @@ mod tests {
     /// A complete, well-formed `answers` object covering every judgment in
     /// [`JUDGMENT_QUESTIONS`], defaulting every probability to `0.1` except
     /// the overrides given. Keeps individual tests from having to spell out
-    /// all six judgments just to exercise one of them.
+    /// all eight judgments just to exercise one of them.
     fn full_answers(overrides: &[(JudgmentKind, f64)]) -> Value {
         let mut answers = serde_json::Map::new();
         for spec in JUDGMENT_QUESTIONS {
@@ -724,6 +738,8 @@ mod tests {
                     (JudgmentKind::SafetyHarassment, 0.02),
                     (JudgmentKind::SafetyViolence, 0.0),
                     (JudgmentKind::SafetySelfHarm, 0.0),
+                    (JudgmentKind::SafetySpam, 0.04),
+                    (JudgmentKind::SafetyScam, 0.02),
                 ],
                 "typesafe/jev-1.13-20260917",
                 0.000019992,
@@ -742,7 +758,7 @@ mod tests {
         assert_eq!(batch.model_version, "typesafe/jev-1.13-20260917");
         assert_eq!(batch.cost_usd, 0.000019992);
         // Every judgment carries its own taxonomy_version, independent of
-        // the others, even though all six came from one call.
+        // the others, even though all eight came from one call.
         let hate_speech_taxonomy = batch
             .judgments
             .iter()

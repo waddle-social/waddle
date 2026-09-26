@@ -20,13 +20,15 @@ pub const IS_QUESTION_JUDGMENT_NAME: &str = "is_question";
 /// Content-safety `judgment_name` values, one row per category per judged
 /// message. Namespaced under `safety:` so they're visibly a family distinct
 /// from `is_question` (a community-enrichment signal, not a safety one)
-/// when scanning `message_judgments` directly. All five are asked together
+/// when scanning `message_judgments` directly. All seven are asked together
 /// in one Jev call — see `jev_client.rs`.
 pub const SAFETY_HATE_SPEECH_JUDGMENT_NAME: &str = "safety:hate_speech";
 pub const SAFETY_EXPLICIT_JUDGMENT_NAME: &str = "safety:explicit";
 pub const SAFETY_HARASSMENT_JUDGMENT_NAME: &str = "safety:harassment";
 pub const SAFETY_VIOLENCE_JUDGMENT_NAME: &str = "safety:violence";
 pub const SAFETY_SELF_HARM_JUDGMENT_NAME: &str = "safety:self_harm";
+pub const SAFETY_SPAM_JUDGMENT_NAME: &str = "safety:spam";
+pub const SAFETY_SCAM_JUDGMENT_NAME: &str = "safety:scam";
 
 /// Cap on the persisted body snapshot. This table is not the canonical
 /// message store — just enough context for the judge call — so the

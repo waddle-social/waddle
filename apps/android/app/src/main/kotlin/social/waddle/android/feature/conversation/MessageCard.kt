@@ -247,9 +247,10 @@ private fun StoredMessageCard(
                 onToggle = { emoji -> onToggleReaction(item, emoji) },
             )
         }
-        item.safetyScores?.takeIf(::hasSafetyScoreBreakdown)?.let { scores ->
+        item.safetyScores?.let { scores ->
+            val severity = safetyScoreSeverity(scores) ?: return@let
             var scoresOpen by remember { mutableStateOf(false) }
-            SafetyScoresChip(onClick = { scoresOpen = true })
+            SafetyScoresChip(severity = severity, onClick = { scoresOpen = true })
             if (scoresOpen) {
                 SafetyScoresSheet(scores = scores, onDismiss = { scoresOpen = false })
             }

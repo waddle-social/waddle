@@ -1,8 +1,10 @@
 import SwiftUI
 import WaddleKit
 
-/// Per-category breakdown of the scores the room fastened to a message.
-/// Reads the live row, so a re-judgment or a clear shows while it is open.
+/// Per-category breakdown of the scores the room fastened to a message:
+/// only the categories at or above the notice threshold, so the reader
+/// sees what raised the marker and nothing else. Reads the live row, so a
+/// re-judgment or a clear shows while it is open.
 struct MessageSafetyScoresSheet: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -37,16 +39,16 @@ struct MessageSafetyScoresSheet: View {
 
     @ViewBuilder
     private var content: some View {
-        if let scores, !scores.rows.isEmpty {
+        if let scores, !scores.notableRows.isEmpty {
             List {
-                if !scores.signalRows.isEmpty {
+                if !scores.notableSignalRows.isEmpty {
                     Section("Community") {
-                        ForEach(scores.signalRows) { MessageSafetyScoreRowView(row: $0) }
+                        ForEach(scores.notableSignalRows) { MessageSafetyScoreRowView(row: $0) }
                     }
                 }
-                if !scores.safetyRows.isEmpty {
+                if !scores.notableSafetyRows.isEmpty {
                     Section("Safety") {
-                        ForEach(scores.safetyRows) { MessageSafetyScoreRowView(row: $0) }
+                        ForEach(scores.notableSafetyRows) { MessageSafetyScoreRowView(row: $0) }
                     }
                 }
                 Section {
@@ -59,13 +61,13 @@ struct MessageSafetyScoresSheet: View {
             ContentUnavailableView(
                 "No signals",
                 systemImage: MessageSafetyScoresButton.symbol,
-                description: Text("This message has no content signals.")
+                description: Text("No category on this message reached the notice threshold.")
             )
         }
     }
 
     private func explanation(modelVersion: String) -> String {
-        "Automated estimates of how likely each category applies, from \(modelVersion). Everyone in this conversation can see them. They are not a moderation decision."
+        "Automated estimates of how likely each category applies, from \(modelVersion). Only categories at 50% or more are listed. Everyone in this conversation can see them. They are not a moderation decision."
     }
 }
 
@@ -83,7 +85,7 @@ struct MessageSafetyScoreRowView: View {
                     .foregroundStyle(.secondary)
             }
             ProgressView(value: row.probability)
-                .tint(Color.secondary)
+                .tint(row.severity.map(MessageSafetyScoresButton.tint(for:)) ?? Color.secondary)
                 .accessibilityHidden(true)
         }
         .padding(.vertical, Theme.Spacing.xxs)

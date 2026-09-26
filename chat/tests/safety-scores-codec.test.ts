@@ -32,6 +32,8 @@ const contractFastening: WasmSafetyScoresFastening = {
       { category: "safety:harassment", probability: 0.02, taxonomy_version: "safety-harassment-v1" },
       { category: "safety:violence", probability: 0, taxonomy_version: "safety-violence-v1" },
       { category: "safety:self_harm", probability: 0, taxonomy_version: "safety-self-harm-v1" },
+      { category: "safety:spam", probability: 0.04, taxonomy_version: "safety-spam-v1" },
+      { category: "safety:scam", probability: 0.02, taxonomy_version: "safety-scam-v1" },
     ],
   },
 };
@@ -71,6 +73,8 @@ describe("safetyScoresFasteningFromWasm", () => {
           { category: "safety:harassment", probability: 0.02, taxonomyVersion: "safety-harassment-v1" },
           { category: "safety:violence", probability: 0, taxonomyVersion: "safety-violence-v1" },
           { category: "safety:self_harm", probability: 0, taxonomyVersion: "safety-self-harm-v1" },
+          { category: "safety:spam", probability: 0.04, taxonomyVersion: "safety-spam-v1" },
+          { category: "safety:scam", probability: 0.02, taxonomyVersion: "safety-scam-v1" },
         ],
       },
     });
@@ -83,7 +87,7 @@ describe("safetyScoresFasteningFromWasm", () => {
         kind: "replace",
         model_version: MODEL,
         scores: [
-          { category: "safety:spam", probability: 0.4, taxonomy_version: "safety-spam-v1" },
+          { category: "safety:future", probability: 0.4, taxonomy_version: "safety-future-v1" },
           { category: "safety:violence", probability: 1.2, taxonomy_version: "v" },
           { category: "safety:explicit", probability: Number.NaN, taxonomy_version: "v" },
           { category: "safety:harassment", probability: 0.5, taxonomy_version: "" },
@@ -145,7 +149,7 @@ describe("roomMessageFromArchived with a safety-scores fastening", () => {
       safetyScoresFastening: { targetId: "judged-stanza-id", kind: "replace" },
     });
     expect(decoded?.safetyScoresFastening?.kind === "replace"
-      && decoded.safetyScoresFastening.scores.scores).toHaveLength(6);
+      && decoded.safetyScoresFastening.scores.scores).toHaveLength(8);
   });
 
   test("the live path decodes the same record", () => {

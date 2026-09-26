@@ -13689,7 +13689,9 @@ enum class WaddleSafetyCategory {
     EXPLICIT,
     HARASSMENT,
     VIOLENCE,
-    SELF_HARM;
+    SELF_HARM,
+    SPAM,
+    SCAM;
 
 
 

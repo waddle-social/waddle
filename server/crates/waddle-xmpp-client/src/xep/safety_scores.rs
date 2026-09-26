@@ -63,6 +63,10 @@ pub enum SafetyCategory {
     Violence,
     /// `safety:self_harm`
     SelfHarm,
+    /// `safety:spam`
+    Spam,
+    /// `safety:scam`
+    Scam,
 }
 
 impl SafetyCategory {
@@ -75,6 +79,8 @@ impl SafetyCategory {
             SafetyCategory::Harassment => "safety:harassment",
             SafetyCategory::Violence => "safety:violence",
             SafetyCategory::SelfHarm => "safety:self_harm",
+            SafetyCategory::Spam => "safety:spam",
+            SafetyCategory::Scam => "safety:scam",
         }
     }
 
@@ -87,6 +93,8 @@ impl SafetyCategory {
             "safety:harassment" => Some(SafetyCategory::Harassment),
             "safety:violence" => Some(SafetyCategory::Violence),
             "safety:self_harm" => Some(SafetyCategory::SelfHarm),
+            "safety:spam" => Some(SafetyCategory::Spam),
+            "safety:scam" => Some(SafetyCategory::Scam),
             _ => None,
         }
     }
