@@ -1,5 +1,7 @@
 # build output
 dist/
+# generated Panda CSS output (bun run panda:codegen)
+styled-system/
 # generated types
 .astro/
 worker-configuration.d.ts

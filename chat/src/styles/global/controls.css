@@ -1,17 +1,15 @@
 @layer components {
-/* Glass panel utility */
+/* Panel surfaces. Huddle has no glass: opaque ink surfaces with a
+ * hairline border. The class names stay so existing call sites keep
+ * working until they move to Panda recipes. */
 .glass-panel {
   background: var(--card);
-  backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-backdrop-filter: blur(24px) saturate(1.4);
-  box-shadow: var(--shadow-pane);
+  border: 1px solid var(--border);
 }
 
 .glass-surface {
   background: var(--surface);
-  backdrop-filter: blur(16px) saturate(1.2);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: var(--shadow-pane);
+  border: 1px solid var(--border);
 }
 
 .chat-icon-button {

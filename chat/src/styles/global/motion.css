@@ -1,16 +1,3 @@
-/* Ambient tint background */
-@layer base {
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    background:
-      linear-gradient(180deg, var(--ambient-veil), transparent 34rem),
-      linear-gradient(115deg, transparent 0 55%, var(--ambient-shadow) 100%);
-  }
-}
-
 /* Text selection — primary-tinted so highlighted text speaks the
  * brand instead of the OS default (system blue on macOS, varies
  * elsewhere). Mixes 30% of --primary against the page so the
@@ -229,9 +216,6 @@
 
 /* Suppress unnecessary motion for users who prefer reduced stimulus */
 @media (prefers-reduced-motion: reduce) {
-  body::before {
-    animation: none;
-  }
   .animate-message-in,
   .animate-slide-up,
   .animate-fade-in {
