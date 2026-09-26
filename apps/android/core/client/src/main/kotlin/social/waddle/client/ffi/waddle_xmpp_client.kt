@@ -10894,11 +10894,23 @@ public object FfiConverterTypeWaddleSafetyScores: FfiConverterRustBuffer<WaddleS
  */
 data class WaddleSafetyScoresFastening (
     /**
-     * XEP-0422 `<apply-to id='…'/>` target.
+     * XEP-0422 `<apply-to id='…'/>` target origin-id.
      */
-    var `targetId`: kotlin.String
+    var `targetOriginId`: kotlin.String
     ,
-    var `action`: WaddleSafetyScoresAction
+    /**
+     * Authoritative room-assigned source stanza-id and assigning room.
+     */
+    var `targetStanzaId`: kotlin.String
+    ,
+    var `targetStanzaBy`: kotlin.String
+    ,
+    /**
+     * Room-assigned stanza-id of the accepted body revision.
+     */
+    var `sourceRevisionId`: kotlin.String
+    ,
+    var `scores`: WaddleSafetyScores
 
 ){
 
@@ -10916,18 +10928,27 @@ public object FfiConverterTypeWaddleSafetyScoresFastening: FfiConverterRustBuffe
     override fun read(buf: ByteBuffer): WaddleSafetyScoresFastening {
         return WaddleSafetyScoresFastening(
             FfiConverterString.read(buf),
-            FfiConverterTypeWaddleSafetyScoresAction.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleSafetyScores.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleSafetyScoresFastening) = (
-            FfiConverterString.allocationSize(value.`targetId`) +
-            FfiConverterTypeWaddleSafetyScoresAction.allocationSize(value.`action`)
+            FfiConverterString.allocationSize(value.`targetOriginId`) +
+            FfiConverterString.allocationSize(value.`targetStanzaId`) +
+            FfiConverterString.allocationSize(value.`targetStanzaBy`) +
+            FfiConverterString.allocationSize(value.`sourceRevisionId`) +
+            FfiConverterTypeWaddleSafetyScores.allocationSize(value.`scores`)
     )
 
     override fun write(value: WaddleSafetyScoresFastening, buf: ByteBuffer) {
-            FfiConverterString.write(value.`targetId`, buf)
-            FfiConverterTypeWaddleSafetyScoresAction.write(value.`action`, buf)
+            FfiConverterString.write(value.`targetOriginId`, buf)
+            FfiConverterString.write(value.`targetStanzaId`, buf)
+            FfiConverterString.write(value.`targetStanzaBy`, buf)
+            FfiConverterString.write(value.`sourceRevisionId`, buf)
+            FfiConverterTypeWaddleSafetyScores.write(value.`scores`, buf)
     }
 }
 
@@ -13714,82 +13735,6 @@ public object FfiConverterTypeWaddleSafetyCategory: FfiConverterRustBuffer<Waddl
 
     override fun write(value: WaddleSafetyCategory, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-/**
- * Replace the sender's scores, or clear them (XEP-0422 `clear='true'`).
- */
-sealed class WaddleSafetyScoresAction {
-
-    data class Apply(
-        val `scores`: social.waddle.client.ffi.WaddleSafetyScores) : WaddleSafetyScoresAction()
-
-    {
-
-
-        companion object
-    }
-
-    object Clear : WaddleSafetyScoresAction()
-
-
-
-
-
-
-
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeWaddleSafetyScoresAction : FfiConverterRustBuffer<WaddleSafetyScoresAction>{
-    override fun read(buf: ByteBuffer): WaddleSafetyScoresAction {
-        return when(buf.getInt()) {
-            1 -> WaddleSafetyScoresAction.Apply(
-                FfiConverterTypeWaddleSafetyScores.read(buf),
-                )
-            2 -> WaddleSafetyScoresAction.Clear
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: WaddleSafetyScoresAction) = when(value) {
-        is WaddleSafetyScoresAction.Apply -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeWaddleSafetyScores.allocationSize(value.`scores`)
-            )
-        }
-        is WaddleSafetyScoresAction.Clear -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-            )
-        }
-    }
-
-    override fun write(value: WaddleSafetyScoresAction, buf: ByteBuffer) {
-        when(value) {
-            is WaddleSafetyScoresAction.Apply -> {
-                buf.putInt(1)
-                FfiConverterTypeWaddleSafetyScores.write(value.`scores`, buf)
-                Unit
-            }
-            is WaddleSafetyScoresAction.Clear -> {
-                buf.putInt(2)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 

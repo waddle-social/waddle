@@ -641,7 +641,7 @@
             baseArgs
             // {
               CARGO_BUILD_TARGET = "wasm32-wasip2";
-              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes --package jev-judgments";
               cargoCheckExtraArgs = "";
               cargoBuildExtraArgs = "";
               cargoTestExtraArgs = "";
@@ -722,18 +722,33 @@
               pname = "waddle-server-extension-modules";
               CARGO_BUILD_TARGET = "wasm32-wasip2";
               cargoArtifacts = extensionWasmArtifacts;
-              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes --package jev-judgments";
               # Publish these exact immutable outputs instead of compiling
               # the same extensions again in the publication job.
               doInstallCargoArtifacts = false;
               installPhaseCommand = ''
                 mkdir -p "$out/wasm"
-                for module in ai_chatbot decision_polls github link_board stargate_quotes; do
+                for module in ai_chatbot decision_polls github link_board stargate_quotes jev_judgments; do
                   wasm="''${CARGO_TARGET_DIR:-target}/wasm32-wasip2/release/$module.wasm"
                   test -s "$wasm"
                   cp "$wasm" "$out/wasm/$module.wasm"
                 done
               '';
+            }
+          );
+          waddle-server-extension-runtime = craneLib.cargoTest (
+            baseArgs
+            // testRuntimeEnv
+            // {
+              pname = "waddle-server-extension-runtime";
+              doInstallCargoArtifacts = false;
+              CARGO_PROFILE = "ci-test";
+              cargoArtifacts = workspaceAllFeaturesArtifacts;
+              cargoExtraArgs = "--locked --package waddle-extensions";
+              cargoTestExtraArgs = "--test jev_guest_runtime";
+              WADDLE_JEV_GUEST_WASM = "${
+                self.checks.${system}.waddle-server-extension-modules
+              }/wasm/jev_judgments.wasm";
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoNextest (

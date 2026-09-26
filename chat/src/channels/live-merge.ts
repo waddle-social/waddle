@@ -13,13 +13,12 @@ import {
   isValidMucRetractionTarget,
   mucCorrectionSender,
 } from "@/channels/message-timeline-state";
-import { applyCorrection as applyCorrectionUpdate } from "@/lib/messaging/correction";
+import { ChannelPendingUpdates } from "@/channels/pending-updates";
 import { applyDisplayedMarker } from "@/lib/messaging/displayed";
 import { applyReactionUpdate, type ReactionPolicy } from "@/lib/messaging/reactions";
 import { applyRetraction as applyRetractionUpdate, retractTimelineMessage } from "@/lib/messaging/retraction";
 import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import { classifyRoomMessage } from "@/lib/xmpp/classify-room-message";
-import { applySafetyScoresFastening } from "@/lib/safety-scores/apply";
 import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 
@@ -37,6 +36,7 @@ import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 // #351's plan), the classifier becomes redundant.
 
 type UseChannelLiveMergeDeps = {
+  pendingUpdates?: ChannelPendingUpdates;
   session: Ref<WaddleSession | null>;
   messages: Ref<TimelineMessage[]>;
   activeChannelId: Ref<string | null>;
@@ -56,6 +56,7 @@ const channelReactionPolicy: ReactionPolicy = {
 
 export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
   const {
+    pendingUpdates = new ChannelPendingUpdates(),
     session,
     messages,
     activeChannelId,
@@ -63,6 +64,11 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     scrollToPinnedEdgeAndPin,
     persistLastSeen,
   } = deps;
+  function drainPendingUpdates() {
+    messages.value = pendingUpdates.applyScores(
+      pendingUpdates.applyCorrections(messages.value, isSameMucCorrectionSender),
+    );
+  }
 
   /** XEP-0333 displayed marker — shared merge, no channel divergences. */
   function applyDisplayed(messageId: string, nick: string) {
@@ -134,24 +140,25 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
     linkPreviews?: LiveRoomMessage["linkPreviews"],
+    sourceRevisionId?: string,
+    sourceRevisionAt?: string,
   ) {
-    const next = applyCorrectionUpdate(
-      messages.value,
-      replacesId,
-      { body: newBody, markup, references, linkPreviews, extensionAnnotations, extensionBodyFallback },
-      { senderMatches: (target) => isSameMucCorrectionSender(target, correctionSender) },
-    );
-    if (next) messages.value = next;
+    pendingUpdates.addCorrection({
+      targetId: replacesId,
+      correctionSender,
+      payload: { body: newBody, markup, references, linkPreviews, extensionAnnotations, extensionBodyFallback, sourceRevisionId, sourceRevisionAt },
+    });
+    drainPendingUpdates();
   }
 
   /**
    * XEP-0422 safety-scores fastening (`urn:waddle:safety-scores:1`),
-   * sender already gated by the decoder. A target outside the loaded
-   * timeline is a no-op, like reactions to unloaded messages.
+   * sender already gated by the decoder. Room relays can deliver a score
+   * before the source or its correction; retry those when either arrives.
    */
   function applySafetyScores(fastening: SafetyScoresFastening, at?: string) {
-    const next = applySafetyScoresFastening(messages.value, fastening, "room", at);
-    if (next) messages.value = next;
+    pendingUpdates.addScores(fastening, at);
+    drainPendingUpdates();
   }
 
   function applyCallThreadEnded(ended: NonNullable<LiveRoomMessage["callThreadEnded"]>) {
@@ -194,6 +201,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
       finalize: (timeline) => applyForumContext(timeline),
     });
     messages.value = result.messages;
+    drainPendingUpdates();
     if (!result.appended) return;
     void scrollToPinnedEdgeAndPin();
     if (channelId && isFeedVisible(msg)) {
@@ -231,6 +239,8 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
           classified.extensionAnnotations,
           classified.extensionBodyFallback,
           classified.linkPreviews,
+          classified.sourceRevisionId,
+          msg.createdAt,
         );
         break;
       case "live":

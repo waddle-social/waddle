@@ -5,7 +5,6 @@ use super::EffectOutcome;
 use waddle_xmpp::{
     muc::room_actor::{ApplyPin, GetRoomSnapshot, SetSubject},
     muc::room_registry_actor::GetRoom,
-    Stanza,
 };
 
 pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) -> EffectOutcome {
@@ -15,6 +14,7 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
             message,
             fence,
             archive_expectation: _,
+            correction_target: _,
         } => {
             // Immediate callers retain the current MAM store contract. Ingress
             // ArchiveExpectation is applied by the transaction repository in Phase B.
@@ -29,32 +29,7 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
                         .await
                 }
             };
-            // CORRECTION (#1831 Phase 2): an earlier draft of this comment
-            // claimed this `execute_durable` arm was "the single place a
-            // groupchat archive write is ever really performed," including
-            // for the primary ingress commit path, and planned to enqueue
-            // `message_judgment_outbox` rows here. Two independent
-            // adversarial reviews traced the real call graph and found
-            // that claim false: `ingress::execute::execute_effects` (the
-            // post-commit "Phase C" replay `commit_submission` actually
-            // drives) only ever reconstructs `Effect::External` payloads
-            // to run through `ImmediateSink` — never `Effect::Durable` —
-            // so this arm is *never* reached by a normal user chat
-            // message's commit. The real (and only) archive write for
-            // that path is `ingress_uow::MamArchiveRepository::store` /
-            // `store_fenced`, called from `ingress::durable::apply_durable`
-            // inside the same database transaction the ingress commit
-            // uses; the `message_judgment_outbox` enqueue now lives there
-            // too, in the same transaction — see that function's docs.
-            //
-            // This arm instead serves callers that construct and execute a
-            // `Durable(ArchiveGroupchat)` effect directly through
-            // `ImmediateSink`, outside any ingress transaction — room
-            // system messages (`room_system_message.rs`), not ordinary
-            // occupant chat messages. Those do not enqueue a judgment-
-            // outbox row: they are synthetic notices (subject changes and
-            // similar), not user content, so nothing here needs to change
-            // that.
+            // User room observations are captured atomically by ingress::durable.
             EffectOutcome::Archive(outcome)
         }
         DurableRoomEffect::ProjectGroupchatInbox {
@@ -216,42 +191,22 @@ async fn observe_room(
     deps: &Deps<'_>,
     room: jid::BareJid,
     plugin: waddle_extensions::PluginId,
-    message: Box<xmpp_parsers::message::Message>,
-    requester: jid::BareJid,
-    sender: jid::FullJid,
-    error_request: Box<xmpp_parsers::message::Message>,
+    _message: Box<xmpp_parsers::message::Message>,
+    _requester: jid::BareJid,
+    _sender: jid::FullJid,
+    _error_request: Box<xmpp_parsers::message::Message>,
 ) -> EffectOutcome {
-    let Some(state) = deps.web_socket_state else {
-        return EffectOutcome::Unavailable;
-    };
-    let Some(outcome) = state
-        .deps
-        .protocol
-        .extension_manager
-        .process_message_observer(
-            &plugin,
-            &message,
-            super::super::waddle_id_for_room_jid(&room),
-            Some(requester),
-        )
-        .await
-    else {
-        return EffectOutcome::Unavailable;
-    };
-    let replies = outcome
-        .effects
-        .into_iter()
-        .filter_map(|effect| match effect {
-            waddle_extensions::ExtensionEffect::HostWarning(warning) => {
-                Some(Stanza::Message(super::super::build_message_error_reply(
-                    &error_request,
-                    &room,
-                    &sender,
-                    super::super::service_unavailable_error(warning.as_str()),
-                )))
-            }
-            _ => None,
-        })
-        .collect();
-    EffectOutcome::Frames(replies)
+    if let Some(state) = deps.web_socket_state {
+        if let Some(actors) = state.deps.protocol.ingress.room_observers() {
+            actors.notify_room(state, &room, &plugin).await;
+        }
+    }
+    // Enqueue is a hint, never a completion receipt. The result transaction
+    // discharges this obligation after saving its independent publication.
+    EffectOutcome::Settled(super::SettledOutcome {
+        refusal: None,
+        persisted: Vec::new(),
+        completion: super::SettledCompletion::Deferred,
+        detached: None,
+    })
 }

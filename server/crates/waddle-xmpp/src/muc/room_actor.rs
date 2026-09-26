@@ -859,6 +859,10 @@ impl OccupantInfo {
 /// `MucRoom` directly with no external synchronisation required.
 #[derive(Actor)]
 pub struct RoomActor {
+    extension_subscribers: HashMap<
+        waddle_extensions::PluginId,
+        std::sync::Arc<dyn extension_subscriptions::RoomExtensionSubscriber>,
+    >,
     room: MucRoom,
     durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
     config_durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
@@ -1111,6 +1115,7 @@ impl RoomActor {
     ) -> Self {
         room.config = room.config.normalized();
         Self {
+            extension_subscribers: HashMap::new(),
             room,
             durable_coordinates: None,
             config_durable_coordinates: None,
@@ -3398,3 +3403,8 @@ impl kameo::message::Message<HealthCheck> for RoomActor {
     ) -> Self::Reply {
     }
 }
+
+mod extension_subscriptions;
+pub use extension_subscriptions::{
+    NotifyRoomExtensions, RoomExtensionSubscriber, SubscribeRoomExtension,
+};

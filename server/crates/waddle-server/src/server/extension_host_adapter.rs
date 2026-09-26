@@ -59,6 +59,9 @@ impl ExtensionHostAdapter {
         invocation: &ExtensionInvocation,
         request: HostSendMessage,
     ) -> Result<StanzaId, ExtensionHostAdapterError> {
+        if invocation.kind == InvocationKind::RoomMessageObserve {
+            return Err(ExtensionHostAdapterError::NotAuthorized);
+        }
         match request.target {
             HostMessageTarget::Room(room) => {
                 if invocation

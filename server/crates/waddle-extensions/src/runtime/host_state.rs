@@ -25,6 +25,10 @@ pub struct HostState {
     pub config: String,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
+    pub(super) limits: wasmtime::StoreLimits,
+    runtime_limits: crate::config::RuntimeLimits,
+    http: super::http::HttpRuntime,
+    http_requests: u32,
 }
 
 impl HostState {
@@ -34,8 +38,22 @@ impl HostState {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
+        runtime_limits: crate::config::RuntimeLimits,
+        http: super::http::HttpRuntime,
     ) -> Self {
-        let wasi = WasiCtxBuilder::new().inherit_stderr().build();
+        let mut wasi_builder = WasiCtxBuilder::new();
+        if context.kind != InvocationKind::RoomMessageObserve {
+            wasi_builder.inherit_stderr();
+        }
+        let wasi = wasi_builder.build();
+        let limits = wasmtime::StoreLimitsBuilder::new()
+            .memory_size(runtime_limits.memory_bytes)
+            .table_elements(20_000)
+            .tables(8)
+            .memories(4)
+            .instances(16)
+            .trap_on_grow_failure(true)
+            .build();
         Self {
             wasi,
             table: ResourceTable::new(),
@@ -44,10 +62,24 @@ impl HostState {
             config,
             grants,
             allowed_http_origins,
+            limits,
+            runtime_limits,
+            http,
+            http_requests: 0,
         }
     }
 
     pub(super) fn for_init() -> Self {
+        Self::for_init_with(
+            crate::config::RuntimeLimits::default(),
+            super::http::HttpRuntime::new().expect("static HTTP client configuration"),
+        )
+    }
+
+    pub(super) fn for_init_with(
+        limits: crate::config::RuntimeLimits,
+        http: super::http::HttpRuntime,
+    ) -> Self {
         Self::new(
             Arc::new(DenyingExtensionHostTools),
             InvocationContext {
@@ -62,6 +94,8 @@ impl HostState {
             String::new(),
             HashSet::new(),
             Vec::new(),
+            limits,
+            http,
         )
     }
 
@@ -69,6 +103,16 @@ impl HostState {
         &self,
         capability: ExtensionCapability,
     ) -> std::result::Result<(), HostToolError> {
+        if self.context.kind == InvocationKind::RoomMessageObserve
+            && capability == ExtensionCapability::HostMessageSend
+        {
+            return Err(HostToolError::denied(
+                DisplayText::new(
+                    "room observations return effects; message sending is unavailable",
+                )
+                .expect("static denial"),
+            ));
+        }
         if self.grants.contains(&capability) {
             Ok(())
         } else {
@@ -121,6 +165,11 @@ impl LoggingHost for HostState {
         context: String,
         message: String,
     ) -> wasmtime::Result<()> {
+        // Background observations may contain private message bodies and provider credentials.
+        // Their typed outcome is logged by the host; arbitrary guest logs are suppressed.
+        if self.context.kind == InvocationKind::RoomMessageObserve {
+            return Ok(());
+        }
         let context_display = if context.is_empty() {
             "waddle-extension".to_string()
         } else {
@@ -292,7 +341,19 @@ impl RuntimeHost for HostState {
     ) -> wasmtime::Result<std::result::Result<wit_types::HttpResponse, wit_types::HostToolError>>
     {
         let result = match self.ensure_capability(ExtensionCapability::OutboundHttpRequest) {
-            Ok(()) => execute_runtime_http_request(request, &self.allowed_http_origins).await,
+            Ok(()) if self.http_requests < self.runtime_limits.http_max_requests => {
+                self.http_requests += 1;
+                execute_runtime_http_request(
+                    request,
+                    &self.allowed_http_origins,
+                    &self.http,
+                    &self.runtime_limits,
+                )
+                .await
+            }
+            Ok(()) => Err(HostToolError::denied(
+                DisplayText::new("extension HTTP request limit exceeded").expect("static denial"),
+            )),
             Err(error) => Err(error),
         };
         Ok(result.map_err(Into::into))

@@ -150,6 +150,8 @@ fn build_module(spec: &ExtSpec, root: &std::path::Path) -> ExtensionModuleConfig
         );
     }
     ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: spec.name.to_string(),
         registry: String::new(),
         digest: None,

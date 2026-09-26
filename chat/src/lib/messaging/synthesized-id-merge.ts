@@ -85,6 +85,7 @@ const ADOPTED_IDENTITY_FIELDS = [
   "replyableId",
   "stanzaId",
   "stanzaIdBy",
+  "originId",
   "reactionTargetId",
   "correctionTargetId",
 ] as const;

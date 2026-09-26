@@ -15,6 +15,7 @@ impl ExtensionManager {
                 actor
                     .manifest()
                     .declares_capability(ExtensionCapability::MessageObserve)
+                    && actor.room_observer().is_none()
                     && actor.has_grant(ExtensionCapability::MessageObserve)
             })
             .map(|actor| actor.manifest().id)
@@ -36,6 +37,7 @@ impl ExtensionManager {
         let actor = self.actors.iter().find(|actor| {
             let manifest = actor.manifest();
             manifest.id == *plugin
+                && actor.room_observer().is_none()
                 && manifest.declares_capability(ExtensionCapability::MessageObserve)
                 && actor.has_grant(ExtensionCapability::MessageObserve)
         })?;
@@ -198,8 +200,9 @@ impl ExtensionManager {
                 let manifest = actor.manifest();
                 let declares_enrich =
                     manifest.declares_capability(crate::types::ExtensionCapability::MessageEnrich);
-                let declares_observe =
-                    manifest.declares_capability(crate::types::ExtensionCapability::MessageObserve);
+                let declares_observe = manifest
+                    .declares_capability(crate::types::ExtensionCapability::MessageObserve)
+                    && actor.room_observer().is_none();
                 let grants_enrich =
                     actor.has_grant(crate::types::ExtensionCapability::MessageEnrich);
                 let grants_observe =
@@ -263,7 +266,8 @@ impl ExtensionManager {
                         ExtensionEffect::EnrichMessage(envelope) => {
                             enrichments.extend(envelope.enrichments);
                         }
-                        ExtensionEffect::PublishPubSub(_)
+                        ExtensionEffect::PublishRoomResult(_)
+                        | ExtensionEffect::PublishPubSub(_)
                         | ExtensionEffect::ReferenceArtifact(_)
                         | ExtensionEffect::CommandForm(_) => {}
                         ExtensionEffect::HostWarning(warning) => {

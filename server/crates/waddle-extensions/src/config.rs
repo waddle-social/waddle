@@ -9,6 +9,11 @@ use crate::types::ExtensionCapability;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionModuleConfig {
     pub name: String,
+    /// Explicit opt-in to durable room observation; omission subscribes to no rooms.
+    #[serde(default, alias = "roomObservation")]
+    pub room_observation: Option<RoomObservationConfig>,
+    #[serde(default, alias = "runtimeLimits")]
+    pub runtime_limits: RuntimeLimits,
     #[serde(default)]
     pub registry: String,
     /// Immutable OCI artifact digest for the extension WASM component.
@@ -101,6 +106,10 @@ impl ExtensionConfig {
 
 impl ExtensionModuleConfig {
     pub fn validate(&self) -> Result<(), String> {
+        self.runtime_limits.validate()?;
+        if let Some(observation) = &self.room_observation {
+            observation.validate()?;
+        }
         if self.name.trim().is_empty() {
             return Err("extension module name must not be empty".to_string());
         }
@@ -347,6 +356,8 @@ mod tests {
     #[test]
     fn validate_rejects_missing_digest_for_oci_module() {
         let module = ExtensionModuleConfig {
+            room_observation: None,
+            runtime_limits: Default::default(),
             name: "example-extension".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
             digest: None,
@@ -369,6 +380,8 @@ mod tests {
     #[test]
     fn validate_rejects_registry_with_embedded_tag() {
         let module = ExtensionModuleConfig {
+            room_observation: None,
+            runtime_limits: Default::default(),
             name: "example-extension".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/example-extension:latest"
                 .to_string(),
@@ -392,6 +405,8 @@ mod tests {
     #[test]
     fn validate_preserves_local_path_without_oci_reference() {
         let module = ExtensionModuleConfig {
+            room_observation: None,
+            runtime_limits: Default::default(),
             name: "example-extension".to_string(),
             registry: String::new(),
             digest: None,
@@ -441,3 +456,6 @@ mod tests {
         }
     }
 }
+
+mod limits;
+pub use limits::{RoomObservationConfig, RuntimeLimits};

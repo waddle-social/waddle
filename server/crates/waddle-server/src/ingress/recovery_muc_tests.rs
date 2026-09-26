@@ -496,21 +496,16 @@ paired!(
     Case::OccupantPm
 );
 
-/// #1815: the post-execution cache decision must read the receipts as they
-/// stand AFTER the rebuilt effects ran, never the pre-execution settlement
-/// answer.
+/// A rebuilt groupchat copy can settle while room observation remains pending.
 ///
 /// One row can carry both a REBUILDABLE frozen groupchat copy and a
-/// warning-only `room_observer`. The copy is still owed when the departed-copy
+/// deferred `room_observer`. The copy is still owed when the departed-copy
 /// settlement looks at it — its occupant is seated, so nothing may be settled —
 /// and the rebuilt `QueueDetached` then delivers it in the SAME attempt,
 /// landing the fanout's aggregate receipt. Nothing is owed by the time the row
-/// is classified: the only obligation left is the warning-only observer, whose
-/// reply belongs to a connection that no longer exists, so no later attempt can
-/// settle it and the row must be cached. Trusting the pre-execution
-/// `still_owed` left it uncached, and the next scan re-invoked the
-/// at-least-once observer plugin.
-async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) {
+/// is classified: the only obligation left is the observer, now owned by the
+/// durable scheduler rather than synchronous recovery.
+async fn delivered_copy_remains_once_with_deferred_observer(f: IngressFixture) {
     use crate::ingress::{
         effects::{room::ExternalRoomEffect, PlanSuppressionPolicy},
         PlannedEffect,
@@ -562,6 +557,9 @@ async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) 
         .push(IngressEffectIntent::RoomObserver {
             room: room.clone(),
             plugin: plugin_id.clone(),
+            correction_target: None,
+            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
         });
@@ -594,15 +592,14 @@ async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) 
     for pass_number in 1..=2 {
         assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
         cursor.wait_for_recovery_accounting().await;
-        assert_eq!(
-            plugin.invocations().len(),
-            1,
-            "pass {pass_number}: the at-least-once observer is not re-invoked"
+        assert!(
+            plugin.invocations().is_empty(),
+            "pass {pass_number}: recovery only wakes durable observer work"
         );
         assert_eq!(
             super::super::attempt_count(key),
-            1,
-            "pass {pass_number}: the row is cached once its last frozen copy has landed"
+            pass_number,
+            "pass {pass_number}: pending durable observer work remains retryable"
         );
         assert_eq!(
             append_count(&sm, &occupant).await,
@@ -611,7 +608,7 @@ async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) 
         );
     }
 
-    let mut tx = f.uow.begin().await.expect("inspect cached row");
+    let mut tx = f.uow.begin().await.expect("inspect pending row");
     assert_eq!(
         DeliveryProgressRepository::load(&mut tx, key, &receipt)
             .await
@@ -634,21 +631,21 @@ async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) 
         !CanonicalMessageRepository::is_terminal(&mut tx, key)
             .await
             .expect("terminal"),
-        "the warning-only observer keeps the row pending"
+        "the deferred observer keeps the row pending"
     );
     tx.commit().await.expect("read commit");
     f.close().await;
 }
 
 #[tokio::test]
-async fn sqlite_delivered_copy_still_caches_a_warning_only_observer() {
-    delivered_copy_still_caches_a_warning_only_observer(IngressFixture::sqlite().await).await;
+async fn sqlite_delivered_copy_remains_once_with_deferred_observer() {
+    delivered_copy_remains_once_with_deferred_observer(IngressFixture::sqlite().await).await;
 }
 
 #[tokio::test]
-async fn postgres_delivered_copy_still_caches_a_warning_only_observer() {
+async fn postgres_delivered_copy_remains_once_with_deferred_observer() {
     if let Some(f) = IngressFixture::postgres("muc_recovery_delivered_copy_observer").await {
-        delivered_copy_still_caches_a_warning_only_observer(f).await;
+        delivered_copy_remains_once_with_deferred_observer(f).await;
     }
 }
 

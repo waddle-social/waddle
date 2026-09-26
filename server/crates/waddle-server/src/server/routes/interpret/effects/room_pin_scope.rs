@@ -17,6 +17,7 @@ impl RoomPinSink<'_> {
                 message,
                 fence,
                 archive_expectation: _,
+                correction_target: _,
             },
         )) = effect.effect
         {

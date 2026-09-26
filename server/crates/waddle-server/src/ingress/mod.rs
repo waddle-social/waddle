@@ -101,6 +101,7 @@ const RETIREMENT_BATCH_SIZE: u32 = 256;
 
 /// Boot-owned handle. Shutdown blocks new work and joins admitted operations and GC.
 pub struct IngressAuthority {
+    observers: std::sync::OnceLock<Arc<crate::room_observation::RoomObservationActors>>,
     database: Database,
     uow: IngressUnitOfWork,
     config: IngressConfig,
@@ -121,18 +122,30 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
-    /// Opt this authority's ingress transactions into enqueueing a
-    /// `message_judgment_outbox` row alongside every freshly archived
-    /// direct/groupchat message, in the same transaction that commits the
-    /// archive write (#1831 Phase 2). Chain this onto [`Self::new`] at the
-    /// single production construction site
-    /// (`server::http::open_ingress_authority`), passing
-    /// `ServerConfig::message_judgment_outbox.enabled`; every other
-    /// (test) caller of [`Self::new`] keeps building an authority whose
-    /// transactions never enqueue, unmodified.
-    pub fn with_judgment_outbox_enabled(mut self, enabled: bool) -> Self {
-        self.uow.set_judgment_outbox_enabled(enabled);
-        self
+    pub(crate) fn bind_room_observers(
+        &self,
+        actors: Arc<crate::room_observation::RoomObservationActors>,
+    ) {
+        let _ = self.observers.set(actors);
+        self.uow.enable_room_observations();
+    }
+
+    pub(crate) fn room_observers(
+        &self,
+    ) -> Option<&Arc<crate::room_observation::RoomObservationActors>> {
+        self.observers.get()
+    }
+
+    pub(crate) async fn observation_transaction(
+        &self,
+    ) -> Result<crate::ingress_uow::IngressUowTransaction<'_>, IngressUowError> {
+        self.uow
+            .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+            .await
+    }
+
+    pub(crate) fn observation_cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
     }
 
     /// Resolve a provider's configured room authority without minting a grant.
@@ -241,6 +254,7 @@ impl IngressAuthority {
             force_stop.clone(),
         ));
         Ok(Self {
+            observers: std::sync::OnceLock::new(),
             database,
             uow,
             config,
@@ -274,6 +288,7 @@ impl IngressAuthority {
             .expect("open test ingress unit of work");
         let recovery = RecoveryBinding::default();
         Self {
+            observers: std::sync::OnceLock::new(),
             gc: gc::RetentionGcCoordinator::new(database.clone(), uow.clone(), recovery.clone()),
             recovery,
             database,
@@ -633,6 +648,9 @@ impl IngressAuthority {
                 if task.await.is_err() {
                     return false;
                 }
+            }
+            if let Some(observers) = self.room_observers() {
+                observers.join().await;
             }
             *self.admission.write().await = false;
             let mut task = self.gc_task.lock().await;
@@ -1247,8 +1265,5 @@ mod offline_hardening_tests;
 
 #[cfg(test)]
 mod muc_occupant_progress_tests;
-
-#[cfg(test)]
-mod judgment_outbox_gating_tests;
 
 mod room_canonical;

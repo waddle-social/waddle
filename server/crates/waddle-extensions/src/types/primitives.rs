@@ -19,6 +19,8 @@ typed_non_empty_string!(PubSubItemId, "pubsub item id");
 typed_non_empty_string!(PubSubNode, "pubsub node");
 typed_non_empty_string!(RouteId, "route id");
 typed_non_empty_string!(StanzaId, "stanza id");
+typed_non_empty_string!(OriginId, "origin id");
+typed_non_empty_string!(ModelId, "model id");
 typed_non_empty_string!(Timestamp, "timestamp");
 typed_non_empty_string!(ThreadId, "thread id");
 typed_non_empty_string!(UiActionId, "ui action id");

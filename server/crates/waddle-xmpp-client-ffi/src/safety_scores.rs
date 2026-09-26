@@ -1,25 +1,22 @@
 //! XEP-0422 `urn:waddle:safety-scores:1` fastening → UniFFI records.
 
 use waddle_xmpp_client::xep::safety_scores::{
-    SafetyCategory, SafetyScore, SafetyScores, SafetyScoresAction, SafetyScoresFastening,
+    SafetyCategory, SafetyScore, SafetyScores, SafetyScoresFastening,
 };
 
 use crate::{
-    WaddleSafetyCategory, WaddleSafetyScore, WaddleSafetyScores, WaddleSafetyScoresAction,
-    WaddleSafetyScoresFastening,
+    WaddleSafetyCategory, WaddleSafetyScore, WaddleSafetyScores, WaddleSafetyScoresFastening,
 };
 
 pub(crate) fn safety_scores_fastening_to_ffi(
     fastening: SafetyScoresFastening,
 ) -> WaddleSafetyScoresFastening {
     WaddleSafetyScoresFastening {
-        target_id: fastening.target_id.as_str().to_owned(),
-        action: match fastening.action {
-            SafetyScoresAction::Apply(scores) => WaddleSafetyScoresAction::Apply {
-                scores: safety_scores_to_ffi(scores),
-            },
-            SafetyScoresAction::Clear => WaddleSafetyScoresAction::Clear,
-        },
+        target_origin_id: fastening.target_origin_id.id,
+        target_stanza_id: fastening.target_stanza_id.id,
+        target_stanza_by: fastening.target_stanza_id.by.to_string(),
+        source_revision_id: fastening.source_revision_id.id,
+        scores: safety_scores_to_ffi(fastening.scores),
     }
 }
 

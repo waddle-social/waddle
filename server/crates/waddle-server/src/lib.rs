@@ -18,7 +18,6 @@ pub mod ingress;
 pub mod ingress_substrate;
 /// Atomic PostgreSQL ingress transaction seam (#1654).
 pub mod ingress_uow;
-pub mod message_judgment_outbox;
 pub mod metrics;
 pub mod muc_destroy_completion_outbox;
 /// Postgres-backed durable MUC room ownership state (ADR-0017 Phase 3
@@ -40,6 +39,7 @@ pub mod push_registrations;
 pub mod push_service;
 /// Durable, FIFO room-mutation broadcast effect queue (#1646).
 pub mod room_effect_outbox;
+pub(crate) mod room_observation;
 pub mod room_policy;
 pub mod server;
 pub mod sm_persistence;

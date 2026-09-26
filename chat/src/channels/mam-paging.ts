@@ -35,11 +35,13 @@ import {
   threadCursorFromLatestPage,
 } from "@/lib/xmpp/mam";
 import { hydratePinnedRoom, pinnedRoomsEpoch } from "@/stores/pinned-messages";
+import { ChannelPendingUpdates } from "@/channels/pending-updates";
 import type { ChannelLoadIntent } from "@/channels/room-access";
 
 const PAGE_SIZE = 100;
 
 type UseChannelMamPagingDeps = {
+  pendingUpdates?: ChannelPendingUpdates;
   session: Ref<WaddleSession | null>;
   xmppClient: Ref<BrowserXmppClient | null>;
   activeSpaceId: Ref<string | null>;
@@ -63,6 +65,7 @@ type UseChannelMamPagingDeps = {
 
 export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
   const {
+    pendingUpdates = new ChannelPendingUpdates(),
     session,
     xmppClient,
     activeSpaceId,
@@ -107,6 +110,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       mamResults,
       existing,
       options,
+      pendingUpdates,
     });
   }
 
@@ -122,6 +126,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     if (!session.value) return "aborted";
 
     const requestId = ++messageRequestId;
+    pendingUpdates.clear();
     const roomJid = roomJidForChannel(channelId);
     if (!roomJid) return "aborted";
     initialLatestPagePinned = false;
@@ -223,6 +228,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       if (liveDuringLoad.length > 0) {
         rebuilt = applyForumContext(rebuilt, isForumChannel(currentChannel.value));
       }
+      rebuilt = buildTimelineFromMamResults([], rebuilt);
       const timelineWithQueue = appendQueuedMessages(rebuilt, roomJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) {
@@ -528,6 +534,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
   }
 
   function reset() {
+    pendingUpdates.clear();
     messageRequestId++;
     initialLatestPagePinned = false;
     oldestArchiveId = null;

@@ -235,6 +235,7 @@ fn room_projection(
             message: Box::new(archived),
             fence: waddle_server::ingress::effects::room::RoomFenceRequirement::Unfenced,
             archive_expectation: ArchiveExpectation::Fresh,
+            correction_target: None,
         },
     )));
     submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone());

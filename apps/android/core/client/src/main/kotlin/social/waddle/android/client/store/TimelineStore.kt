@@ -9,7 +9,6 @@ import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSafetyScores
-import social.waddle.client.ffi.WaddleSafetyScoresAction
 import java.time.Instant
 import java.time.OffsetDateTime
 
@@ -301,7 +300,16 @@ class TimelineStore(
             val list = entries[conversation]
             val index = list?.let { resolveTargetIndex(it, mutation.targetId, mutation, isGroupchat) } ?: -1
             if (list != null && index >= 0) {
-                val updated = list[index].applying(ranked)
+                if (mutation is MessageMutation.SafetyScores && !scoreRevisionMatches(list[index], mutation)) {
+                    val queue = pendingMutations.getOrPut(conversation) { ArrayDeque() }
+                    queue.addLast(ranked)
+                    while (queue.size > maxPendingMutationsPerConversation) queue.removeFirst()
+                    return
+                }
+                var updated = list[index].applying(ranked)
+                if (mutation is MessageMutation.Correction && updated != list[index]) {
+                    updated = drainPendingMutationsInto(conversation, updated, isGroupchat)
+                }
                 if (updated != list[index]) {
                     list[index] = updated
                     publish(conversation, list)
@@ -330,6 +338,10 @@ class TimelineStore(
         mutation: MessageMutation,
         isGroupchat: Boolean,
     ): Int {
+        if (mutation is MessageMutation.SafetyScores) {
+            val matches = list.indices.filter { safetyScoreTargets(list[it].item, mutation) }
+            return matches.singleOrNull() ?: -1
+        }
         val senderScoped = mutation is MessageMutation.Correction ||
             mutation is MessageMutation.Retraction
         fun eligible(entry: Entry): Boolean =
@@ -354,6 +366,18 @@ class TimelineStore(
         return found
     }
 
+    private fun safetyScoreTargets(item: TimelineItem, mutation: MessageMutation.SafetyScores): Boolean {
+        val fastening = mutation.fastening
+        val roomId = item.assignedStanzaId(item.conversationJid)
+        return item.conversationJid.equals(fastening.targetStanzaBy, ignoreCase = true) &&
+            roomId?.id == fastening.targetStanzaId &&
+            item.originId == fastening.targetOriginId
+    }
+
+    private fun scoreRevisionMatches(entry: Entry, mutation: MessageMutation.SafetyScores): Boolean =
+        (entry.mutations.correctionRevisionId ?: entry.item.assignedStanzaId(entry.item.conversationJid)?.id) ==
+            mutation.fastening.sourceRevisionId
+
     /** Apply (in rank order) every parked mutation that targets [entry]. */
     private fun drainPendingMutationsInto(
         conversation: String,
@@ -361,13 +385,25 @@ class TimelineStore(
         isGroupchat: Boolean,
     ): Entry {
         val queue = pendingMutations[conversation] ?: return entry
-        val matching = queue.filter { it.mutation.targetId in entry.item.identityIds }
+        val matching = queue.filter {
+            val mutation = it.mutation
+            if (mutation is MessageMutation.SafetyScores) {
+                safetyScoreTargets(entry.item, mutation) && scoreRevisionMatches(entry, mutation)
+            } else {
+                mutation.targetId in entry.item.identityIds
+            }
+        }
         if (matching.isEmpty()) return entry
         queue.removeAll(matching.toSet())
         if (queue.isEmpty()) pendingMutations.remove(conversation)
-        return matching
+        val applied = matching
             .sortedBy { it.rank }
             .fold(entry) { acc, ranked -> acc.applying(ranked.copy(isGroupchat = isGroupchat)) }
+        return if (pendingMutations[conversation] == null) {
+            applied
+        } else {
+            drainPendingMutationsInto(conversation, applied, isGroupchat)
+        }
     }
 
     private fun Entry.applying(ranked: RankedMutation): Entry {
@@ -408,7 +444,17 @@ class TimelineStore(
         tombstone != null -> this
         !sameSender(mutation.from, item.from, ranked.isGroupchat) -> this
         correctionRank != null && correctionRank > ranked.rank -> this
-        else -> copy(correctedBody = mutation.newBody, correctionRank = ranked.rank)
+        else -> copy(
+            correctedBody = mutation.newBody,
+            correctionRank = ranked.rank,
+            correctionRevisionId = mutation.sourceRevisionId ?: "",
+            safetyScores =
+                if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScores else null,
+            safetyScoresRank =
+                if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScoresRank else null,
+            safetyScoresRevisionId =
+                if (safetyScoresRevisionId == mutation.sourceRevisionId) safetyScoresRevisionId else null,
+        )
     }
 
     private fun MutationState.applyingRetraction(
@@ -446,6 +492,10 @@ class TimelineStore(
         // Same authenticity rule as XEP-0425: only the room service
         // itself (bare room JID, no occupant resource) scores messages.
         mutation.from != item.conversationJid -> this
+        !safetyScoreTargets(item, mutation) -> this
+        tombstone != null -> this
+        (correctionRevisionId ?: item.assignedStanzaId(item.conversationJid)?.id) !=
+            mutation.fastening.sourceRevisionId -> this
         // A re-delivery (MAM re-page, reconnect catch-up) of a fastening
         // already applied is history, never an update — even when its
         // stamp ties the anchor of a later live replace or clear.
@@ -454,8 +504,9 @@ class TimelineStore(
         // older MAM replay cannot resurrect scores it removed.
         safetyScoresRank != null && safetyScoresRank > rank -> this
         else -> copy(
-            safetyScores = (mutation.action as? WaddleSafetyScoresAction.Apply)?.scores,
+            safetyScores = mutation.fastening.scores,
             safetyScoresRank = rank,
+            safetyScoresRevisionId = mutation.fastening.sourceRevisionId,
             appliedSafetyFastenings = appliedSafetyFastenings + mutation.fasteningIds,
         )
     }
@@ -474,7 +525,7 @@ class TimelineStore(
             edited = state.correctedBody != null,
             tombstone = state.tombstone,
             reactions = aggregateReactions(state.reactionsBySender),
-            safetyScores = state.safetyScores,
+            safetyScores = if (state.tombstone == null) state.safetyScores else null,
         )
     }
 
@@ -520,9 +571,11 @@ class TimelineStore(
         val reactionsBySender: Map<String, SenderReactions> = emptyMap(),
         val correctedBody: String? = null,
         val correctionRank: Rank? = null,
+        val correctionRevisionId: String? = null,
         val tombstone: MessageTombstone? = null,
         val safetyScores: WaddleSafetyScores? = null,
         val safetyScoresRank: Rank? = null,
+        val safetyScoresRevisionId: String? = null,
         /** Wire ids of every safety-score fastening applied to the row. */
         val appliedSafetyFastenings: Set<String> = emptySet(),
     )

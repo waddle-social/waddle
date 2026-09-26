@@ -196,6 +196,8 @@ interface ReplyPreview {
 }
 
 export interface LiveRoomMessage {
+  /** XEP-0359 author-supplied identity of the original source. */
+  originId?: string;
   id: string;
   /** XEP-0313 archive UID from the MAM result envelope, when known. */
   archiveId?: string;

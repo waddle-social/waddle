@@ -820,7 +820,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 27 THEN 'room_observer'
+           WHEN 28 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family
@@ -1309,7 +1309,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 27 THEN 'room_observer'
+           WHEN 28 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family
@@ -1538,7 +1538,7 @@ WITH pending AS (
            WHEN 22 THEN 'pending_delivery'
            WHEN 23 THEN 'tombstone_replay_deletion'
            WHEN 24 THEN 'relay_carbons'
-           WHEN 27 THEN 'room_observer'
+           WHEN 28 THEN 'room_observer'
            WHEN 26 THEN 'dm_call_thread_state'
            ELSE 'kind_' || intent.kind::text
          END AS kind_family

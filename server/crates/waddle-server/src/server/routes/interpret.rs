@@ -203,7 +203,7 @@ pub(crate) use groupchat_inbox::reconcile_groupchat_notification_recovery;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
-    resource_constraint_error, service_unavailable_error, validate_groupchat_rich_targets,
+    resource_constraint_error, validate_groupchat_rich_targets,
 };
 #[cfg(feature = "clustering")]
 pub use handoff::OrderedRelayHandoffHandle;
@@ -996,3 +996,6 @@ mod retraction_ingress_tests;
 
 #[cfg(all(test, feature = "clustering"))]
 pub(crate) use route_to_connection::{ControlledMucRelay, CONTROLLED_MUC_RELAY};
+
+mod room_result;
+pub(crate) use room_result::plan_room_result;

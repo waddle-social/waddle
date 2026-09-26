@@ -197,7 +197,7 @@ public final class TimelineStore {
                 updated = marked
             }
             if let replaced = updated {
-                list[index] = replaced
+                list[index] = drainParked(into: replaced, conversation: conversation)
                 list.sort(by: Entry.precedes)
                 entries[conversation] = list
                 publish(conversation)
@@ -291,8 +291,20 @@ public final class TimelineStore {
             parked[conversation] = queue
             return
         }
-        let updated = list[index].applying(ranked, conversation: conversation)
+        if !mutationReady(list[index], mutation) {
+            var queue = parked[conversation] ?? []
+            queue.append(ranked)
+            if queue.count > maxPendingMutations {
+                queue.removeFirst(queue.count - maxPendingMutations)
+            }
+            parked[conversation] = queue
+            return
+        }
+        var updated = list[index].applying(ranked, conversation: conversation)
         guard updated != list[index] else { return }
+        if case .correction = mutation {
+            updated = drainParked(into: updated, conversation: conversation)
+        }
         list[index] = updated
         entries[conversation] = list
         publish(conversation)
@@ -328,9 +340,23 @@ public final class TimelineStore {
             if case .correction = mutation {
                 return item.identity.messageID == target || item.identity.originID == target
             }
+            if case let .safetyScores(_, _, fastening) = mutation {
+                return item.roomStanzaID == fastening.targetStanzaID
+                    && item.identity.originID == fastening.targetOriginID
+                    && item.conversation.jid == fastening.targetStanzaBy
+            }
             return item.roomStanzaID == target
         }
         return item.id == target || item.identity.all.contains(target)
+    }
+
+    private func mutationReady(_ entry: Entry, _ mutation: MessageMutation) -> Bool {
+        guard mutationTargets(entry.item, mutation) else { return false }
+        if case let .safetyScores(_, _, fastening) = mutation {
+            let revision = entry.mutations.correction?.sourceRevisionID ?? entry.item.roomStanzaID
+            return revision == fastening.sourceRevisionID
+        }
+        return true
     }
 
     /// Ids that identify the same stanza from the same sender: XEP-0359
@@ -346,13 +372,14 @@ public final class TimelineStore {
 
     private func drainParked(into entry: Entry, conversation: ConversationID) -> Entry {
         guard var queue = parked[conversation] else { return entry }
-        let matching = queue.filter { mutationTargets(entry.item, $0.mutation) }
+        let matching = queue.filter { mutationReady(entry, $0.mutation) }
         guard !matching.isEmpty else { return entry }
-        queue.removeAll { mutationTargets(entry.item, $0.mutation) }
+        queue.removeAll { mutationReady(entry, $0.mutation) }
         parked[conversation] = queue.isEmpty ? nil : queue
-        return matching
+        let applied = matching
             .sorted { $0.rank < $1.rank }
             .reduce(entry) { $0.applying($1, conversation: conversation) }
+        return parked[conversation] == nil ? applied : drainParked(into: applied, conversation: conversation)
     }
 
     // MARK: - Publishing
@@ -469,6 +496,7 @@ private struct MutationState: Hashable {
     var tombstone: Tombstone?
     var safetyScores: SafetyScores?
     var safetyScoresRank: Rank?
+    var safetyScoresRevisionID: String?
 }
 
 private struct Entry: Hashable {
@@ -522,6 +550,11 @@ private struct Entry: Hashable {
             }
             next.mutations.correction = content
             next.mutations.correctionRank = ranked.rank
+            if next.mutations.safetyScoresRevisionID != content.sourceRevisionID {
+                next.mutations.safetyScores = nil
+                next.mutations.safetyScoresRank = nil
+                next.mutations.safetyScoresRevisionID = nil
+            }
         case let .retraction(_, from):
             guard mutations.tombstone == nil,
                   isSameAuthor(from, item.from, isGroupchat: isGroupchat)
@@ -535,16 +568,20 @@ private struct Entry: Hashable {
                   from.bare == conversation.jid
             else { return self }
             next.mutations.tombstone = .moderated(by: moderatedBy, reason: reason)
-        case let .safetyScores(_, from, scores):
+        case let .safetyScores(_, from, fastening):
             // Only the room itself (bare room JID) judges its messages; an
             // occupant claiming to is a spoof. XEP-0422: the newest
             // fastening replaces the previous one, a clear included.
-            guard from.resource == nil, from.bare == conversation.jid else { return self }
+            guard from.resource == nil, from.bare == conversation.jid,
+                  fastening.targetStanzaBy == conversation.jid,
+                  (mutations.correction?.sourceRevisionID ?? item.roomStanzaID) == fastening.sourceRevisionID,
+                  mutations.tombstone == nil else { return self }
             if let current = mutations.safetyScoresRank, current > ranked.rank {
                 return self
             }
-            next.mutations.safetyScores = scores
+            next.mutations.safetyScores = fastening.scores
             next.mutations.safetyScoresRank = ranked.rank
+            next.mutations.safetyScoresRevisionID = fastening.sourceRevisionID
         }
         return next
     }

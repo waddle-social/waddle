@@ -609,6 +609,7 @@ export function roomMessageFromArchived(
     createdAtSource,
     type: message.subject && !message.body ? "subject" : "message",
     ...(message.replaces_id ? { replacesId: message.replaces_id } : {}),
+    ...(message.origin_id ? { originId: message.origin_id } : {}),
     ...(roomWireIds.length > 0
       ? { wireIds: roomWireIds }
       : {}),

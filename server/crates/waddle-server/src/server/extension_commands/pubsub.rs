@@ -228,6 +228,11 @@ pub(crate) async fn extension_command_result(
                     notes.extend(summaries.into_iter().map(waddle_xmpp::commands::Note::info));
                 }
             }
+            ExtensionEffect::PublishRoomResult(_) => {
+                notes.push(waddle_xmpp::commands::Note::error(
+                    "Room results are only accepted from a committed room observation".to_string(),
+                ))
+            }
             ExtensionEffect::Noop => {}
         }
     }

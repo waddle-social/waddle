@@ -1,4 +1,4 @@
-package waddle:extension@1.0.0;
+package waddle:extension@2.0.0;
 
 interface types {
     record detected-link {
@@ -181,6 +181,7 @@ interface types {
     }
 
     enum extension-capability {
+        room-result-publish,
         message-enrich,
         message-observe,
         host-channels-read,
@@ -213,6 +214,7 @@ interface types {
     }
 
     enum payload-surface {
+        room-result,
         message-enrichment,
         launch-payload,
         pubsub-item,
@@ -496,7 +498,29 @@ interface types {
         payload: provider-payload,
     }
 
+    record origin-id { value: string, }
+    record model-id { value: string, }
+    record room-message-source {
+        room: room-jid,
+        stanza-id: stanza-id,
+        revision-stanza-id: stanza-id,
+        origin-id: option<origin-id>,
+        sender: bare-jid,
+        revision: u64,
+        body-digest: sha256-digest,
+        observed-at: timestamp,
+    }
+    record room-message-observe {
+        source: room-message-source,
+        body: display-text,
+    }
+    record invocation-usage {
+        provider: provider-id,
+        model: model-id,
+        cost-micro-usd: u64,
+    }
     variant extension-event {
+        room-message-observe(room-message-observe),
         message-hook(message-hook),
         command(command-invocation),
         launch(launch-invocation),
@@ -510,6 +534,7 @@ interface types {
     }
 
     variant extension-effect {
+        publish-room-result(extension-payload),
         enrich-message(extension-envelope),
         publish-pubsub(pubsub-publish),
         reference-artifact(artifact-reference),
@@ -520,6 +545,7 @@ interface types {
 
     record extension-response {
         effects: list<extension-effect>,
+        usage: option<invocation-usage>,
     }
 
     enum extension-error-code {

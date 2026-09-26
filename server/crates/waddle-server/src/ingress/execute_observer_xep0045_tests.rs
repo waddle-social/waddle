@@ -1,7 +1,7 @@
 use super::*;
 
 // XEP-0045 §7.4: observers see the committed groupchat reflection, including
-// the room occupant sender, once per plugin across an ordinary ingress replay.
+// the room occupant sender in each frozen obligation across an ingress replay.
 async fn committed_groupchat_observers(fixture: IngressFixture) {
     use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
     use xmpp_parsers::message::{Id, MessageType};
@@ -50,31 +50,28 @@ async fn committed_groupchat_observers(fixture: IngressFixture) {
     assert!(report
         .outcomes
         .iter()
-        .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
-    for plugin in [&a, &b] {
-        let invocations = plugin.invocations();
-        assert_eq!(invocations.len(), 1);
-        let invocation = &invocations[0];
-        assert_eq!(invocation.body.as_str(), "committed room message");
+        .all(|(_, outcome)| *outcome == ExternalOutcome::AwaitingPredecessor));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(first.external.len(), 2);
+    for effect in &first.external {
+        let ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, message, .. }) =
+            effect
+        else {
+            panic!("frozen room observer");
+        };
+        assert_eq!(room.as_str(), "room@muc.example.com");
         assert_eq!(
-            invocation.context.room.as_ref().expect("room").as_str(),
-            "room@muc.example.com"
-        );
-        assert_eq!(
-            invocation
-                .context
-                .sender
-                .as_ref()
-                .expect("occupant")
-                .as_str(),
+            message.from.as_ref().expect("occupant").to_string(),
             "room@muc.example.com/romeo"
         );
+        assert_eq!(message.id.as_ref().expect("room ID").0, "committed-room-id");
         assert_eq!(
-            invocation.context.stanza_id.as_ref().expect("id").as_str(),
-            "committed-room-id"
+            message.bodies.values().next().expect("body"),
+            "committed room message"
         );
     }
+    assert!(a.invocations().is_empty());
+    assert!(b.invocations().is_empty());
     let replay = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("replay groupchat");
@@ -83,10 +80,10 @@ async fn committed_groupchat_observers(fixture: IngressFixture) {
     assert!(report
         .outcomes
         .iter()
-        .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
-    assert_eq!(a.invocations().len(), 1);
-    assert_eq!(b.invocations().len(), 1);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+        .all(|(_, outcome)| *outcome == ExternalOutcome::AwaitingPredecessor));
+    assert!(a.invocations().is_empty());
+    assert!(b.invocations().is_empty());
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     fixture.close().await;
 }
 

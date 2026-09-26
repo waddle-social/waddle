@@ -152,16 +152,14 @@ pub struct WaddleCallThreadEnded {
 /// room JID, `type='groupchat'`) ever reaches this record.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct WaddleSafetyScoresFastening {
-    /// XEP-0422 `<apply-to id='…'/>` target.
-    pub target_id: String,
-    pub action: WaddleSafetyScoresAction,
-}
-
-/// Replace the sender's scores, or clear them (XEP-0422 `clear='true'`).
-#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
-pub enum WaddleSafetyScoresAction {
-    Apply { scores: WaddleSafetyScores },
-    Clear,
+    /// XEP-0422 `<apply-to id='…'/>` target origin-id.
+    pub target_origin_id: String,
+    /// Authoritative room-assigned source stanza-id and assigning room.
+    pub target_stanza_id: String,
+    pub target_stanza_by: String,
+    /// Room-assigned stanza-id of the accepted body revision.
+    pub source_revision_id: String,
+    pub scores: WaddleSafetyScores,
 }
 
 /// One `<safety-scores/>` batch.

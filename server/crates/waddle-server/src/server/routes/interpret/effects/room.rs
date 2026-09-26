@@ -36,6 +36,8 @@ pub enum DurableRoomEffect {
         message: Box<ArchivedMessage>,
         fence: RoomFenceRequirement,
         archive_expectation: ArchiveExpectation,
+        /// The exact archived target authorized by the room correction validator.
+        correction_target: Option<StanzaId>,
     },
     ProjectGroupchatInbox {
         archive_stanza_id: StanzaId,

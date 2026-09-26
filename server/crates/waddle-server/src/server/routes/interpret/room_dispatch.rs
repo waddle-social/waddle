@@ -535,7 +535,7 @@ pub(super) async fn dispatch_to_room(
     //    validation), so derive that view here for the same-sender
     //    comparison rather than relying on `prototype.from` (alice's
     //    real full JID).
-    if let Err(stanza_error) = validate_groupchat_rich_targets(
+    let correction_target = match validate_groupchat_rich_targets(
         deps,
         &room_jid,
         &prototype,
@@ -545,16 +545,19 @@ pub(super) async fn dispatch_to_room(
     )
     .await
     {
-        push_sender_error_reply(
-            deps,
-            &mut outcome,
-            &incoming,
-            &room_jid,
-            &sender_full,
-            *stanza_error,
-        );
-        return outcome;
-    }
+        Ok(target) => target,
+        Err(stanza_error) => {
+            push_sender_error_reply(
+                deps,
+                &mut outcome,
+                &incoming,
+                &room_jid,
+                &sender_full,
+                *stanza_error,
+            );
+            return outcome;
+        }
+    };
 
     // 7. Build context + run the rest of the chain (canonicalize,
     //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
@@ -644,6 +647,17 @@ pub(super) async fn dispatch_to_room(
         "MUC fanout latency: accepted groupchat broadcast until all per-recipient sends are enqueued.",
         fanout_started.elapsed().as_secs_f64() * 1000.0,
     );
+    if let Some(target) = correction_target.as_ref() {
+        if let Some(revision) = waddle_xmpp_core::xep0359::extract_stanza_ids(&working)
+            .into_iter()
+            .find(|id| id.by == room_jid)
+        {
+            // Freshness follows the accepted archive even when this replica has no
+            // active observer subscription for the room during a configuration roll.
+            deps.effects
+                .set_room_correction_target(&room_jid, &revision, target);
+        }
+    }
     let retry_suppression = nested.retry_suppression;
     let routed_connections = nested.route_to_connection_events;
     outcome.frames.extend(nested.frames);
@@ -686,18 +700,22 @@ pub(super) async fn dispatch_to_room(
     // The marker controls only this nested room batch. Consume it here rather
     // than folding it into the returned outcome, where it could leak into an
     // unrelated sibling event in the enclosing interpreter batch.
-    let observer_plugins = state
+    let observer_subscriptions = state
         .deps
         .protocol
         .extension_manager
-        .message_observer_plugins(&observer_message);
+        .room_observation_subscriptions(&room_jid);
     if retry_suppression.is_none() && deps.effects.is_planning() {
-        for plugin in observer_plugins {
+        for subscription in observer_subscriptions {
+            let plugin = subscription.plugin;
             deps.capture_intent(IngressEffectIntent::RoomObserver {
                 room: room_jid.clone(),
                 requester: sender_full.to_bare(),
                 sender: sender_full.clone(),
                 plugin: plugin.clone(),
+                generation: subscription.generation,
+                identity: subscription.identity,
+                correction_target: correction_target.clone(),
             });
             super::effects::room::external(
                 deps,

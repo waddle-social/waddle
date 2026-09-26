@@ -1210,9 +1210,9 @@ mod inbound_to_js_tests {
         let inbound = parse_message_element(
             "<message xmlns='jabber:client' type='groupchat' id='f-1' \
                       from='general@muc.waddle.test' to='alice@waddle.test/web'>\
-               <apply-to xmlns='urn:xmpp:fasten:0' id='judged-stanza-id'>\
+               <apply-to xmlns='urn:xmpp:fasten:0' id='judged-origin-id'>\
                  <safety-scores xmlns='urn:waddle:safety-scores:1' \
-                                model-version='typesafe/jev-1.13-20260917'>\
+                                model-version='typesafe/jev-1.13-20260917' target-stanza-id='judged-stanza-id' target-stanza-by='general@muc.waddle.test' source-revision-id='judged-stanza-id'>\
                    <score category='is_question' probability='0.92' \
                           taxonomy-version='is-question-v1'/>\
                    <score category='safety:future' probability='0.5' \
@@ -1231,9 +1231,11 @@ mod inbound_to_js_tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "target_id": "judged-stanza-id",
-                "update": {
-                    "kind": "replace",
+                "target_origin_id": "judged-origin-id",
+                "target_stanza_id": "judged-stanza-id",
+                "target_stanza_by": "general@muc.waddle.test",
+                "source_revision_id": "judged-stanza-id",
+                "scores": {
                     "model_version": "typesafe/jev-1.13-20260917",
                     "scores": [
                         {
@@ -1253,7 +1255,7 @@ mod inbound_to_js_tests {
     }
 
     #[test]
-    fn archived_to_js_preserves_safety_scores_clear_for_room_reload() {
+    fn archived_to_js_ignores_score_clear_without_canonical_binding() {
         let archived = parse_mam_archived(
             "<message xmlns='jabber:client'>\
                <result xmlns='urn:xmpp:mam:2' id='mam-scores' queryid='q1'>\
@@ -1271,16 +1273,7 @@ mod inbound_to_js_tests {
         );
 
         let js = archived_to_js(archived).expect("safety-scores MAM row should convert");
-        let value = serde_json::to_value(js.safety_scores.expect("fastening survives archive"))
-            .expect("serializes");
-
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "target_id": "judged-stanza-id",
-                "update": { "kind": "clear" },
-            })
-        );
+        assert!(js.safety_scores.is_none());
     }
 
     #[test]

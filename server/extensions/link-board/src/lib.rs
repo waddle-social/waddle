@@ -47,12 +47,16 @@ impl exports::waddle::extension::framework::Guest for LinkBoard {
         event: types::ExtensionEvent,
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let effects = match event {
+            types::ExtensionEvent::RoomMessageObserve(_) => vec![],
             types::ExtensionEvent::MessageHook(hook) => link_enrichments(&hook),
             types::ExtensionEvent::Launch(launch) => save_link(launch),
             types::ExtensionEvent::Command(_) => vec![],
             types::ExtensionEvent::ProviderWebhook(_) => vec![],
         };
-        Ok(types::ExtensionResponse { effects })
+        Ok(types::ExtensionResponse {
+            effects,
+            usage: None,
+        })
     }
 }
 

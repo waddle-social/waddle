@@ -3,10 +3,12 @@ use super::*;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExtensionResponse {
     pub effects: Vec<ExtensionEffect>,
+    pub usage: Option<InvocationUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExtensionEffect {
+    PublishRoomResult(ExtensionPayload),
     EnrichMessage(ExtensionEnvelope),
     PublishPubSub(PubSubPublish),
     ReferenceArtifact(ArtifactReference),
@@ -29,6 +31,11 @@ impl ExtensionEffect {
         grants: &HashSet<ExtensionCapability>,
     ) -> bool {
         match self {
+            Self::PublishRoomResult(payload) => {
+                manifest.declares_capability(ExtensionCapability::RoomResultPublish)
+                    && grants.contains(&ExtensionCapability::RoomResultPublish)
+                    && manifest.declares_payload(PayloadSurface::RoomResult, payload)
+            }
             Self::EnrichMessage(envelope) => envelope.enrichments.iter().all(|enrichment| {
                 enrichment.plugin == manifest.id
                     && enrichment.capability == ExtensionCapability::MessageEnrich

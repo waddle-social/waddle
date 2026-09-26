@@ -15,16 +15,21 @@ use crate::types::{ExtensionCapability, ExtensionEvent, ExtensionManifest, Exten
 #[derive(Clone, Debug)]
 pub struct WasmRuntime {
     engine: Engine,
+    http: super::http::HttpRuntime,
 }
 
 impl WasmRuntime {
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
+        config.consume_fuel(true);
         let engine = Engine::new(&config)
             .map_err(anyhow::Error::from)
             .context("failed to create wasmtime engine")?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            http: super::http::HttpRuntime::new()?,
+        })
     }
 
     pub fn engine(&self) -> &Engine {
@@ -37,6 +42,8 @@ pub struct LoadedExtension {
     engine: Engine,
     component: Component,
     linker: Linker<HostState>,
+    http: super::http::HttpRuntime,
+    limits: crate::config::RuntimeLimits,
 }
 
 impl std::fmt::Debug for LoadedExtension {
@@ -72,11 +79,39 @@ impl LoadedExtension {
             engine,
             component,
             linker,
+            http: runtime.http.clone(),
+            limits: crate::config::RuntimeLimits::default(),
         })
     }
 
+    pub fn with_limits(mut self, limits: crate::config::RuntimeLimits) -> Result<Self> {
+        limits.validate().map_err(anyhow::Error::msg)?;
+        self.limits = limits;
+        Ok(self)
+    }
+
+    fn configure_store(&self, store: &mut Store<HostState>) -> Result<()> {
+        store.limiter(|state| &mut state.limits);
+        store.set_fuel(self.limits.wasm_fuel)?;
+        store.fuel_async_yield_interval(Some(10_000))?;
+        Ok(())
+    }
+
     pub async fn call_init(&self, config: &str) -> Result<ExtensionManifest> {
-        let mut store = Store::new(&self.engine, HostState::for_init());
+        tokio::time::timeout(
+            std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
+            self.invoke_init(config),
+        )
+        .await
+        .context("extension init deadline exceeded")?
+    }
+
+    async fn invoke_init(&self, config: &str) -> Result<ExtensionManifest> {
+        let mut store = Store::new(
+            &self.engine,
+            HostState::for_init_with(self.limits.clone(), self.http.clone()),
+        );
+        self.configure_store(&mut store)?;
         let bindings: WaddleExtension =
             WaddleExtension::instantiate_async(&mut store, &self.component, &self.linker)
                 .await
@@ -106,30 +141,151 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> Result<ExtensionResponse> {
+        self.call_handle_event_typed(event, tools, context, config, grants, allowed_http_origins)
+            .await
+            .map_err(|error| anyhow::anyhow!("extension invocation failed: {error:?}"))
+    }
+
+    pub async fn call_handle_event_typed(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        context: InvocationContext,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
+            self.invoke(event, tools, context, config, grants, allowed_http_origins),
+        )
+        .await
+        .map_err(|_| crate::types::ObservationFailure::DeadlineExceeded)?
+    }
+
+    async fn invoke(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        context: InvocationContext,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+        use crate::types::ObservationFailure;
         let mut store = Store::new(
             &self.engine,
-            HostState::new(tools, context, config, grants, allowed_http_origins),
+            HostState::new(
+                tools,
+                context,
+                config,
+                grants,
+                allowed_http_origins,
+                self.limits.clone(),
+                self.http.clone(),
+            ),
         );
-        let bindings: WaddleExtension =
+        self.configure_store(&mut store)
+            .map_err(|_| ObservationFailure::ResourceLimit)?;
+        let bindings =
             WaddleExtension::instantiate_async(&mut store, &self.component, &self.linker)
                 .await
-                .map_err(anyhow::Error::from)
-                .context("failed to instantiate WASM component")?;
-
+                .map_err(classify_runtime_error)?;
         let result = bindings
             .waddle_extension_framework()
             .call_handle_event(&mut store, &event.into())
             .await
-            .map_err(anyhow::Error::from)
-            .context("wasm handle-event() call trapped")?;
-
+            .map_err(classify_runtime_error)?;
         match result {
-            Ok(response) => response.try_into(),
-            Err(error) => Err(anyhow::anyhow!(
-                "extension handle-event failed: {:?}: {}",
-                error.code,
-                error.message.value
-            )),
+            Ok(response) => response
+                .try_into()
+                .map_err(|_| ObservationFailure::InvalidResult),
+            Err(error) => Err(match error.code {
+                super::waddle::extension::types::ExtensionErrorCode::TemporaryFailure => {
+                    ObservationFailure::TemporaryFailure
+                }
+                super::waddle::extension::types::ExtensionErrorCode::Denied => {
+                    ObservationFailure::Denied
+                }
+                super::waddle::extension::types::ExtensionErrorCode::InvalidRequest => {
+                    ObservationFailure::InvalidRequest
+                }
+                super::waddle::extension::types::ExtensionErrorCode::UnsupportedEvent => {
+                    ObservationFailure::UnsupportedEvent
+                }
+            }),
         }
+    }
+}
+
+fn classify_runtime_error(error: wasmtime::Error) -> crate::types::ObservationFailure {
+    if matches!(
+        error.downcast_ref::<wasmtime::Trap>(),
+        Some(wasmtime::Trap::OutOfFuel)
+    ) {
+        crate::types::ObservationFailure::ResourceLimit
+    } else {
+        crate::types::ObservationFailure::RuntimeFailure
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spinning_wasm_exhausts_fuel_without_blocking_the_executor() {
+        let runtime = WasmRuntime::new().expect("runtime");
+        let module = wasmtime::Module::new(
+            runtime.engine(),
+            r#"(module (func (export "run") (loop br 0)))"#,
+        )
+        .expect("module");
+        let mut store = Store::new(runtime.engine(), HostState::for_init());
+        store.set_fuel(20_000).expect("fuel");
+        store.fuel_async_yield_interval(Some(1_000)).expect("yield");
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("instance");
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .expect("run");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run.call_async(&mut store, ()),
+        )
+        .await
+        .expect("guest must yield and terminate")
+        .expect_err("fuel exhausted");
+        assert_eq!(
+            classify_runtime_error(error),
+            crate::types::ObservationFailure::ResourceLimit
+        );
+    }
+
+    #[tokio::test]
+    async fn wasm_memory_growth_is_rejected_at_the_store_limit() {
+        let runtime = WasmRuntime::new().expect("runtime");
+        let module = wasmtime::Module::new(
+            runtime.engine(),
+            r#"(module
+            (memory 1) (func (export "grow") (result i32) i32.const 1 memory.grow))"#,
+        )
+        .expect("module");
+        let mut state = HostState::for_init();
+        state.limits = wasmtime::StoreLimitsBuilder::new()
+            .memory_size(65_536)
+            .trap_on_grow_failure(true)
+            .build();
+        let mut store = Store::new(runtime.engine(), state);
+        store.limiter(|state| &mut state.limits);
+        store.set_fuel(10_000).expect("fuel");
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("instance");
+        let grow = instance
+            .get_typed_func::<(), i32>(&mut store, "grow")
+            .expect("grow");
+        assert!(grow.call_async(&mut store, ()).await.is_err());
     }
 }

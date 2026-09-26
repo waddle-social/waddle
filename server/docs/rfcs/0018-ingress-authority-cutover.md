@@ -368,19 +368,26 @@ The remaining limits are explicit:
   attempts can repeat; no compatibility guarantee is made for that development
   state, and no payload is fabricated to preserve old evidence.
 
-### 3.3b Per-plugin observer obligations (#1740)
+### 3.3b Per-plugin observer obligations (#1740, #1859)
 
-Room observer work is one typed intent and one external effect per eligible
-plugin: `RoomObserver { room, requester, sender, plugin: PluginId }` (codec tag
-27; the semantic key includes the plugin). Eligibility is frozen at planning
-from the extension manager's exact predicates (valid hook body, declared
-`MessageObserve` capability, grant). Ready observer effects execute
-concurrently under the shared Phase C deadline and are receipted independently,
-so a slow plugin cannot starve a fast plugin's receipt. On replay the recorded
-plugin set is authoritative: unrecorded plugins never run historical messages,
-recorded plugins missing from the fresh plan are rebuilt from the canonical
-envelope, and a plugin that is missing or revoked at execution stays
-unresolved. Host-warning replies keep their non-proving semantics.
+Room observation work freezes one typed intent per configured installation:
+`RoomObserver { room, requester, sender, plugin, generation, identity, correction_target }`.
+Storage kind 28 replaces the former synchronous hook's kind 27; older binaries
+reject the new kind. Eligibility comes from the installation's explicit room
+scope, declared `MessageObserve` capability, and grant. The archive transaction
+captures the canonical source revision and work with that frozen subscription.
+
+The external effect only wakes the room's extension subscriptions and never
+receipts the invocation. A supervised installation actor claims durable work,
+runs the guest under bounded concurrency and deadlines, and saves its result
+and observer receipt atomically. A separate saved publication passes through
+the current room owner's fenced ingress and archive before XMPP delivery.
+Corrections, retractions, and newer installation generations invalidate stale
+work and results. Lost wake hints recover through the durable sweep; provider
+inference remains at least once across a crash before result persistence.
+
+See [durable room observations](../../../docs/extensions/room-observations.md)
+for the WIT 2 cutover, explicit revocation, recovery, and resource limits.
 
 ### 3.3c Atomic notification recovery settlement (#1743)
 

@@ -56,6 +56,7 @@ package(waddle-server) & (
     | test(websocket::tests::ingress_authority::)
     | test(websocket::tests::keyed_detach_drain::)
     | test(ingress_uow::)
+    | test(extension_host_adapter::tests::room_results::)
     | test(muc_durable::)
     | test(notification_outbox::)
     | test(pending_delivery::)

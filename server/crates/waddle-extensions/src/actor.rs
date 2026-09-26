@@ -24,6 +24,8 @@ pub struct WasmExtensionActor {
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
     provider_room_grants: Vec<xmpp_parsers::jid::BareJid>,
+    room_observer: Option<crate::types::ConfiguredRoomObserver>,
+    observation_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl std::fmt::Debug for WasmExtensionActor {
@@ -51,6 +53,8 @@ impl WasmExtensionActor {
             grants: HashSet::new(),
             allowed_http_origins: Vec::new(),
             provider_room_grants: Vec::new(),
+            room_observer: None,
+            observation_permits: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
@@ -86,6 +90,53 @@ impl WasmExtensionActor {
 
     pub(crate) fn provider_room_grants(&self) -> &[xmpp_parsers::jid::BareJid] {
         &self.provider_room_grants
+    }
+
+    pub(crate) fn with_room_observer(
+        mut self,
+        observer: Option<crate::types::ConfiguredRoomObserver>,
+    ) -> Self {
+        if let Some(observer) = &observer {
+            self.observation_permits = Arc::new(tokio::sync::Semaphore::new(
+                observer.max_concurrent as usize,
+            ));
+        }
+        self.room_observer = observer;
+        self
+    }
+
+    pub(crate) fn room_observer(&self) -> Option<&crate::types::ConfiguredRoomObserver> {
+        self.room_observer.as_ref()
+    }
+
+    pub(crate) async fn observe_room_message(
+        &self,
+        event: crate::types::RoomMessageObserve,
+    ) -> Result<crate::types::ExtensionResponse, crate::types::ObservationFailure> {
+        let _permit = self
+            .observation_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| crate::types::ObservationFailure::TemporaryFailure)?;
+        let context = InvocationContext {
+            // This is a display/runtime context only, never tenant authority.
+            waddle_id: WaddleId::new("room-observation").expect("static context"),
+            plugin_id: self.manifest.id.clone(),
+            requester: None,
+            source_room: Some(event.source.room.clone()),
+            kind: InvocationKind::RoomMessageObserve,
+            provider_room_grants: Vec::new(),
+        };
+        self.extension
+            .call_handle_event_typed(
+                ExtensionEvent::RoomMessageObserve(event),
+                Arc::clone(&self.host_tools),
+                context,
+                self.config.clone(),
+                self.grants.clone(),
+                self.allowed_http_origins.clone(),
+            )
+            .await
     }
 
     pub fn manifest(&self) -> ExtensionManifest {
@@ -147,6 +198,10 @@ impl WasmExtensionActor {
                 Vec::new()
             },
         };
+        // Durable observations must use the explicit subscription/generation entry point.
+        if matches!(event, ExtensionEvent::RoomMessageObserve(_)) {
+            return Vec::new();
+        }
         match self
             .extension
             .call_handle_event(
@@ -163,7 +218,8 @@ impl WasmExtensionActor {
                 .effects
                 .into_iter()
                 .filter(|effect| {
-                    effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
+                    !matches!(effect, ExtensionEffect::PublishRoomResult(_))
+                        && effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
                 })
                 .collect(),
             Err(error) => {
@@ -183,6 +239,7 @@ impl WasmExtensionActor {
 
 fn invocation_kind_for_event(event: &ExtensionEvent) -> InvocationKind {
     match event {
+        ExtensionEvent::RoomMessageObserve(_) => InvocationKind::RoomMessageObserve,
         ExtensionEvent::MessageHook(_) => InvocationKind::MessageHook,
         ExtensionEvent::Command(_) => InvocationKind::Command,
         ExtensionEvent::Launch(_) => InvocationKind::Launch,
@@ -210,7 +267,7 @@ fn requester_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::Bare
             .parse::<FullJid>()
             .ok()
             .map(|jid| jid.to_bare()),
-        ExtensionEvent::ProviderWebhook(_) => None,
+        ExtensionEvent::RoomMessageObserve(_) | ExtensionEvent::ProviderWebhook(_) => None,
     }
 }
 
@@ -230,6 +287,7 @@ fn source_room_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::Ba
             .room
             .as_ref()
             .and_then(|room| room.as_str().parse().ok()),
+        ExtensionEvent::RoomMessageObserve(event) => Some(event.source.room.clone()),
         ExtensionEvent::ProviderWebhook(_) => None,
     }
 }

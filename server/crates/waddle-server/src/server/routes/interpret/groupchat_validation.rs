@@ -7,7 +7,7 @@ pub(super) async fn validate_groupchat_rich_targets(
     sender_room_nick_jid: Option<&Jid>,
     room_actor: &ActorRef<RoomActor>,
     sender_nickname_generation: Option<u64>,
-) -> Result<(), Box<StanzaError>> {
+) -> Result<Option<waddle_xmpp_core::xep0359::StanzaId>, Box<StanzaError>> {
     match validate_groupchat_rich_targets_inner(
         deps,
         room,
@@ -18,7 +18,7 @@ pub(super) async fn validate_groupchat_rich_targets(
     )
     .await
     {
-        Ok(()) => Ok(()),
+        Ok(target) => Ok(target),
         Err(RichTargetValidationError::Semantic(error)) => Err(error),
         Err(error) => {
             warn!(%error, "Rich-target validation infrastructure failed");
@@ -52,9 +52,9 @@ async fn validate_groupchat_rich_targets_inner(
     sender_room_nick_jid: Option<&Jid>,
     room_actor: &ActorRef<RoomActor>,
     sender_nickname_generation: Option<u64>,
-) -> Result<(), RichTargetValidationError> {
+) -> Result<Option<waddle_xmpp_core::xep0359::StanzaId>, RichTargetValidationError> {
     if message.from.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     if has_malformed_rich_payload(message) {
         return Err(bad_request_error(
@@ -67,7 +67,7 @@ async fn validate_groupchat_rich_targets_inner(
         // the legacy bridge's `state.deps.protocol.mam_storage` use:
         // production always supplies it; in test fixtures without
         // storage we treat the validation as a no-op.
-        return Ok(());
+        return Ok(None);
     };
     // The archive stores `from` in the XEP-0045 §7.2.13 `room/nick`
     // form (the chain stamps it AFTER validation), so the
@@ -90,9 +90,10 @@ async fn validate_groupchat_rich_targets_inner(
             )
             .into());
         }
-        return Ok(());
+        return Ok(None);
     };
 
+    let mut correction_target = None;
     if let Some(correction) = extract_correction_from_message(message) {
         let original = match mam_storage
             .get_message_by_message_id(room, &correction.replaces_id)
@@ -112,6 +113,10 @@ async fn validate_groupchat_rich_targets_inner(
             sender_nickname_generation,
         )
         .await?;
+        correction_target = Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            original.id,
+            room.clone().into(),
+        ));
     }
 
     if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message) {
@@ -127,7 +132,7 @@ async fn validate_groupchat_rich_targets_inner(
             return Err(forbidden_error("Only the original sender may retract a message.").into());
         }
     }
-    Ok(())
+    Ok(correction_target)
 }
 
 /// XEP-0424 §3 retraction target resolution for groupchat. Per
@@ -269,15 +274,6 @@ pub(super) fn forbidden_error(text: &str) -> StanzaError {
     StanzaError::new(ErrorType::Auth, DefinedCondition::Forbidden, "en", text)
 }
 
-pub(super) fn service_unavailable_error(text: &str) -> StanzaError {
-    StanzaError::new(
-        ErrorType::Wait,
-        DefinedCondition::ServiceUnavailable,
-        "en",
-        text,
-    )
-}
-
 /// ADR-0017 Phase 3 Slice 7: the ownership-gap bounce — "messages arriving
 /// during the ownership gap are bounced with a typed recoverable
 /// `<resource-constraint/>` error, never silently dropped." `type='wait'`
@@ -323,3 +319,6 @@ pub(super) fn build_message_error_reply(
     reply.payloads.push(Element::from(error));
     reply
 }
+
+#[cfg(test)]
+mod xep0308_tests;

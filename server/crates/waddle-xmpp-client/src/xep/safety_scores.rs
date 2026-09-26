@@ -2,8 +2,10 @@
 //! with XEP-0422 Message Fastening.
 //!
 //! ```xml
-//! <apply-to xmlns='urn:xmpp:fasten:0' id='TARGET_ID'>
-//!   <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='…'>
+//! <apply-to xmlns='urn:xmpp:fasten:0' id='SOURCE_ORIGIN_ID'>
+//!   <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='…'
+//!       target-stanza-id='ROOM_ID' target-stanza-by='room@conference.example.org'
+//!       source-revision-id='ROOM_REVISION_ID'>
 //!     <score category='is_question' probability='0.92' taxonomy-version='is-question-v1'/>
 //!   </safety-scores>
 //! </apply-to>
@@ -16,13 +18,13 @@
 //! - a message carries at most one `<apply-to/>` (§Business Rules);
 //! - an `<apply-to shell='true'/>` has no content and is ignored
 //!   (§Interaction with stanza encryption);
-//! - `clear='true'` with an empty fastening removes the sender's previous
-//!   fastenings of that qualified name (§Removing fastenings);
+//! - `clear='true'` is ignored by this result-only profile;
 //! - unknown children of `<apply-to/>` are ignored.
 //!
 //! Waddle rules for the payload:
 //! - one `<safety-scores/>` per `<apply-to/>`;
 //! - `model-version` is required and batch-level;
+//! - room stanza identity and accepted body revision are required;
 //! - unknown `category` values are skipped, so the server can add a
 //!   category without breaking older clients; a malformed or out-of-range
 //!   `<score/>` is skipped as well; a repeated category keeps its first
@@ -39,7 +41,7 @@
 
 use minidom::Element;
 
-use crate::request::StanzaId;
+use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 
 /// `urn:xmpp:fasten:0` — XEP-0422 Message Fastening.
 pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
@@ -47,8 +49,7 @@ pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 /// `urn:waddle:safety-scores:1` — the fastened safety-score payload.
 pub const NS_WADDLE_SAFETY_SCORES: &str = "urn:waddle:safety-scores:1";
 
-/// A judgment category. The wire tokens are the server's
-/// `message_judgments.judgment_name` values.
+/// A category in the room extension safety-score payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SafetyCategory {
     /// `is_question`: a community-enrichment signal, not a safety one.
@@ -161,28 +162,26 @@ pub struct SafetyScores {
     pub scores: Vec<SafetyScore>,
 }
 
-/// What a safety-scores fastening does to its target.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SafetyScoresAction {
-    /// Replace the sender's previous scores with these (XEP-0422 §Replacing).
-    Apply(SafetyScores),
-    /// Remove the sender's previous scores (XEP-0422 §Removing).
-    Clear,
-}
-
 /// A parsed `<apply-to/>` carrying `<safety-scores/>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScoresFastening {
-    /// The `<apply-to id='…'/>` target.
-    pub target_id: StanzaId,
-    pub action: SafetyScoresAction,
+    /// XEP-0422 target: the original source's XEP-0359 origin-id.
+    pub target_origin_id: OriginId,
+    /// Room-assigned identity that disambiguates sender-chosen origin IDs.
+    pub target_stanza_id: StanzaId,
+    /// Room-assigned identity of the body revision that was judged.
+    pub source_revision_id: StanzaId,
+    pub scores: SafetyScores,
 }
 
 /// Extracts a safety-scores fastening from a `<message/>`, or `None` when
 /// the message carries none or carries a malformed one.
 pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFastening> {
     let apply_to = single_apply_to(message)?;
-    let target_id = StanzaId::new(apply_to.attr("id")?.trim()).ok()?;
+    if is_true(apply_to.attr("clear")) {
+        return None;
+    }
+    let target_origin_id = OriginId::new(non_empty(apply_to.attr("id")?)?);
     let mut payloads = apply_to
         .children()
         .filter(|child| child.is("safety-scores", NS_WADDLE_SAFETY_SCORES));
@@ -190,12 +189,19 @@ pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFa
     if payloads.next().is_some() {
         return None;
     }
-    let action = if is_true(apply_to.attr("clear")) {
-        parse_clear(payload)?
-    } else {
-        SafetyScoresAction::Apply(parse_safety_scores(payload)?)
-    };
-    Some(SafetyScoresFastening { target_id, action })
+    let by: jid::Jid = payload.attr("target-stanza-by")?.parse().ok()?;
+    if by.to_string().contains('/') {
+        return None;
+    }
+    let target_stanza_id = StanzaId::new(non_empty(payload.attr("target-stanza-id")?)?, by.clone());
+    let source_revision_id = StanzaId::new(non_empty(payload.attr("source-revision-id")?)?, by);
+    let scores = parse_safety_scores(payload)?;
+    Some(SafetyScoresFastening {
+        target_origin_id,
+        target_stanza_id,
+        source_revision_id,
+        scores,
+    })
 }
 
 /// Extracts a safety-scores fastening from a room broadcast, the only
@@ -209,11 +215,12 @@ pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFa
 /// fastening is not accepted: no trusted 1:1 sender is defined for this
 /// payload.
 pub fn parse_room_safety_scores_child(message: &Element) -> Option<SafetyScoresFastening> {
-    let from = message.attr("from")?;
-    if message.attr("type") != Some("groupchat") || from.contains('/') {
+    let from: jid::BareJid = message.attr("from")?.parse().ok()?;
+    if message.attr("type") != Some("groupchat") {
         return None;
     }
-    parse_safety_scores_fastening(message)
+    let fastening = parse_safety_scores_fastening(message)?;
+    (fastening.target_stanza_id.by == from).then_some(fastening)
 }
 
 /// The message's one non-shell `<apply-to/>`. Two or more is a XEP-0422
@@ -224,13 +231,6 @@ fn single_apply_to(message: &Element) -> Option<&Element> {
         .filter(|child| child.is("apply-to", NS_FASTEN) && !is_true(child.attr("shell")));
     let apply_to = candidates.next()?;
     candidates.next().is_none().then_some(apply_to)
-}
-
-/// XEP-0422 §Removing: the fastening is sent empty, with no attributes and
-/// no children.
-fn parse_clear(payload: &Element) -> Option<SafetyScoresAction> {
-    let is_empty = payload.attrs().iter().next().is_none() && payload.children().next().is_none();
-    is_empty.then_some(SafetyScoresAction::Clear)
 }
 
 fn parse_safety_scores(payload: &Element) -> Option<SafetyScores> {

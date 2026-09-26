@@ -1103,10 +1103,6 @@ pub struct ServerConfig {
     pub extensions: ExtensionConfig,
     /// Operator controls for server-side link-preview enrichment.
     pub link_preview: LinkPreviewConfig,
-    /// Operator control for the `is_question` community-enrichment
-    /// judgment outbox (#1831 Phase 1). Not yet wired to an env var or to
-    /// startup drain-loop spawning; see [`MessageJudgmentOutboxConfig`].
-    pub message_judgment_outbox: MessageJudgmentOutboxConfig,
     /// RFC 7395 §3.8 WebSocket keepalive knobs (issue #1090), parsed
     /// from `WADDLE_WS_KEEPALIVE_*` by [`ws_keepalive_from_vars`].
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
@@ -1278,79 +1274,6 @@ impl LinkPreviewConfig {
             max_redirects: parse_usize_var(&vars, "WADDLE_LINK_PREVIEW_MAX_REDIRECTS", 3)?,
             fetch_timeout,
             video_enabled: parse_bool_var(&vars, "WADDLE_LINK_PREVIEW_VIDEO_ENABLED", true)?,
-        })
-    }
-}
-
-/// Operator control for the `is_question`/safety community-enrichment
-/// judgment outbox (#1831). Measurement-only: when `enabled` is `false`
-/// (the default), no `message_judgment_outbox` row is ever enqueued (see
-/// `ingress::durable::apply_durable`), the table is never created (see
-/// `message_judgment_outbox::initialize`), and the drain worker is never
-/// started (see `server::http`'s startup wiring).
-///
-/// `api_key_path` names a file holding the OpenRouter API key (the same
-/// account/secret already deployed for the `ai-chatbot` extension — see
-/// `message_judgment_outbox::jev_client`'s module docs) rather than
-/// carrying the key value directly, mirroring
-/// [`crate::push_service::ApnsConfig::key_path`]'s established convention
-/// for a mounted-secret-file env var: the key is read once, lazily, at the
-/// point [`crate::message_judgment_outbox::JevClient`] is actually
-/// constructed, not eagerly at `from_env` time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageJudgmentOutboxConfig {
-    pub enabled: bool,
-    pub api_key_path: Option<std::path::PathBuf>,
-    /// How often the drain worker polls for due rows.
-    pub poll_interval_secs: u64,
-}
-
-impl Default for MessageJudgmentOutboxConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            api_key_path: None,
-            poll_interval_secs: 5,
-        }
-    }
-}
-
-impl MessageJudgmentOutboxConfig {
-    pub fn from_env() -> Result<Self, String> {
-        Self::from_vars(std::env::vars())
-    }
-
-    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: AsRef<str>,
-        V: AsRef<str>,
-    {
-        let vars: std::collections::HashMap<String, String> = vars
-            .into_iter()
-            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-            .collect();
-        let enabled = parse_bool_var(&vars, "WADDLE_MESSAGE_JUDGMENT_OUTBOX_ENABLED", false)?;
-        let api_key_path = vars
-            .get("WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH")
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(std::path::PathBuf::from);
-        if enabled && api_key_path.is_none() {
-            return Err("WADDLE_MESSAGE_JUDGMENT_OUTBOX_ENABLED=true requires \
-                 WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH"
-                .to_string());
-        }
-        let poll_interval_secs = parse_usize_var(
-            &vars,
-            "WADDLE_MESSAGE_JUDGMENT_OUTBOX_POLL_INTERVAL_SECONDS",
-            5,
-        )?
-        .max(1) as u64;
-        Ok(Self {
-            enabled,
-            api_key_path,
-            poll_interval_secs,
         })
     }
 }
@@ -1657,7 +1580,6 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
-            message_judgment_outbox: MessageJudgmentOutboxConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
@@ -1682,7 +1604,6 @@ impl ServerConfig {
         let extensions =
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
         let link_preview = LinkPreviewConfig::from_env()?;
-        let message_judgment_outbox = MessageJudgmentOutboxConfig::from_env()?;
         // `ServerConfig::from_env` predates the typed-error rule and
         // still aggregates `String` diagnostics; render the typed
         // keepalive error at this boundary.
@@ -1704,7 +1625,6 @@ impl ServerConfig {
             auth,
             extensions,
             link_preview,
-            message_judgment_outbox,
             ws_keepalive,
             spicedb,
             occupant_id_secret,
@@ -1741,7 +1661,6 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
-            message_judgment_outbox: MessageJudgmentOutboxConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
@@ -1760,7 +1679,6 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
-            message_judgment_outbox: MessageJudgmentOutboxConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
@@ -2544,46 +2462,6 @@ mod tests {
 
         assert!(error.contains("WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS"));
         assert!(error.contains("at most"));
-    }
-
-    #[test]
-    fn message_judgment_outbox_config_defaults_disabled() {
-        let config =
-            MessageJudgmentOutboxConfig::from_vars(Vec::<(String, String)>::new()).expect("config");
-        assert!(!config.enabled);
-        assert!(config.api_key_path.is_none());
-        assert_eq!(config.poll_interval_secs, 5);
-    }
-
-    #[test]
-    fn message_judgment_outbox_config_enabled_requires_api_key_path() {
-        let error = MessageJudgmentOutboxConfig::from_vars([(
-            "WADDLE_MESSAGE_JUDGMENT_OUTBOX_ENABLED",
-            "true",
-        )])
-        .expect_err("enabling without an API key path must fail startup");
-        assert!(error.contains("WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH"));
-    }
-
-    #[test]
-    fn message_judgment_outbox_config_parses_operator_policy_vars() {
-        let config = MessageJudgmentOutboxConfig::from_vars([
-            ("WADDLE_MESSAGE_JUDGMENT_OUTBOX_ENABLED", "true"),
-            (
-                "WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH",
-                "/var/run/secrets/waddle-ai/api_key",
-            ),
-            ("WADDLE_MESSAGE_JUDGMENT_OUTBOX_POLL_INTERVAL_SECONDS", "30"),
-        ])
-        .expect("config");
-        assert!(config.enabled);
-        assert_eq!(
-            config.api_key_path,
-            Some(std::path::PathBuf::from(
-                "/var/run/secrets/waddle-ai/api_key"
-            ))
-        );
-        assert_eq!(config.poll_interval_secs, 30);
     }
 
     #[test]

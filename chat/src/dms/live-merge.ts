@@ -134,7 +134,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
    * timeline is a no-op, like reactions to unloaded messages.
    */
   function applySafetyScores(fastening: SafetyScoresFastening) {
-    const next = applySafetyScoresFastening(messages.value, fastening, "dm");
+    const next = applySafetyScoresFastening(messages.value, fastening);
     if (next) messages.value = next;
   }
 

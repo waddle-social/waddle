@@ -443,8 +443,19 @@ async fn commit_attempt(
             _ => true,
         }
     });
-    let applied =
-        super::durable::apply_durable(&mut tx, key, &plan, &recorded, &room_proof).await?;
+    let applied = super::durable::apply_durable(
+        &mut tx,
+        key,
+        &plan,
+        &recorded,
+        &room_proof,
+        &submission.sender.to_bare(),
+        match &submission.principal {
+            super::IngressPrincipal::RoomResult(result) => Some(result.as_ref()),
+            _ => None,
+        },
+    )
+    .await?;
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);
     super::commit_stream::finish_stream(&mut tx, stream.as_ref(), key).await?;
     let class = rejection.unwrap_or_else(|| {
@@ -566,7 +577,8 @@ async fn commit_attempt(
                         super::principal::IngressPrincipal::Authenticated(principal) => {
                             principal.clone()
                         }
-                        super::principal::IngressPrincipal::Extension(_) => {
+                        super::principal::IngressPrincipal::Extension(_)
+                        | super::principal::IngressPrincipal::RoomResult(_) => {
                             return Err(IngressUowError::ExtensionRemoteRoomUnsupported)
                         }
                     },

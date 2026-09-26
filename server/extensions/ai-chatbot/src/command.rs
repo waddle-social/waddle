@@ -21,16 +21,21 @@ pub(crate) fn handle_event_with_executor(
     executor: &dyn ProviderExecutor,
 ) -> Result<types::ExtensionResponse, types::ExtensionError> {
     let effects = match event {
+        types::ExtensionEvent::RoomMessageObserve(_) => vec![],
         types::ExtensionEvent::MessageHook(_) => vec![],
         types::ExtensionEvent::Command(command) => {
             return command_response(command, executor).map(|effect| types::ExtensionResponse {
+                usage: None,
                 effects: effect.into_iter().collect(),
             });
         }
         types::ExtensionEvent::Launch(_) => vec![],
         types::ExtensionEvent::ProviderWebhook(_) => vec![],
     };
-    Ok(types::ExtensionResponse { effects })
+    Ok(types::ExtensionResponse {
+        effects,
+        usage: None,
+    })
 }
 
 fn command_response(

@@ -58,11 +58,15 @@ impl exports::waddle::extension::framework::Guest for GitHub {
         event: types::ExtensionEvent,
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let effects = match event {
+            types::ExtensionEvent::RoomMessageObserve(_) => vec![],
             types::ExtensionEvent::ProviderWebhook(webhook) => handle_provider_webhook(webhook)?,
             types::ExtensionEvent::Command(command) => handle_command(command, current_config()?)?,
             types::ExtensionEvent::MessageHook(_) | types::ExtensionEvent::Launch(_) => vec![],
         };
-        Ok(types::ExtensionResponse { effects })
+        Ok(types::ExtensionResponse {
+            effects,
+            usage: None,
+        })
     }
 }
 

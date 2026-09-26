@@ -317,6 +317,7 @@ pub fn restore_room_observer_envelope(
             requester,
             sender,
             plugin,
+            ..
         } = intent
         else {
             continue;
@@ -846,7 +847,7 @@ fn apply_external(
         (
             ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, plugin, requester, sender, .. }),
             IngressEffectIntent::RoomObserver { room: original_room, plugin: original_plugin, .. },
-            IngressEffectIntent::RoomObserver { room: saved_room, plugin: saved_plugin, requester: saved_requester, sender: saved_sender },
+            IngressEffectIntent::RoomObserver { room: saved_room, plugin: saved_plugin, requester: saved_requester, sender: saved_sender, .. },
         ) if room == original_room && plugin == original_plugin => {
             *room = saved_room.clone();
             *plugin = saved_plugin.clone();

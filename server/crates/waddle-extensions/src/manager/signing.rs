@@ -7,7 +7,8 @@ impl ExtensionManager {
                 ExtensionEffect::EnrichMessage(envelope) => {
                     self.sign_envelope(envelope);
                 }
-                ExtensionEffect::PublishPubSub(_)
+                ExtensionEffect::PublishRoomResult(_)
+                | ExtensionEffect::PublishPubSub(_)
                 | ExtensionEffect::ReferenceArtifact(_)
                 | ExtensionEffect::CommandForm(_)
                 | ExtensionEffect::HostWarning(_)

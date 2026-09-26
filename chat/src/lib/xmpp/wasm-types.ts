@@ -84,10 +84,11 @@ interface WasmSafetyScore {
 /** `urn:waddle:safety-scores:1` XEP-0422 fastening, as the wasm bridge
  * serializes it (`WaddleSafetyScoresFastening`). */
 export interface WasmSafetyScoresFastening {
-  target_id: string;
-  update:
-    | { kind: "replace"; model_version: string; scores: WasmSafetyScore[] }
-    | { kind: "clear" };
+  target_origin_id: string;
+  target_stanza_id: string;
+  target_stanza_by: string;
+  source_revision_id: string;
+  scores: { model_version: string; scores: WasmSafetyScore[] };
 }
 
 export interface WasmExtensionEnvelope {

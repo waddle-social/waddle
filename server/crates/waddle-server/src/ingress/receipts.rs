@@ -89,6 +89,7 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
                 requester: recorded_requester,
                 sender: recorded_sender,
                 plugin: recorded_plugin,
+                ..
             },
         ) => {
             room == recorded_room

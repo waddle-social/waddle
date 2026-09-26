@@ -1531,6 +1531,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
 // ---------------------------------------------------------------------------
 
 mod ownership_claims_tests {
+    mod durable_restore_tests;
     use super::*;
     use crate::muc::affiliation::AffiliationEntry;
     use crate::muc::durable::{

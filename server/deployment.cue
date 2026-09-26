@@ -1,15 +1,16 @@
 package cuenv
 
 #PlaceholderDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-#Digest: =~"^sha256:[a-f0-9]{64}$" & !=#PlaceholderDigest
-#GitSha: =~"^[a-f0-9]{40}$"
+#Digest:            =~"^sha256:[a-f0-9]{64}$" & !=#PlaceholderDigest
+#GitSha:            =~"^[a-f0-9]{40}$"
 
-#LinkBoardDigest: #Digest @tag(linkBoardDigest)
-#AiChatbotDigest: #Digest @tag(aiChatbotDigest)
-#DecisionPollsDigest: #Digest @tag(decisionPollsDigest)
-#GithubDigest: #Digest @tag(githubDigest)
+#LinkBoardDigest:      #Digest @tag(linkBoardDigest)
+#AiChatbotDigest:      #Digest @tag(aiChatbotDigest)
+#DecisionPollsDigest:  #Digest @tag(decisionPollsDigest)
+#GithubDigest:         #Digest @tag(githubDigest)
 #StargateQuotesDigest: #Digest @tag(stargateQuotesDigest)
-#ServerImageDigest: #Digest @tag(serverImageDigest)
+#JevJudgmentsDigest:   #Digest @tag(jevJudgmentsDigest)
+#ServerImageDigest:    #Digest @tag(serverImageDigest)
 
 #GitHubActionsRoom: "github-actions@muc.waddle.social"
 
@@ -92,6 +93,30 @@ package cuenv
 			"message.enrich",
 		]
 	},
+	{
+		name:      "jev-judgments"
+		registry:  "ghcr.io/waddle-social/waddle/extensions/jev-judgments"
+		digest:    #JevJudgmentsDigest
+		namespace: "urn:waddle:safety-scores:1"
+		config: {
+			endpoint: "https://openrouter.ai/api/alpha/decisions"
+			model:    "typesafe/jev-1.13"
+		}
+		configSecretFiles: api_key: "/var/run/secrets/waddle-ai/api_key"
+		capabilityGrants: ["message.observe", "room.result.publish", "outbound.http.request"]
+		allowedHttpOrigins: ["https://openrouter.ai"]
+		roomObservation: {
+			generation: 1
+			scope: kind: "all-hosted-rooms"
+			max_concurrent: 8
+		}
+		runtimeLimits: {
+			invocation_timeout_ms:   10000
+			http_timeout_ms:         4000
+			http_max_response_bytes: 65536
+			http_max_requests:       1
+		}
+	},
 ]
 
 #CheckedInGitOpsValues: {
@@ -119,7 +144,7 @@ package cuenv
 	}
 	extensions: {
 		enabled: true
-		modules:  #PublishedExtensionModules
+		modules: #PublishedExtensionModules
 		...
 	}
 	...

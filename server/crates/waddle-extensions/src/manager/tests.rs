@@ -203,6 +203,8 @@ fn merges_secret_file_values_into_effective_config() {
     );
 
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(
@@ -247,6 +249,8 @@ fn rejects_non_object_config_when_secret_files_are_enabled() {
     );
 
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(
@@ -283,6 +287,8 @@ fn reads_secret_files_from_disk_when_building_effective_config() {
     );
 
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(
@@ -309,6 +315,8 @@ async fn from_config_fails_fast_when_configured_actor_cannot_load() {
         enabled: true,
         cache_dir: "/var/lib/waddle/extensions".to_string(),
         modules: vec![ExtensionModuleConfig {
+            room_observation: None,
+            runtime_limits: Default::default(),
             name: "example-extension".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
             digest: None,
@@ -347,6 +355,8 @@ async fn disabled_config_does_not_require_cache_dir() {
 #[test]
 fn advertised_feature_namespaces_reject_official_namespaces() {
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "bad-advertiser".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/bad-advertiser".to_string(),
         digest: Some(
@@ -383,6 +393,8 @@ fn advertised_feature_namespaces_reject_official_namespaces() {
 #[test]
 fn runtime_grants_are_host_configured_and_manifest_bounded() {
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(

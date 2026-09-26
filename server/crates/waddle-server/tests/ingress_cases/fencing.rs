@@ -140,6 +140,7 @@ async fn relayed_owner_acceptance(mut fixture: IngressFixture) {
                     message,
                     fence,
                     archive_expectation: ArchiveExpectation::Fresh,
+                    correction_target: None,
                 }));
         }
     }
@@ -360,6 +361,7 @@ async fn local_room_commit(
             message,
             fence: fence.clone(),
             archive_expectation: ArchiveExpectation::Fresh,
+            correction_target: None,
         },
     )));
     submission.plan.room_execution = RoomExecutionPath::Local {

@@ -61,6 +61,7 @@ fn archive_plan(fixture: &IngressFixture, id: &str) -> IngressSubmission {
                 message: Box::new(message),
                 fence: RoomFenceRequirement::Unfenced,
                 archive_expectation: ArchiveExpectation::Fresh,
+                correction_target: None,
             },
         ))));
     submission

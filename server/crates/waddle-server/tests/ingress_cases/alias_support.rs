@@ -62,6 +62,7 @@ pub(super) fn archive_plan(fixture: &IngressFixture, room: bool, id: &str) -> In
             message: Box::new(archived),
             fence: RoomFenceRequirement::Unfenced,
             archive_expectation: ArchiveExpectation::Fresh,
+            correction_target: None,
         })
     } else {
         DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {

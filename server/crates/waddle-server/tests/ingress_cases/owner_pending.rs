@@ -230,6 +230,7 @@ async fn relayed_language_matches_canonical(mut fixture: IngressFixture) {
             message: Box::new(archived),
             fence: RoomFenceRequirement::Guarded(room_fence),
             archive_expectation: ArchiveExpectation::Fresh,
+            correction_target: None,
         },
     )))];
     owner.plan.room_execution = RoomExecutionPath::None;

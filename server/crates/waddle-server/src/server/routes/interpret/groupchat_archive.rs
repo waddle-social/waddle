@@ -309,6 +309,7 @@ async fn finish_archive_groupchat_message_with_effects(
                         message: Box::new(archived.clone()),
                         fence: requirement,
                         archive_expectation: waddle_xmpp::mam::ArchiveExpectation::Fresh,
+                        correction_target: None,
                     },
                 ),
                 deps,

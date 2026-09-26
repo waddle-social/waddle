@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExtensionEvent {
+    RoomMessageObserve(RoomMessageObserve),
     MessageHook(MessageHook),
     Command(CommandInvocation),
     Launch(LaunchInvocation),
