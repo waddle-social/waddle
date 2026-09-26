@@ -17,10 +17,8 @@ enum MessageAccessibilityText {
         if replyCount > 0 {
             parts.append(replyCount == 1 ? "1 reply" : "\(replyCount) replies")
         }
-        switch item.safetyScores?.severity {
-        case .alert: parts.append("Content alert")
-        case .notice: parts.append("Content notice")
-        case nil: break
+        if let row = item.safetyScores?.markerRow {
+            parts.append("Content signal: \(row.title) \(row.percentText)")
         }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }

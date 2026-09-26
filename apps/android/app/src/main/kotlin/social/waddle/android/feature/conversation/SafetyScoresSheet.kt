@@ -10,49 +10,37 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
+import social.waddle.client.ffi.WaddleSafetyCategory
 import social.waddle.client.ffi.WaddleSafetyScores
 
-/** Amber for a notice, the theme error colour (red) for an alert. */
-@Composable
-fun safetyScoreSeverityColor(severity: SafetyScoreSeverity): Color = when (severity) {
-    SafetyScoreSeverity.NOTICE -> NoticeAmber
-    SafetyScoreSeverity.ALERT -> MaterialTheme.colorScheme.error
-}
-
-private val NoticeAmber = Color(0xFFB45309)
-
 /**
- * Affordance under a message whose XEP-0422 safety scores crossed the
- * notice threshold: amber for a notice, red for an alert, absent below.
- * The scores are measurements shown to everyone, not a moderation
- * verdict, so it stays small.
+ * Compact marker for the highest visible safety category. Colour and icon
+ * describe the category, while probability only controls visibility.
  */
 @Composable
-fun SafetyScoresChip(severity: SafetyScoreSeverity, onClick: () -> Unit) {
-    val description = stringResource(safetyScoreChipDescriptionRes(severity))
-    val tint = safetyScoreSeverityColor(severity)
+fun SafetyScoresChip(category: WaddleSafetyCategory, onClick: () -> Unit) {
+    val label = stringResource(safetyScoreLabelRes(category))
+    val description = stringResource(R.string.safety_scores_chip_description, label)
+    val style = safetyScoreStyle(category)
+    val tint = style.color()
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        color = MaterialTheme.colorScheme.surface,
         onClick = onClick,
         modifier = Modifier
             .padding(top = 2.dp)
@@ -63,13 +51,13 @@ fun SafetyScoresChip(severity: SafetyScoreSeverity, onClick: () -> Unit) {
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
         ) {
             Icon(
-                Icons.Outlined.Insights,
+                style.icon,
                 contentDescription = null,
                 tint = tint,
                 modifier = Modifier.size(14.dp),
             )
             Text(
-                text = stringResource(R.string.safety_scores_chip),
+                text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = tint,
                 modifier = Modifier.padding(start = 4.dp),
@@ -78,7 +66,7 @@ fun SafetyScoresChip(severity: SafetyScoreSeverity, onClick: () -> Unit) {
     }
 }
 
-/** Breakdown of the categories at or above the notice threshold. */
+/** Breakdown of the categories at or above the visibility threshold. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SafetyScoresSheet(
@@ -117,12 +105,21 @@ fun SafetyScoresSheet(
 
 @Composable
 private fun SafetyScoreLine(row: SafetyScoreRow) {
+    val style = safetyScoreStyle(row.category)
+    val tint = style.color()
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = style.icon,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(18.dp),
+            )
             Text(
                 text = stringResource(safetyScoreLabelRes(row.category)),
                 style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
+                color = tint,
+                modifier = Modifier.weight(1f).padding(start = 6.dp),
             )
             Text(
                 text = stringResource(R.string.safety_scores_percent, row.percent),
@@ -131,7 +128,7 @@ private fun SafetyScoreLine(row: SafetyScoreRow) {
         }
         LinearProgressIndicator(
             progress = { row.fraction },
-            color = row.severity?.let { safetyScoreSeverityColor(it) } ?: ProgressIndicatorDefaults.linearColor,
+            color = tint,
             modifier = Modifier.fillMaxWidth(),
         )
         Text(
