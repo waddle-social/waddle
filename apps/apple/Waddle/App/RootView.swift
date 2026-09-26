@@ -37,6 +37,7 @@ private struct LaunchView: View {
         VStack(spacing: Theme.Spacing.l) {
             WaddleBrandMark(size: 72)
             ProgressView()
+                .accessibilityLabel(Text("Starting Waddle"))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
