@@ -225,7 +225,7 @@ impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
     }
 }
 
-/// Get all connected resource JIDs.
+/// Get every registered resource JID, including sockets still completing cleanup.
 pub struct GetResources;
 
 /// One atomic routing-policy snapshot from the actor that owns the account.
@@ -250,6 +250,7 @@ impl kameo::message::Message<GetRoutingResources> for UserActor {
         let mut resources: Vec<_> = self
             .connections
             .iter()
+            .filter(|(_, entry)| !entry.sender.is_closed())
             .map(|(jid, entry)| ResourceRoutingState {
                 jid: jid.clone(),
                 available: entry.is_presence_available(),

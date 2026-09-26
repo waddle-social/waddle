@@ -519,6 +519,101 @@ async fn make_available(actor: &ActorRef<UserActor>, jid: FullJid, priority: i8)
     assert!(updated);
 }
 
+#[tokio::test]
+async fn routing_queries_exclude_closed_receivers_without_retiring_presence() {
+    let actor = spawn_actor("alice").await;
+    let closing = full("alice", "closing");
+    let available = full("alice", "available");
+    let bound = full("alice", "bound");
+    let (closing_entry, mut closing_rx) = entry();
+    let (available_entry, mut available_rx) = entry();
+    let (bound_entry, mut bound_rx) = entry();
+    let closing_owner = closing_entry.carbons_handle();
+    register(&actor, closing.clone(), closing_entry).await;
+    register(&actor, available.clone(), available_entry).await;
+    register(&actor, bound.clone(), bound_entry).await;
+    make_available(&actor, closing.clone(), 10).await;
+    make_available(&actor, available.clone(), 5).await;
+    assert_eq!(
+        actor
+            .ask(SelectRoutableResources)
+            .await
+            .expect("initial selection"),
+        vec![closing.clone()],
+    );
+
+    // A terminal stream close stops outbound admission before the socket's
+    // asynchronous presence cleanup and owner-gated unregister complete.
+    closing_rx.close();
+    let mut connected = actor.ask(GetResources).await.expect("connected fallback");
+    connected.sort();
+    let snapshot = actor
+        .ask(GetRoutingResources)
+        .await
+        .expect("routing snapshot");
+    let selected = actor
+        .ask(SelectRoutableResources)
+        .await
+        .expect("ranked selection");
+    assert_eq!(
+        (
+            connected,
+            snapshot
+                .iter()
+                .map(|state| state.jid.clone())
+                .collect::<Vec<_>>(),
+            selected
+        ),
+        (
+            vec![available.clone(), bound.clone(), closing.clone()],
+            vec![available.clone(), bound.clone()],
+            vec![available.clone()]
+        ),
+        "routing excludes closed admission while teardown inventory retains it",
+    );
+    assert!(snapshot[0].available);
+    assert_eq!(snapshot[0].priority, 5);
+    assert!(
+        !snapshot[1].available,
+        "a bound resource need not advertise presence"
+    );
+    let incumbent = actor
+        .ask(GetConnectionEntry {
+            jid: closing.clone(),
+        })
+        .await
+        .expect("owner lookup")
+        .expect("cleanup still owns the entry");
+    assert!(Arc::ptr_eq(&incumbent.carbons_handle(), &closing_owner));
+    assert!(
+        incumbent.is_presence_available(),
+        "normal cleanup must still broadcast unavailable"
+    );
+    assert_eq!(actor.ask(ResourceCount).await.expect("count"), 3);
+
+    available_rx.close();
+    bound_rx.close();
+    assert_eq!(
+        actor
+            .ask(GetResources)
+            .await
+            .expect("teardown inventory")
+            .len(),
+        3
+    );
+    assert!(actor
+        .ask(GetRoutingResources)
+        .await
+        .expect("offline snapshot")
+        .is_empty());
+    assert!(actor
+        .ask(SelectRoutableResources)
+        .await
+        .expect("offline selection")
+        .is_empty());
+    assert_eq!(actor.ask(ResourceCount).await.expect("cleanup count"), 3);
+}
+
 /// Invariant 6: no outbound drop-rate regression under a join-burst. A slow
 /// client that never drains its channel while a 200-occupant room fans in
 /// must buffer the whole burst without a single `DroppedFull` — the 256

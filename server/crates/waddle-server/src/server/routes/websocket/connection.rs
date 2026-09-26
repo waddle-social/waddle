@@ -182,12 +182,12 @@ const ORDERED_RELAY_HANDOFF_CLEANUP_DEADLINE: std::time::Duration =
     std::time::Duration::from_secs(2);
 const ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS: usize = 1_024;
 
-/// The two channel halves handed over to the `ConnectionRegistry` at
-/// registration time (`register_bound_connection_after_frame`, then
-/// ADR-0017 Phase 3 Slice 6's force-detach receiver take-over). Bundled so
+/// Registration and delivery channels, including the receiver that fences
+/// routing admission before a terminal stream response is written. Bundled so
 /// `handle_inbound_text` stays under the clippy too-many-arguments
 /// threshold, mirroring `SmCtx`'s identical rationale one file over.
 pub(super) struct RegistrationChannels<'a> {
+    pub(super) outbound_rx: &'a mut mpsc::Receiver<OutboundStanza>,
     pub(super) pending_tx: &'a mut Option<mpsc::Sender<OutboundStanza>>,
     pub(super) force_detach_rx:
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
@@ -462,6 +462,7 @@ async fn handle_xmpp_websocket(
                         &state,
                         &mut conn,
                         RegistrationChannels {
+                            outbound_rx: &mut outbound_rx,
                             pending_tx: &mut pending_tx,
                             force_detach_rx: &mut force_detach_rx,
                         },
@@ -492,6 +493,7 @@ async fn handle_xmpp_websocket(
                             &state,
                             &mut conn,
                             RegistrationChannels {
+                                outbound_rx: &mut outbound_rx,
                                 pending_tx: &mut pending_tx,
                                 force_detach_rx: &mut force_detach_rx,
                             },
@@ -1348,6 +1350,7 @@ where
     RE: std::fmt::Display,
 {
     let RegistrationChannels {
+        outbound_rx,
         pending_tx,
         force_detach_rx,
     } = channels;
@@ -1379,6 +1382,12 @@ where
         shutdown_token,
     )
     .await;
+    if matches!(conn.phase, ConnectionPhase::Closing { .. }) {
+        // A peer may send new traffic as soon as it sees our close ACK. Stop
+        // admission through every cloned actor/registry sender before that
+        // ACK reaches the wire; cleanup retains the prior presence state.
+        outbound_rx.close();
+    }
     if matches!(
         conn.inbound_frame_terminal.take(),
         Some(InboundFrameTerminal::AuthorityRevoked)
@@ -1404,7 +1413,7 @@ where
     // resource binding. This keeps the transport loop focused on
     // WebSocket I/O while the registration module owns registry
     // publication and post-registration SM finalization.
-    match register_bound_connection_after_frame_with_admission(
+    let registration = register_bound_connection_after_frame_with_admission(
         state.as_ref(),
         domain,
         conn,
@@ -1412,8 +1421,12 @@ where
         admission_permit,
         shutdown_token,
     )
-    .await
-    {
+    .await;
+    // Resume finalization may also have moved the stream to Closing.
+    if matches!(conn.phase, ConnectionPhase::Closing { .. }) {
+        outbound_rx.close();
+    }
+    match registration {
         RegistrationAfterFrame::Unchanged => {}
         RegistrationAfterFrame::SessionInitializationFailed => {
             if close_if_frame_authority_revoked(

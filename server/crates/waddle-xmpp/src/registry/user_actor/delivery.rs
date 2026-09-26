@@ -101,7 +101,7 @@ impl kameo::message::Message<SelectRoutableResources> for UserActor {
         let candidates: Vec<(&FullJid, i8)> = self
             .connections
             .iter()
-            .filter(|(_, entry)| entry.is_presence_available())
+            .filter(|(_, entry)| !entry.sender.is_closed() && entry.is_presence_available())
             .map(|(jid, entry)| (jid, entry.presence_priority()))
             .filter(|(_, priority)| *priority >= 0)
             .collect();

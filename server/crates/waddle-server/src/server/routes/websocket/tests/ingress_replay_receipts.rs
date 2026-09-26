@@ -837,7 +837,7 @@ async fn ingress_post_registration_resume_settles_replayed_receipt() {
             Ok::<_, std::io::Error>(captured)
         },
     ));
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let (tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
     let mut pending_tx = Some(tx);
     let mut force_detach_rx = None;
     assert!(
@@ -847,6 +847,7 @@ async fn ingress_post_registration_resume_settles_replayed_receipt() {
             &state,
             &mut resumed,
             RegistrationChannels {
+                outbound_rx: &mut outbound_rx,
                 pending_tx: &mut pending_tx,
                 force_detach_rx: &mut force_detach_rx
             },
@@ -864,6 +865,10 @@ async fn ingress_post_registration_resume_settles_replayed_receipt() {
     assert!(
         pending_tx.is_none(),
         "production handler must register the resumed connection"
+    );
+    assert!(
+        !outbound_rx.is_closed(),
+        "successful resume keeps delivery admission"
     );
     assert!(resumed.pending_resume_stream_id.is_none());
     assert!(resumed.registry_owner.is_some());
