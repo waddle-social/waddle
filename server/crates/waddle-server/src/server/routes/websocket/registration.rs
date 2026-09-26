@@ -3,7 +3,8 @@ use super::{
     session_init::load_blocklist_for_bind,
     state::WsConnState,
     stream_management::{
-        finalize_sm_after_registry_registration, sm_show_name, SmRegistrationFinalization,
+        finalize_sm_after_registry_registration, reject_unregistered_resume, sm_show_name,
+        SmRegistrationFinalization,
     },
 };
 
@@ -14,35 +15,60 @@ const RESUME_REGISTRATION_BUSY_ATTEMPTS: usize = 3;
 
 const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static PREPARED_BIND_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+    pub(super) static LOCAL_PUBLICATION_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BindPreparationError {
+    #[error("resumed occupancy generation is no longer authoritative")]
+    ResumeAuthorityRevoked,
+    #[error("occupancy authority storage failed: {0}")]
+    Authority(#[from] crate::db::DatabaseError),
+    #[error("SM generation inventory failed: {0}")]
+    Inventory(#[from] waddle_xmpp::stream_management::SmRegistryError),
+    #[error("incumbent occupancy retirement could not be confirmed")]
+    RetirementUnconfirmed,
+}
+
 async fn prepare_socket_bind(
     state: &WebSocketState,
     jid: &FullJid,
     generation: waddle_xmpp_core::OccupancySessionGeneration,
     resumed: bool,
-) -> Option<waddle_xmpp::registry::ConnectionBindGuard> {
+) -> Result<waddle_xmpp::registry::ConnectionBindGuard, BindPreparationError> {
     use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachRequest, SocketCleanupState};
     let registry = &state.deps.protocol.connection_registry;
     let mut guard = registry.lock_bind(jid).await;
     let db = state.deps.app_state.db_pool.global();
     if resumed {
-        if !crate::occupancy_authority::is_current(db, jid, generation)
-            .await
-            .ok()?
-        {
-            return None;
+        if !crate::occupancy_authority::is_current(db, jid, generation).await? {
+            return Err(BindPreparationError::ResumeAuthorityRevoked);
         }
     } else {
+        // Snapshot before publication: scanning afterwards could capture and
+        // invalidate a newer cross-node bind. Legacy snapshots have no prior
+        // authority row, so publication alone cannot discover their lineage.
+        let detached_generations = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .occupancy_generations_for_full_jid(jid)?;
         // Revoke stale asynchronous room joins before awaiting their cleanup.
-        if let Some(displaced) = crate::occupancy_authority::publish(db, jid, generation)
-            .await
-            .ok()?
-        {
+        if let Some(displaced) = crate::occupancy_authority::publish(db, jid, generation).await? {
             guard.retain_retirement(displaced);
+        }
+        for detached in detached_generations {
+            if detached != generation {
+                guard.retain_retirement(detached);
+            }
         }
     }
     if let Some(incumbent) = guard.incumbent() {
         if resumed && incumbent.generation != generation {
-            return None;
+            return Err(BindPreparationError::ResumeAuthorityRevoked);
         }
         if incumbent.state() == SocketCleanupState::Running {
             let (ack, _ack_rx) = tokio::sync::oneshot::channel();
@@ -78,22 +104,23 @@ async fn prepare_socket_bind(
                 .retire_remote_incumbent_before_local_bind(jid, generation)
                 .await
             {
-                return None;
+                return Err(BindPreparationError::RetirementUnconfirmed);
             }
         }
     }
     if !complete_bind_retirements(state, jid, generation, &mut guard, resumed).await {
-        return None;
+        return Err(BindPreparationError::RetirementUnconfirmed);
     }
-    if !crate::occupancy_authority::is_current(db, jid, generation)
-        .await
-        .ok()?
-    {
-        return None;
+    if !crate::occupancy_authority::is_current(db, jid, generation).await? {
+        return Err(if resumed {
+            BindPreparationError::ResumeAuthorityRevoked
+        } else {
+            BindPreparationError::RetirementUnconfirmed
+        });
     }
     // A remote-resource mirror may occupy this route without a local socket
     // lifecycle. Its owner registration is separately generation-fenced.
-    Some(guard)
+    Ok(guard)
 }
 
 /// Drain exact-generation obligations with the bind gate held. Callers retain
@@ -461,20 +488,36 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             prepare_socket_bind(state, &jid, conn.occupancy_session, resumed),
         ) => prepared,
     };
-    let Ok(Some(mut bind_guard)) = prepared else {
-        record_session_init_failure(
-            waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
-            &jid,
-            conn.sm_state.stream_id.as_deref(),
-            Some(
-                "incumbent occupancy retirement or bind authority could not be confirmed"
-                    .to_owned(),
-            ),
-        );
-        return RegistrationAfterFrame::SessionInitializationFailed;
+    let mut bind_guard = match prepared {
+        Ok(Ok(guard)) => guard,
+        Ok(Err(BindPreparationError::ResumeAuthorityRevoked)) => {
+            return RegistrationAfterFrame::Registered(
+                reject_unregistered_resume(state, conn, &jid).await,
+            );
+        }
+        failure => {
+            let detail = match failure {
+                Ok(Err(error)) => error.to_string(),
+                Err(error) => format!("occupancy retirement timed out: {error}"),
+                Ok(Ok(_)) => unreachable!("successful bind preparation handled above"),
+            };
+            record_session_init_failure(
+                waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
+                &jid,
+                conn.sm_state.stream_id.as_deref(),
+                Some(detail),
+            );
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        }
     };
     if !registration_authoritative(permit, shutdown) {
         return RegistrationAfterFrame::AuthorityRevoked;
+    }
+
+    #[cfg(test)]
+    if let Ok((entered, release)) = PREPARED_BIND_GATE.try_with(Clone::clone) {
+        entered.notify_one();
+        release.notified().await;
     }
 
     let publication = tokio::select! {
@@ -486,14 +529,34 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             ),
         ) => result,
     };
-    let Ok(Ok(Some(publication_guard))) = publication else {
-        record_session_init_failure(
-            waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
-            &jid,
-            conn.sm_state.stream_id.as_deref(),
-            Some("occupancy authority changed before registration publication".to_owned()),
+    if resumed && matches!(publication, Ok(Ok(None))) {
+        return RegistrationAfterFrame::Registered(
+            reject_unregistered_resume(state, conn, &jid).await,
         );
-        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
+    let publication_guard = match publication {
+        Ok(Ok(Some(guard))) => guard,
+        failure => {
+            let detail = match failure {
+                Ok(Ok(None)) => {
+                    "occupancy authority changed before registration publication".to_owned()
+                }
+                Ok(Err(error)) => format!(
+                    "occupancy authority storage failed before registration publication: {error}"
+                ),
+                Err(error) => format!(
+                    "occupancy authority check timed out before registration publication: {error}"
+                ),
+                Ok(Ok(Some(_))) => unreachable!("current publication guard handled above"),
+            };
+            record_session_init_failure(
+                waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
+                &jid,
+                conn.sm_state.stream_id.as_deref(),
+                Some(detail),
+            );
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        }
     };
 
     conn.ensure_state_machine(
@@ -542,6 +605,18 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
     // `publish_stream_id_and_presence`'s doc comment for the full
     // "run before the authoritative mirror ask" rationale).
     publish_stream_id_and_presence(state, &jid, &owner, conn);
+
+    // Only synchronous routing publication needs the SQL authority fence.
+    // Keep the per-JID bind gate while mirrors drain, but return the main-pool
+    // connection before actor, relay, or rollback awaits. A remote successor
+    // is detected again after SM finalization below.
+    drop(publication_guard);
+
+    #[cfg(test)]
+    if let Ok((entered, release)) = LOCAL_PUBLICATION_GATE.try_with(Clone::clone) {
+        entered.notify_one();
+        release.notified().await;
+    }
 
     if !registration_authoritative(permit, shutdown) {
         rollback_registered_connection(state, &jid, &owner, conn).await;
@@ -612,7 +687,10 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             .await
         };
         let registered = match mirror_outcome {
-            crate::server::dual_registration::MirrorRegisterOutcome::Registered => true,
+            crate::server::dual_registration::MirrorRegisterOutcome::Registered => {
+                bind_guard.complete_actor_retirements_after_registration();
+                true
+            }
             crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner => {
                 register_remote_clustered_resource(state, &jid, entry, owner.clone()).await
             }
@@ -655,9 +733,6 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         }
     }
 
-    // Actor registration uses the control-plane claim pool. Release the
-    // main-pool authority lock before SM finalization performs its own writes.
-    drop(publication_guard);
     let sm_report = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
     #[cfg(test)]
     if let Some((reached, release)) = conn.post_sm_finalization_test_hook.take() {
@@ -671,7 +746,11 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             conn.occupancy_session,
         )
         .await
-        .unwrap_or(false);
+        .unwrap_or_else(|error| {
+            tracing::warn!(%jid, %error,
+                "occupancy authority lookup failed after stream finalization");
+            false
+        });
     if !registration_authoritative(permit, shutdown) || !generation_current {
         // `complete_pending_resume_claim` persist-deletes the detached
         // snapshot after restoring it into `conn.sm_state`. Clearing the

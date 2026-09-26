@@ -75,12 +75,27 @@ replaces v2 because the serialized force-detach origin gains a fresh-bind
 replacement variant. Stop every old replica before starting new replicas: an
 old writer neither publishes nor checks the new authority, and mixed peers
 cannot register or force-detach remote resources through the same endpoints.
+The rolling compatibility introduced by [#1841](https://github.com/waddle-social/waddle/pull/1841)
+covers live resource routing and frame delivery. It does not provide compatible
+receivers for these registration changes or generation fencing in old writers.
 
 The migration adds an empty authority table and does not backfill old sessions.
 A detached session created before the cutover has no matching authority row and
-cannot resume; clients must establish a fresh bind and rejoin their rooms.
+cannot resume. The server returns XEP-0198 `<failed/>` with `item-not-found` and
+the server's handled count, leaving the authenticated connection open for a
+fresh bind. Clients can retain and retry their unhandled outbound tail, then
+rejoin their rooms.
 Expect the connection interruption inherent in `Recreate`. The additive DDL
 does not make a rolling upgrade safe.
+
+A fresh bind discovers and retires locally held predecessor snapshots by their
+exact generation, including snapshots without an authority row. SM maintenance
+also promotes queues from locally owned detached snapshots whose generation is
+missing or superseded, without waiting for their resume timeout. Both paths
+verify the snapshot's SM owner and claim epoch before taking custody. Snapshots
+owned by another node follow the existing ownership recovery path; a bind does
+not synchronously discover or steal every foreign snapshot. Recovery timing
+therefore depends on claim recovery and maintenance as well as reconnects.
 
 Deployment and verification are a separate operator action; implementation and
 tests do not deploy this change:
@@ -94,7 +109,9 @@ tests do not deploy this change:
    the channel/message namespace already includes V1020.
 3. Verify fresh binds, cross-node remote-resource registration, MUC joins, and
    same-full-JID replacement cleanup. Verify resumption of a session created by
-   the new fleet; a pre-cutover session requiring a fresh bind is expected.
+   the new fleet. A pre-cutover resume must receive SM `<failed/>`, retain its
+   unhandled tail, and allow a fresh bind on the same authenticated connection.
+   Check pending-message promotion and reconnect-time database pool health.
 4. Only after verification, use a separate follow-up change to restore
    `RollingUpdate` with `maxSurge: 1` and `maxUnavailable: 0`. Keep server and
    build changes out of that flip-back commit. The publisher and live Helm
@@ -107,3 +124,8 @@ the ledger row or authority table to bypass this fence. Never roll back before
 the append-only migration-ledger guard introduced in `43860571` (#1671): those
 older binaries can destructively recreate database tables, as documented in
 the [ingress authority runbook](../../server/docs/operations/ingress-authority.md).
+
+The authority table currently retains one row per full JID. Garbage collection
+is a separate follow-up: deleting a row on disconnect would invalidate valid
+resumes. Safe reclamation must prove terminal cleanup and absence of resumable
+state or in-flight work, then delete only the unchanged generation.

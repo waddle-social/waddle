@@ -1393,6 +1393,95 @@ impl InMemorySmSessionRegistry {
         Ok(())
     }
 
+    /// Caller holds the stream shard. Never acquire or steal a claim here:
+    /// retirement is authorized only by this snapshot's recorded exact fence.
+    async fn retirement_identity_locked(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<crate::ownership::CurrentNodeIdentityGuard>, SmRegistryError> {
+        let fence = self
+            .claim_fences
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?
+            .get(stream_id.as_str())
+            .cloned();
+        let Some(fence) = fence else {
+            return Ok(None);
+        };
+        if self.node_identity.current() != *fence.owner() {
+            return Ok(None);
+        }
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.fence(
+                &sm_session_entity(stream_id.as_str()),
+                fence.owner(),
+                fence.epoch(),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => return Ok(None),
+            Ok(Err(_)) => {
+                return Err(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Backend,
+                ))
+            }
+            Err(_) => {
+                return Err(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Timeout,
+                ))
+            }
+        }
+        Ok(self.node_identity.guard_if_current(fence.owner()).await)
+    }
+
+    /// Retire a discovered detached snapshot only while this node still owns
+    /// its exact SM claim. A resume that claimed it since discovery, a changed
+    /// generation, or a foreign ownership transfer leaves it untouched.
+    /// The caller must immediately adopt the returned session into promotion
+    /// custody, then use the existing promote/confirm contract.
+    pub async fn invalidate_detached_session_for_occupancy(
+        &self,
+        stream_id: &SmSessionId,
+        jid: &FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id.as_str())?;
+        let _stream_guard = stream_lock.lock().await;
+        self.reconcile_stale_session_locked(stream_id).await?;
+        let Some(_identity) = self.retirement_identity_locked(stream_id).await? else {
+            return Ok(None);
+        };
+        let removed = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let mut promotions = self
+                .pending_promotions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let matches = sessions.get(stream_id.as_str()).is_some_and(|session| {
+                session.jid == *jid && session.occupancy_session == generation
+            });
+            if !matches {
+                return Ok(None);
+            }
+            let removed = sessions.remove(stream_id.as_str());
+            promotions.insert(stream_id.as_str().to_owned());
+            removed
+        };
+        let Some(session) = removed else {
+            return Ok(None);
+        };
+        let mut retry = PendingPromotionRetryLease::new(self, session);
+        self.reconcile_promotion_session_locked(retry.session_mut())
+            .await?;
+        Ok(Some(retry.finish()))
+    }
+
     pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
         let mut drained = DrainedSessionBatch::new(self, 0);
         self.lease_pending_promotion_retries(&mut drained).await?;
@@ -2503,6 +2592,12 @@ impl InMemorySmSessionRegistry {
             let _stream_guard = stream_lock.lock().await;
             self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
                 .await?;
+            let Some(_identity) = self
+                .retirement_identity_locked(&SmSessionId::new(stream_id))
+                .await?
+            else {
+                continue;
+            };
             let (removed_detached, removed_claimed) = {
                 let mut sessions = self
                     .sessions
@@ -2516,7 +2611,22 @@ impl InMemorySmSessionRegistry {
                     .pending_promotions
                     .write()
                     .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                let removed = (sessions.remove(stream_id), claimed.remove(stream_id));
+                let matches = |session: &DetachedSession| {
+                    session.jid == *jid
+                        && generation
+                            .is_none_or(|generation| session.occupancy_session == generation)
+                };
+                let detached = if sessions.get(stream_id).is_some_and(matches) {
+                    sessions.remove(stream_id)
+                } else {
+                    None
+                };
+                let claimed = if claimed.get(stream_id).is_some_and(matches) {
+                    claimed.remove(stream_id)
+                } else {
+                    None
+                };
+                let removed = (detached, claimed);
                 if removed.0.is_some() || removed.1.is_some() {
                     promotions.insert(stream_id.clone());
                 }

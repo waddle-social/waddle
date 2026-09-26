@@ -1057,6 +1057,61 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
     run_sm_expiry_sweep_with_custody_cursor(state, &mut None).await;
 }
 
+/// Authority absence or replacement makes this generation permanently
+/// non-resumable: fresh binds mint generations, and resume never republishes
+/// one. Recover locally owned queues through the same custody/promotion path
+/// as expiry instead of leaving pre-cutover sessions stranded until timeout.
+async fn drain_noncurrent_occupancy_sessions(
+    state: &WebSocketState,
+    promotion_batch: &mut crate::sm_promotion::PromotionBatchGuard<'_>,
+) -> bool {
+    let registry = &state.deps.protocol.sm_session_registry;
+    let candidates = match registry.detached_occupancy_inventory() {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            warn!(%error, "SM janitor: detached occupancy inventory failed");
+            return false;
+        }
+    };
+    let mut completed = true;
+    for (stream_id, jid, generation) in candidates {
+        match crate::occupancy_authority::is_current(
+            state.deps.app_state.db_pool.global(),
+            &jid,
+            generation,
+        )
+        .await
+        {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                completed = false;
+                warn!(%stream_id, %jid, %error, "SM janitor: occupancy authority lookup failed; retaining detached session");
+                continue;
+            }
+        }
+        // The registry rechecks the exact immutable SM claim fence and
+        // detached identity under its stream lock. Never steal a foreign
+        // claim or take a snapshot already claimed for an in-flight resume.
+        match registry
+            .invalidate_detached_session_for_occupancy(&stream_id, &jid, generation)
+            .await
+        {
+            Ok(Some(session)) => {
+                // Adopt custody before the next await, including the next
+                // candidate's authority lookup, so cancellation keeps Q.
+                promotion_batch.push(session);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                completed = false;
+                warn!(%stream_id, %jid, %error, "SM janitor: noncurrent occupancy drain failed; retaining detached session");
+            }
+        }
+    }
+    completed
+}
+
 async fn run_sm_expiry_sweep_with_custody_cursor(
     state: &Arc<WebSocketState>,
     custody_cursor: &mut Option<waddle_xmpp::stream_management::SmIngressAppendKey>,
@@ -1088,6 +1143,9 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             &state.deps.protocol.sm_session_registry,
             drained,
         );
+        if !drain_noncurrent_occupancy_sessions(state, &mut promotion_batch).await {
+            sweep_failed = true;
+        }
         while let Some(pending_session) = promotion_batch.pop() {
             let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
                 &state.deps.protocol.sm_session_registry,
@@ -12591,7 +12649,7 @@ mod remote_muc_reconciler_tests {
 
 #[cfg(all(test, feature = "clustering"))]
 mod graceful_shutdown_drain_tests {
-    use super::{run_graceful_shutdown_drain, HangingSmReadPersistence};
+    use super::{run_graceful_shutdown_drain, run_sm_expiry_sweep, HangingSmReadPersistence};
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state_with_sm_registry,
         create_test_websocket_state_with_sm_registry_and_pending_storage,
@@ -12654,6 +12712,161 @@ mod graceful_shutdown_drain_tests {
             .bodies
             .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         message
+    }
+
+    #[tokio::test]
+    async fn sm_maintenance_promotes_nonexpired_sessions_without_current_occupancy_authority() {
+        for replaced in [false, true] {
+            let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
+            let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+            let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+                sm_registry.clone(),
+                pending.clone(),
+            )
+            .await;
+            let jid: jid::FullJid = "romeo@example.com/legacy".parse().unwrap();
+            let recipient = jid.to_bare();
+            let mut session = detached_session("legacy-authority", jid.clone());
+            session.outbound_count = 1;
+            session.unacked_stanzas.push(DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
+                sequence: 1,
+                stanza_xml: message_xml(&transient_message(&recipient, "recover now")),
+                original_receipt_at: chrono::Utc::now(),
+            });
+            assert!(!session.is_expired());
+            if replaced {
+                crate::occupancy_authority::publish(
+                    state.deps.app_state.db_pool.global(),
+                    &jid,
+                    waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                )
+                .await
+                .unwrap();
+            }
+            sm_registry.store_session(session).await.unwrap();
+
+            run_sm_expiry_sweep(&state).await;
+
+            assert!(sm_registry
+                .peek_session("legacy-authority")
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(pending.list(&recipient).await.unwrap().len(), 1);
+            run_sm_expiry_sweep(&state).await;
+            assert_eq!(
+                pending.list(&recipient).await.unwrap().len(),
+                1,
+                "promote once"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sm_maintenance_preserves_nonexpired_current_occupancy_authority() {
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+        let session = detached_session(
+            "current-authority",
+            "romeo@example.com/current".parse().unwrap(),
+        );
+        crate::occupancy_authority::publish(
+            state.deps.app_state.db_pool.global(),
+            &session.jid,
+            session.occupancy_session,
+        )
+        .await
+        .unwrap();
+        registry.store_session(session).await.unwrap();
+        run_sm_expiry_sweep(&state).await;
+        assert!(registry
+            .peek_session("current-authority")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn sm_maintenance_defers_nonexpired_session_when_authority_lookup_fails() {
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+        registry
+            .store_session(detached_session(
+                "authority-unavailable",
+                "romeo@example.com/current".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .guard()
+            .await
+            .unwrap()
+            .execute("DROP TABLE xmpp_occupancy_authority", crate::db_params![])
+            .await
+            .unwrap();
+
+        run_sm_expiry_sweep(&state).await;
+
+        assert!(registry
+            .peek_session("authority-unavailable")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn sm_maintenance_preserves_foreign_owned_legacy_snapshot_and_queue() {
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let claims = Arc::new(InProcessClaimStore::new());
+        let local = NodeIdentity::new("local", "legacy");
+        let foreign = NodeIdentity::new("foreign", "current");
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(claims.clone(), SharedNodeIdentity::new(local.clone())),
+        );
+        let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+            registry.clone(),
+            pending.clone(),
+        )
+        .await;
+        let jid: jid::FullJid = "romeo@example.com/foreign".parse().unwrap();
+        let mut session = detached_session("foreign-legacy-authority", jid.clone());
+        session.outbound_count = 1;
+        session.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 1,
+            stanza_xml: message_xml(&transient_message(&jid.to_bare(), "foreign custody")),
+            original_receipt_at: chrono::Utc::now(),
+        });
+        registry.store_session(session).await.unwrap();
+        let entity = Entity::new(EntityType::SmSession, "foreign-legacy-authority");
+        let epoch = claims
+            .current_claim(&entity)
+            .await
+            .unwrap()
+            .unwrap()
+            .claim_epoch;
+        claims.release(&entity, &local, epoch).await.unwrap();
+        let foreign_epoch = claims.acquire(&entity, &foreign).await.unwrap();
+
+        run_sm_expiry_sweep(&state).await;
+
+        let stream = SmSessionId::new("foreign-legacy-authority");
+        assert!(persistence.get_session(&stream).await.unwrap().is_some());
+        assert_eq!(persistence.list_unacked(&stream).await.unwrap().len(), 1);
+        assert!(pending.list(&jid.to_bare()).await.unwrap().is_empty());
+        assert!(claims
+            .fence(&entity, &foreign, foreign_epoch)
+            .await
+            .unwrap());
     }
 
     struct HangingBlockingStorage {

@@ -54,6 +54,7 @@ impl SocketLifecycle {
 pub(super) struct BindState {
     incumbent: Option<Arc<SocketLifecycle>>,
     retirements: std::collections::HashSet<OccupancySessionGeneration>,
+    actor_retirements: Vec<Arc<SocketLifecycle>>,
 }
 type BindSlot = Mutex<BindState>;
 pub(super) type BindSlots = DashMap<FullJid, Arc<BindSlot>>;
@@ -90,6 +91,46 @@ impl ConnectionBindGuard {
         }
     }
 
+    /// Actor cleanup is separate from occupancy cleanup: a same-generation
+    /// resume must retain its room membership while retiring the old token.
+    pub fn retain_actor_retirement(&mut self, lifecycle: Arc<SocketLifecycle>) {
+        if let Some(guard) = self.guard.as_mut() {
+            let owner = lifecycle.entry.carbons_handle();
+            if !guard
+                .actor_retirements
+                .iter()
+                .any(|pending| Arc::ptr_eq(&pending.entry.carbons_handle(), &owner))
+            {
+                guard.actor_retirements.push(lifecycle);
+            }
+        }
+    }
+
+    pub fn pending_actor_retirements(&self) -> Vec<Arc<SocketLifecycle>> {
+        self.guard
+            .as_ref()
+            .map(|guard| guard.actor_retirements.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn complete_actor_retirement(&mut self, lifecycle: &Arc<SocketLifecycle>) {
+        if let Some(guard) = self.guard.as_mut() {
+            let owner = lifecycle.entry.carbons_handle();
+            guard
+                .actor_retirements
+                .retain(|pending| !Arc::ptr_eq(&pending.entry.carbons_handle(), &owner));
+        }
+    }
+
+    /// A confirmed local actor registration atomically supersedes every old
+    /// token for this full JID. Failed or cancelled registration cannot clear
+    /// this inventory, even if it already published a new socket lifecycle.
+    pub fn complete_actor_retirements_after_registration(&mut self) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.actor_retirements.clear();
+        }
+    }
+
     pub fn publish(
         &mut self,
         entry: ConnectionEntry,
@@ -122,6 +163,7 @@ fn prune(slots: &BindSlots, jid: &FullJid) {
         Arc::strong_count(slot) == 1
             && slot.try_lock().is_ok_and(|current| {
                 current.retirements.is_empty()
+                    && current.actor_retirements.is_empty()
                     && current.incumbent.as_ref().is_none_or(|lifecycle| {
                         matches!(
                             lifecycle.state(),
@@ -187,5 +229,43 @@ impl ConnectionRegistry {
 
     pub fn prune_completed_bind(&self, jid: &FullJid) {
         prune(&self.bind_slots, jid);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_successor_publication_cannot_discard_prior_actor_retirement() {
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "alice@example.com/retirement".parse().expect("JID");
+        let mut guard = registry.lock_bind(&jid).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let old = guard.publish(ConnectionEntry::new(tx), OccupancySessionGeneration::mint());
+        old.finish(SocketCleanupState::Detached);
+        guard.retain_actor_retirement(old.clone());
+        guard.retain_actor_retirement(old.clone());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let successor = guard.publish(ConnectionEntry::new(tx), OccupancySessionGeneration::mint());
+        successor.finish(SocketCleanupState::Retired);
+        // The successor's actor mirror failed. Its lifecycle is complete but
+        // the old exact token still needs cleanup, even after the slot drops.
+        drop(guard);
+        let mut guard = registry.lock_bind(&jid).await;
+        let pending = guard.pending_actor_retirements();
+        assert_eq!(pending.len(), 1, "retries deduplicate the exact owner");
+        assert!(Arc::ptr_eq(&pending[0], &old));
+        assert!(
+            guard.pending_retirements().is_empty(),
+            "same-generation actor retirement is not a room cleanup obligation"
+        );
+        guard.complete_actor_retirement(&old);
+        drop(guard);
+        let guard = registry.lock_bind(&jid).await;
+        assert!(
+            guard.incumbent().is_none(),
+            "only confirmed actor cleanup makes the completed slot prunable"
+        );
     }
 }

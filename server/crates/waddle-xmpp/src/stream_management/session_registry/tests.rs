@@ -8229,3 +8229,138 @@ async fn stale_deferred_release_after_local_demotion_falls_back_without_reparkin
         .expect("live inventory after late stale defer")
         .is_empty());
 }
+
+#[tokio::test]
+async fn detached_occupancy_inventory_and_retirement_skip_claimed_resume() {
+    use super::super::persistence::InMemorySmPersistence;
+    let storage = std::sync::Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let jid: FullJid = "alice@example.com/legacy-cutover".parse().unwrap();
+    let session = realistic_test_session_for_jid("legacy-cutover", jid.clone());
+    let generation = session.occupancy_session;
+    let stream_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+    registry.store_session(session).await.unwrap();
+    assert_eq!(
+        registry.detached_occupancy_inventory().unwrap(),
+        vec![(stream_id.clone(), jid.clone(), generation)]
+    );
+    assert_eq!(
+        registry.occupancy_generations_for_full_jid(&jid).unwrap(),
+        vec![generation]
+    );
+    registry
+        .claim_session(stream_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(registry.detached_occupancy_inventory().unwrap().is_empty());
+    assert_eq!(
+        registry.occupancy_generations_for_full_jid(&jid).unwrap(),
+        vec![generation],
+        "fresh bind must also discover a preexisting claimed resume"
+    );
+    assert!(
+        registry
+            .invalidate_detached_session_for_occupancy(&stream_id, &jid, generation)
+            .await
+            .unwrap()
+            .is_none(),
+        "owner maintenance must not consume an in-flight resume"
+    );
+    registry.release_claim(stream_id.as_str()).await.unwrap();
+    assert!(registry
+        .invalidate_detached_session_for_occupancy(
+            &stream_id,
+            &jid,
+            waddle_xmpp_core::OccupancySessionGeneration::mint()
+        )
+        .await
+        .unwrap()
+        .is_none());
+    let retired = registry
+        .invalidate_detached_session_for_occupancy(&stream_id, &jid, generation)
+        .await
+        .unwrap()
+        .expect("exact locally owned detached snapshot");
+    assert_eq!(retired.occupancy_session, generation);
+    assert_eq!(retired.unacked_stanzas.len(), 2);
+    assert!(
+        storage.get_session(&stream_id).await.unwrap().is_some(),
+        "handoff retains durable custody until promotion is confirmed"
+    );
+    registry.confirm_drained(stream_id.as_str()).await;
+    assert!(storage.get_session(&stream_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn detached_occupancy_retirement_rejects_foreign_or_reacquired_claim() {
+    use super::super::persistence::InMemorySmPersistence;
+    use crate::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    for claimed_resume in [false, true] {
+        for same_owner_new_epoch in [false, true] {
+            let storage = std::sync::Arc::new(InMemorySmPersistence::new());
+            let claims = std::sync::Arc::new(InProcessClaimStore::new());
+            let local = NodeIdentity::new("local", "incarnation");
+            let registry = InMemorySmSessionRegistry::new()
+                .with_persistence(storage.clone())
+                .with_claim_store(claims.clone(), SharedNodeIdentity::new(local.clone()));
+            let jid: FullJid = "alice@example.com/foreign-cutover".parse().unwrap();
+            let session = realistic_test_session_for_jid("foreign-cutover", jid.clone());
+            let generation = session.occupancy_session;
+            let stream_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+            registry.store_session(session).await.unwrap();
+            if claimed_resume {
+                registry
+                    .claim_session(stream_id.as_str())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_owned());
+            let original = claims.current_claim(&entity).await.unwrap().unwrap();
+            claims
+                .release(&entity, &local, original.claim_epoch)
+                .await
+                .unwrap();
+            let successor = if same_owner_new_epoch {
+                local
+            } else {
+                NodeIdentity::new("foreign", "incarnation")
+            };
+            let epoch = claims.ensure_claimed(&entity, &successor).await.unwrap();
+            assert_ne!(epoch, original.claim_epoch);
+            assert!(
+                registry
+                    .invalidate_detached_session_for_occupancy(&stream_id, &jid, generation)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a stale local snapshot grants no retirement authority"
+            );
+            assert!(
+                registry
+                    .invalidate_sessions_for_generation(&jid, generation)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "fresh-bind retirement also needs the stored exact claim fence"
+            );
+            assert!(!registry
+                .pending_promotions
+                .read()
+                .unwrap()
+                .contains(stream_id.as_str()));
+            assert!(registry
+                .detached_snapshot_matching(&stream_id, |_| true)
+                .unwrap()
+                .is_some());
+            assert!(storage.get_session(&stream_id).await.unwrap().is_some());
+            assert_eq!(storage.list_unacked(&stream_id).await.unwrap().len(), 2);
+            let current = claims.current_claim(&entity).await.unwrap().unwrap();
+            assert_eq!(current.owner, successor);
+            assert_eq!(current.claim_epoch, epoch);
+        }
+    }
+}

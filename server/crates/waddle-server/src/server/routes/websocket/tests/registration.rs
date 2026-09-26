@@ -66,6 +66,73 @@ use xmpp_parsers::minidom::Element;
 #[path = "registration_owner_local.rs"]
 mod owner_local;
 
+#[tokio::test]
+async fn paused_local_mirror_releases_the_only_main_pool_connection() {
+    use super::super::registration::LOCAL_PUBLICATION_GATE;
+    use crate::db::{DatabaseConfig, DatabaseDriver, DatabasePool, PoolConfig};
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&database_url).await.expect("admin");
+    let schema = format!("bind_pool_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("schema");
+    let mut url = url::Url::parse(&database_url).expect("URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained)
+        .append_pair("options", &format!("-c search_path={schema}"));
+    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
+    config.pool_size = 1;
+    let pool = Arc::new(DatabasePool::new(config, PoolConfig).await.expect("pool"));
+    let state = super::create_test_websocket_state_with_db_pool(pool.clone()).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let registering = tokio::spawn({
+        let state = state.clone();
+        let gate = (entered.clone(), release.clone());
+        async move {
+            LOCAL_PUBLICATION_GATE
+                .scope(
+                    gate,
+                    bind_fresh_test_connection(
+                        state,
+                        "alice@example.com/pool".parse().expect("JID"),
+                    ),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("local route publication");
+    let available = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let conn = pool.global().guard().await.expect("unrelated connection");
+        conn.query("SELECT 1", ()).await.expect("unrelated query");
+    })
+    .await;
+    release.notify_one();
+    let (outcome, mut conn, mut rx, _) = registering.await.expect("registration task");
+    assert!(matches!(outcome, RegistrationAfterFrame::Registered(_)));
+    finish_test_socket_cleanup(&state, &mut conn, &mut rx).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+    admin.close().await;
+    assert!(
+        available.is_ok(),
+        "a paused mirror must not retain the only main-pool connection"
+    );
+}
+
 async fn bind_fresh_test_connection(
     state: Arc<super::super::WebSocketState>,
     jid: FullJid,
@@ -577,6 +644,279 @@ async fn register_bound_connection_after_frame_registers_ready_connection_once()
         state.deps.protocol.connection_registry.connection_count(),
         1
     );
+}
+
+/// XEP-0198 section 5: a pre-cutover stream can fail resumption without
+/// terminating the authenticated transport or dropping its unhandled tail.
+#[tokio::test]
+async fn xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind() {
+    assert_pre_authority_bind_cutover(true, false).await;
+}
+
+#[tokio::test]
+async fn xep0198_pre_authority_fresh_bind_promotes_detached_queue_once() {
+    assert_pre_authority_bind_cutover(false, false).await;
+}
+
+#[tokio::test]
+async fn xep0198_authority_replaced_before_publication_fails_cleanly() {
+    assert_pre_authority_bind_cutover(true, true).await;
+}
+
+async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publication: bool) {
+    use waddle_xmpp::stream_management::{
+        DetachedSession, DetachedUnackedStanza, SmSessionRegistry,
+    };
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let session = create_test_session(&state, "alice").await;
+    let stream_id = "pre-authority-resume";
+    let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    store_resumable_detached_session(
+        &state,
+        &session,
+        DetachedSession {
+            stream_id: stream_id.to_owned(),
+            user_id: session.user_jid.clone(),
+            jid: jid.clone(),
+            occupancy_session: generation,
+            inbound_count: 4,
+            outbound_count: 1,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
+                sequence: 1,
+                stanza_xml: "<message xmlns='jabber:client' type='chat' from='bob@example.com/web' to='alice@example.com/web' id='pre-authority-pending'><body>queued before cutover</body></message>".to_owned(),
+                original_receipt_at: chrono::Utc::now(),
+            }],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: true,
+            roster_interested: true,
+            blocklist_interested: true,
+            presence_available: true,
+            presence_show: Some(xmpp_parsers::presence::Show::Away),
+            presence_status: Some("old session status".to_owned()),
+            presence_priority: 7,
+            presence_payloads: vec![waddle_xmpp::xep::xep0319::build_idle_element(chrono::Utc::now())],
+            pending_subscribes_flushed: true,
+        },
+    ).await;
+    // V0013 creates an empty authority table alongside already-persisted SM
+    // snapshots. Do not seed the new authority as other resume fixtures do.
+    if !revoke_at_publication {
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .guard()
+            .await
+            .expect("database connection")
+            .execute(
+                "DELETE FROM xmpp_occupancy_authority WHERE full_jid = ?",
+                crate::db_params![jid.to_string()],
+            )
+            .await
+            .expect("model pre-V0013 persisted session");
+    }
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    conn.authenticated_session = Some(session);
+    let (tx, _rx) = mpsc::channel(4);
+    let mut pending_tx = Some(tx);
+    if resume_first {
+        let frame = element_to_xml(
+            Element::builder("resume", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), stream_id)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        );
+        use super::super::connection::{
+            handle_inbound_text, ConnectionIo, FrameAuthority, RegistrationChannels,
+        };
+        use axum::extract::ws::Message;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut socket = Box::pin(futures::sink::unfold(
+            captured.clone(),
+            |captured, frame: Message| async move {
+                captured.lock().expect("captured frames").push(frame);
+                Ok::<_, std::io::Error>(captured)
+            },
+        ));
+        let mut reader = futures::stream::pending::<Result<Message, std::io::Error>>();
+        let mut force_detach_rx = None;
+        let handle_resume = handle_inbound_text(
+            &frame,
+            "example.com",
+            &state,
+            &mut conn,
+            RegistrationChannels {
+                pending_tx: &mut pending_tx,
+                force_detach_rx: &mut force_detach_rx,
+            },
+            ConnectionIo {
+                sender: &mut socket,
+                receiver: &mut reader,
+            },
+            FrameAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        );
+        let stayed_open = if revoke_at_publication {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let paused = super::super::registration::PREPARED_BIND_GATE
+                .scope((entered.clone(), release.clone()), handle_resume);
+            let supersede = async {
+                entered.notified().await;
+                crate::occupancy_authority::publish(
+                    state.deps.app_state.db_pool.global(),
+                    &jid,
+                    waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                )
+                .await
+                .unwrap();
+                release.notify_one();
+            };
+            tokio::join!(paused, supersede).0
+        } else {
+            handle_resume.await
+        };
+        assert!(
+            stayed_open,
+            "failed resume must leave the authenticated socket open"
+        );
+        let failed: Element = {
+            let wire = captured.lock().expect("captured frames");
+            assert_eq!(
+                wire.len(),
+                1,
+                "only SM failed, without stream error or close"
+            );
+            let Message::Text(xml) = &wire[0] else {
+                panic!("SM failure must be XML");
+            };
+            xml.parse().expect("valid SM failure XML")
+        };
+        assert!(failed.is("failed", SM_NS));
+        assert_eq!(failed.attr("h"), Some("4"));
+        assert!(failed
+            .get_child("item-not-found", xmpp_parsers::ns::XMPP_STANZAS)
+            .is_some());
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+        assert!(!conn.carbons_enabled);
+        assert!(!conn.roster_interested);
+        assert!(!conn.blocklist_interested);
+        assert!(!conn.presence_available);
+        assert!(conn.presence_show.is_none());
+        assert!(conn.presence_status.is_none());
+        assert_eq!(conn.presence_priority, 0);
+        assert!(conn.presence_payloads.is_empty());
+        assert!(!conn.pending_subscribes_flushed);
+        assert!(
+            conn.authenticated_session.is_some(),
+            "session reset preserves authentication"
+        );
+        assert!(
+            pending_tx.is_some(),
+            "fresh bind must retain the outbound channel"
+        );
+        assert!(conn.pending_resume_claim.is_none());
+        assert!(conn.pending_resume_stream_id.is_none());
+        assert!(conn.pending_resume_h.is_none());
+        assert!(
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .peek_session(stream_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "resume failure keeps detached custody for fresh-bind promotion"
+        );
+    }
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    let fresh =
+        register_bound_connection_after_frame(&state, "example.com", &mut conn, &mut pending_tx)
+            .await;
+    assert!(matches!(
+        fresh,
+        RegistrationAfterFrame::Registered(SmRegistrationFinalization::KeepExistingResponses)
+    ));
+    assert_ne!(conn.occupancy_session, generation);
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("fresh bind");
+    assert!(
+        !entry.is_presence_available(),
+        "fresh bind waits for initial presence"
+    );
+    assert_eq!(entry.presence_priority(), 0);
+    assert!(
+        !entry.is_carbons_enabled(),
+        "fresh session must explicitly enable carbons"
+    );
+    assert!(!entry
+        .roster_interested
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(!entry
+        .blocklist_interested
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .get_presence_state(&jid)
+        .is_none());
+    assert!(!conn.pending_subscribes_flushed);
+    assert!(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session(stream_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "fresh bind retires the pre-authority detached snapshot immediately"
+    );
+    let queued = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .unwrap();
+    assert_eq!(
+        queued.len(),
+        1,
+        "legacy unacked payload must promote before bind returns"
+    );
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
+    let after_retry = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .unwrap();
+    assert_eq!(
+        after_retry.len(),
+        1,
+        "a later sweep must not promote the same payload twice"
+    );
+    assert_eq!(after_retry[0].id, queued[0].id);
 }
 
 #[tokio::test]

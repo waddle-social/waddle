@@ -180,7 +180,7 @@ async fn complete_pending_resume_claim(
                 replay_gap_through = ?detached.replay_gap_through,
                 "SM resume claim gained a replay gap before completion"
             );
-            reset_registered_resume_attempt(state, conn, jid, owner).await;
+            reset_resume_attempt(state, conn, jid, Some(owner)).await;
             resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
@@ -242,31 +242,50 @@ async fn complete_pending_resume_claim(
     }
 }
 
-async fn reset_registered_resume_attempt(
+/// A known detached stream can outlive its bind authority across a Recreate
+/// cutover. Fail resumption on the SM layer so the authenticated client can
+/// bind afresh and retry its unhandled outbound tail on this same socket.
+pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+) -> SmRegistrationFinalization {
+    let handled = conn.sm_state.get_inbound_count();
+    if let Some(claim) = conn.pending_resume_claim.take() {
+        claim.release().await;
+    }
+    conn.pending_resume_stream_id = None;
+    conn.pending_resume_h = None;
+    reset_resume_attempt(state, conn, jid, None).await;
+    conn.pending_finalized_resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
+    SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
+        "item-not-found",
+        handled,
+    ))
+}
+
+async fn reset_resume_attempt(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+    owner: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) {
-    let removed = state
-        .deps
-        .protocol
-        .connection_registry
-        .unregister_if_owner(jid, owner)
-        .is_some();
-    if removed {
-        // ADR-0017 Phase 1: the fresh/resumed bind already mirror-registered
-        // this resource into the actor tree, so a resume-rollback that
-        // unregisters it from the DashMap must mirror the unregister too or
-        // the actor-tree resource leaks. Owner-gated on the same token so a
-        // superseding newcomer is not clobbered.
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            jid,
-            Some(Arc::clone(owner)),
-        )
-        .await;
-        unregister_remote_user_resource_if_owner(state, jid, owner).await;
+    if let Some(owner) = owner {
+        let removed = state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister_if_owner(jid, owner)
+            .is_some();
+        if removed {
+            crate::server::dual_registration::mirror_unregister(
+                &state.deps.protocol.user_registry,
+                jid,
+                Some(Arc::clone(owner)),
+            )
+            .await;
+            unregister_remote_user_resource_if_owner(state, jid, owner).await;
+        }
     }
     conn.registry_owner = None;
     // The adopted detached generation is rolled back too: the detached
@@ -298,7 +317,18 @@ async fn reset_registered_resume_attempt(
     conn.init_prebind_state_machine(&domain, &state.deps.protocol.dispatcher, keepalive);
     conn.sm_ingress_fence = None;
     conn.sm_state = StreamManagementState::new();
+    // These flags belong to the failed resumed stream. The next fresh bind
+    // starts unavailable until initial presence and must opt in again to
+    // carbons, roster pushes, and other session-scoped subscriptions.
+    conn.carbons_enabled = false;
+    conn.roster_interested = false;
     conn.blocklist_interested = false;
+    conn.presence_available = false;
+    conn.presence_show = None;
+    conn.presence_status = None;
+    conn.presence_priority = 0;
+    conn.presence_payloads.clear();
+    conn.pending_subscribes_flushed = false;
     conn.suppress_sm_record_next_batch = false;
 }
 

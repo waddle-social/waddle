@@ -10,8 +10,9 @@ use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
-/// Held through local and remote registry publication. SQLite cannot cluster;
-/// its caller's per-JID bind mutex supplies serialization without holding a
+/// Held only through synchronous registry publication, never actor or relay
+/// awaits. The caller retains its per-JID bind gate and rechecks durable
+/// authority after asynchronous admission. SQLite uses that gate without a
 /// database writer lock across nested actor calls.
 pub struct CurrentGenerationGuard<'a> {
     _transaction: Option<Transaction<'a>>,

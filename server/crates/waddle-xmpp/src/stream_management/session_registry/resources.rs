@@ -45,6 +45,59 @@ impl DetachedPresenceState {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Snapshot exact local detached identities. This is discovery only: a
+    /// caller must recheck backend ownership under the stream shard before
+    /// transferring any candidate to promotion. Claimed resumes are excluded.
+    pub fn detached_occupancy_inventory(
+        &self,
+    ) -> Result<
+        Vec<(
+            SmSessionId,
+            FullJid,
+            waddle_xmpp_core::OccupancySessionGeneration,
+        )>,
+        SmRegistryError,
+    > {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+        Ok(sessions
+            .values()
+            .map(|session| {
+                (
+                    SmSessionId::new(session.stream_id.clone()),
+                    session.jid.clone(),
+                    session.occupancy_session,
+                )
+            })
+            .collect())
+    }
+
+    /// Capture preexisting local generations before publishing a fresh bind.
+    /// Includes claimed resumes, whose exact generation is displaced too.
+    /// Never repeat this scan after publication: it could observe a successor.
+    pub fn occupancy_generations_for_full_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<Vec<waddle_xmpp_core::OccupancySessionGeneration>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+        let generations: std::collections::BTreeSet<_> = sessions
+            .values()
+            .chain(claimed.values())
+            .filter(|session| session.jid == *jid)
+            .map(|session| session.occupancy_session)
+            .collect();
+        Ok(generations.into_iter().collect())
+    }
+
     /// Conservatively probe lifecycle ownership before retiring durable stream metadata.
     /// Includes rows not hydrated after a failed startup read and foreign claims.
     pub async fn has_retirement_protection(
