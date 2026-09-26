@@ -359,6 +359,11 @@ pub use super::xep_waddle_call_thread::{
     CallThreadParseError, NS_FASTEN, NS_WADDLE_CALL_THREAD,
 };
 
+pub use super::xep_waddle_safety_scores::{
+    build_apply_to_element, build_safety_scores_fastening_message, SafetyScoreToSend,
+    SafetyScoresToSend, NS_WADDLE_SAFETY_SCORES,
+};
+
 pub use waddle_xmpp_core::xep0472::{
     build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
     PUBSUB_NODE_FEED,

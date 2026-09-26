@@ -29,10 +29,19 @@
 //! the bare room JID (no `/resource`) is trusted, so this module always
 //! builds exactly that shape — the host never emits this fastening from a
 //! resource-bearing (occupant or bot) sender.
+//!
+//! Carries a XEP-0334 `<store/>` hint (matching the existing
+//! `call_thread_end.rs` fastening precedent): every client parser has a
+//! dedicated MAM-replay path for this payload (an "older archived fastening
+//! loaded on backwards paging" test exists in all three client PRs), so
+//! without this hint a reconnecting or history-loading client would never
+//! see a score that only ever went out on the live path.
 
 use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::message::{Message, MessageType};
+
+use super::xep0334::{build_hint_element, Hint};
 
 /// `urn:xmpp:fasten:0` — XEP-0422 Message Fastening.
 pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
@@ -73,12 +82,13 @@ pub fn build_safety_scores_fastening_message(
     target_stanza_id: &str,
     scores: &SafetyScoresToSend,
 ) -> Message {
-    let mut msg = Message::new(None::<jid::Jid>);
+    let mut msg = Message::new(Some(jid::Jid::from(from_room.clone())));
     msg.from = Some(jid::Jid::from(from_room));
     msg.type_ = MessageType::Groupchat;
     msg.id = Some(xmpp_parsers::message::Id(uuid::Uuid::new_v4().to_string()));
     msg.payloads
         .push(build_apply_to_element(target_stanza_id, scores));
+    msg.payloads.push(build_hint_element(Hint::Store));
     msg
 }
 
@@ -157,6 +167,19 @@ mod tests {
                 .as_ref()
                 .is_some_and(|jid| !jid.to_string().contains('/')),
             "sender must be a bare JID, matching the client's authority rule"
+        );
+    }
+
+    #[test]
+    fn carries_a_store_hint_so_mam_archives_it() {
+        let room: BareJid = "room@conference.example.test".parse().expect("room jid");
+        let msg = build_safety_scores_fastening_message(room, "target-1", &scores());
+        assert!(
+            msg.payloads
+                .iter()
+                .any(|el| el.is("store", super::super::xep0334::NS_HINTS)),
+            "without a store hint, a client reconnecting or paging history would never see a \
+             score that only ever went out on the live path"
         );
     }
 
