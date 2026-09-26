@@ -388,20 +388,36 @@ impl JevClient {
 impl MessageJudge for JevClient {
     async fn judge(&self, body: &str) -> Result<JudgmentBatch, JudgeError> {
         let request_body = build_request_body(&self.model, body);
-        let response = self.transport.send(request_body).await?;
+        // Provider errors can echo submitted content. Log only static categories
+        // and status codes; keep error details out of operational logs.
+        let response = self.transport.send(request_body).await.inspect_err(|_| {
+            tracing::warn!(failure_category = "transport", "Jev judgment call failed");
+        })?;
         if !(200..300).contains(&response.status) {
+            tracing::warn!(
+                failure_category = "http_status",
+                http_status = response.status,
+                "Jev judgment call failed"
+            );
             return Err(JudgeError::Transport(transport_error_message(
                 response.status,
                 &response.body,
             )));
         }
-        let decoded =
-            serde_json::from_slice::<DecisionsResponse>(&response.body).map_err(|error| {
+        serde_json::from_slice::<DecisionsResponse>(&response.body)
+            .map_err(|error| {
                 JudgeError::InvalidResponse(format!(
                     "jev response did not match the documented Decisions API shape: {error}"
                 ))
-            })?;
-        parse_response(decoded, &self.model)
+            })
+            .and_then(|decoded| parse_response(decoded, &self.model))
+            .inspect_err(|_| {
+                tracing::warn!(
+                    failure_category = "invalid_response",
+                    http_status = response.status,
+                    "Jev judgment call failed"
+                );
+            })
     }
 }
 

@@ -496,16 +496,15 @@ pub async fn insert_judgment_batch_and_mark_done(
     outbox_id: &MessageJudgmentOutboxId,
 ) -> Result<bool, MessageJudgmentOutboxError> {
     // Both drivers support the same upsert grammar here, so one query
-    // string covers both: on conflict, only `cost_usd` is touched (see the
-    // doc comment above), and referencing it unqualified in the `SET`
-    // clause (rather than `message_judgments.cost_usd`) is valid in both
-    // Postgres and SQLite.
+    // string covers both. Qualify the existing cost on the right-hand side:
+    // Postgres otherwise considers it ambiguous with `excluded.cost_usd`,
+    // rejecting even inserts that would not encounter an identity conflict.
     let insert_sql = "INSERT INTO message_judgments \
          (id, archive_jid, stanza_id, stanza_by, judgment_name, taxonomy_version, \
           model_version, probability, cost_usd, decided_at_ms, created_at_ms) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (stanza_id, judgment_name, model_version) \
-         DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd";
+         DO UPDATE SET cost_usd = message_judgments.cost_usd + excluded.cost_usd";
     let mut tx = db.begin().await?;
     let claimed = tx
         .execute(
