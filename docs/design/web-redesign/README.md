@@ -8,8 +8,7 @@ https://claude.ai/artifact/NLk2yGmdN3GxP5niioC6bG
 Files in this folder:
 
 - `README.md` — this brief: the idea, brand, tokens, screens, the wire objects they need, stack, migration.
-- `panda.config.ts` — tokens, semantic tokens (night and daylight), text styles and recipes for the Ark UI primitives. Verified with `panda codegen` and `panda cssgen` on `@pandacss/dev@1.12.1`.
-- `prototypes/MemberMenu.vue` — an Ark UI `Menu` on the `menu` and `avatar` slot recipes, with "Join their huddle" as the first item when the person is in one.
+- The token, semantic-token, text-style and recipe config lives in the workspace at `chat/panda.config.ts` (Panda CSS 1.12, registered through `@pandacss/postcss` in `chat/astro.config.mjs`). The Ark UI primitives built on those recipes live under `chat/src/components/ui/`.
 
 ## 1. The idea
 
