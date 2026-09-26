@@ -19,7 +19,6 @@ struct ComposerCard: View {
         VStack(alignment: .leading, spacing: 0) {
             if showsFormatting {
                 ComposerFormattingBar(
-                    canFormat: ComposerSelectionSupport.isAvailable || !text.isEmpty,
                     onFormat: actions.format,
                     onLink: actions.requestLink
                 )
