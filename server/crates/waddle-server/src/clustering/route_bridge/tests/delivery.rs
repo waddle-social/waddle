@@ -779,7 +779,7 @@ async fn remote_socket_write_accepted_reports_acceptance_closed_when_writer_drop
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn remote_socket_write_accepted_reports_acceptance_pending_when_writer_stalls() {
     let services = Arc::new(
         services_with_claims(
@@ -817,6 +817,7 @@ async fn remote_socket_write_accepted_reports_acceptance_pending_when_writer_sta
         .cloned()
         .expect("socket registration");
 
+    tokio::time::pause();
     let bridge_for_task = Arc::clone(&bridge);
     let target_for_task = target.clone();
     let reply = tokio::spawn(async move {

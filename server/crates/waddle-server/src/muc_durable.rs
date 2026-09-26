@@ -3168,6 +3168,13 @@ mod tests {
         )
         .await
         .expect("open test postgres");
+        // This shared database is also used by server-startup scenarios.
+        // Install authority through its migration so later startup observes
+        // both the table and its committed ledger entry.
+        crate::db::MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrate shared MUC fixture database");
         let claim_store = Arc::new(PostgresClaimStore::new(db.clone()));
         claim_store
             .ensure_schema()
@@ -3182,12 +3189,6 @@ mod tests {
         .await
         .expect("open muc durable store");
         let conn = db.guard().await.expect("guard");
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS xmpp_occupancy_authority (full_jid TEXT PRIMARY KEY, generation TEXT NOT NULL)",
-            (),
-        )
-        .await
-        .expect("ensure occupancy authority schema");
         crate::occupancy_authority::publish(
             &db,
             &"alice@example.com/desktop"

@@ -863,8 +863,10 @@ mod tests {
         )
         .await
         .expect("open postgres");
-        db.execute("CREATE TABLE IF NOT EXISTS xmpp_occupancy_authority (full_jid TEXT PRIMARY KEY, generation TEXT NOT NULL)")
-            .await.expect("ensure authority schema");
+        crate::db::MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrate shared registration fixture database");
         let mut services = services_with_claims(
             origin_identity(),
             receiver_identity(),

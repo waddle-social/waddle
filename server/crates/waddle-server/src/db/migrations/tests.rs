@@ -557,7 +557,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 32);
+    let migration_count = i64::try_from(runner.migrations.len()).expect("catalog fits i64");
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -567,7 +567,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 32);
+    assert_eq!(migration_ledger_row_count(&db).await, migration_count);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -579,12 +579,17 @@ async fn unknown_owned_ledger_version_fails_closed_without_changes() {
         .unwrap();
     let runner = MigrationRunner::single();
     runner.run(&db).await.unwrap();
+    let unknown_version = WADDLE_NAMESPACE_START - 1;
+    assert!(!runner
+        .migrations
+        .iter()
+        .any(|migration| migration.version == unknown_version));
     let before = migration_ledger_row_count(&db).await;
     let schema_before = sqlite_schema_object_count(&db).await;
     let conn = db.guard().await.unwrap();
     conn.execute(
         "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
-        crate::db_params![13_i64, "future migration", "future-checksum"],
+        crate::db_params![unknown_version, "future migration", "future-checksum"],
     )
     .await
     .unwrap();
@@ -593,7 +598,8 @@ async fn unknown_owned_ledger_version_fails_closed_without_changes() {
     let error = runner.run(&db).await.unwrap_err();
     assert!(matches!(
         error,
-        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 13, .. })
+        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version, .. })
+            if version == unknown_version
     ));
     assert_eq!(migration_ledger_row_count(&db).await, before + 1);
     assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
@@ -1064,7 +1070,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 32);
+    let migration_count = i64::try_from(runner.migrations.len()).expect("catalog fits i64");
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1078,7 +1084,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 32);
+    assert_eq!(migration_ledger_row_count(&db).await, migration_count);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)

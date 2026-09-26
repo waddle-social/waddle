@@ -1332,7 +1332,7 @@ mod tests {
     /// and that store PROVES the owner incarnation no longer holds the user
     /// (here: no claim row exists at all). Without wired services no proof
     /// is possible and the obligation is retained by design.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn proof_stale_unregister_retry_clears_the_pending_obligation() {
         let services = Arc::new(
             services_with_claims(
@@ -1343,6 +1343,9 @@ mod tests {
             )
             .await,
         );
+        // SQLx opens SQLite on its worker thread; let that real I/O finish
+        // before virtual time starts advancing retry deadlines.
+        tokio::time::pause();
         let bridge = OrderedRelayDeliveryBridge::new(
             tokio_util::sync::CancellationToken::new(),
             &ClusteringMessagingConfig::default(),

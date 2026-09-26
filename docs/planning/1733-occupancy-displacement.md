@@ -24,6 +24,14 @@ XEP-0198 resumption retains the original occupancy generation.
 Issue #1733, including its linked residual findings. Generation-specific token
 issuance and LiveKit participant retirement tracked by #1732 remain separate.
 
+The admission barrier covers active local sockets and mirrored remote
+incumbents. It is not a cluster-wide discovery mechanism for a previously
+detached generation on another node after its remote mirror disappeared.
+Those sessions retain the existing source-node SM and cleanup inventories.
+The durable generation check independently prevents their delayed joins from
+overwriting a newer room occupant. Restart/lost-handoff work in #1825/#1826 is
+related, but does not cover every ordinary detached-session discovery case.
+
 ## Verification cases
 
 - A replacement cannot publish while its incumbent is handling or cleaning up.
