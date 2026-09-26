@@ -296,6 +296,20 @@ struct UnreadOverviewTests {
         #expect(port.inboxReadRequests.count == 1)
     }
 
+    @Test func newerReplyIsReadAfterOneRefusal() async {
+        let (coordinator, port) = online()
+        coordinator.inboxHydrateRetryDelays = [60]
+        await coordinator.openThread(thread)
+        port.failingInboxReads = 1
+        coordinator.handle(.inboxPush(threadRow(unread: 1, last: "r1", updated: 10)))
+        await eventually { port.inboxReadRequests.count == 1 }
+        // The server recovered; a newer reply arrives while the thread is open.
+        coordinator.handle(.inboxPush(threadRow(unread: 2, last: "r2", updated: 20)))
+        await eventually { port.inboxReadRequests.count == 2 }
+        #expect(port.inboxReadRequests.count == 2)
+        #expect(port.inboxReads == [room])
+    }
+
     @Test func streamChangeFreesTheHydrateRetrySlot() {
         let (coordinator, _) = online()
         coordinator.scheduleInboxHydrate(delays: [60])

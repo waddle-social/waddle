@@ -159,17 +159,24 @@ extension SessionCoordinator {
             try await port.markInboxRead(partner: key.partner, threadID: key.threadID)
             guard epoch == connectionEpoch else { return }
             inbox.serverTookRead(key.partner, threadID: key.threadID)
-            failedInboxReads.remove(key)
+            refusedInboxReads[key] = nil
         } catch {
             guard epoch == connectionEpoch else { return }
             inbox.forgetBarrier(key.partner, threadID: key.threadID)
-            // The re-fetch brings the count back; the row on screen must not
-            // read it again automatically, or a server that keeps refusing
-            // the read would get it in a tight loop. The next open or new
-            // message retries.
-            failedInboxReads.insert(key)
+            // The re-fetch brings the count back. The row on screen must not
+            // read that same state again automatically, or a server that
+            // keeps refusing would get the read in a tight loop; a push for
+            // a newer message, an open or a reconnect retries.
+            refusedInboxReads[key] = PendingInboxRead(covered: covered)
             scheduleInboxHydrate()
         }
+    }
+
+    /// Whether the server refused a read of this row while its newest
+    /// message was `newest`.
+    func wasRefused(_ key: InboxReadKey, newest: String?) -> Bool {
+        guard let refused = refusedInboxReads[key] else { return false }
+        return refused.covered == newest
     }
 
     func drainPendingInboxReads() async {
