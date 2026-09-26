@@ -31,8 +31,6 @@ pub const MAX_ATTEMPTS: i64 = 20;
 pub const BASE_RETRY_DELAY_MS: i64 = 5_000;
 pub const MAX_RETRY_DELAY_MS: i64 = 600_000;
 
-const DEFAULT_BATCH_LIMIT: i64 = 100;
-
 /// Bound on job invocations processed concurrently within one
 /// [`drain_once`] batch, for the same reason
 /// `message_judgment_outbox::drain::MAX_CONCURRENT_JUDGE_CALLS` existed:
@@ -42,20 +40,55 @@ const DEFAULT_BATCH_LIMIT: i64 = 100;
 /// bounds a single invocation that never returns.
 const MAX_CONCURRENT_JOB_CALLS: usize = 8;
 
-/// Upper bound on a single job invocation. The current wasmtime setup has
-/// no epoch interruption or fuel limit configured, so nothing on the guest
-/// side can force a CPU-wedged or I/O-stuck invocation to return on its
-/// own. Attempt-on-claim (`store::claim_due_batch` incrementing
-/// `attempt_count` as part of the claim) only bounds a row across
-/// claim/reclaim cycles — it does nothing for an invocation that is still
-/// running on a live node and simply never resolves: without this
-/// timeout, that invocation's `buffer_unordered` slot in [`drain_once`]
-/// never frees, `drain_once`'s `.collect()` never completes, and
-/// [`run_drain_loop`] never starts another poll tick on this node. Chosen
-/// well above Jev's own tight (4s) HTTP timeout, since that should trip
-/// first in the "just slow" case; this is the backstop for "never returns
-/// at all".
+/// Upper bound on a single job invocation, for the invocation that is
+/// stuck awaiting something (an async host call — network I/O, a
+/// database write) rather than one that resolves quickly. Attempt-on-claim
+/// (`store::claim_due_batch` incrementing `attempt_count` as part of the
+/// claim) only bounds a row across claim/reclaim cycles — it does nothing
+/// for an invocation that is still running on a live node and simply
+/// never resolves: without this timeout, that invocation's
+/// `buffer_unordered` slot in [`drain_once`] never frees, `drain_once`'s
+/// `.collect()` never completes, and [`run_drain_loop`] never starts
+/// another poll tick on this node. Chosen well above Jev's own tight (4s)
+/// HTTP timeout, since that should trip first in the "just slow" case.
+///
+/// **Known gap, not fixed here**: this timeout relies on `tokio::time::
+/// timeout` getting control back, which only happens at an `.await` point
+/// the guest's own execution reaches. The current wasmtime setup has no
+/// epoch interruption or fuel limit configured, so a guest that is
+/// genuinely CPU-spinning (an infinite loop with no host call inside it)
+/// never yields back to the host at all — this timeout does not fire, and
+/// the failure mode this const's doc used to claim it prevents (a wedged
+/// node's drain loop stalling forever) still happens for that specific
+/// case. This is a pre-existing platform-wide gap (every other extension
+/// invocation path already has the same limitation — see
+/// `waddle-extensions`'s `manager.rs`/`manager/invocation.rs`, which wrap
+/// calls in the same kind of host-side timeout with no epoch/fuel backing
+/// it either), not something Phase B introduced or was expected to solve;
+/// closing it means adding wasmtime epoch interruption across the whole
+/// extension host, which is separate, larger, cross-cutting work.
 const JOB_INVOCATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many "waves" of [`MAX_CONCURRENT_JOB_CALLS`] a batch is allowed to
+/// need in the worst case (every row's invocation takes the full
+/// [`JOB_INVOCATION_TIMEOUT`]) before the batch as a whole could run
+/// longer than [`store::CLAIM_TIMEOUT_MS`]. Kept comfortably under the
+/// exact boundary (8 waves × 30s = 240s vs. a 300s lease) rather than
+/// exactly at it, since the reclaim scan itself isn't instantaneous.
+const MAX_WORST_CASE_WAVES: i64 = 8;
+
+/// Batch size bound. If a batch could take longer than the claim lease to
+/// fully drain — which a batch built entirely of rows that each hit
+/// [`JOB_INVOCATION_TIMEOUT`] can, since `drain_once` awaits the whole
+/// batch before returning — a row still legitimately in flight on this
+/// node can have its lease go stale and get reclaimed by another node
+/// while still running here. Guardrail 2 (lease-checked finalize) still
+/// prevents a double broadcast in that case, but both nodes still pay for
+/// a real vendor call. `DEFAULT_BATCH_LIMIT / MAX_CONCURRENT_JOB_CALLS`
+/// waves × `JOB_INVOCATION_TIMEOUT` bounds the batch's own worst-case
+/// duration well under `store::CLAIM_TIMEOUT_MS`; re-derive this if any
+/// of those three constants changes.
+const DEFAULT_BATCH_LIMIT: i64 = MAX_CONCURRENT_JOB_CALLS as i64 * MAX_WORST_CASE_WAVES;
 
 pub fn retry_delay_ms(attempt: i64) -> i64 {
     let shift = if attempt <= 1 {
@@ -185,8 +218,10 @@ async fn process_row(
         // an invocation that is still running right now and never
         // resolves. Treating a timeout as a retryable failure routes it
         // through the same MAX_ATTEMPTS/backoff/dead-letter path as any
-        // other failure, so a job kind whose guest is reliably wedged
-        // still eventually dead-letters instead of retrying forever.
+        // other failure, so a job kind whose guest reliably gets stuck
+        // awaiting a host call still eventually dead-letters instead of
+        // retrying forever (see `JOB_INVOCATION_TIMEOUT`'s doc for the
+        // CPU-spinning case this does not cover).
         Err(_elapsed) => {
             finalize_failure(
                 db,
@@ -556,9 +591,13 @@ mod tests {
     }
 
     /// A runner whose `run` future never resolves — no failure, no
-    /// success, nothing — modeling a CPU-wedged or I/O-stuck guest
-    /// invocation with no epoch interruption/fuel limit to force it to
-    /// return.
+    /// success, nothing. This models a guest invocation stuck awaiting a
+    /// host call (I/O-stuck): `std::future::pending()` yields
+    /// cooperatively, the same way a real guest parked in an async host
+    /// call would. It does NOT model a guest that is genuinely
+    /// CPU-spinning (a busy loop with no yield point) — `tokio::time::
+    /// timeout` cannot preempt that without wasmtime epoch interruption,
+    /// which is not configured (see `JOB_INVOCATION_TIMEOUT`'s doc).
     struct HangingRunner;
 
     #[async_trait]

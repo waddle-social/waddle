@@ -10,11 +10,20 @@
 //! the fastening to the room's MAM (which is why
 //! `xep_waddle_safety_scores`'s builder carries a XEP-0334 `<store/>`
 //! hint — without a real archive write behind it, that hint would do
-//! nothing), and fans it out to every currently-joined occupant. A
-//! recipient connected to a different cluster node still gets the
-//! fastening on the room's normal cross-node fan-out path; one who is
-//! offline or reconnects later sees it on their next MAM page, exactly
-//! like any other room message.
+//! nothing), and fans it out to every currently-joined occupant known to
+//! this node's local room registry.
+//!
+//! **Same limitation #1856 already had, not new here**:
+//! `broadcast_room_system_message` looks the room actor up via
+//! `GetRoom`, which only resolves a room that is *locally* registered on
+//! this node. A job drained on a node that does not host the room actor
+//! (or that has none loaded, e.g. no one has joined since a restart)
+//! finds no room, archives nothing, and delivers nothing — the judgment
+//! itself stays durably recorded (`mark_done` already committed), but
+//! that particular fastening never reaches MAM or any occupant. An
+//! occupant connected to a *different* node than the one that happens to
+//! drain a given job sees the fastening only if that job is drained on
+//! (or later reclaimed by) the node hosting the room.
 
 use async_trait::async_trait;
 use waddle_extensions::{JudgmentResult, RoomJid};
