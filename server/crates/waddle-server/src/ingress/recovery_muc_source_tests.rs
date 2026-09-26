@@ -198,7 +198,7 @@ fn bodyless_system_result_recovers_only_undelivered_occupant_without_pin() {
     else {
         panic!("frozen iOS copy")
     };
-    assert_eq!(resources, &[ios.clone()]);
+    assert_eq!(resources, std::slice::from_ref(&ios));
     let Stanza::Message(copy) = stanza.as_ref() else {
         panic!("groupchat copy")
     };
