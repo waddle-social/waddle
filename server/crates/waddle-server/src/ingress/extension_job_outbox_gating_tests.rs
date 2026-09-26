@@ -7,6 +7,13 @@
 //! grant for the `message-judge` job kind, asked live of a real
 //! `ExtensionManager` — never a static config flag.
 //!
+//! Groupchat is the only effect kind that can enqueue at all (see
+//! `durable.rs`'s doc comment: a `Direct` effect has nowhere to deliver a
+//! judgment result yet), so every gate test below except
+//! `direct_message_never_enqueues_a_row` itself drives a groupchat
+//! submission — a direct-message submission would pass these gate tests
+//! vacuously (zero rows either way) without actually exercising the gate.
+//!
 //! These tests drive a real `commit_submission` call — the same entry
 //! point production ingress uses.
 use super::commit::commit_submission;
@@ -208,7 +215,14 @@ fn groupchat_submission(
 }
 
 #[tokio::test]
-async fn direct_message_enqueues_exactly_one_row_not_two() {
+async fn direct_message_never_enqueues_a_row() {
+    // `extension_job_outbox::wire`'s only delivery path is a XEP-0422
+    // fastening broadcast to a room's occupants; a direct message has no
+    // defined trusted sender or per-participant stanza-id targeting yet
+    // (see `durable.rs`'s doc comment), so judging one would send a real
+    // DM body to a paid third-party vendor and have nowhere to deliver or
+    // store the result. Both archive copies (sender's and recipient's) are
+    // pushed to confirm neither one enqueues.
     let fixture = enabled_fixture().await;
     let mut submission = fixture.submission(Some("job-direct"), "hello there");
     let sender = fixture.principal.bare_jid().clone();
@@ -236,8 +250,8 @@ async fn direct_message_enqueues_exactly_one_row_not_two() {
     assert!(decision.class.advances());
     assert_eq!(
         row_count(&fixture).await,
-        1,
-        "only the sender's own archive copy enqueues a job row, not the recipient's too"
+        0,
+        "a direct message must never enqueue a job row, from either archive copy"
     );
     fixture.close().await;
 }
@@ -273,15 +287,20 @@ async fn groupchat_message_enqueues_exactly_one_row() {
 #[tokio::test]
 async fn retransmit_of_the_same_message_enqueues_no_additional_rows() {
     let fixture = enabled_fixture().await;
-    let mut submission = fixture.submission(Some("job-retransmit"), "hello there");
-    let sender = fixture.principal.bare_jid().clone();
-    let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
-    push_direct_archive(
+    let room: BareJid = "waddlers@muc.example.com".parse().expect("room");
+    let mut submission = groupchat_submission(&fixture, &room, "job-retransmit", "hello there");
+    let sender: Jid = fixture
+        .principal
+        .bare_jid()
+        .clone()
+        .with_resource_str("phone")
+        .expect("sender resource")
+        .into();
+    push_room_archive(
         &mut submission,
-        &sender,
-        sender.clone().into(),
-        recipient.clone().into(),
-        "sender-copy",
+        &room,
+        sender,
+        "room-copy",
         Some("hello there"),
     );
 
@@ -306,21 +325,20 @@ async fn retransmit_of_the_same_message_enqueues_no_additional_rows() {
 #[tokio::test]
 async fn empty_and_whitespace_only_bodies_enqueue_zero_rows() {
     let fixture = enabled_fixture().await;
-    let sender = fixture.principal.bare_jid().clone();
-    let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
+    let room: BareJid = "waddlers@muc.example.com".parse().expect("room");
     for (origin, id, body) in [
         ("job-empty-body", "empty-body-copy", ""),
         ("job-whitespace-body", "whitespace-body-copy", "   \t\n"),
     ] {
-        let mut submission = fixture.submission(Some(origin), "placeholder");
-        push_direct_archive(
-            &mut submission,
-            &sender,
-            sender.clone().into(),
-            recipient.clone().into(),
-            id,
-            Some(body),
-        );
+        let mut submission = groupchat_submission(&fixture, &room, origin, "placeholder");
+        let sender: Jid = fixture
+            .principal
+            .bare_jid()
+            .clone()
+            .with_resource_str("phone")
+            .expect("sender resource")
+            .into();
+        push_room_archive(&mut submission, &room, sender, id, Some(body));
         let decision = commit_submission(&fixture.uow, &submission, 5)
             .await
             .expect("commit");
@@ -342,15 +360,20 @@ async fn no_extension_manager_configured_never_enqueues_a_row() {
     crate::extension_job_outbox::initialize(&fixture.db)
         .await
         .expect("extension job outbox schema");
-    let mut submission = fixture.submission(Some("job-no-manager"), "hello there");
-    let sender = fixture.principal.bare_jid().clone();
-    let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
-    push_direct_archive(
+    let room: BareJid = "waddlers@muc.example.com".parse().expect("room");
+    let mut submission = groupchat_submission(&fixture, &room, "job-no-manager", "hello there");
+    let sender: Jid = fixture
+        .principal
+        .bare_jid()
+        .clone()
+        .with_resource_str("phone")
+        .expect("sender resource")
+        .into();
+    push_room_archive(
         &mut submission,
-        &sender,
-        sender.clone().into(),
-        recipient.clone().into(),
-        "sender-copy",
+        &room,
+        sender,
+        "room-copy",
         Some("hello there"),
     );
 
@@ -411,15 +434,20 @@ async fn extension_manager_present_but_grant_not_held_never_enqueues_a_row() {
         .uow
         .set_extension_manager(Arc::new(ungranted_manager));
 
-    let mut submission = fixture.submission(Some("job-ungranted"), "hello there");
-    let sender = fixture.principal.bare_jid().clone();
-    let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
-    push_direct_archive(
+    let room: BareJid = "waddlers@muc.example.com".parse().expect("room");
+    let mut submission = groupchat_submission(&fixture, &room, "job-ungranted", "hello there");
+    let sender: Jid = fixture
+        .principal
+        .bare_jid()
+        .clone()
+        .with_resource_str("phone")
+        .expect("sender resource")
+        .into();
+    push_room_archive(
         &mut submission,
-        &sender,
-        sender.clone().into(),
-        recipient.clone().into(),
-        "sender-copy",
+        &room,
+        sender,
+        "room-copy",
         Some("hello there"),
     );
 

@@ -5,18 +5,16 @@
 //! (and its own conformance test, which round-trips against the exact
 //! client-side parser).
 //!
-//! **Scope of this first version**: delivery is local-only (a best-effort
-//! fan-out to this node's own `connection_registry` sessions for the
-//! room's current occupants) and not archived to MAM. A recipient who is
-//! offline, connected to a different cluster node, or who reconnects
-//! after this broadcast simply does not receive this particular
-//! fastening — the same "local delivery is best-effort, cross-node/
-//! recovered delivery is a separate concern" split already visible
-//! elsewhere in this codebase (e.g. the non-clustered fast path in
-//! `server::routes::websocket::handlers::iq::muc_owner_moderation`'s
-//! destroy-notification delivery). Extending this to clustered fan-out
-//! and/or MAM persistence is a natural fast-follow, not required for this
-//! effect to be genuinely new, real, wire-visible functionality.
+//! Delivery goes through the same `broadcast_room_system_message` path
+//! Phase A (#1856) used: it stamps a fresh XEP-0359 stanza-id, archives
+//! the fastening to the room's MAM (which is why
+//! `xep_waddle_safety_scores`'s builder carries a XEP-0334 `<store/>`
+//! hint — without a real archive write behind it, that hint would do
+//! nothing), and fans it out to every currently-joined occupant. A
+//! recipient connected to a different cluster node still gets the
+//! fastening on the room's normal cross-node fan-out path; one who is
+//! offline or reconnects later sees it on their next MAM page, exactly
+//! like any other room message.
 
 use async_trait::async_trait;
 use waddle_extensions::{JudgmentResult, RoomJid};
@@ -108,50 +106,27 @@ impl SafetyScoresWireSink for WebSocketStateSafetyScoresWireSink {
         target_stanza_id: StanzaId,
         result: JudgmentResult,
     ) -> Result<(), WireSinkError> {
-        use waddle_xmpp::muc::room_actor::{GetSnapshot, RoomActor};
-        use waddle_xmpp::muc::room_registry_actor::GetRoom;
+        use crate::server::routes::interpret::broadcast_room_system_message;
+        use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
         use waddle_xmpp::xep::xep_waddle_safety_scores::build_safety_scores_fastening_message;
-        use waddle_xmpp::Stanza;
 
         let room = room.ok_or(WireSinkError::NoRoom)?;
         let room_jid: jid::BareJid = room
             .as_str()
             .parse()
             .map_err(|_| WireSinkError::InvalidRoomJid(room.as_str().to_string()))?;
-        let room_actor: kameo::actor::ActorRef<RoomActor> = self
-            .state
-            .deps
-            .protocol
-            .room_registry
-            .ask(GetRoom {
-                room_jid: room_jid.clone(),
-            })
-            .await
-            .map_err(|error| WireSinkError::RoomLookupFailed(format!("{error:?}")))?
-            .ok_or_else(|| WireSinkError::RoomNotFound(room_jid.to_string()))?;
-        let snapshot = room_actor
-            .ask(GetSnapshot)
-            .await
-            .map_err(|error| WireSinkError::RoomLookupFailed(format!("{error:?}")))?;
 
         let message = build_safety_scores_fastening_message(
-            room_jid,
+            room_jid.clone(),
             target_stanza_id.id.as_str(),
             &to_wire_scores(&result),
         );
-        for occupant in snapshot.room.occupants.values() {
-            for session in snapshot.room.get_occupant_sessions(&occupant.nick) {
-                let mut frame = message.clone();
-                frame.to = Some(jid::Jid::from(session.clone()));
-                let _ = self
-                    .state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_to(&session, Stanza::Message(frame));
-            }
-        }
-        Ok(())
+
+        let deps = build_interpret_deps(&self.state, None);
+        broadcast_room_system_message(&deps, room_jid.clone(), Box::new(message))
+            .await
+            .map(|_| ())
+            .ok_or_else(|| WireSinkError::RoomNotFound(room_jid.to_string()))
     }
 }
 

@@ -169,27 +169,27 @@ pub(super) async fn apply_durable(
                 // Correctness notes:
                 // - Only `Inserted` (a genuinely new archive row) enqueues;
                 //   `Existing`/`Repaired`/`TombstoneHit`/`Expired` do not.
-                // - A 1:1 direct message archives twice — once into the
-                //   sender's own MAM store, once into the recipient's —
-                //   both driven through this same match arm with the same
-                //   `message`. Enqueueing on both would judge (and cost)
-                //   every DM twice. `is_own_archive_copy` restricts a
-                //   `Direct` effect to the sender's own archive write,
-                //   using this codebase's existing sender/recipient-archive
-                //   test (`direct_archive.rs`'s `sender_archive`). A
-                //   groupchat message has exactly one room-owned archive,
-                //   so no such restriction applies there.
+                // - Groupchat only: `extension_job_outbox::wire`'s only
+                //   delivery path is a XEP-0422 fastening broadcast to a
+                //   room's occupants, and there is no defined trusted
+                //   sender or per-participant stanza-id targeting for a
+                //   direct-message fastening yet (the same open
+                //   wire-contract question flagged on #1849/#1850/#1851,
+                //   still unresolved on the client side). Enqueueing a
+                //   `Direct` effect would send a real DM body to a paid
+                //   third-party vendor and then have nowhere to deliver or
+                //   store the result — a cost and privacy problem with no
+                //   offsetting benefit — so `DurableEffect::Direct` never
+                //   reaches this block at all. A room message has exactly
+                //   one room-owned archive, so no per-copy dedup is needed
+                //   here either.
                 // - An empty or whitespace-only `<body/>` (e.g. a `<store/>`
                 //   hint on a reaction/retraction/correction stanza XMPP
                 //   allows to carry one) is skipped: it would still cost a
                 //   real judge call for no useful signal.
                 if let Some(manager) = tx.extension_manager() {
                     if let MamTxStoreOutcome::Inserted { stanza_id, .. } = &outcome {
-                        let is_own_archive_copy = match effect {
-                            DurableEffect::Direct(_) => &message.from.to_bare() == archive,
-                            DurableEffect::Room(_) => true,
-                        };
-                        if is_own_archive_copy {
+                        if let DurableEffect::Room(_) = effect {
                             if let Some(body) = message.body.clone() {
                                 if !body.trim().is_empty() {
                                     if let Ok(job_kind) = waddle_extensions::JobKind::new(
@@ -198,15 +198,10 @@ pub(super) async fn apply_durable(
                                         if let Some(extension_id) =
                                             manager.durable_job_grant_holder(&job_kind)
                                         {
-                                            let room = match effect {
-                                                DurableEffect::Room(_) => {
-                                                    waddle_extensions::RoomJid::new(
-                                                        archive.to_string(),
-                                                    )
-                                                    .ok()
-                                                }
-                                                DurableEffect::Direct(_) => None,
-                                            };
+                                            let room = waddle_extensions::RoomJid::new(
+                                                archive.to_string(),
+                                            )
+                                            .ok();
                                             ExtensionJobOutboxRepository::enqueue_in_tx(
                                                 tx,
                                                 crate::extension_job_outbox::PendingJobInput {

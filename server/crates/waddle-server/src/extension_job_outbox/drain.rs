@@ -36,10 +36,26 @@ const DEFAULT_BATCH_LIMIT: i64 = 100;
 /// Bound on job invocations processed concurrently within one
 /// [`drain_once`] batch, for the same reason
 /// `message_judgment_outbox::drain::MAX_CONCURRENT_JUDGE_CALLS` existed:
-/// rows are otherwise independent, so a slow (or, per this PR's guardrail
-/// 1, wedged-forever) guest invocation must not serialize the rest of the
-/// batch behind it.
+/// rows are otherwise independent, so a slow guest invocation must not
+/// serialize the rest of the batch behind it. This bounds concurrency, not
+/// wall-clock time — see [`JOB_INVOCATION_TIMEOUT`] for what actually
+/// bounds a single invocation that never returns.
 const MAX_CONCURRENT_JOB_CALLS: usize = 8;
+
+/// Upper bound on a single job invocation. The current wasmtime setup has
+/// no epoch interruption or fuel limit configured, so nothing on the guest
+/// side can force a CPU-wedged or I/O-stuck invocation to return on its
+/// own. Attempt-on-claim (`store::claim_due_batch` incrementing
+/// `attempt_count` as part of the claim) only bounds a row across
+/// claim/reclaim cycles — it does nothing for an invocation that is still
+/// running on a live node and simply never resolves: without this
+/// timeout, that invocation's `buffer_unordered` slot in [`drain_once`]
+/// never frees, `drain_once`'s `.collect()` never completes, and
+/// [`run_drain_loop`] never starts another poll tick on this node. Chosen
+/// well above Jev's own tight (4s) HTTP timeout, since that should trip
+/// first in the "just slow" case; this is the backstop for "never returns
+/// at all".
+const JOB_INVOCATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn retry_delay_ms(attempt: i64) -> i64 {
     let shift = if attempt <= 1 {
@@ -99,6 +115,7 @@ pub async fn drain_once(
     sink: &dyn SafetyScoresWireSink,
     now_ms: i64,
     batch_limit: i64,
+    job_timeout: Duration,
 ) -> DrainOutcome {
     let mut outcome = DrainOutcome::default();
     let batch = match store::claim_due_batch(db, batch_limit, now_ms).await {
@@ -110,7 +127,7 @@ pub async fn drain_once(
     };
     outcome.fetched = batch.len();
     let deltas: Vec<RowOutcome> = stream::iter(batch)
-        .map(|row| process_row(db, runner, sink, row, now_ms))
+        .map(|row| process_row(db, runner, sink, row, now_ms, job_timeout))
         .buffer_unordered(MAX_CONCURRENT_JOB_CALLS)
         .collect()
         .await;
@@ -146,17 +163,35 @@ async fn process_row(
     sink: &dyn SafetyScoresWireSink,
     row: ClaimedJob,
     now_ms: i64,
+    job_timeout: Duration,
 ) -> RowOutcome {
-    match runner.run(&row).await {
-        DurableJobRunOutcome::Success(result) => finalize_success(db, sink, &row, result).await,
-        DurableJobRunOutcome::Failure { message, retryable } => {
+    match tokio::time::timeout(job_timeout, runner.run(&row)).await {
+        Ok(DurableJobRunOutcome::Success(result)) => finalize_success(db, sink, &row, result).await,
+        Ok(DurableJobRunOutcome::Failure { message, retryable }) => {
             finalize_failure(db, &row, &message, retryable, now_ms).await
         }
-        DurableJobRunOutcome::NoHandler => {
+        Ok(DurableJobRunOutcome::NoHandler) => {
             finalize_failure(
                 db,
                 &row,
                 "no loaded/granted extension currently handles this job kind",
+                true,
+                now_ms,
+            )
+            .await
+        }
+        // Guardrail 1, invocation half: the SQL-side attempt-on-claim
+        // bounds a row across claim/reclaim cycles, but does nothing for
+        // an invocation that is still running right now and never
+        // resolves. Treating a timeout as a retryable failure routes it
+        // through the same MAX_ATTEMPTS/backoff/dead-letter path as any
+        // other failure, so a job kind whose guest is reliably wedged
+        // still eventually dead-letters instead of retrying forever.
+        Err(_elapsed) => {
+            finalize_failure(
+                db,
+                &row,
+                "job invocation exceeded the per-job timeout",
                 true,
                 now_ms,
             )
@@ -265,6 +300,7 @@ pub async fn run_drain_loop(
             sink.as_ref(),
             now_ms,
             DEFAULT_BATCH_LIMIT,
+            JOB_INVOCATION_TIMEOUT,
         )
         .await;
     }
@@ -279,6 +315,13 @@ mod tests {
     use std::sync::Mutex;
     use waddle_extensions::{JobKind, JudgmentScore, PluginId, RoomJid, WaddleId};
     use waddle_xmpp_core::xep0359::StanzaId;
+
+    /// Generous relative to these tests' fake runners (which resolve
+    /// immediately), but short enough that
+    /// `drain_once_dead_letters_a_job_whose_invocation_never_returns`
+    /// (a genuinely hanging runner) completes quickly instead of waiting
+    /// out the real 30s production timeout.
+    const TEST_JOB_TIMEOUT: Duration = Duration::from_millis(200);
 
     fn extension() -> PluginId {
         PluginId::new("community-safety-judge").expect("plugin id")
@@ -377,7 +420,7 @@ mod tests {
         let emitted = Arc::new(AtomicUsize::new(0));
         let sink = super::super::wire::tests::CountingSink::new(Arc::clone(&emitted));
         let runner = FakeRunner::new(|_row| DurableJobRunOutcome::Success(judgment_result()));
-        let outcome = drain_once(&db, &runner, &sink, 1_000, 10).await;
+        let outcome = drain_once(&db, &runner, &sink, 1_000, 10, TEST_JOB_TIMEOUT).await;
 
         assert_eq!(outcome.fetched, 1);
         assert_eq!(outcome.succeeded, 1);
@@ -412,7 +455,7 @@ mod tests {
             message: "transport error".to_string(),
             retryable: true,
         });
-        let outcome = drain_once(&db, &runner, &sink, 1_000, 10).await;
+        let outcome = drain_once(&db, &runner, &sink, 1_000, 10, TEST_JOB_TIMEOUT).await;
 
         assert_eq!(outcome.fetched, 1);
         assert_eq!(outcome.succeeded, 0);
@@ -452,7 +495,7 @@ mod tests {
             message: "malformed job".to_string(),
             retryable: false,
         });
-        let outcome = drain_once(&db, &runner, &sink, 1_000, 10).await;
+        let outcome = drain_once(&db, &runner, &sink, 1_000, 10, TEST_JOB_TIMEOUT).await;
 
         assert_eq!(outcome.dead_lettered, 1);
         assert!(fetch_due_batch(&db, 10, i64::MAX)
@@ -462,13 +505,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_once_dead_letters_after_max_attempts_even_though_the_guest_never_returns() {
-        // Simulates guardrail 1: a "wedged" job whose guest invocation never
-        // returns is modeled here as a runner that always reports a
-        // retryable failure (standing in for the row being reclaimed after
-        // its lease goes stale with no successful invocation ever having
-        // happened) — attempt_count still marches to MAX_ATTEMPTS purely
-        // from claim/reclaim, and the row is dead-lettered on its own.
+    async fn drain_once_dead_letters_after_max_attempts_across_reclaims() {
+        // Guardrail 1, SQL half: a job whose lease keeps going stale and
+        // getting reclaimed (modeled here as a runner that always reports
+        // a retryable failure, standing in for a row reclaimed after a
+        // crashed node with no successful invocation ever having
+        // happened) still has attempt_count march to MAX_ATTEMPTS purely
+        // from claim/reclaim, and dead-letters on its own. This does NOT
+        // cover a single invocation that never returns at all within one
+        // process_row call — see
+        // `drain_once_dead_letters_a_job_whose_invocation_never_returns`
+        // below for that (guardrail 1, invocation-timeout half).
         let db = test_db().await;
         enqueue_pending(
             &db,
@@ -492,7 +539,7 @@ mod tests {
         });
         let mut now_ms = 0_i64;
         for attempt in 1..=MAX_ATTEMPTS {
-            let outcome = drain_once(&db, &runner, &sink, now_ms, 10).await;
+            let outcome = drain_once(&db, &runner, &sink, now_ms, 10, TEST_JOB_TIMEOUT).await;
             assert_eq!(outcome.fetched, 1, "attempt {attempt}: row still due");
             if attempt < MAX_ATTEMPTS {
                 assert_eq!(outcome.dead_lettered, 0);
@@ -502,6 +549,63 @@ mod tests {
             }
         }
         assert_eq!(runner.call_count(), MAX_ATTEMPTS as usize);
+        assert!(fetch_due_batch(&db, 10, i64::MAX)
+            .await
+            .expect("fetch")
+            .is_empty());
+    }
+
+    /// A runner whose `run` future never resolves — no failure, no
+    /// success, nothing — modeling a CPU-wedged or I/O-stuck guest
+    /// invocation with no epoch interruption/fuel limit to force it to
+    /// return.
+    struct HangingRunner;
+
+    #[async_trait]
+    impl DurableJobRunner for HangingRunner {
+        async fn run(&self, _job: &ClaimedJob) -> DurableJobRunOutcome {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_once_dead_letters_a_job_whose_invocation_never_returns() {
+        // Guardrail 1, invocation-timeout half: unlike the claim/reclaim
+        // test above, this runner's `run` call genuinely never resolves
+        // within a single `process_row` invocation. Without
+        // `JOB_INVOCATION_TIMEOUT`, this row's `buffer_unordered` slot
+        // would never free, `drain_once`'s `.collect()` would never
+        // complete, and this test would hang forever instead of the row
+        // being retried and eventually dead-lettered.
+        let db = test_db().await;
+        enqueue_pending(
+            &db,
+            PendingJobInput {
+                extension_id: extension(),
+                job_kind: kind(),
+                waddle_id: waddle(),
+                room: None,
+                target_stanza_id: stanza("stanza-hung"),
+                body: "body".to_string(),
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue");
+
+        let sink = NullSafetyScoresWireSink;
+        let runner = HangingRunner;
+        let mut now_ms = 0_i64;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let outcome = drain_once(&db, &runner, &sink, now_ms, 10, TEST_JOB_TIMEOUT).await;
+            assert_eq!(outcome.fetched, 1, "attempt {attempt}: row still due");
+            if attempt < MAX_ATTEMPTS {
+                assert_eq!(outcome.dead_lettered, 0);
+                now_ms += retry_delay_ms(attempt);
+            } else {
+                assert_eq!(outcome.dead_lettered, 1, "final attempt must dead-letter");
+            }
+        }
         assert!(fetch_due_batch(&db, 10, i64::MAX)
             .await
             .expect("fetch")
@@ -528,7 +632,7 @@ mod tests {
 
         let sink = NullSafetyScoresWireSink;
         let runner = FakeRunner::new(|_row| DurableJobRunOutcome::NoHandler);
-        let outcome = drain_once(&db, &runner, &sink, 1_000, 10).await;
+        let outcome = drain_once(&db, &runner, &sink, 1_000, 10, TEST_JOB_TIMEOUT).await;
         assert_eq!(outcome.failed, 1);
         assert_eq!(outcome.dead_lettered, 0);
     }

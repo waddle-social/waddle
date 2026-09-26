@@ -55,6 +55,7 @@ impl ProviderConfig {
         let api_key = parsed
             .api_key
             .filter(|key| !key.trim().is_empty())
+            .map(|key| key.trim().to_string())
             .ok_or(ProviderConfigError::MissingApiKey)?;
         Ok(Self {
             api_key,
@@ -96,6 +97,17 @@ mod tests {
         let error = ProviderConfig::parse(r#"{"api_key": "   "}"#)
             .expect_err("blank api_key must be rejected");
         assert_eq!(error, ProviderConfigError::MissingApiKey);
+    }
+
+    #[test]
+    fn trims_secret_file_newline() {
+        // `config_secret_files` injects a mounted secret file's contents
+        // verbatim (see this module's own doc comment); a file created
+        // with a trailing newline, as `waddle-openrouter` (shared with
+        // ai-chatbot, which trims for exactly this reason) may be, must
+        // not become part of the `Bearer` header value sent to the vendor.
+        let config = ProviderConfig::parse("{\"api_key\": \"secret-key\\n\"}").expect("parse");
+        assert_eq!(config.api_key, "secret-key");
     }
 
     #[test]
