@@ -8,13 +8,13 @@ import {
   safetyCategoryPresentation,
   safetyProbabilitySeverity,
   safetyProbabilityWidth,
+  QUESTION_MARKER_THRESHOLD,
 } from "@/components/chat/message-safety-scores";
 
 // Server judgments fastened to a message (XEP-0422,
-// `urn:waddle:safety-scores:1`). The parent only mounts this once a
-// content-safety category has crossed the notice threshold. Collapsed to a chip
-// in the reactions row; the breakdown expands inline, matching the reply
-// chip's disclosure idiom, so it works identically on touch and desktop.
+// `urn:waddle:safety-scores:1`). Safety scores use the notice threshold;
+// question signals get a separate blue marker at their own threshold. The
+// breakdown expands inline, matching the reply chip's disclosure idiom.
 const props = defineProps<{
   scores: SafetyScores;
   messageId: string;
@@ -28,12 +28,19 @@ const indicator = computed(() => {
     ? { ...safetyCategoryPresentation(score.category), severity: safetyProbabilitySeverity(score.probability) }
     : null;
 });
+const questionScore = computed(() => {
+  return props.scores.scores.find(
+    (score) => score.category === "is_question" && score.probability >= QUESTION_MARKER_THRESHOLD,
+  ) ?? null;
+});
+const questionPresentation = computed(() => safetyCategoryPresentation("is_question"));
 const rows = computed(() => notableSafetyScores(props.scores));
 </script>
 
 <template>
-  <div v-if="indicator" class="chat-safety-scores flex flex-col items-start gap-1">
+  <div v-if="indicator || questionScore" class="chat-safety-scores flex flex-col items-start gap-1">
     <button
+      v-if="indicator"
       type="button"
       class="chat-safety-scores__toggle type-caption inline-flex h-6 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-muted/50"
       :class="indicator.textClass"
@@ -46,6 +53,20 @@ const rows = computed(() => notableSafetyScores(props.scores));
     >
       <component :is="indicator.icon" class="h-3 w-3" aria-hidden="true" />
       <span>{{ indicator.label }}</span>
+    </button>
+    <button
+      v-if="questionScore"
+      type="button"
+      class="chat-safety-scores__toggle type-caption inline-flex h-6 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-muted/50"
+      :class="questionPresentation.textClass"
+      :aria-expanded="expanded"
+      :aria-controls="panelId"
+      :aria-label="`${expanded ? 'Hide' : 'Show'} question score`"
+      :title="`${expanded ? 'Hide' : 'Show'} question score`"
+      @click="expanded = !expanded"
+    >
+      <component :is="questionPresentation.icon" class="h-3 w-3" aria-hidden="true" />
+      <span>Question</span>
     </button>
     <div
       v-if="expanded"

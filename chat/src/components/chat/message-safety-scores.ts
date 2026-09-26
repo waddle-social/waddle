@@ -76,6 +76,8 @@ const CATEGORY_PRESENTATION = {
 const SAFETY_NOTICE_THRESHOLD = 0.5;
 /** Probability at which a category is an alert. */
 const SAFETY_ALERT_THRESHOLD = 0.8;
+/** Probability at which a question signal gets its own message marker. */
+export const QUESTION_MARKER_THRESHOLD = 0.75;
 
 export type SafetySeverity = "notice" | "alert";
 
@@ -108,6 +110,16 @@ export function visibleSafetyScores(
   return leadingSafetyScore(scores) ? scores : null;
 }
 
+/** A question signal is shown independently from the content-safety marker. */
+export function visibleQuestionScore(
+  message: Pick<TimelineMessage, "safetyScores" | "isRetracted">,
+): SafetyScore | null {
+  if (!message.safetyScores || message.isRetracted) return null;
+  return message.safetyScores.scores.find(
+    (score) => score.category === "is_question" && score.probability >= QUESTION_MARKER_THRESHOLD,
+  ) ?? null;
+}
+
 /** Scores in canonical category order, independent of wire order. */
 export function orderedSafetyScores(scores: SafetyScores): SafetyScore[] {
   return [...scores.scores].sort(
@@ -115,10 +127,12 @@ export function orderedSafetyScores(scores: SafetyScores): SafetyScore[] {
   );
 }
 
-/** The breakdown includes every category at or above the existing threshold. */
+/** The breakdown includes safety notices and questions at their own threshold. */
 export function notableSafetyScores(scores: SafetyScores): SafetyScore[] {
-  return orderedSafetyScores(scores).filter(
-    (score) => safetyProbabilitySeverity(score.probability) !== null,
+  return orderedSafetyScores(scores).filter((score) =>
+    score.category === "is_question"
+      ? score.probability >= QUESTION_MARKER_THRESHOLD
+      : safetyProbabilitySeverity(score.probability) !== null,
   );
 }
 

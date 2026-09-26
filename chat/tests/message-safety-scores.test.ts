@@ -38,7 +38,7 @@ const NOTICE: SafetyScores = {
     { category: "safety:harassment", probability: 0.5, taxonomyVersion: "safety-harassment-v1" },
     { category: "safety:hate_speech", probability: 0.003, taxonomyVersion: "safety-hate-speech-v1" },
     { category: "safety:scam", probability: 0.49, taxonomyVersion: "safety-scam-v1" },
-    { category: "is_question", probability: 0.92, taxonomyVersion: "is-question-v1" },
+    { category: "is_question", probability: 0.75, taxonomyVersion: "is-question-v1" },
   ],
 };
 
@@ -49,7 +49,7 @@ const ALERT: SafetyScores = {
     { category: "safety:scam", probability: 0.8, taxonomyVersion: "safety-scam-v1" },
     { category: "safety:harassment", probability: 0.61, taxonomyVersion: "safety-harassment-v1" },
     { category: "safety:violence", probability: 0.12, taxonomyVersion: "safety-violence-v1" },
-    { category: "is_question", probability: 0.1, taxonomyVersion: "is-question-v1" },
+    { category: "is_question", probability: 0.74, taxonomyVersion: "is-question-v1" },
   ],
 };
 
@@ -154,7 +154,7 @@ describe("safety-scores presentation helpers", () => {
 describe("MessageSafetyScores", () => {
   const componentUrl = new URL("../src/components/chat/MessageSafetyScores.vue", import.meta.url);
 
-  test("renders collapsed: the leading safety category names the disclosure", async () => {
+  test("renders collapsed safety and high-confidence question markers", async () => {
     const html = await renderVueComponent(
       "../src/components/chat/MessageSafetyScores.vue",
       { scores: NOTICE, messageId: "m-1" },
@@ -167,7 +167,7 @@ describe("MessageSafetyScores", () => {
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('aria-controls="safety-scores-m-1"');
     expect(html).toContain('aria-label="Show Harassment scores"');
-    expect(html).not.toContain("Question");
+    expect(html).toContain("Question");
   });
 
   test("renders a scam marker for an alert", async () => {
@@ -252,7 +252,7 @@ defineProps<{ scored: TimelineMessage; grouped: TimelineMessage; quiet: Timeline
 </template>
 `;
 
-  test("notice-level messages show the chip, including grouped rows; quiet and unscored rows show none", async () => {
+  test("notice-level and question-only messages show a marker; unscored rows show none", async () => {
     const html = await renderVueComponentSource(wrapper, {
       scored: { ...base, id: "scored", safetyScores: NOTICE },
       grouped: { ...base, id: "grouped", safetyScores: ALERT },
@@ -261,7 +261,8 @@ defineProps<{ scored: TimelineMessage; grouped: TimelineMessage; quiet: Timeline
     });
     expect(html).toContain('aria-controls="safety-scores-scored"');
     expect(html).toContain('aria-controls="safety-scores-grouped"');
-    expect(html).not.toContain("safety-scores-quiet");
+    expect(html).toContain('aria-controls="safety-scores-quiet"');
+    expect(html).toContain('aria-label="Show question score"');
     expect(html).not.toContain("safety-scores-plain");
   }, 30_000);
 });
