@@ -4,13 +4,18 @@ import WaddleKit
 /// The marker on a row whose scores crossed the notice threshold. Every
 /// participant sees it; it opens the per-category breakdown. It is an
 /// annotation, not a moderation action, so it stays small and reflects
-/// the strongest visible safety category.
+/// the strongest visible safety category, or a question signal when no
+/// safety category crosses the threshold.
 struct MessageSafetyScoresButton: View {
     static let title = "Content signals"
     @Environment(\.colorScheme) private var colorScheme
 
     let row: SafetyScoreRow
     let action: () -> Void
+
+    static func markerRow(for scores: SafetyScores?) -> SafetyScoreRow? {
+        scores?.markerRow ?? scores?.notableSignalRows.first { $0.category == .isQuestion }
+    }
 
     var body: some View {
         Button(action: action) {

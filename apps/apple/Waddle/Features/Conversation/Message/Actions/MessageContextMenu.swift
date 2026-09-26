@@ -54,7 +54,7 @@ struct MessageContextMenu: View {
             if item.conversation.isRoom {
                 pinButton
             }
-            if let row = item.safetyScores?.markerRow {
+            if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {
                 Button {
                     actions.showSafetyScores(for: item)
                 } label: {
@@ -130,7 +130,7 @@ struct MessageAccessibilityActions: ViewModifier {
             if replyCount > 0 {
                 Button("Open thread", action: openThread)
             }
-            if let row = item.safetyScores?.markerRow {
+            if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {
                 Button("Show \(row.title.lowercased()) content signal") { actions.showSafetyScores(for: item) }
             }
             if let file = item.message.sharedFiles.first, file.encrypted == nil {
