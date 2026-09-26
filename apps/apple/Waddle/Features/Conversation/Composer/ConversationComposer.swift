@@ -9,15 +9,18 @@ import WaddleKit
 struct ConversationComposer: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(MessageActionModel.self) private var actions
+    @Environment(AppState.self) private var app
     let model: ComposerModel
     let conversation: ConversationID
     /// XEP-0201 thread replies go to, or nil for the main feed.
     let thread: String?
     let placeholder: String
 
-    @FocusState private var isFocused: Bool
+    /// Whether the text field is being edited; the field keeps it in step
+    /// with the system's focus.
+    @State private var isFocused = false
     /// Unicode-scalar selection in the draft; nil where the system does
-    /// not report one (before iOS 18 / macOS 15).
+    /// not report one (macOS before 15).
     @State private var selection: Range<Int>?
     /// The draft `selection` was measured against: what the field itself
     /// last wrote, or the result of a formatting edit. Any other change to
@@ -31,39 +34,25 @@ struct ConversationComposer: View {
     @State private var gifSearch: ComposerGifSearch?
     @State private var linkPrompt = ComposerLinkPrompt()
     @State private var commands = ComposerCommandCenter()
+    /// Counts sends, to play the send haptic.
+    @State private var sendCount = 0
 
     var body: some View {
         let slash = slashSuggestions
         let mentions = slash == nil ? mentionSuggestions : nil
         VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-            if let slash, !slash.isEmpty {
-                ComposerSlashSuggestions(candidates: slash) { candidate in
-                    complete(with: candidate)
-                }
+            // Suggestions and notices open away from the screen edge the
+            // composer sits on: above it at the bottom, below it at the
+            // top in the social order.
+            if isTopPinned {
+                ComposerContextBanner(model: model)
+                card(slash: slash, mentions: mentions)
+                suggestionsAndNotices(slash: slash, mentions: mentions)
+            } else {
+                suggestionsAndNotices(slash: slash, mentions: mentions)
+                ComposerContextBanner(model: model)
+                card(slash: slash, mentions: mentions)
             }
-            if let mentions, !mentions.candidates.isEmpty {
-                ComposerMentionSuggestions(candidates: mentions.candidates) { candidate in
-                    model.insertMention(candidate, replacing: mentions.query)
-                }
-            }
-            if let error = model.errorMessage {
-                ComposerErrorLine(message: error) { model.errorMessage = nil }
-            }
-            ComposerNoticeLine(notice: commands.notice, runningCommand: commands.running?.name) {
-                commands.dismissNotice()
-            }
-            ComposerContextBanner(model: model)
-            ComposerCard(
-                model: model,
-                text: fieldText,
-                selection: $selection,
-                showsFormatting: $showsFormatting,
-                isFocused: $isFocused,
-                placeholder: placeholder,
-                showsMention: conversation.isRoom,
-                uploader: uploader,
-                actions: cardActions(slash: slash, mentions: mentions)
-            )
         }
         .padding(.horizontal, Theme.Spacing.m)
         .padding(.top, Theme.Spacing.s)
@@ -89,8 +78,53 @@ struct ConversationComposer: View {
         .onChange(of: actions.focusRequest) { _, _ in
             isFocused = true
         }
+        .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.7), trigger: sendCount)
         .task(id: commands.notice?.id) {
             await expireInfoNotice()
+        }
+    }
+
+    private var isTopPinned: Bool {
+        app.preferences.messageOrder.isNewestFirst
+    }
+
+    private func card(
+        slash: [SlashCandidate]?,
+        mentions: (query: MentionQuery, candidates: [MentionCandidate])?
+    ) -> some View {
+        ComposerCard(
+            model: model,
+            text: fieldText,
+            selection: $selection,
+            showsFormatting: $showsFormatting,
+            isFocused: $isFocused,
+            placeholder: placeholder,
+            showsMention: conversation.isRoom,
+            uploader: uploader,
+            actions: cardActions(slash: slash, mentions: mentions)
+        )
+    }
+
+    @ViewBuilder
+    private func suggestionsAndNotices(
+        slash: [SlashCandidate]?,
+        mentions: (query: MentionQuery, candidates: [MentionCandidate])?
+    ) -> some View {
+        if let slash, !slash.isEmpty {
+            ComposerSlashSuggestions(candidates: slash) { candidate in
+                complete(with: candidate)
+            }
+        }
+        if let mentions, !mentions.candidates.isEmpty {
+            ComposerMentionSuggestions(candidates: mentions.candidates) { candidate in
+                model.insertMention(candidate, replacing: mentions.query)
+            }
+        }
+        if let error = model.errorMessage {
+            ComposerErrorLine(message: error) { model.errorMessage = nil }
+        }
+        ComposerNoticeLine(notice: commands.notice, runningCommand: commands.running?.name) {
+            commands.dismissNotice()
         }
     }
 
@@ -258,6 +292,7 @@ struct ConversationComposer: View {
     }
 
     private func dispatch(_ submission: ComposerSubmission) {
+        sendCount += 1
         let model = self.model
         let session = self.session
         let conversation = self.conversation

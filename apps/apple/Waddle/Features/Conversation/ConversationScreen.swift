@@ -28,6 +28,7 @@ struct ConversationScreen: View {
 /// and unread anchor reset when the conversation changes.
 private struct ConversationContent: View {
     @Environment(SessionCoordinator.self) private var session
+    @Environment(AppState.self) private var app
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var actions: MessageActionModel
@@ -50,27 +51,28 @@ private struct ConversationContent: View {
     var body: some View {
         let header = ConversationHeaderText.make(for: conversation, session: session)
         ConversationTimelineContainer(conversation: conversation, header: header, unreadAnchorID: unreadAnchorID)
-            .overlay(alignment: .top) {
+            // Opposite the jump-to-latest pill, which sits at the newest
+            // edge: the top in the social order.
+            .overlay(alignment: newestFirst ? .bottom : .top) {
                 ZStack {
                     if let phase = revealPhase {
-                        TimelineRevealBanner(phase: phase)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                        TimelineRevealBanner(phase: phase, edge: newestFirst ? .bottom : .top)
+                            .transition(.move(edge: newestFirst ? .bottom : .top).combined(with: .opacity))
                     }
                 }
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: revealPhase)
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                ConnectionBanner(status: session.connection)
+                VStack(alignment: .leading, spacing: 0) {
+                    ConnectionBanner(status: session.connection)
+                    if newestFirst {
+                        composerStack(placeholder: header.composerPlaceholder)
+                    }
+                }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                    ConversationTypingIndicator(conversation: conversation)
-                    ConversationComposer(
-                        model: composer,
-                        conversation: conversation,
-                        thread: nil,
-                        placeholder: header.composerPlaceholder
-                    )
+                if !newestFirst {
+                    composerStack(placeholder: header.composerPlaceholder)
                 }
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: session.connection)
@@ -117,6 +119,31 @@ private struct ConversationContent: View {
                 session.close(conversation)
                 session.stopTyping(in: conversation, notify: true)
             }
+    }
+
+    /// The social order puts the composer above the feed, newest first,
+    /// with the typing line under it next to where messages arrive.
+    private var newestFirst: Bool {
+        app.preferences.messageOrder.isNewestFirst
+    }
+
+    /// The typing line sits between the composer and the feed.
+    private func composerStack(placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            if !newestFirst {
+                ConversationTypingIndicator(conversation: conversation)
+            }
+            ConversationComposer(
+                model: composer,
+                conversation: conversation,
+                thread: nil,
+                placeholder: placeholder
+            )
+            if newestFirst {
+                ConversationTypingIndicator(conversation: conversation)
+                    .padding(.bottom, Theme.Spacing.xs)
+            }
+        }
     }
 
     /// Captures the unread count before opening clears it, so the divider

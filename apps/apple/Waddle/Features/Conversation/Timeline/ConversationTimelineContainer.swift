@@ -5,6 +5,7 @@ import WaddleKit
 /// conversation state and the message list.
 struct ConversationTimelineContainer: View {
     @Environment(SessionCoordinator.self) private var session
+    @Environment(AppState.self) private var app
     let conversation: ConversationID
     let header: ConversationHeaderText
     let unreadAnchorID: String?
@@ -20,7 +21,7 @@ struct ConversationTimelineContainer: View {
                     Task { await session.loadLatest(conversation) }
                 }
             } else {
-                TimelineSkeleton()
+                TimelineSkeleton(newestFirst: app.preferences.messageOrder.isNewestFirst)
             }
         } else {
             ConversationTimelineList(
@@ -83,13 +84,17 @@ struct ConversationEmptyState: View {
     }
 }
 
-/// Placeholder rows while the newest page loads.
+/// Placeholder rows while the newest page loads, at the end the newest
+/// messages will appear.
 struct TimelineSkeleton: View {
+    var newestFirst = false
     private let lineWidths: [CGFloat] = [180, 240, 120, 210, 160, 230]
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.l + 2) {
-            Spacer(minLength: 0)
+            if !newestFirst {
+                Spacer(minLength: 0)
+            }
             ForEach(lineWidths.indices, id: \.self) { index in
                 HStack(alignment: .top, spacing: Theme.Spacing.s + 2) {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -99,6 +104,9 @@ struct TimelineSkeleton: View {
                         RoundedRectangle(cornerRadius: 4).frame(width: lineWidths[index], height: 10)
                     }
                 }
+            }
+            if newestFirst {
+                Spacer(minLength: 0)
             }
         }
         .foregroundStyle(Color.secondary.opacity(0.15))

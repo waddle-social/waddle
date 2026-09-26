@@ -52,8 +52,10 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Unread overview (Activity) | 0430, 0313 | ❌ | 🟡 | iPhone Activity tab matches web `/unread`: rooms with unread room or thread rows, newest first, with their unread messages and unread thread replies (Waddle MAM thread filter); pull to refresh; mark all read on the server, room and thread rows. iPad/Mac have no Activity surface yet |
 | Room create | 0045 | ❌ | ✅ | Baseline: `createChannel` was a stub returning nil |
 | Slash commands | 0050, 0004 | ❌ | ✅ | Built-ins (`/me`, `/shrug`, `/giphy`, `/away`, `/active`, `/dnd`) plus server extension commands discovered over XEP-0050 at session start; popover completion, inline single-field execution, XEP-0004 form sheet for multi-step commands |
-| Composer | 0394, 0372 | 🟡 | ✅ | Slack-style card: `+` menu (photo, file, GIF), `Aa` formatting bar (bold, italic, strikethrough, code, code block, quote as XEP-0394 markup; links inserted as bare URLs), emoji, `@` and `/` buttons, send |
-| Paste images / files / GIFs | 0363, 0447 | ❌ | ✅ | Pasted files, animated GIFs (bytes kept) and still images upload as attachments; text and rich-text selections paste as text. Mac: Cmd-V in the composer. iOS: the `+` menu's Paste (the system text field only pastes text) |
+| Composer | 0394, 0372 | 🟡 | ✅ | Slack-style card: `+` menu (photo, file, GIF), `Aa` formatting bar (bold, italic, strikethrough, code, code block, quote as XEP-0394 markup; links inserted as bare URLs), emoji, `@` and `/` buttons, send. Hardware keyboard on iPad and iPhone: Return sends, Shift/Option-Return adds a line, Tab accepts a suggestion, Escape cancels, as on Mac |
+| Paste images / files / GIFs | 0363, 0447 | ❌ | ✅ | Pasted files, animated GIFs (bytes kept) and still images upload as attachments; text and rich-text selections paste as text. Mac: Cmd-V in the composer, or the `+` menu's Paste. iOS: the field's own Paste (edit menu or Cmd-V), a `UITextView` so the paste is user-initiated and never shows the system paste prompt |
+| Drag and drop | 0363, 0447 | ❌ | ✅ | Files and pictures (image data from Photos or a browser, GIFs kept animated) dropped on the composer attach; a dashed "Drop to attach" target shows while dragging |
+| Message order ("social mode") | — | ❌ | ✅ | Settings › Message Order, like web's scroll direction: Chat (newest at bottom) or Social (composer on top, newest first, older history loads at the bottom, suggestions open downward). Threads follow it too, root last as on web |
 
 ## Presence & profile
 

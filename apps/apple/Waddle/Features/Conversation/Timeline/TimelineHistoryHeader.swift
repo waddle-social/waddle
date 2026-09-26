@@ -87,14 +87,25 @@ struct TimelineDaySeparator: View {
     }
 }
 
-/// Marks the first message that was unread when the screen opened.
+/// Marks where the messages that were unread when the screen opened
+/// begin: above the oldest of them in the chat order, below it in the
+/// social order.
 struct TimelineUnreadDivider: View {
+    /// Which side of the divider the unread rows are on.
+    enum Edge: Hashable {
+        case unreadBelow
+        case unreadAbove
+    }
+
+    let edge: Edge
+
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
             Rectangle()
                 .fill(Color.red.opacity(0.7))
                 .frame(height: 1)
-            Text("Unread")
+            Label("Unread", systemImage: edge == .unreadAbove ? "arrow.up" : "arrow.down")
+                .labelStyle(.titleAndIcon)
                 .font(.caption2.weight(.bold))
                 .textCase(.uppercase)
                 .foregroundStyle(Color.red)
@@ -102,19 +113,22 @@ struct TimelineUnreadDivider: View {
         }
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.vertical, Theme.Spacing.xs)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(Text("Unread messages below"))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(edge == .unreadAbove ? "Unread messages above" : "Unread messages below"))
     }
 }
 
-/// Floating button back to the newest message.
+/// Floating button back to the newest message, at the feed's newest
+/// edge.
 struct JumpToLatestPill: View {
     let unseenCount: Int
+    var edge: VerticalEdge = .bottom
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: "arrow.down")
+            Label(title, systemImage: edge == .top ? "arrow.up" : "arrow.down")
+                .contentTransition(.numericText(value: Double(unseenCount)))
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, Theme.Spacing.m + 2)
@@ -124,7 +138,7 @@ struct JumpToLatestPill: View {
         .buttonStyle(.plain)
         .waddleInteractiveGlass(in: Capsule())
         .shadow(color: Color.black.opacity(0.12), radius: 6, y: 2)
-        .padding(.bottom, Theme.Spacing.m)
+        .padding(edge == .top ? .top : .bottom, Theme.Spacing.m)
         .accessibilityHint(Text("Scrolls to the newest message"))
     }
 

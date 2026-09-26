@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The filled `+` menu: attach a photo, file or GIF, paste, or browse
-/// slash commands.
+/// The filled `+` menu: attach a photo, file or GIF, paste (Mac), or
+/// browse slash commands.
 struct ComposerPlusMenu: View {
     let isEditing: Bool
     let actions: ComposerActions
@@ -17,9 +17,14 @@ struct ComposerPlusMenu: View {
             Button(action: actions.pickGIF) {
                 Label("GIF", systemImage: "play.rectangle.on.rectangle")
             }
+            #if os(macOS)
+            // iOS pastes pictures and files straight into the field, from
+            // the edit menu or Cmd-V; reading the pasteboard from a menu
+            // item there would stop on the system's paste prompt.
             Button(action: actions.paste) {
                 Label("Paste", systemImage: "doc.on.clipboard")
             }
+            #endif
             Divider()
             Button(action: actions.startCommand) {
                 Label("Commands…", systemImage: "slash.circle")

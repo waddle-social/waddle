@@ -76,6 +76,17 @@ struct MessageDeliveryView: View {
     let item: TimelineItem
 
     var body: some View {
+        status
+            .sensoryFeedback(.error, trigger: isFailed) { _, failed in failed }
+    }
+
+    private var isFailed: Bool {
+        if case .some(.failed) = session.deliveries.state(of: item.id) { return true }
+        return false
+    }
+
+    @ViewBuilder
+    private var status: some View {
         switch session.deliveries.state(of: item.id) {
         case .some(.sending):
             HStack(spacing: Theme.Spacing.xs) {
