@@ -24,6 +24,15 @@ XEP-0198 resumption retains the original occupancy generation.
 Issue #1733, including its linked residual findings. Generation-specific token
 issuance and LiveKit participant retirement tracked by #1732 remain separate.
 
+Ownerless participant teardown requires a captured participant SID. An
+occupant generation or signaling session is checked against node-local SFU
+state; it cannot authorize identity-only removal on a different node after an
+unlocked claim-absence lookup. No-SID intents therefore remain owner-gated
+under the existing outbox retention policy. Owner-local occupant-fenced
+cleanup and SID-fenced ownerless recovery remain supported. The original
+ownerless/no-SID recommendation needs stronger portable authority before it
+can be enabled safely.
+
 The admission barrier covers active local sockets and mirrored remote
 incumbents. It is not a cluster-wide discovery mechanism for a previously
 detached generation on another node after its remote mirror disappeared.

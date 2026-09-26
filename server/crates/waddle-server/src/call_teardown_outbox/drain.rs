@@ -400,21 +400,17 @@ fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
 /// Targets allowed to execute on a node that does not own the room
 /// actor, provided the room has no claim at all. A completion-only
 /// retry needs no actor for its durable effect (the inbox summary).
-/// Participant/Room LiveKit teardowns can use a SID fence resolved against
-/// LiveKit's live state. A confirmed occupant-fenced departure also remains
-/// safe: the executor waits for reconciliation when local state is missing,
-/// then rejects replacement bindings and permits restored unbound participants.
+/// Participant teardown needs a captured participant SID on this path.
+/// Occupant/session bindings are node-local evidence: an unlocked claim-absence
+/// lookup cannot prevent another owner admitting the same LiveKit identity.
+/// Room teardown retains its room-SID fence resolved against LiveKit state.
 /// Muji presence effects require the owning room actor and stay gated.
 fn executes_without_room_owner(intent: &CallTeardownIntent) -> bool {
     match &intent.target {
         TeardownTarget::CallThreadEndRetry { .. } => true,
         TeardownTarget::Participant {
             participant_sid, ..
-        } => {
-            participant_sid.is_some()
-                || (intent.occupant.is_some()
-                    && intent.unbound_occupant == waddle_sfu::UnboundOccupantPolicy::TearDown)
-        }
+        } => participant_sid.is_some(),
         TeardownTarget::Room => intent.room_sid.is_some(),
         TeardownTarget::MujiPresenceClear { .. } | TeardownTarget::MujiRoomSweep { .. } => false,
     }
