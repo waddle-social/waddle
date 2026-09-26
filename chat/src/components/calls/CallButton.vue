@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneIncoming, Video } from "lucide-vue-next";
 import { $callState } from "@/lib/calls/call-store";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { dmCallActivityAction } from "@/lib/calls/call-activity-dock";
 import {
   hasKnownDmCallMedia,
@@ -149,49 +150,51 @@ async function handlePeerCallActivity(): Promise<void> {
     >
       {{ activityBannerLabel }}
     </span>
-    <button
-      v-if="showPeerCallActivity"
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="activityButtonDisabled
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-success-foreground hover:bg-success/10 hover:text-success-foreground'"
-      type="button"
-      :title="activityButtonLabel"
-      :aria-label="activityButtonLabel"
-      :disabled="activityButtonDisabled"
-      @click="handlePeerCallActivity"
-    >
-      <PhoneIncoming v-if="peerActivityAction === 'answer'" class="w-3.5 h-3.5" />
-      <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" class="w-3.5 h-3.5" />
-      <Phone v-else class="w-3.5 h-3.5" />
-    </button>
+    <AppTooltip v-if="showPeerCallActivity" :label="activityButtonLabel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="activityButtonDisabled
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-success-foreground hover:bg-success/10 hover:text-success-foreground'"
+        type="button"
+        :aria-label="activityButtonLabel"
+        :disabled="activityButtonDisabled"
+        @click="handlePeerCallActivity"
+      >
+        <PhoneIncoming v-if="peerActivityAction === 'answer'" class="w-3.5 h-3.5" />
+        <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" class="w-3.5 h-3.5" />
+        <Phone v-else class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
     <template v-else-if="showStartControls">
-    <button
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="inCall
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-      type="button"
-      :title="voiceLabel"
-      :aria-label="voiceLabel"
-      :disabled="inCall"
-      @click="startCall({ audio: true, video: false })"
-    >
-      <Phone class="w-3.5 h-3.5" />
-    </button>
-    <button
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="inCall
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-      type="button"
-      :title="videoLabel"
-      :aria-label="videoLabel"
-      :disabled="inCall"
-      @click="startCall({ audio: true, video: true })"
-    >
-      <Video class="w-3.5 h-3.5" />
-    </button>
+    <AppTooltip :label="voiceLabel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="inCall
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        type="button"
+        :aria-label="voiceLabel"
+        :disabled="inCall"
+        @click="startCall({ audio: true, video: false })"
+      >
+        <Phone class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
+    <AppTooltip :label="videoLabel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="inCall
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        type="button"
+        :aria-label="videoLabel"
+        :disabled="inCall"
+        @click="startCall({ audio: true, video: true })"
+      >
+        <Video class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
     </template>
   </div>
 </template>

@@ -145,8 +145,12 @@ describe("isSameCallEntry", () => {
 
 describe("tone classes", () => {
   test("each tone maps to its palette", () => {
-    expect(callEntryToneClass("warning")).toContain("border-warning/25");
-    expect(callEntryToneClass("primary")).toContain("border-primary/25");
-    expect(callEntryToneClass("success")).toContain("border-success/20");
+    // Only a live huddle carries the ember border and glow; ringing and
+    // syncing calls are outlined in their state colour without a glow.
+    expect(callEntryToneClass("warning")).toContain("border-warning/40");
+    expect(callEntryToneClass("warning")).not.toContain("glow");
+    expect(callEntryToneClass("primary")).toContain("border-primary/40");
+    expect(callEntryToneClass("success")).toContain("border-live");
+    expect(callEntryToneClass("success")).toContain("var(--glow-live)");
   });
 });

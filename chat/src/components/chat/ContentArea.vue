@@ -558,7 +558,13 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   return true;
 }
 
-defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage });
+/** Opens the message search panel (or focuses it when already open);
+ * the community header's Search button calls this through the shell. */
+function openSearch(): void {
+  showSearch.value = true;
+}
+
+defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage, openSearch });
 
 function presenceText(show?: string): string {
   if (show === "available") return "online";

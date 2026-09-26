@@ -38,14 +38,17 @@ import ChatAppModals from "@/components/chat/ChatAppModals.vue";
 import ChatMobileDrawers from "@/components/chat/ChatMobileDrawers.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import SupersededRecoveryBanner from "@/components/chat/SupersededRecoveryBanner.vue";
-import DmPanel from "@/components/chat/DmPanel.vue";
 import ExtensionRouteRail from "@/components/chat/ExtensionRouteRail.vue";
 import ExtensionRouteView from "@/components/chat/ExtensionRouteView.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
-import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import PinnedPanel from "@/components/chat/PinnedPanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
-import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
+import CommunityShell from "@/components/community/CommunityShell.vue";
+import { toast } from "@/ui/toaster";
+import RoomsPage from "@/components/community/pages/RoomsPage.vue";
+import MembersPage from "@/components/community/pages/MembersPage.vue";
+import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
+import AppAvatar from "@/components/ui/AppAvatar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
@@ -56,7 +59,9 @@ import type { MessageThreadEntry } from "@/channels/threads";
 import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp/jid";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
-import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
+import { isEventUpcomingOrOngoing, sortEventsUpcomingFirst, type CommunityEvent } from "@/lib/xmpp-client";
+import { eventBounds } from "@/lib/xmpp/event-calendar";
+import { presenceFromShow, type MemberCardModel } from "@/shell/controllers/use-people-rail";
 import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import { setManualActivity } from "@/presence/self-activity";
@@ -131,6 +136,7 @@ const {
   activeRoomAccessRequirement,
   activeErrorActionLabel,
   activeUploadProgress,
+  contentAreaRef,
   setContentAreaRef,
   getThreadLabel,
   refreshAppUpdate,
@@ -142,6 +148,8 @@ const {
   openDmList,
   openThreads,
   openUnread,
+  openRooms,
+  openMembers,
   openCommunitySurface,
   closeUserSettings,
   handleLogout,
@@ -192,7 +200,7 @@ const {
  * XEP-0272 Muji participant counts keyed by room JID. Derived from
  * the per-room nick list so the sidebar badge updates as occupants
  * join and leave the call without any extra round-trip. Computed
- * once here and threaded through TopicsPanel so per-row lookups
+ * once here and threaded through RoomsPage so per-row lookups
  * stay O(1).
  */
 const mucCallParticipantsStore = useStore($mucCallParticipants);
@@ -282,6 +290,97 @@ const threadPanelConversationActive = computed(() =>
   activeRightPanel.value === "thread" &&
   activeThreadStack.value.length >= 1
 );
+
+// ── Community shell glue ──────────────────────────────────────────────
+/** True when the page cascade lands on the conversation workspace
+ * (ContentArea + right-side panels) rather than a community page. */
+const conversationPageActive = computed(() =>
+  ui.activePage.value === "chat" && ui.activeCommunitySurface.value === null,
+);
+const canSearchMessages = computed(() =>
+  conversationPageActive.value && (!!activeRoomChannel.value || !!activeDmPeer.value),
+);
+/** ContentArea renders `actionError` inline (with Retry) inside the
+ * conversation workspace. Every other page has no renderer for it, so a
+ * failure raised there (group-DM creation, reactions from a page, …)
+ * surfaces as a danger toast instead of vanishing. */
+watch(() => ui.actionError.value, (message) => {
+  if (!message || conversationPageActive.value) return;
+  toast({ id: "shell-action-error", tone: "danger", title: message });
+});
+/** The header Search button opens the MessageSearchPanel that
+ * ContentArea owns, through its exposed handle. */
+function openMessageSearch() {
+  contentAreaRef.value?.openSearch();
+}
+function startHuddleFromHeader() {
+  const channel = activeRoomChannel.value;
+  const roomJid = activeChannelRoomJid.value;
+  if (channel && roomJid) {
+    const media: CallMedia = { audio: true, video: false };
+    if (channel.isGroupDm) joinGroupDmCallFromActivity(roomJid, media);
+    else joinChannelCallFromActivity(channel.id, roomJid, media);
+    return;
+  }
+  openRooms();
+}
+const hasCallContext = computed(() => {
+  const phase = callStateStore.value.phase;
+  if (phase !== "idle" && phase !== "ended") return true;
+  if (activeChannelCallCount.value > 0 || activeDmCallCount.value > 0) return true;
+  if (Object.values(callParticipantCounts.value).some((count) => count > 0)) return true;
+  return Object.keys(dmCallActivitiesStore.value).length > 0;
+});
+/** Home / Rooms / Members always get a context column; a conversation
+ * only when there is call activity to show in it. */
+const contextColumnVisible = computed(() => {
+  const page = ui.activePage.value;
+  if (page === "dashboard" || page === "rooms" || page === "members") return true;
+  return conversationPageActive.value && hasCallContext.value;
+});
+const nextEvent = computed<CommunityEvent | null>(() => {
+  const first = sortEventsUpcomingFirst(communityEvents.events.value)[0];
+  return first && isEventUpcomingOrOngoing(first) ? first : null;
+});
+const nextEventWhen = computed(() => {
+  const event = nextEvent.value;
+  const bounds = event ? eventBounds(event) : null;
+  if (!bounds) return "";
+  const date = new Date(bounds.startMs);
+  return bounds.isAllDay
+    ? date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+    : date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+});
+/** Contacts and DM peers who are available or busy right now, one per
+ * bare JID. Honest "around now" for the Home context column — nobody
+ * has a join date, so there is no "new this week". */
+const aroundNow = computed(() => {
+  const seen = new Set<string>();
+  const people: { jid: string; name: string; avatarUrl: string | null; presence: "online" | "dnd" }[] = [];
+  for (const conversation of dmConversations.conversations.value) {
+    if (conversation.mucPm) continue;
+    const presence = presenceFromShow(conversation.presenceShow);
+    if (presence !== "online" && presence !== "dnd") continue;
+    const jid = barePeerJid(conversation.peerJid).toLowerCase();
+    if (seen.has(jid)) continue;
+    seen.add(jid);
+    people.push({ jid, name: conversation.peerUsername || jid, avatarUrl: conversation.peerAvatarUrl ?? null, presence });
+  }
+  for (const contact of rosterContacts.contacts.value) {
+    const presence = presenceFromShow(contact.presenceShow);
+    if (presence !== "online" && presence !== "dnd") continue;
+    const jid = barePeerJid(contact.jid).toLowerCase();
+    if (seen.has(jid)) continue;
+    seen.add(jid);
+    people.push({ jid, name: contact.name || contact.username || jid, avatarUrl: null, presence });
+  }
+  return people;
+});
+/** Member picked on the Members page; MembersPage emits null on unmount. */
+const selectedMember = ref<MemberCardModel | null>(null);
+function onSelectMember(member: MemberCardModel | null) {
+  selectedMember.value = member;
+}
 
 function onCommunityRsvp(
   event: { uid: string },
@@ -573,6 +672,8 @@ const supersededOutsideConversation = computed(() => {
     || ui.activeCommunitySurface.value === "events"
     || ui.activePage.value === "threads"
     || ui.activePage.value === "unread"
+    || ui.activePage.value === "rooms"
+    || ui.activePage.value === "members"
     || ui.activePage.value === "settings"
   );
 });
@@ -632,13 +733,6 @@ async function recoverSupersededFromShell() {
       :call-participant-counts="callParticipantCounts"
       :call-participants="retainedMucCallParticipantsStore"
       :call-media-by-room="retainedMucCallMediaStore"
-      :managed-muc-domain="managedMucDomain"
-      :self-full-jid="selfFullJid"
-      :join-channel-call="joinChannelCallFromActivity"
-      :leave-channel-call="leaveRetainedChannelCall"
-      :answer-dm="answerDmFromActivity"
-      :reconnect-dm="reconnectDmFromDock"
-      :end-dm="endRecoveredDmFromActivity"
     />
     <CurrentCallPanel
       class="current-call-panel--mobile"
@@ -676,136 +770,19 @@ async function recoverSupersededFromShell() {
       @end-dm="endRecoveredDmFromActivity"
     />
 
-    <!-- Desktop layout -->
-    <div class="chat-desktop-shell relative">
-      <!-- Icon rail: waddle switcher -->
-      <div class="chat-desktop-rail-slot">
-        <WaddlesSidebar
-          :waddles="[]"
-          :active-space-id="null"
-          :active-sidebar-mode="ui.sidebarMode.value"
-          :active-page="ui.activePage.value"
-          :has-unread-dms="dmConversations.hasUnread.value"
-          :active-channel-call-count="activeChannelCallCount"
-          :active-dm-call-count="activeDmCallCount"
-          :session="connectionStore.session"
-          :notification-permission="notifications.permissionState.value"
-          :notifications-enabled="notifications.notificationsEnabled.value"
-          :message-sounds-enabled="notifications.messageSoundsEnabled.value"
-          :total-unread-count="channelUnread.totalUnreadCount.value"
-          :total-mention-count="channelUnread.totalMentionCount.value"
-          :web-commit-sha="version.webCommitSha.value"
-          :server-version="version.serverVersion.value"
-          @open-home="openHome"
-          @open-settings="openUserSettings"
-          @toggle-channels="openHome"
-          @toggle-dms="openDmList"
-          @logout="handleLogout"
-          @request-notifications="handleRequestNotifications"
-          @toggle-notifications="handleToggleNotifications"
-          @toggle-message-sounds="handleToggleMessageSounds"
-        />
-      </div>
-
-      <!-- Channel sidebar -->
-      <div class="chat-sidebar-slot">
-        <TopicsPanel
-          v-if="ui.sidebarMode.value === 'channels'"
-          :waddle="waddles.currentSpace.value"
-          :spaces="waddles.sortedSpaces.value"
-          :channels="waddles.sortedChannels.value"
-          :active-channel-id="waddles.activeChannelId.value"
-          :can-manage-channels="waddles.canManageChannels.value"
-          :can-manage-community="waddles.canManageCommunity.value"
-          :is-loading="waddles.isLoadingStructure.value"
-          :member-count="displayedMemberCount"
-          :member-state="displayedMemberState"
-          :active-channel-jids="messaging.activeChannels.value"
-          :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
-          :channel-unread-map="computedChannelUnreadMap"
-          :call-participant-counts="callParticipantCounts"
-          :call-participants="retainedMucCallParticipantsStore"
-          :call-media-by-room="retainedMucCallMediaStore"
-          :managed-muc-domain="managedMucDomain"
-          :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
-          :active-community-surface="ui.activeCommunitySurface.value"
-          :stories-active-count="stories.activeStories.value.length"
-          :upcoming-event-count="communityEvents.events.value.filter((event) => isEventUpcomingOrOngoing(event)).length"
-          :is-threads-active="ui.activePage.value === 'threads'"
-          :is-unread-active="ui.activePage.value === 'unread'"
-          :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
-          @select-channel="onSelectChannelFromSidebar"
-          @join-channel-call="joinChannelCallFromActivity"
-          @leave-channel-call="leaveRetainedChannelCall"
-          @select-thread="onSelectThread"
-          @select-community-surface="onSelectCommunitySurface"
-          @select-threads-view="openThreads"
-          @select-unread-view="openUnread"
-          @create-channel="openCreateChannelDialog()"
-          @create-channel-in-space="openCreateChannelDialog"
-          @open-settings="ui.showWaddleSettings.value = true"
-          @open-members="ui.showMembers.value = true"
-          @update-collapsed-group-ids="ui.collapsedSpaceGroupIds.value = $event"
-        />
-        <DmPanel
-          v-else
-          :conversations="dmConversations.conversations.value"
-          :group-dms="groupDmConversations"
-          :active-peer-jid="dmConversations.activePeerJid.value"
-          :active-group-dm-room-jid="ui.sidebarMode.value === 'dms' && !dmConversations.activePeerJid.value ? activeChannelRoomJid : null"
-          :thread-entries="activeDmThreadEntries"
-          :self-full-jid="selfFullJid"
-          hide-current-call
-          @answer-dm="answerDmFromActivity"
-          @select-dm="selectDm"
-          @select-group-dm="selectGroupDm"
-          @select-thread="openThread"
-          @reconnect-dm="reconnectDmFromDock"
-          @end-dm="endRecoveredDmFromActivity"
-          @new-dm="ui.showNewDm.value = true"
-          @new-group-dm="handleNewGroupDm"
-          @add-people-to-dm="handleAddPeopleToDm"
-        />
-        <CurrentCallPanel
-          :channels="waddles.sortedChannels.value"
-          :conversations="dmConversations.conversations.value"
-          :active-channel-id="waddles.activeChannelId.value"
-          :active-channel-room-jid="activeChannelRoomJid"
-          :active-peer-jid="dmConversations.activePeerJid.value"
-          @select-channel="onSelectChannelFromSidebar"
-          @select-dm="selectDm"
-        />
-        <CallActivityDock
-          :channels="waddles.sortedChannels.value"
-          :group-dms="groupDmConversations"
-          :conversations="dmConversations.conversations.value"
-          :active-channel-id="waddles.activeChannelId.value"
-          :active-channel-room-jid="activeChannelRoomJid"
-          :active-peer-jid="dmConversations.activePeerJid.value"
-          :sidebar-mode="ui.sidebarMode.value"
-          :active-channel-jids="messaging.activeChannels.value"
-          :call-participants="retainedMucCallParticipantsStore"
-          :call-media-by-room="retainedMucCallMediaStore"
-          :managed-muc-domain="managedMucDomain"
-          :self-full-jid="selfFullJid"
-          :show-dm-calls="ui.sidebarMode.value !== 'dms'"
-          hide-current-call
-          @select-channel="onSelectChannelFromSidebar"
-          @select-group-dm="selectGroupDm"
-          @join-channel-call="joinChannelCallFromActivity"
-          @join-group-dm-call="joinGroupDmCallFromActivity"
-          @leave-channel-call="leaveRetainedChannelCall"
-          @answer-dm="answerDmFromActivity"
-          @select-dm="selectDm"
-          @reconnect-dm="reconnectDmFromDock"
-          @end-dm="endRecoveredDmFromActivity"
-        />
-      </div>
-
-      <!-- Superseded recovery: `.chat-desktop-shell` is a horizontal flex
-           row, so an in-flow banner would become a side column squeezing the
-           active page. Pin it across the full shell width instead; its own
-           background/border keep it readable over any surface. -->
+    <!-- Community shell: header + people rail + page + context column -->
+    <CommunityShell
+      :controller="controller"
+      :hide-rail="ui.activePage.value === 'settings'"
+      :can-search="canSearchMessages"
+      :open-search="openMessageSearch"
+      :start-huddle="startHuddleFromHeader"
+      :call-participants="retainedMucCallParticipantsStore"
+    >
+      <!-- Superseded recovery: the shell's main column is a flex column,
+           so an in-flow banner would push the active page down. Pin it
+           across the full column width instead; its own background/border
+           keep it readable over any surface. -->
       <div
         v-if="supersededBannerVisible"
         class="absolute inset-x-0 top-0 z-40"
@@ -894,6 +871,29 @@ async function recoverSupersededFromShell() {
         :on-select-channel="(id: string) => selectChannel(id)"
         :on-select-thread="onSelectThread"
         :on-refresh-inbox="channelUnread.hydrateFromInbox"
+        @open-nav="ui.showMobileNav.value = true"
+      />
+      <RoomsPage
+        v-else-if="ui.activePage.value === 'rooms'"
+        :controller="controller"
+        :call-participant-counts="callParticipantCounts"
+        :call-participants="retainedMucCallParticipantsStore"
+        :call-media-by-room="retainedMucCallMediaStore"
+        :managed-muc-domain="managedMucDomain"
+        :self-full-jid="selfFullJid"
+        :dm-thread-entries="activeDmThreadEntries"
+        :join-channel-call="joinChannelCallFromActivity"
+        :leave-channel-call="leaveRetainedChannelCall"
+        :answer-dm="answerDmFromActivity"
+        :reconnect-dm="reconnectDmFromDock"
+        :end-dm="endRecoveredDmFromActivity"
+        @open-nav="ui.showMobileNav.value = true"
+      />
+      <MembersPage
+        v-else-if="ui.activePage.value === 'members'"
+        :controller="controller"
+        :call-participants="retainedMucCallParticipantsStore"
+        @select-member="onSelectMember"
         @open-nav="ui.showMobileNav.value = true"
       />
       <UserSettingsPage
@@ -1216,7 +1216,96 @@ async function recoverSupersededFromShell() {
           />
         </div>
       </template>
-    </div>
+
+      <!-- Context column: the live thing that matters on this page. -->
+      <template v-if="contextColumnVisible" #context>
+        <div class="context-column">
+          <template v-if="ui.activePage.value === 'dashboard'">
+            <div class="context-card">
+              <span class="community-kicker">Next event</span>
+              <template v-if="nextEvent">
+                <span class="context-card__title">{{ nextEvent.summary }}</span>
+                <span class="context-card__text">{{ nextEventWhen }}</span>
+                <button
+                  type="button"
+                  class="community-pill self-start"
+                  @click="openCommunitySurface('events')"
+                >
+                  See events
+                </button>
+              </template>
+              <span v-else class="context-card__text">Nothing scheduled yet. Events you post show up here.</span>
+            </div>
+            <div class="context-card">
+              <span class="community-kicker">Around now · {{ aroundNow.length }}</span>
+              <div v-if="aroundNow.length > 0" class="context-avatars">
+                <button
+                  v-for="person in aroundNow.slice(0, 12)"
+                  :key="person.jid"
+                  type="button"
+                  class="rounded-lg"
+                  :aria-label="`Message ${person.name}`"
+                  @click="handleOpenDm(person.jid)"
+                >
+                  <AppAvatar :name="person.name" :src="person.avatarUrl" :presence="person.presence" size="md" />
+                </button>
+              </div>
+              <span v-else class="context-card__text">Nobody around right now. Start a huddle and they will find you.</span>
+            </div>
+          </template>
+          <template v-else-if="ui.activePage.value === 'members'">
+            <MemberProfileCard
+              v-if="selectedMember"
+              :member="selectedMember"
+              :xmpp-client="xmppClient"
+              :is-self="!!connectionStore.session && barePeerJid(connectionStore.session.jid).toLowerCase() === selectedMember.jid"
+              @message="handleOpenDm"
+              @close="selectedMember = null"
+            />
+            <div v-else class="context-card">
+              <span class="community-kicker">Profile</span>
+              <span class="context-card__text">Pick a member to see their profile here.</span>
+            </div>
+          </template>
+          <template v-if="ui.activePage.value !== 'members'">
+            <CurrentCallPanel
+              :channels="waddles.sortedChannels.value"
+              :conversations="dmConversations.conversations.value"
+              :active-channel-id="waddles.activeChannelId.value"
+              :active-channel-room-jid="activeChannelRoomJid"
+              :active-peer-jid="dmConversations.activePeerJid.value"
+              @select-channel="onSelectChannelFromSidebar"
+              @select-dm="selectDm"
+            />
+            <CallActivityDock
+              :channels="waddles.sortedChannels.value"
+              :group-dms="groupDmConversations"
+              :conversations="dmConversations.conversations.value"
+              :active-channel-id="waddles.activeChannelId.value"
+              :active-channel-room-jid="activeChannelRoomJid"
+              :active-peer-jid="dmConversations.activePeerJid.value"
+              :sidebar-mode="ui.sidebarMode.value"
+              :active-channel-jids="messaging.activeChannels.value"
+              :call-participants="retainedMucCallParticipantsStore"
+              :call-media-by-room="retainedMucCallMediaStore"
+              :managed-muc-domain="managedMucDomain"
+              :self-full-jid="selfFullJid"
+              :show-dm-calls="ui.sidebarMode.value !== 'dms'"
+              hide-current-call
+              @select-channel="onSelectChannelFromSidebar"
+              @select-group-dm="selectGroupDm"
+              @join-channel-call="joinChannelCallFromActivity"
+              @join-group-dm-call="joinGroupDmCallFromActivity"
+              @leave-channel-call="leaveRetainedChannelCall"
+              @answer-dm="answerDmFromActivity"
+              @select-dm="selectDm"
+              @reconnect-dm="reconnectDmFromDock"
+              @end-dm="endRecoveredDmFromActivity"
+            />
+          </template>
+        </div>
+      </template>
+    </CommunityShell>
 
     <ChatAppModals :controller="controller" />
   </div>

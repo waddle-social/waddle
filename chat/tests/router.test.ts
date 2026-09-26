@@ -20,6 +20,11 @@ describe("matchLocation", () => {
     expect(matchLocation("/threads", "")).toEqual({ id: "threads" });
   });
 
+  test("parses /rooms and /members as community pages", () => {
+    expect(matchLocation("/rooms", "")).toEqual({ id: "rooms" });
+    expect(matchLocation("/members", "")).toEqual({ id: "members" });
+  });
+
   test("parses /feed, /stories, /events as community-surface routes", () => {
     expect(matchLocation("/feed", "")).toEqual({ id: "feed" });
     expect(matchLocation("/stories", "")).toEqual({ id: "stories" });
@@ -142,6 +147,11 @@ describe("buildHref", () => {
 
   test("threads", () => {
     expect(buildHref({ id: "threads" })).toBe("/threads");
+  });
+
+  test("rooms / members", () => {
+    expect(buildHref({ id: "rooms" })).toBe("/rooms");
+    expect(buildHref({ id: "members" })).toBe("/members");
   });
 
   test("feed / stories alias / events", () => {

@@ -81,25 +81,25 @@ Everything on the boards is backed by an existing store in `chat/src` (MUC, MAM,
 - **Accepted answer** on a discussion: a `urn:waddle:answer:0` fastening (XEP-0422) referencing the accepted message, set by the asker or a host.
 - **Kudos**: XEP-0444 reactions with a reserved emoji for messages; per-person totals as a PEP node or a server-side count.
 - **Roles** Host and Helper: MUC affiliations (owner, admin) plus hats (XEP-0317) for Helper.
-- **Huddle membership as presence**: "in a huddle in #kubernetes, speaking" needs the in-call activity that `presence/in-call-activity.ts` already tracks to be published, not just shown locally.
+- **Huddle room and speaker in presence**: the in-call activity is already published over XEP-0108 (`presence/activity-coordinator.ts`), but it carries no room and the receive side reduces to a boolean, so "in a huddle in #kubernetes, speaking" for people outside your own call needs the room in the published activity and a richer decode.
 - **Public numbers** for the join page (here right now, percent answered, median first reply): computed server side, served to `website/` without an XMPP session.
 
 ## 4. Stack: Panda CSS + Ark UI
 
-- `@ark-ui/vue` 5.39.x, Vue ≥ 3.5. Primitives across the boards: Tabs (primary navigation), SegmentGroup (filters), Menu, Popover, Tooltip, Dialog, Avatar, Toast, Field, Switch, Combobox (search and mentions), Collapsible, Splitter (huddle panel), Presence, Portal.
-- `@pandacss/dev` **1.12.1 stable**, not the v2 beta. The beta (2.0.0-beta.18) compiles this config with zero diagnostics but leaves every conditional semantic token unresolved in the output (`background: action.subtle` instead of `var(--colors-action-subtle)`), in `css()` and recipes alike, with or without custom conditions. The same config on 1.12.1 resolves everything. The authoring API is identical, so moving to v2 later is a version bump.
+- `@ark-ui/vue` 5.39.x, Vue ≥ 3.5. Primitives in use: Tooltip, Menu, Popover, Dialog (dialogs, drawers, confirms), Avatar, Toast. Candidates for later: Tabs, SegmentGroup, Combobox for the DM and member search dialogs (composer mentions and slash commands are Tiptap-driven and stay that way), Collapsible, Splitter.
+- `@pandacss/dev` **1.12.1 stable**, not the v2 beta, wired through `@pandacss/postcss` inside the Astro Vite config (there is no `@pandacss/vite` on the 1.x line). The beta (2.0.0-beta.18) compiles this config with zero diagnostics but leaves every conditional semantic token unresolved in the output (`background: action.subtle` instead of `var(--colors-action-subtle)`), in `css()` and recipes alike, with or without custom conditions. The same config on 1.12.1 resolves everything. The authoring API is identical, so moving to v2 later is a version bump.
 - Fonts: `@fontsource-variable/space-grotesk` added; Outfit and JetBrains Mono are already self-hosted.
-- Integration: `@pandacss/vite` next to `@tailwindcss/vite` in `chat/astro.config.mjs` during migration. Panda's cascade layers are renamed `pd_*` so they never merge with Tailwind's `base` and `utilities`. Drop the rename when Tailwind goes.
-- Theme: night is the default condition (`:root:not([data-theme=light])`), daylight is `[data-theme=light]`. `preferences/theme.ts` and `ThemeSwitcher.vue` keep working; only the default flips.
-- Knip: `styled-system/` is generated; ignore it with a one-line justification and gitignore it.
-- `scripts/generate-design-tokens.mjs` should read Panda's generated `tokens.json` and emit the Apple and Android colour sets, collapsing the four divergent teals into one source.
+- Integration: Panda runs as a PostCSS plugin registered in `chat/astro.config.mjs` (`vite.css.postcss`), next to `@tailwindcss/vite`, during migration. Panda's cascade layers are renamed `pd_*` so they never merge with Tailwind's `base` and `utilities`; because they are declared after Tailwind's, a recipe class beats a plain utility on the same element. Drop the rename when Tailwind goes.
+- Theme: night is the default (no attribute), daylight is `[data-theme=light]`. The three-way light/system/dark switch became a two-way Night/Daylight switch; a stored "system" preference reads as night.
+- Knip: `styled-system/` is generated and gitignored; it sits outside Knip's project globs, so no ignore entry is needed. CI runs `panda codegen` as its own task before typecheck, build and Knip.
+- `scripts/generate-design-tokens.mjs` still parses `--primary` from `tokens.css` (kept in oklch for that reason) and emits the Apple accent and website palette; both now derive from the Huddle teal. Android's hand-maintained accent is a follow-up.
 
 ## 5. Migration
 
 1. **Tokens.** Install Panda 1.12, land `panda.config.ts`, generate. Point the token codegen at Panda. Ship Space Grotesk. Nothing visible changes.
 2. **Primitives.** Add Ark. Replace tooltips (about 154 `title=` sites), menus (6), dialogs and drawers, toasts (new generic toaster; move the three call toasts onto it), tabs.
-3. **People rail and shell.** New `CommunityShell` next to `ChatReadyShell` behind a route flag: header navigation, people rail from `waddles/members.ts` and `presence/*`, context column. The existing timeline, composer and calls are reused inside Rooms.
-4. **Rooms.** Occupancy-sorted tiles over `waddles/directory.ts` and room presence; the huddle panel from `CurrentCallPanel` and `CallParticipantsPanel`.
+3. **People rail and shell.** `CommunityShell` replaces the rail-and-sidebar chrome outright (there is no feature-flag mechanism in the app): header navigation, people rail from `contacts/roster.ts`, `dms/conversations.ts`, the focused room's presence and the call stores, context column. The existing timeline, composer and calls are reused inside Rooms.
+4. **Rooms.** Activity-sorted tiles (call participants, mentions, unread, recency) over `waddles/directory.ts`; occupancy is only known for the focused room, so tiles never claim a head count they do not have. The huddle panel is `CurrentCallPanel` and `CallActivityDock` in the context column.
 5. **Discussions.** Forum view over MUC threads with accepted answer and kudos. The new wire objects land here.
 6. **Members, Events, public page.** Members and Events are re-skins of existing stores; the public page needs the numbers endpoint.
 7. **Remove Tailwind and the 11 CSS partials.** Delete the `pd_` prefixes and the `.chat-*` classes.

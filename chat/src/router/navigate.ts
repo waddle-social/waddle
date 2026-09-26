@@ -7,6 +7,8 @@ import { eventsRoute } from "./routes/events";
 import { feedRoute } from "./routes/feed";
 import { groupDmRoomRoute } from "./routes/group-dm-room";
 import { homeRoute } from "./routes/home";
+import { membersRoute } from "./routes/members";
+import { roomsRoute } from "./routes/rooms";
 import { settingsRoute } from "./routes/settings";
 import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
@@ -38,6 +40,10 @@ export function buildHref(match: RouteMatch): string {
       return threadsRoute.href();
     case "unread":
       return unreadRoute.href();
+    case "rooms":
+      return roomsRoute.href();
+    case "members":
+      return membersRoute.href();
     case "settings":
       return settingsRoute.href();
     case "admin":

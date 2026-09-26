@@ -173,17 +173,23 @@ export function callEntryParticipantInitial(label: string): string {
   return label.trim().charAt(0).toUpperCase() || "?";
 }
 
+/**
+ * Card border for a Home call card. A live huddle is the only thing on
+ * Home allowed to glow (ember); a ringing or syncing call is outlined in
+ * the amber/teal of its state without a glow.
+ */
 export function callEntryToneClass(tone: CallEntryVisualTone): string {
   switch (tone) {
     case "warning":
-      return "border-warning/25 bg-warning/10 hover:bg-warning/15";
+      return "border-warning/40";
     case "primary":
-      return "border-primary/25 bg-primary/8 hover:bg-primary/12";
+      return "border-primary/40";
     case "success":
-      return "border-success/20 bg-success/10 hover:bg-success/15";
+      return "border-live shadow-[0_0_28px_-10px_var(--glow-live)]";
   }
 }
 
+/** Kicker colour for a Home call card: ember for live, state colour otherwise. */
 export function callEntryAccentClass(tone: CallEntryVisualTone): string {
   switch (tone) {
     case "warning":
@@ -191,40 +197,7 @@ export function callEntryAccentClass(tone: CallEntryVisualTone): string {
     case "primary":
       return "text-primary";
     case "success":
-      return "text-success-foreground";
-  }
-}
-
-export function callEntryIconClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "border-warning/25 bg-background/90 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/90 text-primary";
-    case "success":
-      return "border-success/25 bg-background/90 text-success-foreground";
-  }
-}
-
-export function callEntryDotClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "bg-warning shadow-[0_0_6px_var(--warning)]";
-    case "primary":
-      return "bg-primary shadow-[0_0_6px_var(--primary)]";
-    case "success":
-      return "bg-success shadow-[0_0_6px_var(--success)]";
-  }
-}
-
-export function callEntryPillClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "border-warning/25 bg-background/70 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/70 text-primary";
-    case "success":
-      return "border-success/25 bg-background/70 text-success-foreground";
+      return "text-live-text";
   }
 }
 

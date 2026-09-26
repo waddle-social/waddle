@@ -889,10 +889,13 @@ onBeforeUnmount(() => {
   background: var(--background);
 }
 
+/* The immersive stage is a live surface: it keeps the night ground and
+ * ink in daylight too. Controls inside it keep their own tokens. */
 .call-expanded--immersive {
   position: fixed;
   z-index: 80;
-  background: #050507;
+  background: var(--night-ground);
+  color: var(--night-foreground);
 }
 
 .call-expanded--immersive .call-expanded__main {

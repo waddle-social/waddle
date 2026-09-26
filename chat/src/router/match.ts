@@ -7,6 +7,8 @@ import { eventsRoute } from "./routes/events";
 import { feedRoute } from "./routes/feed";
 import { groupDmRoomRoute } from "./routes/group-dm-room";
 import { homeRoute } from "./routes/home";
+import { membersRoute } from "./routes/members";
+import { roomsRoute } from "./routes/rooms";
 import { settingsRoute } from "./routes/settings";
 import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
@@ -30,6 +32,8 @@ const ORDER = [
   eventsRoute,
   threadsRoute,
   unreadRoute,
+  roomsRoute,
+  membersRoute,
   settingsRoute,
   adminRoute,
   homeRoute,

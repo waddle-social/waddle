@@ -12,112 +12,12 @@
   color: var(--foreground);
 }
 
-.chat-startup-rail {
-  display: flex;
-  width: var(--chat-rail-width);
-  flex-direction: column;
-  align-items: center;
-  border-right: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
-  background: var(--rail);
-  padding-block: var(--space-md);
-}
-
-.chat-startup-logo,
-.chat-startup-mobile-logo {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-lg);
-  background: color-mix(in oklab, var(--primary) 10%, transparent);
-}
-
-.chat-startup-logo {
-  width: var(--chat-rail-logo-size);
-  height: var(--chat-rail-logo-size);
-}
-
-/* Logo / Home button in the icon rail — clicking returns to the
- * dashboard. Idle is a quiet container; hover lifts the logo with the
- * established Aether glow. Active (you're on dashboard) gets a soft
- * primary-tinted plate so the user sees "you are here". */
-.chat-rail-home-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--chat-rail-logo-size);
-  height: var(--chat-rail-logo-size);
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-lg);
-  background: transparent;
-  cursor: pointer;
-  transition: background-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
-}
-
-.chat-rail-home-button:hover {
-  background: color-mix(in oklab, var(--primary) 10%, transparent);
-  transform: scale(1.04);
-}
-
-.chat-rail-home-button:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
-  outline-offset: 2px;
-}
-
-.chat-rail-home-button:active {
-  transform: scale(0.97);
-}
-
-.chat-rail-home-button--active {
-  background: color-mix(in oklab, var(--primary) 14%, transparent);
-  box-shadow: 0 0 12px -4px var(--glow-strong);
-}
-
-.chat-rail-home-button--active:hover {
-  background: color-mix(in oklab, var(--primary) 18%, transparent);
-}
-
-.chat-startup-logo img,
-.chat-startup-mobile-logo img {
-  display: block;
-  object-fit: contain;
-}
-
 .chat-startup-sidebar-loading {
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
   padding-block: 2.5rem;
   text-align: center;
-}
-
-.chat-startup-header {
-  display: flex;
-  min-height: var(--chat-header-height);
-  flex-shrink: 0;
-  align-items: center;
-  gap: var(--space-sm);
-  border-bottom: 1px solid var(--border);
-  padding-inline: var(--chat-content-inline);
-}
-
-.chat-startup-mobile-logo {
-  width: var(--control-lg);
-  height: var(--control-lg);
-}
-
-.chat-startup-main {
-  display: flex;
-  flex: 1 1 0%;
-  align-items: center;
-  justify-content: center;
-  padding-inline: var(--chat-content-inline);
-}
-
-@media (min-width: 64rem) {
-  .chat-startup-mobile-logo {
-    display: none;
-  }
 }
 
 .chat-mobile-header {
@@ -129,37 +29,6 @@
   min-height: 0;
   height: 100%;
   flex-direction: column;
-}
-
-.chat-desktop-shell {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex: 1 1 0%;
-  overflow: hidden;
-}
-
-.chat-desktop-rail-slot,
-.chat-sidebar-slot {
-  display: none;
-}
-
-@media (min-width: 64rem) {
-  .chat-desktop-rail-slot,
-  .chat-sidebar-slot {
-    display: flex;
-    min-height: 0;
-    flex-shrink: 0;
-  }
-
-  .chat-desktop-rail-slot {
-    flex-basis: var(--chat-rail-width);
-  }
-
-  .chat-sidebar-slot {
-    flex-basis: var(--chat-sidebar-width);
-    flex-direction: column;
-  }
 }
 
 .chat-workspace {
@@ -239,9 +108,9 @@
   height: var(--control-lg);
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--rail-foreground);
-  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+  transition: background-color 0.16s ease-out, color 0.16s ease-out, box-shadow 0.16s ease-out;
 }
 
 .extension-route-rail__button:hover,
@@ -250,83 +119,10 @@
   color: var(--primary);
 }
 
-/* Active rail button — armed treatment: bumped ring alpha (18% → 40%)
- * plus a primary-tinted glow halo so the active state speaks the
- * same brand-armed language as the iter-61 header toggle and
- * iter-54 bell badge. Distinguishes "this panel is currently open"
- * from "the cursor is hovering this button". */
+/* Active rail button — a 1px primary ring distinguishes "this panel is
+ * currently open" from "the cursor is hovering this button". */
 .extension-route-rail__button--active {
-  box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent),
-    0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .extension-route-rail__button--active {
-    box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent);
-  }
-}
-
-.chat-rail {
-  display: flex;
-  flex-shrink: 0;
-  background: var(--rail);
-}
-
-.chat-rail-vertical {
-  width: var(--chat-rail-width);
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-sm);
-  border-right: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
-  padding-block: var(--space-md);
-}
-
-.chat-rail-horizontal {
-  min-height: var(--chat-mobile-rail-height);
-  width: 100%;
-  flex-direction: row;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-xs) var(--space-sm);
-}
-
-.chat-rail-list {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex: 1 1 0%;
-  gap: var(--space-sm);
-  overflow: auto;
-}
-
-.chat-rail-list-vertical {
-  width: 100%;
-  flex-direction: column;
-  align-items: center;
-  padding-inline: var(--space-xs);
-}
-
-.chat-rail-list-horizontal {
-  flex-direction: row;
-  align-items: center;
-  padding-block: var(--space-2xs);
-}
-
-.chat-rail-actions {
-  display: flex;
-  flex-shrink: 0;
-  gap: var(--space-sm);
-}
-
-.chat-rail-actions-vertical {
-  flex-direction: column;
-  align-items: center;
-}
-
-.chat-rail-actions-horizontal {
-  flex-direction: row;
-  align-items: center;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent);
 }
 
 .chat-sidebar-pane {

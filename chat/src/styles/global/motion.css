@@ -10,11 +10,11 @@
   }
 }
 
-/* Scrollbar — ghost-thin, luminous */
+/* Scrollbar — thin, quiet */
 @layer base {
   /* Firefox / non-WebKit browsers: standardized scrollbar properties.
    * Without these, Firefox falls back to chunky platform scrollbars
-   * that visually conflict with the ghost-thin treatment Chrome/Safari
+   * that visually conflict with the thin treatment Chrome/Safari
    * users see via the ::-webkit-scrollbar block below. */
   * {
     scrollbar-width: thin;
@@ -31,14 +31,14 @@
   ::-webkit-scrollbar-thumb {
     background: color-mix(in oklab, var(--muted-foreground) 28%, transparent);
     border-radius: 99px;
-    transition: background-color 0.18s ease;
+    transition: background-color 0.16s ease-out;
   }
   ::-webkit-scrollbar-thumb:hover {
     background: color-mix(in oklab, var(--primary) 55%, transparent);
   }
 }
 
-/* Message entrance — fluid, spatial */
+/* Message entrance — 160ms ease-out for state, 400ms for a card entering. */
 @keyframes message-in {
   from {
     opacity: 0;
@@ -54,7 +54,7 @@
   animation: message-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* Typing dots — luminous pulse */
+/* Typing dots — someone is typing right now, so this may loop. */
 @keyframes typing-dot {
   0%, 60%, 100% { opacity: 0.2; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-3px); }
@@ -71,7 +71,8 @@
 .typing-dot:nth-child(2) { animation-delay: 0.2s; }
 .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-/* Activity pulse — soft glow.
+/* Live pulse — reserved for indicators of what is happening right now
+ * (a live summary dot, an active thread). Nothing else may loop.
  *
  * Compositor-only: animates `transform` + `opacity` so the GPU can
  * run this on its own thread without scheduling a paint per frame.
@@ -91,6 +92,17 @@
   animation: pulse-glow 2s ease-in-out infinite;
 }
 
+/* Speaking bars — three bars beside a name mean someone is speaking in
+ * a list. The `speaking` keyframe (scaleY 0.4 → 1 → 0.4) is emitted by
+ * Panda from panda.config.ts `theme.keyframes`; this class is the
+ * legacy-CSS hook for it. Stagger the delay per bar (0 / 120ms / 240ms)
+ * from the consuming component. The only motion the design allows to
+ * loop indefinitely besides typing. */
+.animate-speaking {
+  transform-origin: center bottom;
+  animation: speaking 1.2s ease-in-out infinite;
+}
+
 /* Fade in */
 @keyframes fade-in {
   from { opacity: 0; }
@@ -98,7 +110,7 @@
 }
 
 .animate-fade-in {
-  animation: fade-in 0.2s ease-out both;
+  animation: fade-in 0.16s ease-out both;
 }
 
 /* Slide up — spatial entrance */
@@ -111,81 +123,21 @@
   animation: slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* AppDrawer transition — the component wraps its content in
- * <Transition name="drawer"> but no CSS existed for `.drawer-*`
- * classes, so the drawer popped in/out instantly. Fade the
- * outer container (backdrop + panel) for the open/close motion,
- * and slide the inner panel by a few pixels so the drawer
- * arrives with directionality. The panel is targeted via its
- * dialog role since the same Transition wraps both backdrop
- * and panel. */
-.drawer-enter-active,
-.drawer-leave-active {
-  transition: opacity 0.22s ease;
-}
-
-.drawer-enter-from,
-.drawer-leave-to {
-  opacity: 0;
-}
-
-.drawer-enter-active [role="dialog"],
-.drawer-leave-active [role="dialog"] {
-  transition: transform 0.28s cubic-bezier(0.2, 1, 0.3, 1);
-  will-change: transform;
-}
-
-.drawer-enter-from [role="dialog"],
-.drawer-leave-to [role="dialog"] {
-  transform: translateY(0.5rem);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .drawer-enter-active [role="dialog"],
-  .drawer-leave-active [role="dialog"] {
-    transition: none;
-  }
-  .drawer-enter-from [role="dialog"],
-  .drawer-leave-to [role="dialog"] {
-    transform: none;
-  }
-}
-
-/* Glow ring for focus states */
-@keyframes focus-glow {
-  0%, 100% { box-shadow: 0 0 0 2px var(--glow), 0 0 12px 0 var(--glow); }
-  50% { box-shadow: 0 0 0 2px var(--glow-strong), 0 0 20px 4px var(--glow); }
-}
-
-/* Skeleton shimmer — luminous sweep across placeholder surfaces.
- *
- * Compositor-only: the sweeping gradient lives on a `::after` pseudo
- * that translates horizontally. The earlier shape animated
- * `background-position`, which is paint-only and re-rasterized the
- * gradient every frame on every visible skeleton. */
-@keyframes skeleton-shimmer {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
+/* Skeleton — a flat muted placeholder with a slow opacity breath so a
+ * loading surface still reads as "in progress". No gradient sweep, no
+ * glow: opacity is compositor-only and the loop stops under
+ * reduced motion. */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
 }
 
 .chat-skeleton {
   position: relative;
   overflow: hidden;
-  background-color: color-mix(in oklab, var(--muted) 65%, transparent);
+  background-color: var(--muted);
   border-radius: var(--radius-sm, 6px);
-}
-
-.chat-skeleton::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: linear-gradient(
-    100deg,
-    transparent 30%,
-    color-mix(in oklab, var(--primary) 14%, transparent) 50%,
-    transparent 70%
-  );
-  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  animation: skeleton-pulse 1.8s ease-in-out infinite;
 }
 
 /* Visible flash when a user jumps to a replied-to message via the reply chip. */
@@ -224,6 +176,10 @@
   .animate-pulse-glow {
     animation: none;
   }
+  .animate-speaking {
+    animation: none;
+    transform: scaleY(0.7);
+  }
   .typing-dot {
     animation: none;
     opacity: 0.6;
@@ -236,8 +192,7 @@
     animation: none;
     transition: none;
   }
-  .chat-skeleton::after {
+  .chat-skeleton {
     animation: none;
-    background-image: none;
   }
 }

@@ -655,7 +655,7 @@ watch(
                   </span>
                   <span
                     v-if="groupBadgeModel(group).notification?.kind === 'mentions'"
-                    class="chat-badge-glow--mention type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                    class="chat-badge-glow--mention type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-live text-live-foreground"
                     aria-hidden="true"
                   >{{ groupBadgeModel(group).notification?.count }}</span>
                   <span
@@ -773,7 +773,7 @@ watch(
                   </span>
                   <span
                     v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"
-                    class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                    class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-live text-live-foreground"
                     aria-hidden="true"
                   >{{ unread.mentions }}</span>
                   <span

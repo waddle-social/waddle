@@ -7,6 +7,10 @@
   color-scheme: dark;
   --background: light-dark(#f2f6f7, #0b1219);
   --foreground: light-dark(#0f1a24, #e8eef2);
+  /* Theme-independent night ground: live surfaces (the call stage,
+   * toasts) stay night-coloured in daylight. */
+  --night-ground: #0b1219;
+  --night-foreground: #e8eef2;
   --card: light-dark(#ffffff, #121f2b);
   --card-foreground: var(--foreground);
   --popover: light-dark(#ffffff, #121f2b);
@@ -103,14 +107,7 @@
   --leading-control: 1.35;
   --leading-body: 1.5;
   --leading-message: 1.5;
-  --chat-rail-width: 4rem;
-  --chat-mobile-rail-height: 3.5rem;
   --chat-mobile-header-height: 3.5rem;
-  --chat-rail-logo-size: 2.5rem;
-  --chat-rail-logo-mark-size: 2.25rem;
-  --chat-rail-divider-length: 1.75rem;
-  --chat-rail-indicator-length: 1.25rem;
-  --chat-rail-indicator-thickness: 0.1875rem;
   --chat-sidebar-width: clamp(16.5rem, 18vw, 19rem);
   --chat-header-height: 3.5rem;
   --chat-content-inline: clamp(1rem, 2vw, 2rem);

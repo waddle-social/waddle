@@ -49,7 +49,7 @@ watch(
       class="z-modal fixed inset-0 flex items-end sm:items-center justify-center animate-fade-in"
       role="presentation"
     >
-      <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="emit('close')" />
+      <div class="absolute inset-0 bg-background/60" @click="emit('close')" />
       <div
         role="dialog"
         aria-modal="true"

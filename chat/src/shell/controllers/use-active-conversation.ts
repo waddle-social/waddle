@@ -10,6 +10,7 @@ export type ContentAreaHandle = ComponentPublicInstance & {
   messagesContainer: HTMLDivElement | null;
   scrollToPinnedEdge: (mode: ScrollDirectionMode) => Promise<boolean>;
   scrollToMessage: (messageId: string) => Promise<void>;
+  openSearch: () => void;
 };
 
 interface ActiveConversationDeps {

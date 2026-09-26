@@ -2,6 +2,10 @@
 import { ref, computed, watch } from "vue";
 import { ChevronDown, ChevronUp } from "lucide-vue-next";
 import type { AuthProvider } from "@/lib/server-auth";
+import { button, kicker } from "styled-system/recipes";
+
+const signInButtonClass = button({ variant: "primary", size: "lg" });
+const kickerClass = kicker();
 
 const props = defineProps<{
   defaultServerUrl: string;
@@ -94,10 +98,10 @@ function handleLogin(providerId?: string) {
 <template>
   <div class="min-h-screen flex items-center justify-center p-6 bg-background">
     <div class="w-full max-w-sm animate-slide-up">
-      <div class="glass-panel rounded-lg border border-border shadow-2xl overflow-hidden">
+      <div class="overflow-hidden rounded-2xl border border-border bg-card">
         <!-- Header -->
         <div class="flex flex-col gap-4 px-6 pt-7 pb-5">
-          <div class="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center shadow-[0_0_20px_var(--glow)]">
+          <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-background">
             <img
               src="/waddle-logo.svg"
               alt="Waddle"
@@ -107,11 +111,11 @@ function handleLogin(providerId?: string) {
             />
           </div>
           <div class="chat-field-stack">
-            <h1 class="type-display-title">
+            <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">
               Sign in to Waddle
             </h1>
-            <p class="type-control text-muted-foreground">
-              Rooms, membership, and live chat.
+            <p class="text-sm text-muted-foreground">
+              Rooms, discussions, and the people in them.
             </p>
           </div>
         </div>
@@ -119,11 +123,11 @@ function handleLogin(providerId?: string) {
         <!-- Server selection -->
         <div class="flex flex-col gap-3 px-6 pb-5">
           <div class="flex items-center justify-between">
-            <label class="type-section-label text-muted-foreground">
+            <label :class="kickerClass">
               Homeserver
             </label>
             <button
-              class="type-caption text-muted-foreground hover:text-primary transition-colors duration-200 flex items-center gap-0.5"
+              class="flex items-center gap-0.5 text-[13px] font-semibold text-primary transition-colors hover:underline"
               type="button"
               aria-controls="login-server-options"
               :aria-expanded="showCustomServer"
@@ -134,15 +138,15 @@ function handleLogin(providerId?: string) {
             </button>
           </div>
 
-          <div v-if="!showCustomServer" class="type-control flex items-center gap-2">
-            <span class="w-2 h-2 rounded-full bg-success shadow-[0_0_6px_var(--success)]" />
+          <div v-if="!showCustomServer" class="type-control flex items-center gap-2 text-foreground">
+            <span class="h-2 w-2 rounded-full bg-success" aria-hidden="true" />
             {{ activeServerDisplay }}
           </div>
 
           <div v-else id="login-server-options" class="flex flex-col gap-2">
             <label
-              class="flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all duration-200"
-              :class="!useCustom ? 'bg-primary/5 border border-primary/20' : 'border border-border hover:bg-muted'"
+              class="flex cursor-pointer items-center gap-3 rounded-[10px] border p-3 transition-colors"
+              :class="!useCustom ? 'border-primary bg-background' : 'border-border hover:bg-muted'"
             >
               <input
                 type="radio"
@@ -152,12 +156,12 @@ function handleLogin(providerId?: string) {
                 @change="selectDefault"
               />
               <span class="type-control">{{ displayDefault }}</span>
-              <span class="type-meta ml-auto text-muted-foreground">default</span>
+              <span :class="[kickerClass, 'ml-auto']">default</span>
             </label>
 
             <label
-              class="flex flex-col gap-2 p-3 rounded-lg cursor-pointer transition-all duration-200"
-              :class="useCustom ? 'bg-primary/5 border border-primary/20' : 'border border-border hover:bg-muted'"
+              class="flex cursor-pointer flex-col gap-2 rounded-[10px] border p-3 transition-colors"
+              :class="useCustom ? 'border-primary bg-background' : 'border-border hover:bg-muted'"
             >
               <div class="flex items-center gap-3">
                 <input
@@ -186,20 +190,20 @@ function handleLogin(providerId?: string) {
         <div class="flex flex-col gap-2.5 px-6 pb-6">
           <p
             v-if="errorMessage"
-            class="type-control rounded-lg bg-destructive/10 px-4 py-2.5 text-destructive"
+            class="type-control rounded-[10px] border border-destructive/40 px-4 py-2.5 text-destructive"
             role="alert"
           >
             {{ errorMessage }}
           </p>
 
           <template v-if="providers.length > 1">
-            <label class="type-section-label text-muted-foreground">
+            <label :class="kickerClass">
               Sign in with
             </label>
             <button
               v-for="provider in providers"
               :key="provider.id"
-              class="chat-action-button chat-action-button--primary type-action w-full"
+              :class="[signInButtonClass, 'w-full']"
               type="button"
               @click="handleLogin(provider.id)"
             >
@@ -209,7 +213,7 @@ function handleLogin(providerId?: string) {
 
           <button
             v-else
-            class="chat-action-button chat-action-button--primary type-action w-full disabled:opacity-30"
+            :class="[signInButtonClass, 'w-full']"
             type="button"
             :disabled="providers.length === 0"
             @click="handleLogin(providers[0]?.id)"

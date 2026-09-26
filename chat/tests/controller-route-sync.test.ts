@@ -23,6 +23,14 @@ describe("applyMatchToShellState", () => {
     applyMatchToShellState(ui, { id: "unread" } as RouteMatch);
     expect(ui.activePage.value).toBe("unread");
 
+    applyMatchToShellState(ui, { id: "rooms" } as RouteMatch);
+    expect(ui.activePage.value).toBe("rooms");
+    expect(ui.activeCommunitySurface.value).toBeNull();
+
+    applyMatchToShellState(ui, { id: "members" } as RouteMatch);
+    expect(ui.activePage.value).toBe("members");
+    expect(ui.sidebarMode.value).toBe("channels");
+
     applyMatchToShellState(ui, { id: "home" } as RouteMatch);
     expect(ui.activePage.value).toBe("dashboard");
     expect(ui.sidebarMode.value).toBe("channels");
@@ -242,6 +250,25 @@ describe("useRouteSync applyRouteTarget", () => {
     expect(h.activeThreadStack.value).toEqual([]);
     expect(h.clearMessages).toHaveBeenCalledTimes(1);
     expect(h.clearPendingChannelRoomJidSelection).toHaveBeenCalledTimes(1);
+    h.scope.stop();
+  });
+
+  test.each(["rooms", "members"] as const)("%s route drops the conversation target without clearing the timeline", async (id) => {
+    const h = makeHarness();
+    h.activeChannelId.value = "general";
+    h.activeThreadStack.value = ["t1"];
+    h.activeRightPanel.value = "thread";
+    h.activeExtensionRouteKey.value = { channelId: "general", pluginId: "p", routeId: "r" };
+
+    await h.routeSync.applyRouteTarget({ id } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.ui.activePage.value).toBe(id);
+    expect(h.closeDm).toHaveBeenCalledTimes(1);
+    expect(h.activeChannelId.value).toBeNull();
+    expect(h.activeExtensionRouteKey.value).toBeNull();
+    expect(h.activeRightPanel.value).toBeNull();
+    expect(h.activeThreadStack.value).toEqual([]);
+    expect(h.clearMessages).not.toHaveBeenCalled();
     h.scope.stop();
   });
 

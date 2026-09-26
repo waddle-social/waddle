@@ -21,11 +21,11 @@
   justify-content: center;
   border-radius: var(--radius-sm);
   transition:
-    background-color 0.18s ease,
-    color 0.18s ease,
-    border-color 0.18s ease,
-    opacity 0.18s ease,
-    box-shadow 0.18s ease;
+    background-color 0.16s ease-out,
+    color 0.16s ease-out,
+    border-color 0.16s ease-out,
+    opacity 0.16s ease-out,
+    box-shadow 0.16s ease-out;
 }
 
 .chat-icon-button--sm {
@@ -55,29 +55,31 @@
   border-radius: var(--radius-sm);
   padding-inline: var(--space-sm);
   transition:
-    background-color 0.18s ease,
-    color 0.18s ease,
-    border-color 0.18s ease,
-    box-shadow 0.18s ease,
-    opacity 0.18s ease;
+    background-color 0.16s ease-out,
+    color 0.16s ease-out,
+    border-color 0.16s ease-out,
+    box-shadow 0.16s ease-out,
+    opacity 0.16s ease-out;
 }
 
 .chat-action-button--primary {
   background: var(--primary);
   color: var(--primary-foreground);
+  font-weight: 700;
 }
 
 .chat-action-button--primary:hover {
-  box-shadow: 0 0 14px var(--glow);
+  background: color-mix(in oklab, var(--primary) 88%, var(--foreground) 12%);
 }
 
 .chat-action-button--destructive {
   background: var(--destructive);
   color: var(--destructive-foreground);
+  font-weight: 700;
 }
 
 .chat-action-button--destructive:hover {
-  box-shadow: 0 0 14px color-mix(in oklab, var(--destructive) 30%, transparent);
+  background: color-mix(in oklab, var(--destructive) 88%, var(--foreground) 12%);
 }
 
 .chat-action-button--secondary {
@@ -96,14 +98,14 @@
 .chat-field-control {
   min-height: var(--control-md);
   width: 100%;
-  border: 1px solid color-mix(in oklab, var(--border) 85%, transparent);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--muted) 72%, transparent);
+  background: var(--background);
   padding-inline: var(--space-sm);
   transition:
-    background-color 0.18s ease,
-    border-color 0.18s ease,
-    box-shadow 0.18s ease;
+    background-color 0.16s ease-out,
+    border-color 0.16s ease-out,
+    box-shadow 0.16s ease-out;
 }
 
 .chat-field-control--search {
@@ -112,8 +114,8 @@
 
 .chat-field-control:focus {
   outline: none;
-  border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 20%, transparent);
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
 }
 
 .chat-textarea-control {
@@ -150,15 +152,15 @@
 
 .chat-section-card {
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--surface);
   padding: var(--space-md);
 }
 
 .chat-soft-card {
-  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
-  border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--muted) 42%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
 }
 
 .chat-list-stack {
@@ -171,26 +173,20 @@
   position: relative;
   border-radius: var(--radius-sm);
   transition:
-    background-color 0.18s ease,
-    color 0.18s ease,
-    border-color 0.18s ease;
+    background-color 0.16s ease-out,
+    color 0.16s ease-out,
+    border-color 0.16s ease-out;
 }
 
 /* Unread / mention / active emphasis for sidebar channel rows. A
- * left-edge accent rail picks up the same --primary / --destructive
- * language used by the composer armed glow, hover toolbar, and
- * reaction chips — so the sidebar reads as part of the same brand
- * system instead of a one-off "bold + dot" treatment. Three
- * intensities tell the user three states at a glance:
+ * left-edge accent rail tells the user three states at a glance:
  *
- *   - **Active** (the channel currently being viewed): 3 px rail,
- *     full height, strong glow — paired with the existing
- *     bg-sidebar-accent fill so the row has BOTH a rail and a
- *     surface signal ("you are here").
- *   - **Unread** (has unread messages but not active): 2 px rail
- *     with a quieter glow.
- *   - **Mention** (unread + you were @-mentioned): 2 px rail but
- *     in --destructive instead of --primary.
+ *   - **Active** (the channel currently being viewed): 3 px teal rail,
+ *     full height — paired with the existing bg-sidebar-accent fill so
+ *     the row has BOTH a rail and a surface signal ("you are here").
+ *   - **Unread** (has unread messages but not active): 2 px teal rail.
+ *   - **Mention** (unread + you were @-mentioned): a mention is a live
+ *     thing, so the rail is ember (--live) and may glow.
  *
  * The rail anchors to the row's rounded corner so it doesn't clip
  * on small radius. */
@@ -203,7 +199,6 @@
   width: 3px;
   border-radius: 0 1.5px 1.5px 0;
   background: var(--primary);
-  box-shadow: 0 0 12px var(--glow-strong);
   pointer-events: none;
 }
 
@@ -216,44 +211,45 @@
   width: 2px;
   border-radius: 0 1px 1px 0;
   background: var(--primary);
-  box-shadow: 0 0 8px var(--glow-strong);
   pointer-events: none;
 }
 
 .chat-list-row--mention::before {
-  background: var(--destructive);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--destructive) 38%, transparent);
+  background: var(--live);
+  box-shadow: 0 0 8px var(--glow-live);
 }
 
+/* Count badges. Unread counts are teal and flat; mention counts are
+ * ember on ink (a mention is live) with the live glow. The mention
+ * classes set colour so a Tailwind `bg-destructive` on the same element
+ * still wins where present, while bare consumers pick up the ember. */
 .chat-list-row--unread-badge {
-  box-shadow: 0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .chat-list-row--mention-badge {
-  box-shadow: 0 0 10px color-mix(in oklab, var(--destructive) 38%, transparent);
+  background: var(--live);
+  color: var(--live-foreground);
+  box-shadow: 0 0 10px var(--glow-live);
 }
 
-/* Generic count-badge glow halos — same alphas the sidebar
- * list-row badges use, but lifted to a non-sidebar-bound class so
- * other badge surfaces (the rail notification bell) can pull the
- * eye with the same brand language. */
+/* Generic count-badge treatments — the same language as the sidebar
+ * list-row badges, lifted to a non-sidebar-bound class so other badge
+ * surfaces (the rail notification bell) can use it. */
 .chat-badge-glow--primary {
-  box-shadow: 0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
+  box-shadow: none;
 }
 
 .chat-badge-glow--mention {
-  box-shadow: 0 0 10px color-mix(in oklab, var(--destructive) 38%, transparent);
+  background: var(--live);
+  color: var(--live-foreground);
+  box-shadow: 0 0 10px var(--glow-live);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-list-row--active::before,
-  .chat-list-row--unread::before,
-  .chat-list-row--mention::before {
-    box-shadow: none;
-  }
-  .chat-list-row--unread-badge,
+  .chat-list-row--mention::before,
   .chat-list-row--mention-badge,
-  .chat-badge-glow--primary,
   .chat-badge-glow--mention {
     box-shadow: none;
   }

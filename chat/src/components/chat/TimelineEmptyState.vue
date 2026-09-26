@@ -22,38 +22,32 @@ defineProps<{
     role="status"
     aria-live="polite"
   >
-    <div class="chat-empty-state__halo">
-      <span class="chat-empty-state__halo-glow" aria-hidden="true" />
-      <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--muted">
-        <LockKeyhole class="w-6 h-6 text-primary/70" aria-hidden="true" />
-      </span>
-    </div>
+    <span class="flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground" aria-hidden="true">
+      <LockKeyhole class="h-6 w-6" aria-hidden="true" />
+    </span>
     <div class="chat-field-stack">
-      <p class="type-empty-title">
+      <p class="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">
         You need access to this channel
       </p>
-      <p class="type-field text-muted-foreground chat-copy-measure">
+      <p class="chat-copy-measure text-sm text-muted-foreground">
         Ask a space admin for access, then open the channel again to retry.
       </p>
     </div>
   </div>
 
   <div v-else-if="variant === 'pick'" class="chat-empty-state">
-    <div class="chat-empty-state__halo">
-      <span class="chat-empty-state__halo-glow" aria-hidden="true" />
-      <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--muted">
-        <component :is="sidebarMode === 'dms' ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-6 h-6 text-primary/70" />
-      </span>
-    </div>
+    <span class="flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-card text-primary" aria-hidden="true">
+      <component :is="sidebarMode === 'dms' ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="h-6 w-6" aria-hidden="true" />
+    </span>
     <div class="chat-field-stack">
-      <p class="type-empty-title">
+      <p class="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">
         {{ sidebarMode === "dms"
           ? "Pick a conversation"
           : isForumChannel
             ? "Pick a forum"
             : "Pick a channel" }}
       </p>
-      <p class="type-field text-muted-foreground chat-copy-measure">
+      <p class="chat-copy-measure text-sm text-muted-foreground">
         {{ sidebarMode === "dms"
           ? "Open one from the sidebar to keep chatting."
           : isForumChannel
@@ -64,25 +58,21 @@ defineProps<{
   </div>
 
   <div v-else class="chat-empty-state">
-    <div v-if="!dmPeerUsername && !isForumChannel" class="chat-empty-state__mascot-wrap" aria-hidden="true">
-      <span class="chat-empty-state__mascot-halo" />
-      <img class="chat-empty-state__mascot" src="/waddle-logo.svg" alt="" />
+    <div v-if="!dmPeerUsername && !isForumChannel" class="flex h-28 w-28 items-center justify-center" aria-hidden="true">
+      <img class="h-full w-full" src="/waddle-logo.svg" alt="" />
     </div>
-    <div v-else class="chat-empty-state__halo">
-      <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
-      <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
-        <component :is="dmPeerUsername ? MessageCircle : MessagesSquare" class="w-6 h-6 text-primary" />
-      </span>
-    </div>
+    <span v-else class="flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-card text-primary" aria-hidden="true">
+      <component :is="dmPeerUsername ? MessageCircle : MessagesSquare" class="h-6 w-6" aria-hidden="true" />
+    </span>
     <div class="chat-field-stack">
-      <p class="type-empty-title">
+      <p class="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">
         {{ dmPeerUsername
           ? `Just you and @${dmPeerUsername}`
           : isForumChannel
             ? `Welcome to #${channelName}`
             : `It's quiet in #${channelName}` }}
       </p>
-      <p class="type-field text-muted-foreground chat-copy-measure">
+      <p class="chat-copy-measure text-sm text-muted-foreground">
         {{ isForumChannel
           ? "Start the first topic with a clear title so people can follow the thread."
           : dmPeerUsername

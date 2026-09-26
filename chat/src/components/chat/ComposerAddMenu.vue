@@ -1,11 +1,18 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Component } from "vue";
+import { computed, type Component } from "vue";
+import { Menu } from "@ark-ui/vue/menu";
+import type { MenuInteractOutsideEvent, MenuOpenChangeDetails, MenuSelectionDetails } from "@ark-ui/vue/menu";
 import { ImagePlay, Puzzle, Upload } from "lucide-vue-next";
+import { menuClasses, menuItemHintClass, menuItemIconClass, menuItemStackClass } from "@/ui/menu-classes";
 
 /**
  * The composer's `+` menu: everything that adds content other than typed
  * text. Mirrors Slack's attach menu — upload, GIF search, and the
  * extensions launcher when the surface supports it.
+ *
+ * An Ark Menu anchored to the composer's `+` button (`anchorEl`), which
+ * lives in `MessageComposer`; the composer mounts this component while
+ * the menu is open and unmounts it on `close`.
  */
 const props = defineProps<{
   anchorEl: HTMLElement | null;
@@ -31,84 +38,79 @@ const items = computed<AddMenuItem[]>(() => [
     : []),
 ]);
 
-const menuEl = ref<HTMLElement | null>(null);
+const positioning = computed(() => ({
+  placement: props.isTopPinned ? ("bottom-start" as const) : ("top-start" as const),
+  gutter: 8,
+  getAnchorRect: () => props.anchorEl?.getBoundingClientRect() ?? null,
+}));
 
-function itemButtons(): HTMLButtonElement[] {
-  return Array.from(menuEl.value?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") ?? []);
-}
+let closeReason: "escape" | "tab" | "outside" | null = null;
 
-function pick(id: AddMenuItem["id"]) {
+function onSelect(details: MenuSelectionDetails) {
+  const id = details.value as AddMenuItem["id"];
   if (id === "upload") emit("upload");
   else if (id === "gif") emit("gif");
-  else emit("extensions");
+  else if (id === "extensions") emit("extensions");
 }
 
-function moveFocus(delta: number) {
-  const buttons = itemButtons();
-  if (buttons.length === 0) return;
-  const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
-  const next = (current + delta + buttons.length) % buttons.length;
-  buttons[next]?.focus();
+function onEscapeKeyDown() {
+  closeReason = "escape";
 }
 
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === "ArrowDown") {
+function onInteractOutside(event: MenuInteractOutsideEvent) {
+  const target = event.detail.originalEvent.target as Node | null;
+  // The `+` button toggles the menu itself; don't close-then-reopen.
+  if (target && props.anchorEl?.contains(target)) {
     event.preventDefault();
-    moveFocus(1);
-  } else if (event.key === "ArrowUp") {
-    event.preventDefault();
-    moveFocus(-1);
-  } else if (event.key === "Escape") {
-    event.preventDefault();
-    event.stopPropagation();
-    emit("close", "escape");
-  } else if (event.key === "Tab") {
-    emit("close", "tab");
+    return;
   }
+  closeReason = "outside";
 }
 
-function onWindowPointer(event: PointerEvent) {
-  const target = event.target as Node | null;
-  if (!target) return;
-  if (menuEl.value?.contains(target)) return;
-  if (props.anchorEl?.contains(target)) return;
-  emit("close", "outside");
+function onOpenChange(details: MenuOpenChangeDetails) {
+  if (details.open) return;
+  const reason = closeReason ?? "tab";
+  closeReason = null;
+  emit("close", reason);
 }
 
-onMounted(() => {
-  window.addEventListener("pointerdown", onWindowPointer, true);
-  void nextTick(() => itemButtons()[0]?.focus());
-});
-
-onBeforeUnmount(() => {
-  window.removeEventListener("pointerdown", onWindowPointer, true);
-});
+function onContentKeydown(event: KeyboardEvent) {
+  if (event.key === "Tab") closeReason = "tab";
+}
 </script>
 
 <template>
-  <div
-    ref="menuEl"
-    role="menu"
-    aria-label="Add to message"
-    class="chat-composer-add-menu z-popover absolute left-0 bg-popover text-popover-foreground border border-border rounded-lg shadow-2xl animate-fade-in"
-    :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
-    @keydown="onKeydown"
+  <Menu.Root
+    :open="true"
+    :positioning="positioning"
+    default-highlighted-value="upload"
+    @select="onSelect"
+    @escape-key-down="onEscapeKeyDown"
+    @interact-outside="onInteractOutside"
+    @open-change="onOpenChange"
   >
-    <button
-      v-for="item in items"
-      :key="item.id"
-      type="button"
-      role="menuitem"
-      class="chat-composer-add-menu__item"
-      @click="pick(item.id)"
-    >
-      <span class="chat-composer-add-menu__icon" aria-hidden="true">
-        <component :is="item.icon" class="h-4 w-4" />
-      </span>
-      <span class="flex min-w-0 flex-col text-left">
-        <span class="type-control text-foreground">{{ item.label }}</span>
-        <span class="type-caption text-muted-foreground">{{ item.hint }}</span>
-      </span>
-    </button>
-  </div>
+    <Menu.Positioner>
+      <Menu.Content
+        :class="[menuClasses.content, 'chat-composer-add-menu animate-fade-in']"
+        aria-label="Add to message"
+        @keydown="onContentKeydown"
+      >
+        <Menu.Item
+          v-for="item in items"
+          :key="item.id"
+          :value="item.id"
+          :class="[menuClasses.item, 'chat-composer-add-menu__item']"
+          style="height: auto"
+        >
+          <span :class="menuItemIconClass" aria-hidden="true">
+            <component :is="item.icon" class="h-4 w-4" />
+          </span>
+          <span :class="menuItemStackClass">
+            <Menu.ItemText class="type-control text-foreground">{{ item.label }}</Menu.ItemText>
+            <span :class="menuItemHintClass">{{ item.hint }}</span>
+          </span>
+        </Menu.Item>
+      </Menu.Content>
+    </Menu.Positioner>
+  </Menu.Root>
 </template>

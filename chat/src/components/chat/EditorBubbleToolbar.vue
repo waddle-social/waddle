@@ -2,6 +2,7 @@
 import type { Editor } from "@tiptap/core";
 import { BubbleMenu } from "@tiptap/vue-3/menus";
 import { Link } from "lucide-vue-next";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { BLOCK_FORMAT_ACTIONS, INLINE_FORMAT_ACTIONS, type EditorFormatAction } from "./editor-format-actions";
 import { useEditorLinkInput } from "./composables/use-editor-link-input";
 
@@ -28,38 +29,38 @@ function runAction(action: EditorFormatAction) {
   <BubbleMenu :editor="editor">
     <div
       v-show="!suppressed"
-      class="z-popover flex items-center gap-1.5 p-1.5 glass-panel border border-border rounded-lg shadow-xl animate-fade-in"
+      class="z-popover flex items-center gap-1.5 p-1.5 bg-card border border-border rounded-lg shadow-[var(--shadow-floating)] animate-fade-in"
     >
-      <button
-        v-for="action in actions"
-        :key="action.name"
-        type="button"
-        class="type-control h-8 w-8 flex items-center justify-center rounded-md transition-all duration-150"
-        :class="
-          action.isActive(editor)
-            ? 'bg-primary/10 text-primary'
-            : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-        "
-        :title="action.title"
-        :aria-label="action.title"
-        @mousedown.prevent="runAction(action)"
-      >
-        <component :is="action.icon" class="w-3.5 h-3.5" aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        class="type-control h-8 w-8 flex items-center justify-center rounded-md transition-all duration-150"
-        :class="
-          editingLink || editor.isActive('link')
-            ? 'bg-primary/10 text-primary'
-            : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-        "
-        title="Link"
-        aria-label="Link"
-        @mousedown.prevent="openLinkInput"
-      >
-        <Link class="w-3.5 h-3.5" aria-hidden="true" />
-      </button>
+      <AppTooltip v-for="action in actions" :key="action.name" :label="action.title">
+        <button
+          type="button"
+          class="type-control h-8 w-8 flex items-center justify-center rounded-md transition-all duration-150"
+          :class="
+            action.isActive(editor)
+              ? 'bg-primary/10 text-primary'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+          "
+          :aria-label="action.title"
+          @mousedown.prevent="runAction(action)"
+        >
+          <component :is="action.icon" class="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
+      </AppTooltip>
+      <AppTooltip label="Link">
+        <button
+          type="button"
+          class="type-control h-8 w-8 flex items-center justify-center rounded-md transition-all duration-150"
+          :class="
+            editingLink || editor.isActive('link')
+              ? 'bg-primary/10 text-primary'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+          "
+          aria-label="Link"
+          @mousedown.prevent="openLinkInput"
+        >
+          <Link class="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
+      </AppTooltip>
       <input
         v-if="editingLink"
         ref="linkInputRef"
