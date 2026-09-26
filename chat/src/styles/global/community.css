@@ -700,7 +700,6 @@
   line-height: 1.25;
   color: var(--foreground);
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .room-card__preview {
