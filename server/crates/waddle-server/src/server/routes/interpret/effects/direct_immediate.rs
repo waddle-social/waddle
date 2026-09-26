@@ -19,14 +19,14 @@ pub(super) async fn execute_durable(effect: DurableDirectEffect, deps: &Deps<'_>
                 return EffectOutcome::Unavailable;
             };
             // CORRECTION (#1831 Phase 2): this arm previously carried a
-            // TODO to enqueue a `message_judgment_outbox` row here.
+            // TODO to enqueue an `extension_job_outbox` row here.
             // Verified wrong (see `room_immediate.rs`'s `ArchiveGroupchat`
             // arm for the fuller trace of why): the primary ingress commit
             // path's real archive write is
             // `ingress_uow::MamArchiveRepository::store`, called from
             // `ingress::durable::apply_durable` inside the same database
             // transaction the ingress commit uses, and the
-            // `message_judgment_outbox` enqueue now lives there instead —
+            // `extension_job_outbox` enqueue now lives there instead —
             // see that function's docs.
             EffectOutcome::Archive(storage.store_message(&archive, &message).await)
         }

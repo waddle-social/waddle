@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn waddle_id_for_room_jid(room_jid: &BareJid) -> WaddleId {
+pub(crate) fn waddle_id_for_room_jid(room_jid: &BareJid) -> WaddleId {
     let value = if parse_managed_room_jid(room_jid).is_some() {
         "space".to_string()
     } else {

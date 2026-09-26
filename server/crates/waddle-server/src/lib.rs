@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod dnd_projection;
 pub mod dnd_reader;
+pub mod extension_job_outbox;
 pub mod inbox;
 /// Transactional ingress authority and bounded post-commit execution.
 pub mod ingress;
@@ -18,7 +19,6 @@ pub mod ingress;
 pub mod ingress_substrate;
 /// Atomic PostgreSQL ingress transaction seam (#1654).
 pub mod ingress_uow;
-pub mod message_judgment_outbox;
 pub mod metrics;
 pub mod muc_destroy_completion_outbox;
 /// Postgres-backed durable MUC room ownership state (ADR-0017 Phase 3

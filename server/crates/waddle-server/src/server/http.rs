@@ -573,6 +573,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 async fn open_ingress_authority(
     config: &ServerConfig,
     state: &AppState,
+    extension_manager: Arc<waddle_extensions::ExtensionManager>,
 ) -> Result<Arc<crate::ingress::IngressAuthority>> {
     #[cfg(feature = "clustering")]
     let node_identity = if config.clustering.enabled {
@@ -595,68 +596,48 @@ async fn open_ingress_authority(
             node_identity,
         )
         .await?
-        // #1831 Phase 2: measurement-only, default-off (see
-        // `MessageJudgmentOutboxConfig`'s doc comment). Every test
-        // construction of `IngressAuthority`/`IngressUnitOfWork` keeps
-        // building a judgment-outbox-disabled instance unmodified; this
-        // production call site is the only place this flag turns on.
-        .with_judgment_outbox_enabled(config.message_judgment_outbox.enabled),
+        // Issue #1831 Phase B: the enqueue gate is grant-derived (asked
+        // live, per job, of this same extension manager) — never a static
+        // config flag. Every test construction of
+        // `IngressAuthority`/`IngressUnitOfWork` keeps building an
+        // authority with no extension manager, unmodified, so their
+        // transactions never enqueue.
+        .with_extension_manager(extension_manager),
     ))
 }
 
-/// Start the `message_judgment_outbox` drain worker when configured
-/// (#1831 Phase 2). A no-op — no table, no worker — when
-/// `ServerConfig::message_judgment_outbox.enabled` is `false`, keeping this
-/// measurement-only feature fully inert by default. Called once from
-/// startup, independent of [`open_ingress_authority`]/[`WebSocketState`]:
-/// per its own module docs, this outbox is fully decoupled from the
-/// synchronous ingress/delivery path.
-async fn spawn_message_judgment_outbox(config: &ServerConfig, state: &AppState) -> Result<()> {
-    if !config.message_judgment_outbox.enabled {
-        info!(
-            "Message judgment outbox disabled (WADDLE_MESSAGE_JUDGMENT_OUTBOX_ENABLED=false); \
-             no table, no worker"
-        );
-        return Ok(());
-    }
-    let db = state.db_pool.global().clone();
-    crate::message_judgment_outbox::initialize(&db)
+/// Bootstrap the `extension_job_outbox` table and start its drain worker
+/// (issue #1831 Phase B). Unlike the retired `message_judgment_outbox`,
+/// this is unconditional — the table always exists and the drain loop
+/// always runs; whether any row is ever enqueued into it is decided
+/// per-job-kind at enqueue time by the grant-derived gate (see
+/// `extension_job_outbox`'s module docs), not by a startup feature flag.
+/// Called once `websocket_state` exists (the drain worker's wire-emission
+/// sink needs the room registry and connection registry from it).
+async fn spawn_extension_job_outbox(
+    websocket_state: &Arc<crate::server::routes::websocket::WebSocketState>,
+) -> Result<()> {
+    let db = websocket_state.deps.app_state.db_pool.global().clone();
+    crate::extension_job_outbox::initialize(&db)
         .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to initialize message judgment outbox: {error}")
-        })?;
-    let api_key_path = config
-        .message_judgment_outbox
-        .api_key_path
-        .as_ref()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "WADDLE_MESSAGE_JUDGMENT_OUTBOX_ENABLED=true but no \
-                 WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH \
-                 (ServerConfig::from_env should have refused this already)"
-            )
-        })?;
-    let api_key = tokio::fs::read_to_string(api_key_path)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "failed to read WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH {}: {error}",
-                api_key_path.display()
-            )
-        })?;
-    let jev_client = crate::message_judgment_outbox::JevClient::new(
-        crate::message_judgment_outbox::JevClientConfig {
-            api_key: api_key.trim().to_string(),
-            ..Default::default()
-        },
-    )
-    .map_err(|error| anyhow::anyhow!("failed to configure Jev client: {error}"))?;
-    tokio::spawn(crate::message_judgment_outbox::run_drain_loop(
+        .map_err(|error| anyhow::anyhow!("failed to initialize extension job outbox: {error}"))?;
+    let runner = Arc::new(
+        crate::extension_job_outbox::ExtensionManagerDurableJobRunner::new(Arc::clone(
+            &websocket_state.deps.protocol.extension_manager,
+        )),
+    );
+    let sink = Arc::new(
+        crate::extension_job_outbox::WebSocketStateSafetyScoresWireSink::new(Arc::clone(
+            websocket_state,
+        )),
+    );
+    tokio::spawn(crate::extension_job_outbox::run_drain_loop(
         db,
-        Arc::new(jev_client),
-        std::time::Duration::from_secs(config.message_judgment_outbox.poll_interval_secs),
+        runner,
+        sink,
+        std::time::Duration::from_secs(5),
     ));
-    info!("Message judgment outbox enabled: drain loop started");
+    info!("Extension job outbox drain loop started");
     Ok(())
 }
 
@@ -1161,8 +1142,8 @@ async fn create_websocket_state(
     );
     let provider_dispatch_tasks =
         crate::server::routes::extension_webhooks::ProviderDispatchTracker::new();
-    let ingress = open_ingress_authority(server_config, &state).await?;
-    spawn_message_judgment_outbox(server_config, &state).await?;
+    let ingress =
+        open_ingress_authority(server_config, &state, Arc::clone(&extension_manager)).await?;
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
             app_state: state.clone(),
@@ -1301,6 +1282,7 @@ async fn create_websocket_state(
             warn!("skipping LiveKit ghost reconciliation: lineage attestation failed");
         }
     }
+    spawn_extension_job_outbox(&websocket_state).await?;
     Ok(websocket_state)
 }
 
@@ -1905,7 +1887,7 @@ mod admin_failure_observer_tests {
 }
 
 #[cfg(test)]
-mod message_judgment_outbox_startup_tests {
+mod extension_job_outbox_startup_tests {
     use super::*;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 
@@ -1934,73 +1916,37 @@ mod message_judgment_outbox_startup_tests {
             .is_ok()
     }
 
+    // A full `Arc<WebSocketState>` is heavy to build in a unit test; this
+    // suite exercises `extension_job_outbox::initialize` directly (the
+    // unconditional half `spawn_extension_job_outbox` also runs) rather
+    // than the drain-loop spawn itself, which
+    // `extension_job_outbox::drain`'s own tests already cover against a
+    // fake runner/sink.
     #[tokio::test]
-    async fn disabled_config_creates_no_table_and_returns_ok() {
+    async fn initialize_creates_the_table_unconditionally() {
         let state = test_app_state().await;
-        let config = ServerConfig::default();
-        assert!(!config.message_judgment_outbox.enabled);
+        assert!(!table_exists(&state, "extension_job_outbox").await);
 
-        spawn_message_judgment_outbox(&config, &state)
+        crate::extension_job_outbox::initialize(state.db_pool.global())
             .await
-            .expect("the disabled path must not error");
+            .expect("initialize must not error");
 
         assert!(
-            !table_exists(&state, "message_judgment_outbox").await,
-            "the table must not be created while the feature is disabled (default-off contract)"
+            table_exists(&state, "extension_job_outbox").await,
+            "the table must exist unconditionally at startup — whether any row is ever \
+             enqueued into it is a per-job-kind, grant-derived decision, not a startup flag"
         );
     }
 
     #[tokio::test]
-    async fn enabled_config_initializes_the_table_and_starts_the_drain_loop() {
+    async fn initialize_is_idempotent_across_repeated_startups() {
         let state = test_app_state().await;
-        let key_file = tempfile::NamedTempFile::new().expect("temp API key file");
-        std::fs::write(key_file.path(), "test-jev-api-key\n").expect("write API key file");
-        let config = ServerConfig {
-            message_judgment_outbox: crate::config::MessageJudgmentOutboxConfig {
-                enabled: true,
-                api_key_path: Some(key_file.path().to_path_buf()),
-                poll_interval_secs: 1,
-            },
-            ..ServerConfig::default()
-        };
-
-        spawn_message_judgment_outbox(&config, &state)
+        crate::extension_job_outbox::initialize(state.db_pool.global())
             .await
-            .expect("the enabled path must succeed given a readable key file");
-
-        assert!(
-            table_exists(&state, "message_judgment_outbox").await,
-            "enabling the feature must create its table at startup"
-        );
-        // The drain loop is spawned as a detached background task with no
-        // externally observable handle (matching every other outbox's
-        // janitor); its own module tests (`message_judgment_outbox::drain`)
-        // cover its polling/backoff behaviour. What this test can and does
-        // prove is the wiring up to that point: config -> schema -> a
-        // successfully constructed `JevClient` from the mounted key file,
-        // with no error swallowed along the way.
-    }
-
-    #[tokio::test]
-    async fn enabled_config_without_a_readable_key_file_fails_closed() {
-        let state = test_app_state().await;
-        let config = ServerConfig {
-            message_judgment_outbox: crate::config::MessageJudgmentOutboxConfig {
-                enabled: true,
-                api_key_path: Some(std::path::PathBuf::from(
-                    "/nonexistent/waddle-judgment-outbox-test-key",
-                )),
-                poll_interval_secs: 1,
-            },
-            ..ServerConfig::default()
-        };
-
-        let error = spawn_message_judgment_outbox(&config, &state)
+            .expect("first initialize");
+        crate::extension_job_outbox::initialize(state.db_pool.global())
             .await
-            .expect_err("an unreadable key file must fail startup, not silently disable");
-        assert!(error
-            .to_string()
-            .contains("WADDLE_MESSAGE_JUDGMENT_OUTBOX_API_KEY_PATH"));
+            .expect("second initialize (simulated restart) must not error");
     }
 }
 

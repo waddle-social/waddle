@@ -16,8 +16,8 @@ pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod error;
 mod extension_grants;
-mod judgment_outbox;
-pub(crate) use judgment_outbox::MessageJudgmentOutboxRepository;
+mod extension_job_outbox;
+pub(crate) use extension_job_outbox::ExtensionJobOutboxRepository;
 mod pending_receipts;
 mod recovery_receipts;
 pub(crate) use pending_receipts::PendingReceiptRepository;
@@ -43,7 +43,10 @@ pub use repositories::{ClaimRepository, RoomClaimFence, SmClaimFence};
 pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use waddle_extensions::ExtensionManager;
 
 use crate::{
     config::LineageConfig,
@@ -75,15 +78,23 @@ pub struct IngressUnitOfWork {
     /// construction so claim fences can only be minted against the real
     /// rotation gate, never a caller-constructed one.
     fencing: IngressFencing,
-    /// Operator control for the `is_question`/safety community-enrichment
-    /// judgment outbox (#1831 Phase 2). `false` (the default from every
+    /// Live handle to the extension manager, used by
+    /// `ingress::durable::apply_durable`'s `extension_job_outbox` enqueue
+    /// gate (issue #1831 Phase B). `None` (the default from every
     /// [`Self::open`]/[`Self::open_with_node_identity`] call) means every
     /// [`IngressUowTransaction`] this factory opens reports
-    /// [`IngressUowTransaction::judgment_outbox_enabled`] as `false`, so
-    /// `ingress::durable::apply_durable` never enqueues a row — this
-    /// measurement-only feature stays fully inert unless a caller
-    /// deliberately opts in via [`Self::with_judgment_outbox_enabled`].
-    judgment_outbox_enabled: bool,
+    /// [`IngressUowTransaction::extension_manager`] as `None`, so
+    /// `apply_durable` never enqueues a row — a caller must deliberately
+    /// opt in via [`Self::with_extension_manager`].
+    ///
+    /// Deliberately a *live* manager handle, not a cached boolean or job
+    /// -kind list snapshotted at construction time: whether a row should be
+    /// enqueued is decided per-call by asking this manager (via
+    /// `ExtensionManager::durable_job_grant_holder`) whether some
+    /// currently-loaded extension currently holds the grant for the job
+    /// kind in question — an operator revoking that grant takes effect on
+    /// the very next message, with no separate flag to also flip.
+    extension_manager: Option<Arc<ExtensionManager>>,
 }
 
 impl IngressUnitOfWork {
@@ -96,7 +107,7 @@ impl IngressUnitOfWork {
             db,
             lineage,
             fencing: IngressFencing::SingleNode,
-            judgment_outbox_enabled: false,
+            extension_manager: None,
         })
     }
 
@@ -105,25 +116,26 @@ impl IngressUnitOfWork {
         &self.fencing
     }
 
-    /// Opt this factory's transactions into enqueueing a
-    /// `message_judgment_outbox` row alongside every freshly archived
-    /// direct/groupchat message (#1831 Phase 2). Additive and narrow by
-    /// design: every existing `open`/`open_with_node_identity` call site
-    /// keeps building a disabled unit of work unless it explicitly chains
-    /// this or [`Self::set_judgment_outbox_enabled`].
-    pub fn with_judgment_outbox_enabled(mut self, enabled: bool) -> Self {
-        self.set_judgment_outbox_enabled(enabled);
+    /// Opt this factory's transactions into enqueueing an
+    /// `extension_job_outbox` row alongside every freshly archived
+    /// direct/groupchat message, gated live on `manager` at enqueue time
+    /// (issue #1831 Phase B). Additive and narrow by design: every existing
+    /// `open`/`open_with_node_identity` call site keeps building a unit of
+    /// work with no extension manager unless it explicitly chains this or
+    /// [`Self::set_extension_manager`].
+    pub fn with_extension_manager(mut self, manager: Arc<ExtensionManager>) -> Self {
+        self.set_extension_manager(manager);
         self
     }
 
-    /// In-place form of [`Self::with_judgment_outbox_enabled`]. Production
-    /// wiring uses this from
-    /// [`crate::ingress::IngressAuthority::with_judgment_outbox_enabled`],
-    /// which cannot move `self.uow` out of `self` — `IngressAuthority`
-    /// implements `Drop`, and Rust forbids partially moving a field out of
-    /// any type that does, even to immediately move it back in.
-    pub fn set_judgment_outbox_enabled(&mut self, enabled: bool) {
-        self.judgment_outbox_enabled = enabled;
+    /// In-place form of [`Self::with_extension_manager`]. Production wiring
+    /// uses this from
+    /// [`crate::ingress::IngressAuthority::with_extension_manager`], which
+    /// cannot move `self.uow` out of `self` — `IngressAuthority` implements
+    /// `Drop`, and Rust forbids partially moving a field out of any type
+    /// that does, even to immediately move it back in.
+    pub fn set_extension_manager(&mut self, manager: Arc<ExtensionManager>) {
+        self.extension_manager = Some(manager);
     }
 
     /// Open with the server's canonical [`SharedNodeIdentity`] bound, so
@@ -232,7 +244,7 @@ impl IngressUnitOfWork {
             fencing: self.fencing.clone(),
             #[cfg(feature = "clustering")]
             authority_guards: Vec::new(),
-            judgment_outbox_enabled: self.judgment_outbox_enabled,
+            extension_manager: self.extension_manager.clone(),
         })
     }
 }
@@ -278,10 +290,9 @@ pub struct IngressUowTransaction<'a> {
     /// commits or rolls back, never between a fenced write and its commit.
     #[cfg(feature = "clustering")]
     authority_guards: Vec<CurrentNodeIdentityGuard>,
-    /// Snapshot of [`IngressUnitOfWork::with_judgment_outbox_enabled`] taken
-    /// when this transaction opened. See
-    /// [`Self::judgment_outbox_enabled`].
-    judgment_outbox_enabled: bool,
+    /// Snapshot of [`IngressUnitOfWork::with_extension_manager`] taken when
+    /// this transaction opened. See [`Self::extension_manager`].
+    extension_manager: Option<Arc<ExtensionManager>>,
 }
 
 impl<'a> IngressUowTransaction<'a> {
@@ -300,12 +311,13 @@ impl<'a> IngressUowTransaction<'a> {
         &self.lineage
     }
 
-    /// Whether `ingress::durable::apply_durable` may enqueue a
-    /// `message_judgment_outbox` row inside this same transaction (#1831
-    /// Phase 2). `false` unless the owning [`IngressUnitOfWork`] was built
-    /// with [`IngressUnitOfWork::with_judgment_outbox_enabled`].
-    pub(crate) fn judgment_outbox_enabled(&self) -> bool {
-        self.judgment_outbox_enabled
+    /// The live extension manager `ingress::durable::apply_durable` asks
+    /// whether to enqueue an `extension_job_outbox` row inside this same
+    /// transaction (issue #1831 Phase B). `None` unless the owning
+    /// [`IngressUnitOfWork`] was built with
+    /// [`IngressUnitOfWork::with_extension_manager`].
+    pub(crate) fn extension_manager(&self) -> Option<&Arc<ExtensionManager>> {
+        self.extension_manager.as_ref()
     }
 
     /// Commit all ingress and related durable writes atomically.
@@ -371,7 +383,7 @@ impl<'a> IngressUowTransaction<'a> {
 mod tests;
 
 #[cfg(test)]
-mod judgment_outbox_tests;
+mod extension_job_outbox_tests;
 
 #[cfg(test)]
 mod lock_timeout_tests;

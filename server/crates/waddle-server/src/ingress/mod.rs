@@ -121,17 +121,22 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
-    /// Opt this authority's ingress transactions into enqueueing a
-    /// `message_judgment_outbox` row alongside every freshly archived
+    /// Opt this authority's ingress transactions into enqueueing an
+    /// `extension_job_outbox` row alongside every freshly archived
     /// direct/groupchat message, in the same transaction that commits the
-    /// archive write (#1831 Phase 2). Chain this onto [`Self::new`] at the
-    /// single production construction site
-    /// (`server::http::open_ingress_authority`), passing
-    /// `ServerConfig::message_judgment_outbox.enabled`; every other
-    /// (test) caller of [`Self::new`] keeps building an authority whose
-    /// transactions never enqueue, unmodified.
-    pub fn with_judgment_outbox_enabled(mut self, enabled: bool) -> Self {
-        self.uow.set_judgment_outbox_enabled(enabled);
+    /// archive write (issue #1831 Phase B). Chain this onto [`Self::new`]
+    /// at the single production construction site
+    /// (`server::http::open_ingress_authority`), passing the same
+    /// `Arc<ExtensionManager>` that becomes part of `WebSocketState`; every
+    /// other (test) caller of [`Self::new`] keeps building an authority
+    /// whose transactions never enqueue, unmodified. See
+    /// `IngressUnitOfWork::with_extension_manager`'s doc comment for why
+    /// this is a live manager handle, not a cached boolean.
+    pub fn with_extension_manager(
+        mut self,
+        manager: Arc<waddle_extensions::ExtensionManager>,
+    ) -> Self {
+        self.uow.set_extension_manager(manager);
         self
     }
 
@@ -1249,6 +1254,6 @@ mod offline_hardening_tests;
 mod muc_occupant_progress_tests;
 
 #[cfg(test)]
-mod judgment_outbox_gating_tests;
+mod extension_job_outbox_gating_tests;
 
 mod room_canonical;

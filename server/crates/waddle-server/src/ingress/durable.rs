@@ -3,9 +3,10 @@ use super::decision::EffectReceiptKey;
 use crate::{
     ingress_substrate::EffectReceiptKind,
     ingress_uow::{
-        EffectReceiptRepository, InboxRepository, IngressUowError, IngressUowTransaction,
-        MamArchiveRepository,
+        EffectReceiptRepository, ExtensionJobOutboxRepository, InboxRepository, IngressUowError,
+        IngressUowTransaction, MamArchiveRepository,
     },
+    server::routes::interpret::archive_lookup::waddle_id_for_room_jid,
     server::routes::interpret::effects::{
         direct::DurableDirectEffect, room::DurableRoomEffect, AppliedDurableEffects, DurableEffect,
         DurableOutcome, Effect, ExternalEffect, IngressPlan, PlanEffectDependency, ProjectionRef,
@@ -144,17 +145,26 @@ pub(super) async fn apply_durable(
                     &outcome,
                 )
                 .await?;
-                // #1831 Phase 2: enqueue a `message_judgment_outbox` row in
-                // this exact transaction, right after the archive write it
-                // accompanies (and before this same transaction commits),
-                // so the two can never diverge — a crash or error between
-                // them rolls both back, and a retried/replayed commit sees
+                // Issue #1831 Phase B: enqueue an `extension_job_outbox`
+                // row in this exact transaction, right after the archive
+                // write it accompanies (and before this same transaction
+                // commits), so the two can never diverge — a crash or
+                // error between them rolls both back, and a
+                // retried/replayed commit sees
                 // `MamTxStoreOutcome::Existing`/`Repaired` (not `Inserted`)
                 // and correctly skips re-enqueueing.
                 //
-                // Gated on `tx.judgment_outbox_enabled()`
-                // (`MessageJudgmentOutboxConfig::enabled`, default false):
-                // fully inert unless an operator opts in.
+                // Grant-derived enqueue gate: `tx.extension_manager()` is
+                // asked, live, whether some currently-loaded extension
+                // holds the `durable-job` grant for
+                // `extension_job_outbox::MESSAGE_JUDGE_JOB_KIND` — never a
+                // static server config flag. An operator revoking that
+                // grant stops new enqueues on the very next message, with
+                // no separate flag to also flip (see
+                // `IngressUnitOfWork::with_extension_manager`'s doc
+                // comment). No extension manager configured at all (every
+                // test construction of `IngressAuthority` unless it opts
+                // in) behaves like "nothing granted": never enqueues.
                 //
                 // Correctness notes:
                 // - Only `Inserted` (a genuinely new archive row) enqueues;
@@ -169,26 +179,11 @@ pub(super) async fn apply_durable(
                 //   test (`direct_archive.rs`'s `sender_archive`). A
                 //   groupchat message has exactly one room-owned archive,
                 //   so no such restriction applies there.
-                // - The row is grouped by `archive` itself (a real
-                //   `jid::BareJid` — the room's bare JID for groupchat, the
-                //   local mailbox owner's bare JID for direct), not by
-                //   `waddle_xmpp::muc::durable::WaddleId`: that type names a
-                //   different, tenant-scoped identifier that lives only on
-                //   the in-memory `RoomActor` (`self.room.waddle_id`) —
-                //   unreachable from this DB-only transactional boundary —
-                //   and clustering's durable `clustering_muc_rooms` table
-                //   that also carries a `WaddleId` does not exist in a
-                //   single-node deployment. This row is analysis-only (never
-                //   wire-visible, no foreign key); using the archive's own
-                //   JID is finer-grained than a per-tenant scope would be,
-                //   available here with no extra lookup, and keeps a real
-                //   JID a typed `BareJid` rather than smuggling it through
-                //   an unrelated identifier type.
                 // - An empty or whitespace-only `<body/>` (e.g. a `<store/>`
                 //   hint on a reaction/retraction/correction stanza XMPP
                 //   allows to carry one) is skipped: it would still cost a
-                //   real Jev call for no useful signal.
-                if tx.judgment_outbox_enabled() {
+                //   real judge call for no useful signal.
+                if let Some(manager) = tx.extension_manager() {
                     if let MamTxStoreOutcome::Inserted { stanza_id, .. } = &outcome {
                         let is_own_archive_copy = match effect {
                             DurableEffect::Direct(_) => &message.from.to_bare() == archive,
@@ -197,16 +192,36 @@ pub(super) async fn apply_durable(
                         if is_own_archive_copy {
                             if let Some(body) = message.body.clone() {
                                 if !body.trim().is_empty() {
-                                    crate::ingress_uow::MessageJudgmentOutboxRepository::enqueue_in_tx(
-                                        tx,
-                                        crate::message_judgment_outbox::PendingJudgmentInput {
-                                            archive: archive.clone(),
-                                            stanza_id: stanza_id.clone(),
-                                            body,
-                                            now_ms: crate::time::now_ms(),
-                                        },
-                                    )
-                                    .await?;
+                                    if let Ok(job_kind) = waddle_extensions::JobKind::new(
+                                        crate::extension_job_outbox::MESSAGE_JUDGE_JOB_KIND,
+                                    ) {
+                                        if let Some(extension_id) =
+                                            manager.durable_job_grant_holder(&job_kind)
+                                        {
+                                            let room = match effect {
+                                                DurableEffect::Room(_) => {
+                                                    waddle_extensions::RoomJid::new(
+                                                        archive.to_string(),
+                                                    )
+                                                    .ok()
+                                                }
+                                                DurableEffect::Direct(_) => None,
+                                            };
+                                            ExtensionJobOutboxRepository::enqueue_in_tx(
+                                                tx,
+                                                crate::extension_job_outbox::PendingJobInput {
+                                                    extension_id,
+                                                    job_kind,
+                                                    waddle_id: waddle_id_for_room_jid(archive),
+                                                    room,
+                                                    target_stanza_id: stanza_id.clone(),
+                                                    body,
+                                                    now_ms: crate::time::now_ms(),
+                                                },
+                                            )
+                                            .await?;
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -33,7 +33,7 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
             // claimed this `execute_durable` arm was "the single place a
             // groupchat archive write is ever really performed," including
             // for the primary ingress commit path, and planned to enqueue
-            // `message_judgment_outbox` rows here. Two independent
+            // `extension_job_outbox` rows here. Two independent
             // adversarial reviews traced the real call graph and found
             // that claim false: `ingress::execute::execute_effects` (the
             // post-commit "Phase C" replay `commit_submission` actually
@@ -44,7 +44,7 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
             // that path is `ingress_uow::MamArchiveRepository::store` /
             // `store_fenced`, called from `ingress::durable::apply_durable`
             // inside the same database transaction the ingress commit
-            // uses; the `message_judgment_outbox` enqueue now lives there
+            // uses; the `extension_job_outbox` enqueue now lives there
             // too, in the same transaction — see that function's docs.
             //
             // This arm instead serves callers that construct and execute a

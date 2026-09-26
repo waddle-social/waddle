@@ -142,7 +142,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use crate::server::routes::websocket::WebSocketState;
 
 mod archive_groupchat_event;
-mod archive_lookup;
+pub(crate) mod archive_lookup;
 mod bot;
 pub(crate) mod carbons;
 mod deps;
