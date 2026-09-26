@@ -1,16 +1,15 @@
 <script setup lang="ts">
 /**
- * Prototype: an Ark UI Menu styled with the `menu` slot recipe from
- * docs/design/web-redesign/panda.config.ts. Shows the intended pattern for
+ * Prototype: an Ark UI Menu styled with the `menu` and `avatar` slot recipes
+ * from docs/design/web-redesign/panda.config.ts. This is the pattern for
  * replacing the six hand-rolled `role="menu"` implementations in chat/src.
  *
  * Imports point at the paths they would have once Panda is installed in the
  * chat workspace (`styled-system/` is Panda's generated output directory).
  */
 import { Menu } from "@ark-ui/vue/menu";
-import { MessageCircle, Mic, ShieldAlert, UserRound } from "lucide-vue-next";
-import { menu } from "../styled-system/recipes";
-import { avatar } from "../styled-system/recipes";
+import { Award, MessageCircle, ShieldAlert, UserRound } from "lucide-vue-next";
+import { avatar, menu } from "../styled-system/recipes";
 
 const props = defineProps<{
   name: string;
@@ -20,7 +19,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   message: [];
-  inviteToHuddle: [];
+  giveKudos: [];
   viewProfile: [];
   report: [];
 }>();
@@ -32,8 +31,8 @@ function onSelect(details: { value: string }) {
   switch (details.value) {
     case "message":
       return emit("message");
-    case "huddle":
-      return emit("inviteToHuddle");
+    case "kudos":
+      return emit("giveKudos");
     case "profile":
       return emit("viewProfile");
     case "report":
@@ -55,7 +54,7 @@ function onSelect(details: { value: string }) {
         <Menu.ItemGroup>
           <Menu.ItemGroupLabel :class="classes.itemGroupLabel">{{ props.name }}</Menu.ItemGroupLabel>
           <Menu.Item value="message" :class="classes.item"><MessageCircle :size="16" />Message</Menu.Item>
-          <Menu.Item value="huddle" :class="classes.item"><Mic :size="16" />Invite to huddle</Menu.Item>
+          <Menu.Item value="kudos" :class="classes.item"><Award :size="16" />Give kudos</Menu.Item>
           <Menu.Item value="profile" :class="classes.item"><UserRound :size="16" />View profile</Menu.Item>
         </Menu.ItemGroup>
         <Menu.Separator :class="classes.separator" />
