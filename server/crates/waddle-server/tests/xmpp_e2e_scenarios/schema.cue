@@ -8,6 +8,8 @@ package xmpp_e2e_scenarios
 	domain:   string
 	bareJid:  "\(username)@\(domain)"
 	jid:      "\(bareJid)/\(resource)"
+	// Seed the account without opening a stream until ConnectActor.
+	startDisconnected: *false | bool
 	...
 }
 
