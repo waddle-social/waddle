@@ -763,6 +763,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_thread_history(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room(
@@ -1003,6 +1005,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_uploa
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_history(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`maxMessages`: Int,`beforeId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_history(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`maxMessages`: Int,`beforeId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_thread_history(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`threadId`: RustBuffer.ByValue,`maxMessages`: Int,`beforeId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_join_room(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`nick`: RustBuffer.ByValue,
 ): Long
@@ -1391,6 +1395,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history() != 15759) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_thread_history() != 61904) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room() != 29937) {
@@ -2460,6 +2467,14 @@ public interface WaddleClientInterface {
     suspend fun `fetchDmHistory`(`peerJid`: kotlin.String, `maxMessages`: kotlin.UInt, `beforeId`: kotlin.String?): WaddleMamPage
 
     suspend fun `fetchRoomHistory`(`roomJid`: kotlin.String, `maxMessages`: kotlin.UInt, `beforeId`: kotlin.String?): WaddleMamPage
+
+    /**
+     * One room thread's archived replies, newest page first (`before_id =
+     * None`) or older from an RSM cursor, from the room archive filtered by
+     * the Waddle MAM thread field. Unlike the older history verbs, failures
+     * are typed errors rather than an empty page.
+     */
+    suspend fun `fetchRoomThreadHistory`(`roomJid`: kotlin.String, `threadId`: kotlin.String, `maxMessages`: kotlin.UInt, `beforeId`: kotlin.String?): WaddleMamPage
 
     suspend fun `joinRoom`(`roomJid`: kotlin.String, `nick`: kotlin.String)
 
@@ -4176,6 +4191,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { FfiConverterTypeWaddleMamPage.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * One room thread's archived replies, newest page first (`before_id =
+     * None`) or older from an RSM cursor, from the room archive filtered by
+     * the Waddle MAM thread field. Unlike the older history verbs, failures
+     * are typed errors rather than an empty page.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchRoomThreadHistory`(`roomJid`: kotlin.String, `threadId`: kotlin.String, `maxMessages`: kotlin.UInt, `beforeId`: kotlin.String?) : WaddleMamPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_thread_history(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`threadId`),FfiConverterUInt.lower(`maxMessages`),FfiConverterOptionalString.lower(`beforeId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleMamPage.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 

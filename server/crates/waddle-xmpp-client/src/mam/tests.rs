@@ -533,14 +533,9 @@ fn room_search_history_targets_room_archive_with_fulltext() {
 
 #[test]
 fn room_thread_history_targets_room_archive_with_thread_filter() {
-    let iq = build_room_thread_history_iq(
-        "iq-1",
-        "query-1",
-        30,
-        "room@muc.example.com",
-        "thread-42",
-        None,
-    );
+    let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+    let thread = ThreadId::new("thread-42").expect("thread id");
+    let iq = build_room_thread_history_iq("iq-1", "query-1", 30, &room, &thread, None);
 
     assert_eq!(iq.attr("to"), Some("room@muc.example.com"));
     assert_eq!(
@@ -557,14 +552,10 @@ fn room_thread_history_targets_room_archive_with_thread_filter() {
 
 #[test]
 fn room_thread_history_pages_older_from_cursor() {
-    let iq = build_room_thread_history_iq(
-        "iq-1",
-        "query-1",
-        30,
-        "room@muc.example.com",
-        "thread-42",
-        Some("mam-7"),
-    );
+    let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+    let thread = ThreadId::new("thread-42").expect("thread id");
+    let cursor = ArchivedMessageId::new("mam-7").expect("cursor");
+    let iq = build_room_thread_history_iq("iq-1", "query-1", 30, &room, &thread, Some(&cursor));
 
     assert_eq!(rsm_before(&iq).as_deref(), Some("mam-7"));
 }
@@ -1087,11 +1078,13 @@ mod query {
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_room_history_by_thread_sends_thread_filter_to_room_archive() {
         let (handle, cmd_rx, _evt_tx) = make_handle();
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room JID");
+        let thread = waddle_xmpp_core::mam::ThreadId::new("thread-42").expect("thread id");
         let stanza_rx = spawn_fin_responder(cmd_rx);
 
         let page = timeout(
             Duration::from_secs(2),
-            handle.fetch_room_history_by_thread("room@muc.example.com", "thread-42", 30, None),
+            handle.fetch_room_history_by_thread(&room, &thread, 30, None),
         )
         .await
         .expect("thread fetch must resolve once <fin/> arrives")

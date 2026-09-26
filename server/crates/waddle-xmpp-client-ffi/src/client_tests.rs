@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::{
-    WaddleClient, WaddleClientEvent, WaddleConfig, WaddleEncryptedFile, WaddleEventListener,
-    WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile,
+    WaddleClient, WaddleClientEvent, WaddleConfig, WaddleEncryptedFile, WaddleError,
+    WaddleEventListener, WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile,
 };
 
 #[derive(Clone, Default)]
@@ -176,11 +176,10 @@ async fn search_room_history_returns_empty_page_when_not_connected() {
 }
 
 #[tokio::test]
-async fn fetch_room_thread_history_returns_empty_page_when_not_connected() {
-    let listener = Arc::new(RecordingListener::default());
-    let client = test_client((*listener).clone());
+async fn fetch_room_thread_history_reports_not_connected() {
+    let client = test_client(RecordingListener::default());
 
-    let page = client
+    let result = client
         .fetch_room_thread_history(
             "room@muc.waddle.test".to_string(),
             "thread-1".to_string(),
@@ -189,12 +188,37 @@ async fn fetch_room_thread_history_returns_empty_page_when_not_connected() {
         )
         .await;
 
-    // The incomplete, cursor-less empty page is the shape the Apple port
-    // reads as a failed query rather than an empty thread.
-    assert!(page.messages.is_empty());
-    assert!(page.first_id.is_none());
-    assert!(!page.is_complete);
-    assert_eq!(listener.errors(), vec!["Not connected"]);
+    assert!(matches!(result, Err(WaddleError::NotConnected)));
+}
+
+#[tokio::test]
+async fn fetch_room_thread_history_rejects_bad_arguments_before_sending() {
+    let client = test_client(RecordingListener::default());
+
+    let bad_room = client
+        .fetch_room_thread_history("not a jid@@".to_string(), "thread-1".to_string(), 25, None)
+        .await;
+    assert!(matches!(bad_room, Err(WaddleError::InvalidJid)));
+
+    let blank_thread = client
+        .fetch_room_thread_history(
+            "room@muc.waddle.test".to_string(),
+            "  ".to_string(),
+            25,
+            None,
+        )
+        .await;
+    assert!(matches!(blank_thread, Err(WaddleError::InvalidArgument)));
+
+    let empty_cursor = client
+        .fetch_room_thread_history(
+            "room@muc.waddle.test".to_string(),
+            "thread-1".to_string(),
+            25,
+            Some(String::new()),
+        )
+        .await;
+    assert!(matches!(empty_cursor, Err(WaddleError::InvalidArgument)));
 }
 
 #[tokio::test]

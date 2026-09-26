@@ -917,11 +917,11 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     /**
      * One room thread's archived replies, newest page first (`before_id =
-     * None`) or older from an RSM cursor. Filters the room archive with the
-     * Waddle MAM thread field; an empty page plus an `Error` event on
-     * failure, mirroring `fetch_room_history`.
+     * None`) or older from an RSM cursor, from the room archive filtered by
+     * the Waddle MAM thread field. Unlike the older history verbs, failures
+     * are typed errors rather than an empty page.
      */
-    func fetchRoomThreadHistory(roomJid: String, threadId: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
+    func fetchRoomThreadHistory(roomJid: String, threadId: String, maxMessages: UInt32, beforeId: String?) async throws  -> WaddleMamPage
 
     func joinRoom(roomJid: String, nick: String) async
 
@@ -2449,13 +2449,13 @@ open func fetchRoomHistory(roomJid: String, maxMessages: UInt32, beforeId: Strin
 
     /**
      * One room thread's archived replies, newest page first (`before_id =
-     * None`) or older from an RSM cursor. Filters the room archive with the
-     * Waddle MAM thread field; an empty page plus an `Error` event on
-     * failure, mirroring `fetch_room_history`.
+     * None`) or older from an RSM cursor, from the room archive filtered by
+     * the Waddle MAM thread field. Unlike the older history verbs, failures
+     * are typed errors rather than an empty page.
      */
-open func fetchRoomThreadHistory(roomJid: String, threadId: String, maxMessages: UInt32, beforeId: String?)async  -> WaddleMamPage  {
+open func fetchRoomThreadHistory(roomJid: String, threadId: String, maxMessages: UInt32, beforeId: String?)async throws  -> WaddleMamPage  {
     return
-        try!  await uniffiRustCallAsync(
+        try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_thread_history(
                     self.uniffiCloneHandle(),
@@ -2466,8 +2466,7 @@ open func fetchRoomThreadHistory(roomJid: String, threadId: String, maxMessages:
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeWaddleMamPage_lift,
-            errorHandler: nil
-
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -17425,7 +17424,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history() != 15759) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_thread_history() != 28280) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_thread_history() != 61904) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room() != 29937) {

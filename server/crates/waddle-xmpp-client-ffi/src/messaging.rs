@@ -1,17 +1,22 @@
 use jid::{BareJid, Jid};
 use waddle_xmpp_client::{
-    avatar::AvatarExt, discovery::DiscoveryExt, mam::MamExt, messaging::MessagingExt,
+    avatar::AvatarExt,
+    discovery::DiscoveryExt,
+    mam::{ArchivedMessageId, MamExt},
+    messaging::MessagingExt,
 };
+use waddle_xmpp_core::mam::ThreadId;
 
 use crate::boundary_convert::{
     empty_mam_page, empty_topology, jid_domain, mam_page_to_ffi, topology_to_ffi,
     upload_slot_to_ffi,
 };
 use crate::convert::send_options_from_ffi;
+use crate::error::client_error_to_waddle;
 use crate::send_outcome::send_failure_outcome;
 use crate::{
-    WaddleAvatar, WaddleAvatarResult, WaddleClient, WaddleMamPage, WaddleSendMessageOutcome,
-    WaddleSendOptions, WaddleTopology, WaddleUploadSlot,
+    WaddleAvatar, WaddleAvatarResult, WaddleClient, WaddleError, WaddleMamPage,
+    WaddleSendMessageOutcome, WaddleSendOptions, WaddleTopology, WaddleUploadSlot,
 };
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -39,30 +44,30 @@ impl WaddleClient {
     }
 
     /// One room thread's archived replies, newest page first (`before_id =
-    /// None`) or older from an RSM cursor. Filters the room archive with the
-    /// Waddle MAM thread field; an empty page plus an `Error` event on
-    /// failure, mirroring `fetch_room_history`.
+    /// None`) or older from an RSM cursor, from the room archive filtered by
+    /// the Waddle MAM thread field. Unlike the older history verbs, failures
+    /// are typed errors rather than an empty page.
     pub async fn fetch_room_thread_history(
         &self,
         room_jid: String,
         thread_id: String,
         max_messages: u32,
         before_id: Option<String>,
-    ) -> WaddleMamPage {
-        let Some(handle) = self.clone_handle().await else {
-            return empty_mam_page();
+    ) -> Result<WaddleMamPage, WaddleError> {
+        let room: BareJid = room_jid.parse().map_err(|_| WaddleError::InvalidJid)?;
+        let thread = ThreadId::new(thread_id).ok_or(WaddleError::InvalidArgument)?;
+        let before = match before_id {
+            Some(id) => Some(ArchivedMessageId::new(id).ok_or(WaddleError::InvalidArgument)?),
+            None => None,
         };
-
-        match handle
-            .fetch_room_history_by_thread(&room_jid, &thread_id, max_messages, before_id.as_deref())
+        let Some(handle) = self.clone_handle().await else {
+            return Err(WaddleError::NotConnected);
+        };
+        handle
+            .fetch_room_history_by_thread(&room, &thread, max_messages, before.as_ref())
             .await
-        {
-            Ok(page) => mam_page_to_ffi(page),
-            Err(e) => {
-                self.emit_error(format!("fetch_room_thread_history failed: {e}"));
-                empty_mam_page()
-            }
-        }
+            .map(mam_page_to_ffi)
+            .map_err(|e| client_error_to_waddle(&e))
     }
 
     pub async fn fetch_dm_history(
