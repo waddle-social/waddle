@@ -26,7 +26,7 @@ function candidateKey(candidate: SlashCandidate): string {
     class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
     :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
   >
-    <div v-if="blocked" class="type-caption flex items-center gap-2 px-3 py-2 text-destructive">
+    <div v-if="blocked" class="type-caption flex items-center gap-2 px-3 py-2 text-destructive-text">
       <AlertCircle class="h-3.5 w-3.5" aria-hidden="true" />
       <span>No command <span class="type-emphasis">/{{ prefix }}</span>. Press Esc, then Enter to send as text.</span>
     </div>

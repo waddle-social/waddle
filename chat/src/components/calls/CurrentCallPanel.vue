@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { useStore } from "@nanostores/vue";
 import {
   Maximize2,
@@ -210,59 +211,64 @@ function expandCall(): void {
     </div>
 
     <div class="current-call-panel__controls" aria-label="Current call controls">
-      <button
-        type="button"
-        class="current-call-panel__control"
-        :class="{ 'current-call-panel__control--off': !micEnabled }"
-        :disabled="controlsDisabled"
-        :title="micEnabled ? 'Mute' : 'Unmute'"
-        :aria-label="micEnabled ? 'Mute microphone' : 'Unmute microphone'"
-        @click="toggleMic"
-      >
-        <Mic v-if="micEnabled" class="h-3.5 w-3.5" />
-        <MicOff v-else class="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        class="current-call-panel__control"
-        :class="{ 'current-call-panel__control--off': !camEnabled }"
-        :disabled="controlsDisabled"
-        :title="camEnabled ? 'Camera off' : 'Camera on'"
-        :aria-label="camEnabled ? 'Turn camera off' : 'Turn camera on'"
-        @click="toggleCam"
-      >
-        <Video v-if="camEnabled" class="h-3.5 w-3.5" />
-        <VideoOff v-else class="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        class="current-call-panel__control"
-        :disabled="controlsDisabled"
-        title="Expand call"
-        aria-label="Expand current call"
-        @click="expandCall"
-      >
-        <Maximize2 class="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        class="current-call-panel__control"
-        :disabled="controlsDisabled"
-        title="Call settings"
-        aria-label="Open call settings"
-        @click="settingsOpen = true"
-      >
-        <Settings class="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        class="current-call-panel__control current-call-panel__control--danger"
-        title="Hang up"
-        aria-label="Hang up current call"
-        @click="hangupActiveCall"
-      >
-        <PhoneOff class="h-3.5 w-3.5" />
-      </button>
+      <AppTooltip :label="micEnabled ? 'Mute' : 'Unmute'">
+        <button
+          type="button"
+          class="current-call-panel__control"
+          :class="{ 'current-call-panel__control--off': !micEnabled }"
+          :disabled="controlsDisabled"
+          :aria-label="micEnabled ? 'Mute microphone' : 'Unmute microphone'"
+          @click="toggleMic"
+        >
+          <Mic v-if="micEnabled" class="h-3.5 w-3.5" />
+          <MicOff v-else class="h-3.5 w-3.5" />
+        </button>
+      </AppTooltip>
+      <AppTooltip :label="camEnabled ? 'Camera off' : 'Camera on'">
+        <button
+          type="button"
+          class="current-call-panel__control"
+          :class="{ 'current-call-panel__control--off': !camEnabled }"
+          :disabled="controlsDisabled"
+          :aria-label="camEnabled ? 'Turn camera off' : 'Turn camera on'"
+          @click="toggleCam"
+        >
+          <Video v-if="camEnabled" class="h-3.5 w-3.5" />
+          <VideoOff v-else class="h-3.5 w-3.5" />
+        </button>
+      </AppTooltip>
+      <AppTooltip label="Expand call">
+        <button
+          type="button"
+          class="current-call-panel__control"
+          :disabled="controlsDisabled"
+          aria-label="Expand current call"
+          @click="expandCall"
+        >
+          <Maximize2 class="h-3.5 w-3.5" />
+        </button>
+      </AppTooltip>
+      <AppTooltip label="Call settings">
+        <button
+          type="button"
+          class="current-call-panel__control"
+          :disabled="controlsDisabled"
+          aria-label="Open call settings"
+          @click="settingsOpen = true"
+        >
+          <Settings class="h-3.5 w-3.5" />
+        </button>
+      </AppTooltip>
+      <AppTooltip label="Hang up">
+        <button
+          type="button"
+          class="current-call-panel__control current-call-panel__control--danger"
+          aria-label="Hang up current call"
+          @click="hangupActiveCall"
+        >
+          <PhoneOff class="h-3.5 w-3.5" />
+        </button>
+      </AppTooltip>
     </div>
 
     <CallSettingsDialog v-model:open="settingsOpen" />

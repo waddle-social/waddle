@@ -162,11 +162,16 @@ describe("UI WASM build contract", () => {
       "./node_modules/.bin/astro check && ./node_modules/.bin/astro build",
     );
     expect(build).not.toContain("wasm:build");
-    expect(build).toContain("dependsOn: [buildWasm, generateTypes]");
+    expect(build).toContain("dependsOn: [buildWasm, generateTypes, pandaCodegen]");
 
     const lint = taskBlock("lint");
     expect(lint).toContain('args: ["run", "knip"]');
     expect(lint).not.toContain("wasm:build");
-    expect(lint).toContain("dependsOn: [buildWasm, generateTypes]");
+    expect(lint).toContain("dependsOn: [buildWasm, generateTypes, pandaCodegen]");
+
+    const pandaCodegen = taskBlock("pandaCodegen");
+    expect(pandaCodegen).toContain('args: ["run", "panda:codegen"]');
+    expect(pandaCodegen).toContain('"panda.config.ts"');
+    expect(pandaCodegen).toContain('"styled-system/**"');
   });
 });

@@ -164,7 +164,7 @@ function onMoveClick() {
 
     <div class="chat-dialog-footer flex-col sm:flex-row sm:items-center sm:justify-between">
       <button
-        class="chat-action-button type-control text-left text-destructive hover:bg-destructive/10 sm:text-center"
+        class="chat-action-button type-control text-left text-destructive-text hover:bg-destructive/10 sm:text-center"
         type="button"
         @click="emit('delete')"
       >

@@ -7,6 +7,8 @@ import { eventsRoute } from "./routes/events";
 import { feedRoute } from "./routes/feed";
 import { groupDmRoomRoute } from "./routes/group-dm-room";
 import { homeRoute } from "./routes/home";
+import { membersRoute } from "./routes/members";
+import { roomsRoute } from "./routes/rooms";
 import { settingsRoute } from "./routes/settings";
 import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
@@ -38,6 +40,10 @@ export function buildHref(match: RouteMatch): string {
       return threadsRoute.href();
     case "unread":
       return unreadRoute.href();
+    case "rooms":
+      return roomsRoute.href();
+    case "members":
+      return membersRoute.href();
     case "settings":
       return settingsRoute.href();
     case "admin":
@@ -75,4 +81,18 @@ export function navigate(match: RouteMatch, opts?: NavigateOptions): void {
     window.history.pushState(state, "", href);
   }
   currentMatch.value = match;
+}
+
+/**
+ * Settles a per-route Astro island onto the router's match at setup.
+ * Astro routes by path shape (`/dm/[peerJid]` accepts any segment) while
+ * the router matches by content (`dm` rejects a bare username or a
+ * resource without `?scope=occupant`), so an island can mount on a URL
+ * whose match already fell back to `home`. Rather than assert and blank
+ * the page, put the URL where the match is: replace the history entry
+ * with the match's canonical href and let the shell render that page.
+ */
+export function settleIslandMatch(routeId: RouteMatch["id"]): void {
+  if (currentMatch.value.id === routeId) return;
+  navigate(currentMatch.value, { replace: true });
 }

@@ -77,8 +77,10 @@ const COMPOSER_MODES: readonly { id: ComposerMode; label: string; icon: Componen
   { id: "profile", label: "Profile", icon: IdCard },
 ];
 
-const fieldLabelClass = "type-section-label text-muted-foreground/75";
-const fieldClass = "rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
+const fieldLabelClass = "type-section-label";
+const fieldClass = "rounded-[10px] border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
+const primaryButtonClass = "inline-flex h-8 items-center gap-1.5 rounded-[10px] bg-primary px-3.5 text-[13px] font-bold text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
+const quietButtonClass = "inline-flex h-8 items-center gap-1.5 rounded-[10px] border border-border bg-card px-3 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50";
 const textareaClass = `${fieldClass} min-h-[4rem] resize-y`;
 const COMPOSER_MAX = 500;
 
@@ -154,9 +156,9 @@ function authorLabel(author: string | undefined): string {
 function feedbackClass(tone: FeedbackTone): string {
   switch (tone) {
     case "success":
-      return "text-emerald-700 dark:text-emerald-300";
+      return "text-moss";
     case "error":
-      return "text-destructive";
+      return "text-destructive-text";
     default:
       return "text-muted-foreground";
   }
@@ -367,7 +369,7 @@ async function publishProfile() {
 
 <template>
   <section
-    class="grid gap-3 rounded-xl border border-border bg-card p-4 shadow-sm focus-within:ring-1 focus-within:ring-ring/40"
+    class="grid gap-3 rounded-2xl border border-border bg-card p-4 focus-within:border-primary/60"
     aria-label="Create feed update"
   >
     <div class="flex items-center gap-3">
@@ -379,8 +381,8 @@ async function publishProfile() {
             :key="mode.id"
             type="button"
             role="tab"
-            class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors"
-            :class="composerMode === mode.id ? 'border-primary bg-primary/10 text-primary' : 'border-input text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
+            class="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[13px] font-semibold transition-colors"
+            :class="composerMode === mode.id ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'"
             :aria-selected="composerMode === mode.id ? 'true' : 'false'"
             @click="composerMode = mode.id"
           >
@@ -400,12 +402,12 @@ async function publishProfile() {
         aria-label="Feed post body"
       />
       <div class="flex items-center justify-between gap-2">
-        <span class="type-caption" :class="composerOver ? 'text-destructive' : 'text-muted-foreground'">
+        <span class="type-caption" :class="composerOver ? 'text-destructive-text' : 'text-muted-foreground'">
           {{ composerBody.length }} / {{ COMPOSER_MAX }}
         </span>
         <button
           type="submit"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition-opacity hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          :class="primaryButtonClass"
           :disabled="!canSubmitPost || composerOver"
         >
           <Send class="h-3.5 w-3.5" aria-hidden="true" />
@@ -449,7 +451,7 @@ async function publishProfile() {
       <div class="flex justify-end">
         <button
           type="submit"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          :class="primaryButtonClass"
           :disabled="pepBusy !== null"
         >
           <Smile class="h-3.5 w-3.5" aria-hidden="true" />
@@ -468,7 +470,7 @@ async function publishProfile() {
               {{ formatPepKeyword(general) }}
             </option>
           </select>
-          <span v-if="activityErrors.general" class="type-caption text-destructive">{{ activityErrors.general }}</span>
+          <span v-if="activityErrors.general" class="type-caption text-destructive-text">{{ activityErrors.general }}</span>
         </label>
         <label class="grid gap-1.5">
           <span :class="fieldLabelClass">Specific</span>
@@ -480,7 +482,7 @@ async function publishProfile() {
             placeholder="Optional detail"
             type="text"
           />
-          <span v-if="activityErrors.specific" class="type-caption text-destructive">{{ activityErrors.specific }}</span>
+          <span v-if="activityErrors.specific" class="type-caption text-destructive-text">{{ activityErrors.specific }}</span>
         </label>
       </div>
       <label class="grid gap-1.5">
@@ -497,7 +499,7 @@ async function publishProfile() {
       <div class="flex justify-end">
         <button
           type="submit"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          :class="primaryButtonClass"
           :disabled="pepBusy !== null"
         >
           <Briefcase class="h-3.5 w-3.5" aria-hidden="true" />
@@ -547,7 +549,7 @@ async function publishProfile() {
             maxlength="240"
             type="text"
           />
-          <span v-if="tuneErrors.uri" class="type-caption text-destructive">{{ tuneErrors.uri }}</span>
+          <span v-if="tuneErrors.uri" class="type-caption text-destructive-text">{{ tuneErrors.uri }}</span>
         </label>
         <label class="grid gap-1.5">
           <span :class="fieldLabelClass">Length</span>
@@ -558,7 +560,7 @@ async function publishProfile() {
             inputmode="numeric"
             type="text"
           />
-          <span v-if="tuneErrors.length" class="type-caption text-destructive">{{ tuneErrors.length }}</span>
+          <span v-if="tuneErrors.length" class="type-caption text-destructive-text">{{ tuneErrors.length }}</span>
         </label>
         <label class="grid gap-1.5">
           <span :class="fieldLabelClass">Rating</span>
@@ -569,14 +571,14 @@ async function publishProfile() {
             inputmode="numeric"
             type="text"
           />
-          <span v-if="tuneErrors.rating" class="type-caption text-destructive">{{ tuneErrors.rating }}</span>
+          <span v-if="tuneErrors.rating" class="type-caption text-destructive-text">{{ tuneErrors.rating }}</span>
         </label>
       </div>
-      <p v-if="tuneErrors.form" class="type-caption text-destructive">{{ tuneErrors.form }}</p>
+      <p v-if="tuneErrors.form" class="type-caption text-destructive-text">{{ tuneErrors.form }}</p>
       <div class="flex justify-end">
         <button
           type="submit"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          :class="primaryButtonClass"
           :disabled="pepBusy !== null"
         >
           <Music class="h-3.5 w-3.5" aria-hidden="true" />
@@ -640,7 +642,7 @@ async function publishProfile() {
       <div class="flex items-center justify-between gap-2">
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+          :class="quietButtonClass"
           :disabled="profileLoading || pepBusy !== null"
           @click="loadProfileDraft"
         >
@@ -649,7 +651,7 @@ async function publishProfile() {
         </button>
         <button
           type="submit"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          :class="primaryButtonClass"
           :disabled="profileLoading || pepBusy !== null || !profileLoaded"
         >
           <IdCard class="h-3.5 w-3.5" aria-hidden="true" />
@@ -661,7 +663,7 @@ async function publishProfile() {
     <p v-if="composerFeedback" class="type-caption" :class="feedbackClass(composerFeedback.tone)" role="status">
       {{ composerFeedback.message }}
     </p>
-    <p v-if="composerMode === 'story' && storyComposerError" class="type-caption text-destructive" role="status">
+    <p v-if="composerMode === 'story' && storyComposerError" class="type-caption text-destructive-text" role="status">
       {{ storyComposerError }}
     </p>
   </section>

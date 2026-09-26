@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, ref } from "vue";
+import { Menu } from "@ark-ui/vue/menu";
 import { AtSign, Bell, BellOff, Check } from "lucide-vue-next";
+import AppMenu from "@/components/ui/AppMenu.vue";
+import { menuClasses } from "@/ui/menu-classes";
 import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
 import {
   effectiveNotifyMode,
-  nextMenuIndex,
   NOTIFY_MODE_HINT,
   NOTIFY_MODE_LABEL,
   type ConversationKind,
@@ -14,19 +16,18 @@ import {
 /** Per-chat XEP-0492 notification mode picker (#532).
  *
  * Renders as an icon button reflecting the current effective mode for
- * the conversation. Clicking opens a small popover with three radio
+ * the conversation. Clicking opens an Ark Menu with three radio
  * options. Selecting one publishes a XEP-0402 bookmark item update
  * to PEP via [[BrowserXmppClient.setRoomNotificationMode]].
  *
- * Accessibility (round-7 UX P1):
- * * The popover is keyed as a `role="menu"` with three `menuitemradio`
- *   children, matching the WAI-ARIA APG menu radio pattern.
- * * On open, focus moves into the currently-selected option so screen
- *   readers announce the active mode.
- * * Arrow Up/Down move focus between options. Home / End jump to first
- *   / last. Esc closes and returns focus to the trigger.
+ * Accessibility:
+ * * The menu is a `role="menu"` with three `menuitemradio` children and
+ *   one `menuitemcheckbox` (WAI-ARIA APG menu pattern); Ark owns the
+ *   keyboard navigation, outside-click dismissal, Escape and focus return.
+ * * Picking a mode keeps the menu open with a "Saving…" note until the
+ *   publish resolves, then closes; a failure stays open with the error.
  * * The trigger is disabled (`aria-disabled`) while no client is wired
- *   or the store is still hydrating, so clicks don't open a popover
+ *   or the store is still hydrating, so clicks don't open a menu
  *   that can't act.
  */
 const props = defineProps<{
@@ -50,15 +51,9 @@ const open = ref(false);
 const submitting = ref<NotifyMode | null>(null);
 const submittingRich = ref(false);
 const errorMessage = ref<string | null>(null);
-const rootEl = ref<HTMLElement | null>(null);
-const triggerEl = ref<HTMLButtonElement | null>(null);
-const optionRefs = ref<(HTMLButtonElement | null)[]>([]);
 
 const MODES: NotifyMode[] = ["always", "on-mention", "never"];
-// Menu rows participating in arrow-key navigation: the three mode
-// radios plus the rich-payload checkbox at the end.
-const MENU_ITEM_COUNT = MODES.length + 1;
-const RICH_INDEX = MODES.length;
+const RICH_VALUE = "rich-previews";
 
 const currentMode = computed<NotifyMode>(() => {
   const bookmark = props.store.bookmarks.value[props.roomJid];
@@ -102,42 +97,34 @@ const buttonTitle = computed(() => {
   return `Notifications: ${NOTIFY_MODE_LABEL[currentMode.value]}`;
 });
 
-async function toggleOpen() {
-  if (disabled.value) return;
-  if (open.value) {
-    // Route close through closeAndReturnFocus so the error banner
-    // doesn't leak across opens — round-12 reviewer P1.
-    closeAndReturnFocus();
-    return;
-  }
-  open.value = true;
-  await nextTick();
-  focusOptionAt(MODES.indexOf(currentMode.value));
+function onOpenChange(next: boolean) {
+  if (disabled.value && next) return;
+  open.value = next;
+  // Drop the error banner on dismissal so it doesn't reappear the next
+  // time the user opens the menu.
+  if (!next) errorMessage.value = null;
 }
 
-function focusOptionAt(index: number) {
-  const refs = optionRefs.value;
-  if (refs.length === 0) return;
-  const clamped = ((index % refs.length) + refs.length) % refs.length;
-  refs[clamped]?.focus();
-}
-
-function focusedIndex(): number {
-  const active = document.activeElement as HTMLElement | null;
-  return optionRefs.value.findIndex((el) => el === active);
-}
-
-function closeAndReturnFocus() {
+function close() {
   open.value = false;
   errorMessage.value = null;
-  triggerEl.value?.focus();
+}
+
+function onSelect(value: string) {
+  if (value === RICH_VALUE) {
+    void toggleRichPayload();
+    return;
+  }
+  if ((MODES as string[]).includes(value)) {
+    void selectMode(value as NotifyMode);
+  }
 }
 
 async function selectMode(mode: NotifyMode) {
   if (!props.client) return;
   if (busy.value) return;
   if (mode === currentMode.value) {
-    closeAndReturnFocus();
+    close();
     return;
   }
   submitting.value = mode;
@@ -155,14 +142,13 @@ async function selectMode(mode: NotifyMode) {
       // Defence-in-depth — `props.store.setMode` is supposed to always
       // resolve with a typed result, but if a lower layer ever
       // regresses to throwing, surface the error in the banner
-      // instead of leaving the user with a silent dead popover.
-      // Round-13 PR review.
+      // instead of leaving the user with a silent dead menu.
       console.warn("[NotifyModeButton] props.store.setMode threw:", error);
       errorMessage.value = "Couldn't save the setting. Try again in a moment.";
       return;
     }
     if (result === "ok") {
-      closeAndReturnFocus();
+      close();
     } else if (result === "node-config-mismatch") {
       // Round-8 UX P2: distinguish the recoverable XEP-0060
       // precondition-not-met case so the user gets an actionable
@@ -200,7 +186,7 @@ async function toggleRichPayload() {
       return;
     }
     // The toggle is a stay-put interaction (unlike picking a mode,
-    // which dismisses), so the popover stays open on success.
+    // which dismisses), so the menu stays open on success.
     if (result === "node-config-mismatch") {
       errorMessage.value = nodeMismatchMessage.value;
     } else if (result !== "ok") {
@@ -208,150 +194,79 @@ async function toggleRichPayload() {
     }
   } finally {
     submittingRich.value = false;
-    // The toggle was `disabled` while busy, which blurs it. Now that
-    // it has re-enabled, re-land focus on it (after the DOM updates)
-    // so keyboard / AT users keep their place in the open menu.
-    if (open.value) {
-      void nextTick().then(() => focusOptionAt(RICH_INDEX));
-    }
   }
 }
-
-function onMenuKeydown(event: KeyboardEvent) {
-  switch (event.key) {
-    case "ArrowDown":
-    case "ArrowRight":
-      event.preventDefault();
-      focusOptionAt(nextMenuIndex(focusedIndex(), 1, MENU_ITEM_COUNT));
-      break;
-    case "ArrowUp":
-    case "ArrowLeft":
-      event.preventDefault();
-      focusOptionAt(nextMenuIndex(focusedIndex(), -1, MENU_ITEM_COUNT));
-      break;
-    case "Home":
-      event.preventDefault();
-      focusOptionAt(0);
-      break;
-    case "End":
-      event.preventDefault();
-      focusOptionAt(MENU_ITEM_COUNT - 1);
-      break;
-    case "Escape":
-      event.preventDefault();
-      closeAndReturnFocus();
-      break;
-    case "Tab":
-      // WAI-ARIA APG menu pattern: Tab closes the menu and lets
-      // browser focus continue out — round-12 reviewer P2. We do
-      // NOT preventDefault so the next focusable element receives
-      // focus naturally.
-      open.value = false;
-      errorMessage.value = null;
-      break;
-  }
-}
-
-function onWindowClick(event: MouseEvent) {
-  if (!open.value) return;
-  const target = event.target as Node | null;
-  if (target && rootEl.value && !rootEl.value.contains(target)) {
-    open.value = false;
-    // Drop the error banner on dismissal so it doesn't reappear
-    // the next time the user opens the popover. Round-9 P3.
-    errorMessage.value = null;
-  }
-}
-
-function onWindowEsc(event: KeyboardEvent) {
-  // Top-level Esc when focus is somewhere else (e.g. user typed
-  // in the message composer while the popover was open).
-  if (event.key === "Escape" && open.value) closeAndReturnFocus();
-}
-
-onMounted(() => {
-  window.addEventListener("mousedown", onWindowClick);
-  window.addEventListener("keydown", onWindowEsc);
-});
-
-onUnmounted(() => {
-  window.removeEventListener("mousedown", onWindowClick);
-  window.removeEventListener("keydown", onWindowEsc);
-});
 </script>
 
 <template>
-  <div v-if="roomJid" ref="rootEl" class="relative inline-flex">
-    <button
-      ref="triggerEl"
-      class="chat-icon-button chat-icon-button--md"
-      :class="disabled
-        ? 'opacity-50 cursor-not-allowed text-muted-foreground'
-        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-      type="button"
-      :title="buttonTitle"
-      :aria-label="buttonTitle"
-      :aria-expanded="open"
-      :disabled="disabled"
-      :aria-disabled="disabled"
-      aria-haspopup="menu"
-      @click="toggleOpen"
-    >
-      <component :is="icon" class="w-3.5 h-3.5" />
-    </button>
-    <div
-      v-if="open"
-      class="absolute right-0 top-[calc(100%+4px)] z-30 w-64 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-popover p-2 shadow-lg"
-      role="menu"
-      aria-label="Notification mode"
-      @keydown="onMenuKeydown"
-    >
-      <p class="type-section-label px-2 pb-1 pt-1 text-muted-foreground">Notifications for this chat</p>
+  <AppMenu
+    v-if="roomJid"
+    :open="open"
+    :tooltip="buttonTitle"
+    placement="bottom-end"
+    aria-label="Notification mode"
+    content-class="w-64 max-w-[calc(100vw-1rem)]"
+    @update:open="onOpenChange"
+    @select="onSelect"
+  >
+    <template #trigger>
       <button
-        v-for="(mode, index) in MODES"
-        :key="mode"
-        :ref="(el) => optionRefs[index] = (el as HTMLButtonElement | null)"
+        class="chat-icon-button chat-icon-button--md"
+        :class="disabled
+          ? 'opacity-50 cursor-not-allowed text-muted-foreground'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
         type="button"
-        role="menuitemradio"
-        :aria-checked="currentMode === mode"
-        :disabled="busy"
-        class="flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-2 text-left hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-        :class="{ 'bg-muted/60': currentMode === mode }"
-        @click="selectMode(mode)"
+        :aria-label="buttonTitle"
+        :disabled="disabled"
+        :aria-disabled="disabled"
       >
-        <div class="flex w-full items-center justify-between">
-          <span class="type-field text-foreground">{{ NOTIFY_MODE_LABEL[mode] }}</span>
+        <component :is="icon" class="w-3.5 h-3.5" />
+      </button>
+    </template>
+    <Menu.RadioItemGroup :model-value="currentMode">
+      <Menu.ItemGroupLabel :class="menuClasses.itemGroupLabel">Notifications for this chat</Menu.ItemGroupLabel>
+      <Menu.RadioItem
+        v-for="mode in MODES"
+        :key="mode"
+        :value="mode"
+        :disabled="busy"
+        :close-on-select="false"
+        :class="[menuClasses.item, 'flex-col !items-start !gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
+        style="height: auto"
+      >
+        <div class="flex w-full items-center justify-between gap-2">
+          <Menu.ItemText class="type-field text-foreground">{{ NOTIFY_MODE_LABEL[mode] }}</Menu.ItemText>
           <span v-if="submitting === mode" class="type-meta text-muted-foreground">Saving…</span>
-          <span v-else-if="currentMode === mode" class="type-meta text-primary">Current</span>
+          <Menu.ItemIndicator v-else class="type-meta text-primary">Current</Menu.ItemIndicator>
         </div>
         <span class="type-meta text-muted-foreground">{{ NOTIFY_MODE_HINT[mode] }}</span>
-      </button>
+      </Menu.RadioItem>
+    </Menu.RadioItemGroup>
 
-      <div class="my-1 border-t border-border" role="separator" />
-      <button
-        :ref="(el) => optionRefs[RICH_INDEX] = (el as HTMLButtonElement | null)"
-        type="button"
-        role="menuitemcheckbox"
-        :aria-checked="richOptIn"
-        :disabled="busy"
-        class="flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-2 text-left hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-        :class="{ 'bg-muted/60': richOptIn }"
-        @click="toggleRichPayload"
-      >
-        <div class="flex w-full items-center justify-between">
-          <span class="type-field text-foreground">Rich notification previews</span>
-          <span v-if="submittingRich" class="type-meta text-muted-foreground">Saving…</span>
-          <Check v-else-if="richOptIn" class="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-        </div>
-        <span class="type-meta text-muted-foreground">Show the sender and a message preview in push notifications for this chat.</span>
-      </button>
+    <Menu.Separator :class="menuClasses.separator" />
+    <Menu.CheckboxItem
+      :value="RICH_VALUE"
+      :checked="richOptIn"
+      :disabled="busy"
+      :close-on-select="false"
+      :class="[menuClasses.item, 'flex-col !items-start !gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
+      style="height: auto"
+    >
+      <div class="flex w-full items-center justify-between gap-2">
+        <Menu.ItemText class="type-field text-foreground">Rich notification previews</Menu.ItemText>
+        <span v-if="submittingRich" class="type-meta text-muted-foreground">Saving…</span>
+        <Menu.ItemIndicator v-else>
+          <Check class="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+        </Menu.ItemIndicator>
+      </div>
+      <span class="type-meta text-muted-foreground">Show the sender and a message preview in push notifications for this chat.</span>
+    </Menu.CheckboxItem>
 
-      <p
-        v-if="errorMessage"
-        class="type-meta mt-1 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive"
-        role="alert"
-        aria-live="assertive"
-      >{{ errorMessage }}</p>
-    </div>
-  </div>
+    <p
+      v-if="errorMessage"
+      class="type-meta mt-1 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive-text"
+      role="alert"
+      aria-live="assertive"
+    >{{ errorMessage }}</p>
+  </AppMenu>
 </template>

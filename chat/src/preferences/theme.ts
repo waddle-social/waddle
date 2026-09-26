@@ -1,22 +1,25 @@
 import { ref } from "vue";
 
-export type ThemeMode = "light" | "system" | "dark";
+/**
+ * Night is Waddle's canonical theme; daylight is opt-in. A stored
+ * "system" value from the previous three-way switch is read as night.
+ */
+export type ThemeMode = "light" | "dark";
 
 const STORAGE_KEY = "waddle:theme";
 
 function readStored(): ThemeMode {
-  if (typeof localStorage === "undefined") return "system";
-  const value = localStorage.getItem(STORAGE_KEY);
-  return value === "light" || value === "dark" ? value : "system";
+  if (typeof localStorage === "undefined") return "dark";
+  return localStorage.getItem(STORAGE_KEY) === "light" ? "light" : "dark";
 }
 
 function applyMode(value: ThemeMode) {
   if (typeof document === "undefined") return;
   const html = document.documentElement;
-  if (value === "system") {
-    html.removeAttribute("data-theme");
+  if (value === "light") {
+    html.dataset.theme = "light";
   } else {
-    html.setAttribute("data-theme", value);
+    delete html.dataset.theme;
   }
 }
 
@@ -29,10 +32,10 @@ if (typeof window !== "undefined") {
 function setTheme(value: ThemeMode) {
   mode.value = value;
   if (typeof localStorage !== "undefined") {
-    if (value === "system") {
-      localStorage.removeItem(STORAGE_KEY);
-    } else {
+    if (value === "light") {
       localStorage.setItem(STORAGE_KEY, value);
+    } else {
+      localStorage.removeItem(STORAGE_KEY);
     }
   }
   applyMode(value);

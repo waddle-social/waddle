@@ -21,9 +21,9 @@
 /* "Jump to latest" floating pill — appears when the user has scrolled
  * away from the live edge of the message list. Anchors at the
  * appropriate edge based on scroll-direction preference (top in
- * social mode, bottom in chat mode). Soft glass surface with the
- * established --glow-strong shadow so it reads as native to the
- * design system, not a bolted-on tooltip. */
+ * social mode, bottom in chat mode). An opaque card pill with the one
+ * overlay shadow so it reads as native to the design system, not a
+ * bolted-on tooltip. */
 .chat-jump-to-live {
   position: absolute;
   left: 50%;
@@ -33,30 +33,24 @@
   gap: var(--space-2xs);
   padding: 0.4rem 0.85rem;
   border-radius: var(--radius-pill);
-  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
-  background: color-mix(in oklab, var(--card) 90%, transparent);
+  border: 1px solid var(--border);
+  background: var(--card);
   color: var(--foreground);
   font-size: var(--text-meta);
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
   cursor: pointer;
   z-index: var(--z-floating);
-  backdrop-filter: blur(10px);
-  box-shadow:
-    0 8px 24px -8px var(--glow-strong),
-    0 2px 6px color-mix(in oklab, oklch(0.12 0.012 248) 18%, transparent);
-  transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  box-shadow: var(--shadow-floating);
+  transition: transform 0.16s ease-out, background-color 0.16s ease-out;
 }
 
 .chat-jump-to-live--top    { top: var(--space-md); }
 .chat-jump-to-live--bottom { bottom: var(--space-md); }
 
 .chat-jump-to-live:hover {
-  background: var(--card);
+  background: var(--muted);
   transform: translateX(-50%) translateY(-1px);
-  box-shadow:
-    0 12px 30px -8px var(--glow-strong),
-    0 4px 10px color-mix(in oklab, oklch(0.12 0.012 248) 22%, transparent);
 }
 
 .chat-jump-to-live:active {
@@ -64,7 +58,7 @@
 }
 
 .chat-jump-to-live:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
@@ -118,41 +112,24 @@
 
 .chat-message-grid--forum::before {
   opacity: 1;
-  border-color: color-mix(in oklab, var(--border) 70%, transparent);
-  background: color-mix(in oklab, var(--card) 72%, transparent);
+  border-color: var(--border);
+  background: var(--card);
 }
 
 /* Mention treatment — when the current user is @-mentioned, the row
- * reads as "this one's for you", not as a warning. Replaces the prior
- * full warning-yellow border + flat 5% bg (which felt like a danger
- * outline) with:
- *
- *   - A 3 px solid left-edge bar in `--warning` (the "spotlight from
- *     the side" signal — directional, like a highlighted bookmark)
- *   - A horizontal gradient sweep that fades the warmth out to the
- *     right (so the message body stays legible, not tinted)
- *
- * Same colour family the user already trains on for amber/warning
- * states; very different semantics. */
+ * reads as "this one's for you". A mention is a live thing, so it takes
+ * the ember: a 3 px solid left-edge bar in `--live` (the "spotlight
+ * from the side" signal — directional, like a highlighted bookmark) over
+ * a flat, faint ember tint so the message body stays legible. */
 .chat-message-grid--mention::before {
   opacity: 1;
   border: 0;
-  box-shadow: inset 3px 0 0 0 color-mix(in oklab, var(--warning) 80%, transparent);
-  background: linear-gradient(
-    to right,
-    color-mix(in oklab, var(--warning) 14%, transparent),
-    color-mix(in oklab, var(--warning) 6%, transparent) 12rem,
-    transparent 28rem
-  );
+  box-shadow: inset 3px 0 0 0 var(--live);
+  background: color-mix(in oklab, var(--live) 8%, transparent);
 }
 
 .chat-message-grid--mention:hover::before {
-  background: linear-gradient(
-    to right,
-    color-mix(in oklab, var(--warning) 18%, transparent),
-    color-mix(in oklab, var(--warning) 8%, transparent) 12rem,
-    color-mix(in oklab, var(--muted) 24%, transparent) 32rem
-  );
+  background: color-mix(in oklab, var(--live) 12%, transparent);
 }
 
 .chat-message-grid--thread::before {
@@ -179,14 +156,8 @@
 
 .chat-message-grid--reaction-selected::before {
   opacity: 1;
-  border-color: color-mix(in oklab, var(--primary) 16%, transparent);
-  background: linear-gradient(
-    90deg,
-    color-mix(in oklab, var(--primary) 7%, transparent),
-    color-mix(in oklab, var(--primary) 3%, transparent) 16rem,
-    transparent
-  );
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 7%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 24%, transparent);
+  background: color-mix(in oklab, var(--primary) 6%, transparent);
 }
 
 .chat-message-avatar-cell {
@@ -254,7 +225,7 @@
   gap: var(--space-xs);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: color-mix(in oklab, var(--muted) 58%, transparent);
+  background: var(--muted);
   padding: var(--space-xs) var(--space-sm);
   color: var(--muted-foreground);
 }
@@ -275,9 +246,7 @@
 .chat-hover-action-toolbar--reaction-mode {
   border-color: color-mix(in oklab, var(--primary) 28%, var(--border));
   background: color-mix(in oklab, var(--card) 88%, var(--primary) 12%);
-  box-shadow:
-    0 14px 36px color-mix(in oklab, var(--primary) 18%, transparent),
-    var(--shadow-floating);
+  box-shadow: var(--shadow-floating);
 }
 
 .chat-reaction-mode-keycap {
@@ -293,7 +262,6 @@
   background: var(--popover);
   color: var(--primary);
   line-height: 1;
-  box-shadow: 0 4px 10px color-mix(in oklab, var(--primary) 16%, transparent);
 }
 
 .chat-message-meta-row {
@@ -339,7 +307,7 @@
 }
 
 .chat-message-author-button:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
   border-radius: 2px;
 }
@@ -348,6 +316,16 @@
 .chat-message-meta-row > .type-meta {
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+/* Timestamps are mono: 12px JetBrains Mono in the muted ink, both in
+ * the meta row and in the hover-revealed gutter of grouped rows. */
+.chat-message-meta-row > .type-meta,
+.chat-message-time-gutter > .type-meta {
+  font-family: var(--font-code);
+  font-size: var(--text-meta);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Hat / role badge — quiet annotation alongside the author name.
@@ -489,10 +467,11 @@
   height: 1.125rem;
   padding: 0 0.3rem;
   margin-left: -0.25rem;
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--muted) 65%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+  font-family: var(--font-code);
   font-size: 0.55rem;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
   outline: 1.5px solid var(--background);
@@ -557,7 +536,6 @@
   color: color-mix(in oklab, var(--foreground) 75%, transparent);
   font-size: var(--text-meta);
   line-height: 1;
-  box-shadow: 0 0 0 0 var(--glow);
 }
 
 .chat-typing-indicator__wave {
@@ -607,13 +585,9 @@
   align-items: center;
   gap: var(--space-sm);
   justify-content: center;
-  /* Light frosted band — backdrop-blur so messages scrolling under the
-   * sticky marker softly fade rather than punching through. Less
-   * opaque than before so the rules and pill carry the structure
-   * visually; the blur is what guarantees legibility. */
-  background: color-mix(in oklab, var(--background) 62%, transparent);
-  backdrop-filter: blur(8px) saturate(135%);
-  -webkit-backdrop-filter: blur(8px) saturate(135%);
+  /* Opaque band on the page ground so messages scrolling under the
+   * sticky marker never punch through. */
+  background: var(--background);
   padding-block: 0 0.375rem;
 }
 
@@ -622,44 +596,23 @@
   content: "";
   height: 1px;
   flex: 1;
+  background: var(--border);
 }
 
-.chat-current-day-marker__lane::before {
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in oklab, var(--border) 58%, transparent) 18%,
-    color-mix(in oklab, var(--border) 58%, transparent) 100%
-  );
-}
-
-.chat-current-day-marker__lane::after {
-  background: linear-gradient(
-    to left,
-    transparent,
-    color-mix(in oklab, var(--border) 58%, transparent) 18%,
-    color-mix(in oklab, var(--border) 58%, transparent) 100%
-  );
-}
-
-/* Sticky day marker pill — soft glass. The previous bordered + shadowed
- * treatment read like a dropped toast notification, especially in dark
- * mode where var(--background) collapsed against the lane backdrop and
- * the hard border was the only thing separating them. Trade the border
- * and shadow for a translucent --card surface with backdrop-blur so the
- * pill sits OVER the rules (and any content that scrolls under) as a
- * gentle frosted-glass anchor instead of a hard-outlined chip. */
+/* Sticky day marker pill — an opaque card chip with a hairline, set as
+ * a mono kicker so it reads as a date stamp rather than a toast. */
 .chat-current-day-marker__label {
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--card) 72%, transparent);
-  backdrop-filter: blur(6px) saturate(140%);
-  -webkit-backdrop-filter: blur(6px) saturate(140%);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  border: 1px solid var(--border);
   padding: 0.25rem 0.75rem;
+  font-family: var(--font-code);
+  font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-size: 0.6875rem;
+  font-size: var(--text-caption);
   line-height: 1;
-  color: color-mix(in oklab, var(--muted-foreground) 88%, var(--foreground));
+  color: var(--muted-foreground);
 }
 
 .chat-day-divider {
@@ -673,14 +626,16 @@
 .chat-day-divider__rule {
   flex: 1;
   height: 1px;
-  background: color-mix(in oklab, var(--border) 55%, transparent);
+  background: var(--border);
 }
 
 .chat-day-divider__label {
   flex-shrink: 0;
+  font-family: var(--font-code);
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  font-size: var(--text-caption);
 }
 
 /* "New messages" divider — visible between the last read and first
@@ -713,17 +668,18 @@
   border-radius: var(--radius-pill);
   border: 1px solid color-mix(in oklab, var(--primary) 30%, transparent);
   background: color-mix(in oklab, var(--primary) 10%, transparent);
+  font-family: var(--font-code);
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  font-size: var(--text-caption);
 }
 
 .chat-new-messages-divider__pulse {
   width: 0.4rem;
   height: 0.4rem;
-  border-radius: 9999px;
+  border-radius: var(--radius-pill);
   background: var(--primary);
-  box-shadow: 0 0 6px var(--glow-strong);
 }
 
 /* Grouped follow-up: same author, < 5 min after the previous rendered
@@ -760,19 +716,31 @@
   top: 50%;
   width: 1.5rem;
   height: 1.5rem;
-  border-radius: 9999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in oklab, var(--primary) 18%, transparent);
   border: 1px solid color-mix(in oklab, var(--primary) 32%, transparent);
-  background-repeat: no-repeat;
-  background-position: center;
-  background-size: 0.75rem 0.75rem;
   transform: translateY(-50%) scale(0.7);
   opacity: 0;
   transition:
-    opacity 0.18s ease,
-    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.18s ease;
+    opacity 0.16s ease-out,
+    transform 0.16s cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 0.16s ease-out;
   pointer-events: none;
+}
+
+/* The glyph is painted through a mask so it takes `--primary` from the
+ * theme instead of a hex baked into a data URL. */
+.chat-message-swipe-hint::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--primary);
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: 0.75rem 0.75rem;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: 0.75rem 0.75rem;
 }
 
 /* Persistent rest-state visibility on touch viewports — small ghost
@@ -787,14 +755,22 @@
 
 .chat-message-swipe-hint--reply {
   left: -3.25rem;
-  /* lucide "reply" — `--primary` stroke */
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300a99d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='9 17 4 12 9 7'/><path d='M20 18v-2a4 4 0 0 0-4-4H4'/></svg>");
+}
+
+/* lucide "reply" */
+.chat-message-swipe-hint--reply::after {
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='9 17 4 12 9 7'/><path d='M20 18v-2a4 4 0 0 0-4-4H4'/></svg>");
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='9 17 4 12 9 7'/><path d='M20 18v-2a4 4 0 0 0-4-4H4'/></svg>");
 }
 
 .chat-message-swipe-hint--thread {
   right: -3.25rem;
-  /* lucide "message-square" — `--primary` stroke */
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300a99d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/></svg>");
+}
+
+/* lucide "message-square" */
+.chat-message-swipe-hint--thread::after {
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/></svg>");
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/></svg>");
 }
 
 .chat-message-swipeable.chat-message-swipe-active .chat-message-swipe-hint--reply {
@@ -808,9 +784,8 @@
 .chat-message-swipeable.chat-message-swipe-armed-thread .chat-message-swipe-hint--thread {
   opacity: 1;
   transform: translateY(-50%) scale(1);
-  box-shadow: 0 0 18px var(--glow-strong);
   background-color: color-mix(in oklab, var(--primary) 32%, transparent);
-  border-color: color-mix(in oklab, var(--primary) 55%, transparent);
+  border-color: var(--primary);
 }
 
 @media (pointer: fine) {
@@ -832,19 +807,18 @@
   }
   .chat-message-swipe-hint {
     transition: opacity 0.05s linear;
-    box-shadow: none;
   }
 }
 
 .chat-reaction-chip {
-  background: color-mix(in oklab, var(--muted) 60%, transparent);
+  background: var(--muted);
   color: var(--foreground);
-  border: 1px solid transparent;
-  transition: transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  border: 1px solid var(--border);
+  transition: transform 0.16s ease-out, background-color 0.16s ease-out, border-color 0.16s ease-out;
 }
 
 .chat-reaction-chip:hover {
-  background: var(--muted);
+  border-color: color-mix(in oklab, var(--border) 50%, var(--muted-foreground));
 }
 
 .chat-reaction-chip:active:not(:disabled) {
@@ -855,7 +829,7 @@
   outline: none;
   box-shadow:
     0 0 0 2px var(--background),
-    0 0 0 4px color-mix(in oklab, var(--primary) 45%, transparent);
+    0 0 0 4px var(--ring);
 }
 
 .chat-reaction-chip__count {
@@ -864,34 +838,31 @@
 }
 
 .chat-reaction-chip--self {
-  background: color-mix(in oklab, var(--primary) 14%, transparent);
-  border-color: color-mix(in oklab, var(--primary) 30%, transparent);
-  box-shadow: 0 0 12px -4px var(--glow);
+  background: color-mix(in oklab, var(--primary) 14%, var(--muted));
+  border-color: color-mix(in oklab, var(--primary) 40%, var(--border));
 }
 
 .chat-reaction-chip--self:hover {
-  background: color-mix(in oklab, var(--primary) 20%, transparent);
-  border-color: color-mix(in oklab, var(--primary) 40%, transparent);
-  box-shadow: 0 0 14px -2px var(--glow-strong);
+  background: color-mix(in oklab, var(--primary) 20%, var(--muted));
+  border-color: var(--primary);
 }
 
 .chat-reaction-chip--self .chat-reaction-chip__count {
   color: color-mix(in oklab, var(--primary) 85%, var(--foreground));
 }
 
-/* Warmth tiers — a count-proportional ambient halo that nudges
- * reaction chips from "metric chip" toward "ambient acknowledgement".
- * At a glance the room shows you which posts resonated, not just
- * which ones got a tap. Tiers compound with the `--self` variant; the
- * `--self` chip stays primary-tinted but its halo widens with warmth. */
+/* Warmth tiers — a count-proportional teal tint that nudges reaction
+ * chips from "metric chip" toward "ambient acknowledgement". At a
+ * glance the room shows you which posts resonated, not just which ones
+ * got a tap. Tiers compound with the `--self` variant. Tint only: a
+ * reaction is not a live thing, so no glow. */
 .chat-reaction-chip--warmth-tepid {
-  box-shadow: 0 0 10px -4px var(--glow);
+  border-color: color-mix(in oklab, var(--primary) 20%, var(--border));
 }
 
 .chat-reaction-chip--warmth-warm {
   background: color-mix(in oklab, var(--primary) 8%, var(--muted));
-  border-color: color-mix(in oklab, var(--primary) 18%, transparent);
-  box-shadow: 0 0 14px -3px var(--glow-strong);
+  border-color: color-mix(in oklab, var(--primary) 30%, var(--border));
 }
 
 .chat-reaction-chip--warmth-warm:hover {
@@ -900,23 +871,18 @@
 
 .chat-reaction-chip--warmth-hot {
   background: color-mix(in oklab, var(--primary) 14%, var(--muted));
-  border-color: color-mix(in oklab, var(--primary) 26%, transparent);
-  box-shadow:
-    0 0 18px -2px var(--glow-strong),
-    0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent) inset;
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
 }
 
 .chat-reaction-chip--warmth-hot:hover {
   background: color-mix(in oklab, var(--primary) 22%, var(--muted));
 }
 
-/* When the user is themselves a reactor on a hot chip, lift the halo
- * a step further and bias the count color further toward primary. */
+/* When the user is themselves a reactor on a hot chip, the border goes
+ * fully teal and the count colour biases further toward primary. */
 .chat-reaction-chip--self.chat-reaction-chip--warmth-warm,
 .chat-reaction-chip--self.chat-reaction-chip--warmth-hot {
-  box-shadow:
-    0 0 22px -2px var(--glow-strong),
-    0 0 0 1px color-mix(in oklab, var(--primary) 28%, transparent) inset;
+  border-color: var(--primary);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -940,7 +906,7 @@
   outline: none;
   box-shadow:
     0 0 0 2px var(--background),
-    0 0 0 4px color-mix(in oklab, var(--primary) 45%, transparent);
+    0 0 0 4px var(--ring);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -959,6 +925,9 @@
   justify-content: center;
   opacity: 0;
   transition: opacity 0.12s ease-out;
+  font-family: var(--font-code);
+  font-size: var(--text-meta);
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
   white-space: nowrap;
@@ -1015,13 +984,7 @@
 .chat-thread-root-divider {
   height: 1px;
   margin: var(--space-sm) var(--space-md);
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in oklab, var(--border) 78%, transparent) 18%,
-    color-mix(in oklab, var(--border) 78%, transparent) 82%,
-    transparent
-  );
+  background: var(--border);
 }
 
 /* Thread lobby header — replaces the generic "Thread > author"
@@ -1054,8 +1017,10 @@
 .chat-thread-header__preview {
   flex: 1;
   min-width: 0;
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
   font-size: var(--text-control);
-  font-weight: 650;
+  font-weight: 600;
   color: var(--foreground);
   line-height: 1.35;
   margin: 0;
@@ -1083,10 +1048,11 @@
 }
 
 .chat-thread-header__breadcrumb-label {
+  font-family: var(--font-code);
   font-size: 0.6rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  font-weight: 650;
+  font-weight: 500;
 }
 
 .chat-thread-header__breadcrumb-sep {
@@ -1153,20 +1119,22 @@
 }
 
 .chat-thread-header__meta-label {
-  font-size: 0.55rem;
-  letter-spacing: 0.07em;
+  font-family: var(--font-code);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
-  font-weight: 650;
+  font-weight: 500;
 }
 
 .chat-thread-header__meta-value {
+  font-family: var(--font-code);
   font-size: var(--text-meta);
   color: color-mix(in oklab, var(--foreground) 82%, transparent);
 }
 
 .chat-thread-header__meta-value > strong {
-  font-weight: 650;
+  font-weight: 600;
   color: var(--foreground);
   font-variant-numeric: tabular-nums;
 }
@@ -1175,9 +1143,8 @@
   display: inline-block;
   width: 0.4rem;
   height: 0.4rem;
-  border-radius: 9999px;
+  border-radius: var(--radius-pill);
   background: var(--primary);
-  box-shadow: 0 0 6px var(--glow-strong);
   align-self: center;
 }
 
@@ -1224,11 +1191,12 @@
   min-width: 1.5rem;
   height: 1.5rem;
   padding: 0 0.4rem;
-  border-radius: 9999px;
-  background: color-mix(in oklab, var(--muted) 65%, transparent);
-  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  font-family: var(--font-code);
   font-size: 0.625rem;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }

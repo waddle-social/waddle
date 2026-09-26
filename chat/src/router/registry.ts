@@ -7,6 +7,8 @@ import type { EventsMatch } from "./routes/events";
 import type { FeedMatch } from "./routes/feed";
 import type { GroupDmRoomMatch } from "./routes/group-dm-room";
 import type { HomeMatch } from "./routes/home";
+import type { MembersMatch } from "./routes/members";
+import type { RoomsMatch } from "./routes/rooms";
 import type { SettingsMatch } from "./routes/settings";
 import type { StoriesMatch } from "./routes/stories";
 import type { ThreadsMatch } from "./routes/threads";
@@ -24,6 +26,8 @@ export type RouteMatch =
   | EventsMatch
   | ThreadsMatch
   | UnreadMatch
+  | RoomsMatch
+  | MembersMatch
   | SettingsMatch
   | AdminMatch;
 

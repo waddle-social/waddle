@@ -18,8 +18,9 @@
   "ignoreDependencies": [
     "@fontsource-variable/jetbrains-mono",
     "@fontsource-variable/outfit",
-    "tailwindcss",
+    "@fontsource-variable/space-grotesk",
+    "cloudflare",
     "events",
-    "cloudflare"
+    "tailwindcss"
   ]
 }

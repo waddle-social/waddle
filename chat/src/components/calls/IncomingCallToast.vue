@@ -2,10 +2,16 @@
 import { computed, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video } from "lucide-vue-next";
+import { toast as toastRecipe } from "styled-system/recipes";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
 import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
+
+// Styled like every other toast (opaque ink, night-coloured in daylight);
+// the ember border marks it as live. It is not on the generic toaster
+// because it is persistent and derived from `$callState`.
+const cls = toastRecipe();
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);
@@ -97,45 +103,45 @@ async function decline(): Promise<void> {
 <template>
   <div
     v-if="state.phase === 'incoming'"
-    class="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-popover p-4 shadow-2xl glass-surface"
+    :class="[cls.root, 'call-toast fixed bottom-6 right-6 z-50 w-80 max-w-[calc(100vw-2rem)] flex-col animate-slide-up']"
     role="dialog"
     aria-live="assertive"
     aria-label="Incoming call"
   >
-    <div class="flex items-center gap-3">
-      <span class="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary">
+    <div class="flex w-full items-center gap-3">
+      <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-live/15 text-live">
         <component :is="state.media.video ? Video : Phone" class="w-5 h-5" />
       </span>
       <div class="min-w-0 flex-1">
-        <div class="type-chat-title truncate">{{ callerLabel }}</div>
-        <div class="type-caption text-muted-foreground">{{ mediaLabel }} · {{ statusLabel }}</div>
+        <div :class="[cls.title, 'truncate']">{{ callerLabel }}</div>
+        <div :class="cls.description">{{ mediaLabel }} · {{ statusLabel }}</div>
       </div>
     </div>
     <div
       v-if="lastError"
-      class="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 type-caption text-destructive"
+      class="w-full rounded-md border border-destructive/40 bg-destructive/15 px-2 py-1 type-caption text-destructive-text"
       role="alert"
     >
       {{ lastError }}
     </div>
-    <div class="mt-3 flex items-center justify-end gap-2">
+    <div class="flex w-full items-center justify-end gap-2">
       <button
-        class="chat-action-button chat-action-button--secondary"
+        class="call-toast__secondary inline-flex h-7 items-center gap-1.5 rounded-full border border-current/30 px-2.5 text-[12px] font-bold hover:bg-white/10 disabled:opacity-50"
         type="button"
         :disabled="controlsDisabled"
         @click="decline"
       >
-        <PhoneOff class="w-4 h-4" />
-        <span class="type-control">Decline</span>
+        <PhoneOff class="w-3.5 h-3.5" />
+        <span>Decline</span>
       </button>
       <button
-        class="chat-action-button chat-action-button--primary"
+        :class="[cls.actionTrigger, 'inline-flex items-center gap-1.5 disabled:opacity-50']"
         type="button"
         :disabled="controlsDisabled"
         @click="accept"
       >
-        <Phone class="w-4 h-4" />
-        <span class="type-control">{{ controlsDisabled && !declining ? "Connecting…" : "Accept" }}</span>
+        <Phone class="w-3.5 h-3.5" />
+        <span>{{ controlsDisabled && !declining ? "Connecting…" : "Accept" }}</span>
       </button>
     </div>
   </div>

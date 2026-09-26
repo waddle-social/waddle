@@ -44,6 +44,12 @@ export function applyMatchToShellState(ui: ChatShellState, match: RouteMatch): v
     case "unread":
       ui.activePage.value = "unread";
       break;
+    case "rooms":
+      ui.activePage.value = "rooms";
+      break;
+    case "members":
+      ui.activePage.value = "members";
+      break;
   }
   ui.activeCommunitySurface.value =
     match.id === "feed" || match.id === "stories" || match.id === "events"
@@ -160,6 +166,13 @@ export function useRouteSync(deps: RouteSyncDeps) {
       navigate({ id: "unread" });
       return;
     }
+    if (ui.activePage.value === "rooms" || ui.activePage.value === "members") {
+      // Community pages (Rooms / Members) are static routes with no
+      // conversation target; pin the URL like threads/unread so a
+      // watcher never bounces them back to the home route.
+      navigate({ id: ui.activePage.value });
+      return;
+    }
     if (ui.activePage.value === "admin") {
       // Admin owns the entire workspace and is mounted out of
       // ChatReadyShell's own popstate-driven adminPanelRef, but
@@ -252,6 +265,8 @@ export function useRouteSync(deps: RouteSyncDeps) {
       || match.id === "stories"
       || match.id === "events"
       || match.id === "dmList"
+      || match.id === "rooms"
+      || match.id === "members"
     ) {
       dmConversations.closeDm();
       waddles.activeChannelId.value = null;

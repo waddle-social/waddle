@@ -9,8 +9,8 @@
  *    (GitHub workflow runs, deploy notifications, CI events…). Renders
  *    full-width and flat — no avatar gutter, no card border, no message
  *    bubble. The whole row IS the notification. Tone (success / danger /
- *    warning / neutral) drives a 3 px left rail and a subtle hue-tinted
- *    gradient wash so a failing CI run reads red at a glance.
+ *    warning / neutral) drives a 3 px left rail so a failing CI run
+ *    reads red at a glance.
  *
  *  Action chip strip (`.chat-extension-action-strip`)
  *    For HUMAN-AUTHORED messages whose content has been annotated with
@@ -41,9 +41,9 @@
    * list's --space-2xs row gap is too tight for the visual weight of
    * a full-width card; --space-sm gives each event its own block. */
   margin-block-end: var(--space-sm);
-  border-top: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
-  border-bottom: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
-  transition: background-color 0.16s ease;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  transition: background-color 0.16s ease-out;
 }
 
 .chat-system-band::before {
@@ -58,14 +58,10 @@
 }
 
 .chat-system-band:hover {
-  /* Hover gives a quiet hue-tinted lift on the BODY only — well below
-   * the at-rest wash that used to live here, and only while the user
-   * is actually pointing at the card. Standing CI feed stays neutral. */
-  background: linear-gradient(
-    90deg,
-    color-mix(in oklab, var(--rail-color) 5%, transparent),
-    transparent 55%
-  );
+  /* Hover gives a quiet hue-tinted lift on the BODY only, and only
+   * while the user is actually pointing at the card. Standing CI feed
+   * stays neutral. */
+  background: color-mix(in oklab, var(--rail-color) 5%, transparent);
 }
 
 .chat-system-band--tone-success { --rail-color: var(--success); }
@@ -77,29 +73,29 @@
  * borders, picks up a softer card-like surface so it sits naturally
  * within the message column instead of breaking out of it. */
 .chat-system-band--inline {
-  border: 1px solid color-mix(in oklab, var(--border) 88%, transparent);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  /* Inline variant keeps its quiet --card surface; the rail-color
-   * wash that used to layer on top is dropped (same quietening pass
-   * as the full-width band). The rail still carries tone. */
-  background: color-mix(in oklab, var(--card) 55%, transparent);
+  /* Inline variant is an opaque card; the rail still carries tone. */
+  background: var(--card);
 }
 
 .chat-system-band--inline::before {
   top: 0.4rem;
   bottom: 0.4rem;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
+/* Header row is a mono kicker: source · stamp · tone. */
 .chat-system-band__header {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  font-size: 0.65rem;
+  font-family: var(--font-code);
+  font-size: var(--text-caption);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted-foreground);
-  font-weight: 650;
+  font-weight: 500;
   line-height: 1;
 }
 
@@ -125,14 +121,16 @@
 .chat-system-band__tone-pill {
   margin-left: auto;
   padding: 0.1rem 0.45rem;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--rail-color);
   background: color-mix(in oklab, var(--rail-color) 12%, transparent);
 }
 
 .chat-system-band__title {
+  font-family: var(--font-display);
   font-size: var(--text-message);
-  font-weight: 650;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   color: var(--foreground);
   line-height: 1.35;
   word-break: break-word;
@@ -180,11 +178,12 @@
 }
 
 .chat-system-band__meta-label {
-  font-size: 0.55rem;
-  letter-spacing: 0.06em;
+  font-family: var(--font-code);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
-  font-weight: 650;
+  font-weight: 500;
 }
 
 .chat-system-band__meta-value {
@@ -234,21 +233,26 @@
   gap: 0.35rem;
   min-height: 1.6rem;
   padding: 0.2rem 0.65rem;
-  border-radius: 999px;
-  border: 1px solid color-mix(in oklab, var(--border) 88%, transparent);
-  background: color-mix(in oklab, var(--card) 50%, transparent);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--card);
   color: var(--foreground);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0;
   cursor: pointer;
-  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
+  transition: background-color 0.16s ease-out, border-color 0.16s ease-out, color 0.16s ease-out, transform 0.1s ease-out;
 }
 
 .chat-extension-action-chip:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--primary) 10%, transparent);
-  border-color: color-mix(in oklab, var(--primary) 32%, transparent);
+  background: color-mix(in oklab, var(--primary) 10%, var(--card));
+  border-color: color-mix(in oklab, var(--primary) 32%, var(--border));
   color: var(--primary);
+}
+
+.chat-extension-action-chip:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .chat-extension-action-chip:active:not(:disabled) {
@@ -268,11 +272,12 @@
 }
 
 .chat-extension-action-chip__source {
-  font-size: 0.55rem;
-  letter-spacing: 0.06em;
+  font-family: var(--font-code);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: color-mix(in oklab, var(--muted-foreground) 80%, transparent);
-  font-weight: 700;
+  font-weight: 500;
   margin-right: 0.05rem;
 }
 

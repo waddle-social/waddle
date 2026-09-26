@@ -352,14 +352,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section :class="embedded ? 'grid gap-3' : 'grid gap-3 rounded-lg border border-border bg-card p-3'">
-    <div role="tablist" aria-label="Composer mode" class="flex gap-1 rounded-md bg-muted/40 p-1">
+  <section :class="embedded ? 'grid gap-3' : 'grid gap-3 rounded-2xl border border-border bg-card p-4'">
+    <div role="tablist" aria-label="Composer mode" class="flex gap-1 rounded-full border border-border bg-background p-0.5">
       <button
         type="button"
         role="tab"
         :aria-selected="mode === 'attach'"
-        class="flex-1 inline-flex items-center justify-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium"
-        :class="mode === 'attach' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+        class="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors"
+        :class="mode === 'attach' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
         :disabled="busy"
         @click="activateMode('attach')"
       >
@@ -370,8 +370,8 @@ onBeforeUnmount(() => {
         type="button"
         role="tab"
         :aria-selected="mode === 'photo'"
-        class="flex-1 inline-flex items-center justify-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium"
-        :class="mode === 'photo' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+        class="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors"
+        :class="mode === 'photo' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
         :disabled="busy"
         @click="activateMode('photo')"
       >
@@ -382,8 +382,8 @@ onBeforeUnmount(() => {
         type="button"
         role="tab"
         :aria-selected="mode === 'record'"
-        class="flex-1 inline-flex items-center justify-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium"
-        :class="mode === 'record' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+        class="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors"
+        :class="mode === 'record' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
         :disabled="busy"
         @click="activateMode('record')"
       >
@@ -392,12 +392,12 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <p v-if="errorMessage" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+    <p v-if="errorMessage" class="rounded-[10px] border border-destructive/40 px-3 py-2 text-[13px] text-destructive-text">
       {{ errorMessage }}
     </p>
 
-    <div v-if="mode === 'attach' && !previewUrl" class="grid place-items-center rounded-md border border-dashed border-border px-3 py-6 text-center">
-      <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm hover:bg-muted/50">
+    <div v-if="mode === 'attach' && !previewUrl" class="grid place-items-center rounded-2xl border border-dashed border-border px-3 py-6 text-center">
+      <label class="inline-flex cursor-pointer items-center gap-2 rounded-[10px] border border-border bg-card px-3 py-2 text-sm font-semibold hover:bg-muted">
         <Paperclip class="h-4 w-4" aria-hidden="true" />
         Choose photo or video
         <input
@@ -408,13 +408,13 @@ onBeforeUnmount(() => {
           @change="onAttachFile"
         />
       </label>
-      <p class="mt-2 type-caption text-muted-foreground">
+      <p class="mt-2 type-section-label">
         Max {{ Math.floor(maxBytes / (1024 * 1024)) }} MB
       </p>
     </div>
 
     <div v-if="(mode === 'photo' || mode === 'record') && !previewUrl" class="grid gap-2">
-      <div class="relative overflow-hidden rounded-md bg-black">
+      <div class="relative overflow-hidden rounded-[10px] bg-background">
         <video
           ref="videoEl"
           class="block max-h-[60vh] w-full"
@@ -424,15 +424,15 @@ onBeforeUnmount(() => {
         ></video>
         <button
           type="button"
-          class="absolute top-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full bg-background/80 text-foreground shadow-sm hover:bg-background"
+          class="absolute top-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-foreground hover:bg-muted"
           :disabled="busy || recording"
           :aria-label="facingMode === 'user' ? 'Switch to back camera' : 'Switch to front camera'"
           @click="flipCamera"
         >
           <RefreshCw class="h-4 w-4" aria-hidden="true" />
         </button>
-        <div v-if="recording" class="absolute top-2 left-2 inline-flex items-center gap-1.5 rounded-full bg-destructive/90 px-2.5 py-0.5 text-xs font-medium text-destructive-foreground">
-          <span class="h-2 w-2 rounded-full bg-destructive-foreground animate-pulse"></span>
+        <div v-if="recording" class="absolute top-2 left-2 inline-flex items-center gap-1.5 rounded-full bg-live px-2.5 py-0.5 font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-live-foreground shadow-[0_0_10px_var(--glow-live)]">
+          <span class="h-2 w-2 rounded-full bg-live-foreground animate-pulse"></span>
           {{ Math.ceil((RECORDING_MAX_MS - recordElapsedMs) / 1000) }}s
         </div>
       </div>
@@ -440,7 +440,7 @@ onBeforeUnmount(() => {
         <button
           v-if="mode === 'photo'"
           type="button"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          class="inline-flex h-9 items-center gap-1.5 rounded-[10px] bg-primary px-4 text-sm font-bold text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           :disabled="busy || !cameraReady"
           @click="takePhoto"
         >
@@ -451,7 +451,7 @@ onBeforeUnmount(() => {
           <button
             v-if="!recording"
             type="button"
-            class="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground shadow-sm hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-60"
+            class="inline-flex h-9 items-center gap-1.5 rounded-full bg-live px-4 text-sm font-bold text-live-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="busy || !cameraReady"
             @click="startRecording"
           >
@@ -461,7 +461,7 @@ onBeforeUnmount(() => {
           <button
             v-else
             type="button"
-            class="inline-flex items-center gap-1.5 rounded-md bg-foreground px-3 py-2 text-sm font-medium text-background shadow-sm hover:opacity-90"
+            class="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-sm font-bold text-foreground transition-colors hover:bg-muted"
             @click="stopRecording"
           >
             <Square class="h-4 w-4" aria-hidden="true" />
@@ -472,7 +472,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="previewUrl" class="grid gap-2">
-      <div class="relative overflow-hidden rounded-md bg-black">
+      <div class="relative overflow-hidden rounded-[10px] bg-background">
         <img
           v-if="previewKind === 'image'"
           :src="previewUrl"
@@ -488,7 +488,7 @@ onBeforeUnmount(() => {
         ></video>
         <button
           type="button"
-          class="absolute top-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full bg-background/80 text-foreground shadow-sm hover:bg-background"
+          class="absolute top-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-foreground hover:bg-muted"
           :disabled="busy"
           aria-label="Remove media"
           @click="clearPreview"
@@ -500,18 +500,18 @@ onBeforeUnmount(() => {
 
     <textarea
       v-model="body"
-      class="min-h-[3rem] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      class="min-h-[3rem] w-full resize-y rounded-[10px] border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       placeholder="Add a caption (optional)"
       :disabled="busy"
       aria-label="Story caption"
     />
 
     <div class="flex items-center justify-between gap-2">
-      <span class="type-caption text-muted-foreground">Expires in 24h</span>
+      <span class="type-section-label">Expires in 24h</span>
       <div class="flex items-center gap-2">
         <button
           type="button"
-          class="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          class="inline-flex h-8 items-center gap-1 rounded-[10px] border border-border bg-card px-3 text-[13px] font-semibold text-foreground transition-colors hover:bg-muted disabled:opacity-50"
           :disabled="busy"
           @click="cancel"
         >
@@ -520,7 +520,7 @@ onBeforeUnmount(() => {
         </button>
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          class="inline-flex h-8 items-center gap-1.5 rounded-[10px] bg-primary px-3.5 text-[13px] font-bold text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           :disabled="!canSubmit"
           @click="submit"
         >

@@ -94,6 +94,44 @@ export function usePageNavigation(deps: PageNavigationDeps) {
   }
 
   /**
+   * Navigate to the Rooms page (`/rooms`). Mirrors `openUnread()`: the
+   * page has no conversation target, so any channel/DM selection and
+   * thread-panel state is dropped before the URL is pushed.
+   */
+  function openRooms() {
+    cancelPendingRoute();
+    clearPendingChannelRoomJidSelection();
+    ui.showMobileNav.value = false;
+    ui.showMobileDetails.value = false;
+    ui.activePage.value = "rooms";
+    ui.activeCommunitySurface.value = null;
+    waddles.activeChannelId.value = null;
+    dmConversations.closeDm();
+    activeRightPanel.value = null;
+    activeThreadStack.value = [];
+    activeExtensionRouteKey.value = null;
+    navigate({ id: "rooms" });
+  }
+
+  /**
+   * Navigate to the Members page (`/members`). Same shape as `openRooms()`.
+   */
+  function openMembers() {
+    cancelPendingRoute();
+    clearPendingChannelRoomJidSelection();
+    ui.showMobileNav.value = false;
+    ui.showMobileDetails.value = false;
+    ui.activePage.value = "members";
+    ui.activeCommunitySurface.value = null;
+    waddles.activeChannelId.value = null;
+    dmConversations.closeDm();
+    activeRightPanel.value = null;
+    activeThreadStack.value = [];
+    activeExtensionRouteKey.value = null;
+    navigate({ id: "members" });
+  }
+
+  /**
    * Navigate to a community surface — Feed / Events. These
    * are first-class routes (`/feed`, `/events`) but they
    * also need the in-page state set immediately so the v-else-if
@@ -190,6 +228,8 @@ export function usePageNavigation(deps: PageNavigationDeps) {
     openUserSettings,
     openThreads,
     openUnread,
+    openRooms,
+    openMembers,
     openCommunitySurface,
     openHome,
     openDmList,

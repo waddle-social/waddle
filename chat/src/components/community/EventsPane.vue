@@ -39,6 +39,7 @@ import {
 } from "@/lib/xmpp-client";
 import { useCalendarFeedCopy } from "@/lib/use-calendar-feed-copy";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
+import { button, card, kicker } from "styled-system/recipes";
 
 interface EventsPaneProps {
   events: readonly CommunityEvent[];
@@ -97,6 +98,57 @@ const selfAttendeeUri = computed(() => {
   const bare = selfBareJid.value;
   return bare ? `xmpp:${bare}` : null;
 });
+
+// ─── Recipe classes ───────────────────────────────────────────────────────────
+
+const liveCard = card({ tone: "live" });
+const quietCard = card({ tone: "quiet" });
+const kickerClass = kicker();
+const liveKickerClass = kicker({ tone: "live" });
+const primaryButtonClass = button({ variant: "primary", size: "sm" });
+const quietButtonClass = button({ variant: "quiet", size: "sm" });
+const dangerButtonClass = button({ variant: "danger", size: "sm" });
+
+// Pill toggles: hairline at rest, teal when pressed.
+const PILL_BASE = "inline-flex h-8 items-center gap-1 rounded-full border px-3 text-[13px] font-semibold transition-colors";
+const PILL_IDLE = "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground";
+const PILL_ON = "border-primary bg-primary text-primary-foreground";
+function pillClass(pressed: boolean): string {
+  return `${PILL_BASE} ${pressed ? PILL_ON : PILL_IDLE}`;
+}
+
+const FIELD_CLASS = "w-full rounded-[10px] border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+// ─── Live window ──────────────────────────────────────────────────────────────
+
+const SOON_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * An event is "live" on the board when it is ongoing or starts within the
+ * next two hours: that card carries the ember border and the only glow on
+ * the page.
+ */
+function isEventLive(event: CommunityEvent, nowMs = Date.now()): boolean {
+  if (event.dtstart?.kind !== "date-time") return false;
+  const startMs = event.dtstart.ms;
+  const endMs = event.dtend?.kind === "date-time" ? event.dtend.ms : startMs + 60 * 60 * 1000;
+  return startMs - nowMs <= SOON_WINDOW_MS && endMs > nowMs;
+}
+
+function eventCard(event: CommunityEvent) {
+  return isEventLive(event) ? liveCard : quietCard;
+}
+
+function eventKicker(event: CommunityEvent, dayStartMs: number | null): string {
+  const time = formatVisibleTime(event, dayStartMs);
+  if (event.dtstart?.kind !== "date-time") return time;
+  const nowMs = Date.now();
+  const startMs = event.dtstart.ms;
+  const endMs = event.dtend?.kind === "date-time" ? event.dtend.ms : startMs + 60 * 60 * 1000;
+  if (startMs <= nowMs && endMs > nowMs) return `Happening now · ${time}`;
+  if (isEventLive(event, nowMs)) return `Starting soon · ${time}`;
+  return time;
+}
 
 // ─── View & filter state ──────────────────────────────────────────────────────
 
@@ -265,6 +317,25 @@ const selectedDayStartMs = computed(() => {
   if (d === null) return null;
   return localDayRange(calYear.value, calMonth.value, d).startMs;
 });
+
+const selectedDayLabel = computed(() => {
+  const d = selectedDay.value;
+  if (d === null) return "";
+  return new Date(calYear.value, calMonth.value, d).toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+});
+
+/** The next upcoming or ongoing event, unless the selected day already shows it. */
+const nextEvent = computed<CommunityEvent | null>(() => {
+  const nowMs = Date.now();
+  const next = filteredEvents.value.find((event) => isEventUpcomingOrOngoing(event, nowMs)) ?? null;
+  if (!next) return null;
+  return selectedDayEvents.value.some((event) => event.id === next.id) ? null : next;
+});
+
 
 // ─── Formatting ───────────────────────────────────────────────────────────────
 
@@ -629,99 +700,97 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 <template>
   <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
-    <div class="mx-auto grid w-full max-w-3xl gap-4">
+    <div class="mx-auto grid w-full max-w-3xl gap-5">
 
       <!-- Header -->
-      <header class="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          class="md:hidden inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-          aria-label="Open navigation"
-          @click="emit('openNav')"
-        >
-          <Menu class="h-4 w-4" aria-hidden="true" />
-        </button>
-
-        <CalendarDays class="h-5 w-5 text-primary" aria-hidden="true" />
-        <h1 class="type-pane-title text-foreground">Community Events</h1>
-
-        <!-- View mode toggle -->
-        <div class="ml-auto flex items-center rounded-md border border-border bg-muted/40 p-0.5 text-xs">
+      <header class="grid gap-3">
+        <div class="flex items-center gap-3">
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded px-2.5 py-1 font-medium transition-colors"
-            :class="viewMode === 'week'
-              ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground'"
-            @click="viewMode = 'week'"
+            class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
+            aria-label="Open navigation"
+            @click="emit('openNav')"
           >
-            <List class="h-3.5 w-3.5" aria-hidden="true" />
-            7 days
+            <Menu class="h-4 w-4" aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 rounded px-2.5 py-1 font-medium transition-colors"
-            :class="viewMode === 'month'
-              ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground'"
-            @click="viewMode = 'month'"
-          >
-            <CalendarDays class="h-3.5 w-3.5" aria-hidden="true" />
-            Month
-          </button>
+          <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">Events</h1>
+          <div class="ml-auto flex items-center gap-2">
+            <button
+              v-if="canPost"
+              type="button"
+              :class="primaryButtonClass"
+              @click="composerOpen ? resetComposer() : openComposer()"
+            >
+              <Plus class="h-3.5 w-3.5" aria-hidden="true" />
+              {{ composerOpen ? (editingId ? "Cancel edit" : "Close") : "New event" }}
+            </button>
+            <button
+              v-else
+              type="button"
+              :class="quietButtonClass"
+              :disabled="isLoading"
+              @click="emit('refresh')"
+            >
+              <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isLoading }" aria-hidden="true" />
+              Refresh
+            </button>
+          </div>
         </div>
 
-        <!-- Attending filter -->
-        <button
-          v-if="selfBareJid"
-          type="button"
-          class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-          :class="activeFilter === 'attending'
-            ? 'border-primary bg-primary/10 text-primary'
-            : 'border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
-          @click="activeFilter = activeFilter === 'attending' ? 'all' : 'attending'"
-        >
-          {{ activeFilter === 'attending' ? 'Going / Maybe' : 'All events' }}
-        </button>
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- View mode toggle -->
+          <div class="flex items-center gap-1.5" role="group" aria-label="Calendar view">
+            <button
+              type="button"
+              :class="pillClass(viewMode === 'week')"
+              :aria-pressed="viewMode === 'week' ? 'true' : 'false'"
+              @click="viewMode = 'week'"
+            >
+              <List class="h-3.5 w-3.5" aria-hidden="true" />
+              7 days
+            </button>
+            <button
+              type="button"
+              :class="pillClass(viewMode === 'month')"
+              :aria-pressed="viewMode === 'month' ? 'true' : 'false'"
+              @click="viewMode = 'month'"
+            >
+              <CalendarDays class="h-3.5 w-3.5" aria-hidden="true" />
+              Month
+            </button>
+          </div>
 
-        <!-- Calendar feed -->
-        <button
-          type="button"
-          class="inline-flex min-h-11 min-w-[7.5rem] items-center justify-center gap-1 rounded-md border border-transparent px-3 py-2 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground sm:px-2 sm:py-1"
-          :disabled="!canCopyFeedUrl || feedCopyState === 'loading'"
-          @click="copyCalendarFeedUrl"
-        >
-          <Copy class="h-3.5 w-3.5" aria-hidden="true" />
-          Copy feed URL
-        </button>
-        <span
-          class="min-w-[5.5rem] text-xs text-muted-foreground"
-          role="status"
-          aria-live="polite"
-        >
-          {{ feedCopyStatusLabel }}
-        </span>
+          <!-- Attending filter -->
+          <button
+            v-if="selfBareJid"
+            type="button"
+            :class="pillClass(activeFilter === 'attending')"
+            :aria-pressed="activeFilter === 'attending' ? 'true' : 'false'"
+            @click="activeFilter = activeFilter === 'attending' ? 'all' : 'attending'"
+          >
+            Going or maybe
+          </button>
 
-        <!-- New event / Refresh -->
-        <button
-          v-if="canPost"
-          type="button"
-          class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
-          @click="composerOpen ? resetComposer() : openComposer()"
-        >
-          <Plus class="h-3.5 w-3.5" aria-hidden="true" />
-          {{ composerOpen ? (editingId ? "Cancel edit" : "Close") : "New event" }}
-        </button>
-        <button
-          v-else
-          type="button"
-          class="inline-flex items-center gap-1 rounded-md border border-transparent px-2 py-1 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-          :disabled="isLoading"
-          @click="emit('refresh')"
-        >
-          <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isLoading }" aria-hidden="true" />
-          Refresh
-        </button>
+          <!-- Calendar feed -->
+          <div class="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              :class="quietButtonClass"
+              :disabled="!canCopyFeedUrl || feedCopyState === 'loading'"
+              @click="copyCalendarFeedUrl"
+            >
+              <Copy class="h-3.5 w-3.5" aria-hidden="true" />
+              Copy feed URL
+            </button>
+            <span
+              class="type-caption min-w-[5.5rem] text-muted-foreground"
+              role="status"
+              aria-live="polite"
+            >
+              {{ feedCopyStatusLabel }}
+            </span>
+          </div>
+        </div>
       </header>
 
       <CalendarFeedUrlPanel v-if="feedCopyUrl" :url="feedCopyUrl" />
@@ -729,7 +798,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
       <!-- Error -->
       <div
         v-if="error"
-        class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
       >
         Couldn't load events: {{ error }}
       </div>
@@ -737,58 +806,59 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
       <!-- Composer -->
       <form
         v-if="composerOpen"
-        class="grid gap-2 rounded-lg border border-border bg-card p-3"
+        class="grid gap-3 rounded-2xl border border-border bg-card p-4"
         @input="markComposerTouched"
         @submit.prevent="submit"
       >
+        <p :class="kickerClass">{{ editingId ? "Edit event" : "New event" }}</p>
         <input
           v-model="summary"
           type="text"
-          class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          :class="FIELD_CLASS"
           placeholder="Event title"
           required
           aria-label="Event title"
         />
-        <label class="inline-flex w-fit items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground">
+        <label class="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-background px-3 py-1.5 text-[13px] text-foreground">
           <input
             v-model="allDay"
             type="checkbox"
-            class="h-4 w-4 rounded border-input"
+            class="h-4 w-4 rounded border-border accent-[var(--primary)]"
           />
           All day
         </label>
         <div v-if="allDay" class="grid gap-2 md:grid-cols-2">
-          <label class="grid gap-1 text-xs">
-            <span class="text-muted-foreground">Start date</span>
+          <label class="grid gap-1">
+            <span :class="kickerClass">Start date</span>
             <input
               v-model="allDayStart"
               type="date"
-              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              :class="FIELD_CLASS"
             />
           </label>
-          <label class="grid gap-1 text-xs">
-            <span class="text-muted-foreground">End date</span>
+          <label class="grid gap-1">
+            <span :class="kickerClass">End date</span>
             <input
               v-model="allDayEnd"
               type="date"
-              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              :class="FIELD_CLASS"
             />
           </label>
         </div>
         <div v-else class="grid gap-2 md:grid-cols-2">
-          <label class="grid gap-1 text-xs">
-            <span class="text-muted-foreground">Starts</span>
+          <label class="grid gap-1">
+            <span :class="kickerClass">Starts</span>
             <input
               v-model="dtstart"
               type="datetime-local"
-              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              :class="FIELD_CLASS"
             />
           </label>
-          <label class="grid gap-1 text-xs">
-            <span class="text-muted-foreground">Duration</span>
+          <label class="grid gap-1">
+            <span :class="kickerClass">Duration</span>
             <select
               v-model="durationChoice"
-              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              :class="FIELD_CLASS"
             >
               <option
                 v-for="option in DURATION_OPTIONS"
@@ -799,32 +869,32 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
               </option>
             </select>
           </label>
-          <label v-if="durationChoice === 'custom'" class="grid gap-1 text-xs md:col-span-2">
-            <span class="text-muted-foreground">Ends</span>
+          <label v-if="durationChoice === 'custom'" class="grid gap-1 md:col-span-2">
+            <span :class="kickerClass">Ends</span>
             <input
               v-model="dtend"
               type="datetime-local"
-              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              :class="FIELD_CLASS"
             />
           </label>
         </div>
         <input
           v-model="location"
           type="text"
-          class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          :class="FIELD_CLASS"
           placeholder="Location (optional)"
           aria-label="Event location"
         />
         <textarea
           v-model="description"
-          class="min-h-[3rem] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          :class="[FIELD_CLASS, 'min-h-[3rem] resize-y']"
           placeholder="Description (optional)"
           aria-label="Event description"
         />
         <RecurrencePicker v-model="rrule" />
         <p
           v-if="visibleComposerError"
-          class="inline-flex items-center gap-1 text-xs text-destructive"
+          class="type-caption inline-flex items-center gap-1 text-destructive-text"
           role="alert"
         >
           <Clock3 class="h-3.5 w-3.5" aria-hidden="true" />
@@ -833,7 +903,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         <div class="flex items-center justify-end gap-2">
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            :class="quietButtonClass"
             :disabled="isPosting"
             @click="resetComposer"
           >
@@ -842,7 +912,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           </button>
           <button
             type="submit"
-            class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+            :class="primaryButtonClass"
             :disabled="!canSubmit"
           >
             {{ isPosting ? (editingId ? "Saving…" : "Publishing…") : (editingId ? "Save changes" : "Publish event") }}
@@ -852,46 +922,44 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
       <!-- ── 7-day list view ─────────────────────────────────────────────── -->
       <template v-if="viewMode === 'week'">
-        <div v-if="weekEventsByDay.size > 0" class="grid gap-4">
+        <div v-if="weekEventsByDay.size > 0" class="grid gap-5">
           <section
             v-for="[dayLabel, day] in weekEventsByDay"
             :key="dayLabel"
             class="grid gap-2"
           >
-            <h2 class="type-section-label text-muted-foreground">{{ dayLabel }}</h2>
+            <h2 :class="kickerClass">{{ dayLabel }}</h2>
             <article
               v-for="event in day.events"
               :key="event.id"
-              class="grid gap-1.5 rounded-lg border border-border bg-card px-4 py-3"
+              :class="eventCard(event).root"
             >
-              <header class="flex items-baseline justify-between gap-3">
-                <h3 class="type-control font-semibold text-foreground">{{ event.summary }}</h3>
-                <div class="flex shrink-0 items-center gap-1">
-                  <span class="type-caption text-muted-foreground">
-                    {{ formatVisibleTime(event, day.startMs) }}
-                  </span>
-                  <template v-if="isOrganiser(event)">
-                    <button
-                      type="button"
-                      class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                      aria-label="Edit event"
-                      @click="startEdit(event)"
-                    >
-                      <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                      aria-label="Cancel event"
-                      @click="onCancelEvent(event)"
-                    >
-                      <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                  </template>
+              <header class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p :class="eventCard(event).kicker">{{ eventKicker(event, day.startMs) }}</p>
+                  <h3 :class="[eventCard(event).title, 'mt-1']">{{ event.summary }}</h3>
+                </div>
+                <div v-if="isOrganiser(event)" class="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                    aria-label="Edit event"
+                    @click="startEdit(event)"
+                  >
+                    <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive-text"
+                    aria-label="Cancel event"
+                    @click="onCancelEvent(event)"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
                 </div>
               </header>
               <p v-if="event.location" class="type-caption text-muted-foreground">
-                📍 {{ event.location }}
+                {{ event.location }}
               </p>
               <p v-if="event.description" class="whitespace-pre-wrap break-words text-sm text-foreground">
                 {{ event.description }}
@@ -901,74 +969,120 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                 {{ summarizeRrule(event.rrule) }}
               </p>
               <p v-if="event.organizer" class="type-caption text-muted-foreground">
-                Organised by {{ authorLabel(event.organizer) }}
+                Hosted by {{ authorLabel(event.organizer) }}
               </p>
-              <div v-if="selfBareJid" class="mt-1 flex flex-wrap items-center gap-1.5">
-                <button
-                  type="button"
-                  class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                  :class="myPartstat(event) === 'ACCEPTED'
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
-                  @click="onRsvp(event, 'ACCEPTED')"
-                >Going</button>
-                <button
-                  type="button"
-                  class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                  :class="myPartstat(event) === 'TENTATIVE'
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
-                  @click="onRsvp(event, 'TENTATIVE')"
-                >Maybe</button>
-                <button
-                  type="button"
-                  class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                  :class="myPartstat(event) === 'DECLINED'
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
-                  @click="onRsvp(event, 'DECLINED')"
-                >Not going</button>
-                <span class="type-caption ml-1 text-muted-foreground">
+              <div v-if="selfBareJid" :class="[eventCard(event).footer, 'flex-wrap']">
+                <div class="inline-flex gap-1 rounded-full border border-border bg-background p-0.5" role="group" aria-label="RSVP">
+                  <button
+                    type="button"
+                    class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                    :class="myPartstat(event) === 'ACCEPTED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                    :aria-pressed="myPartstat(event) === 'ACCEPTED' ? 'true' : 'false'"
+                    @click="onRsvp(event, 'ACCEPTED')"
+                  >Going</button>
+                  <button
+                    type="button"
+                    class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                    :class="myPartstat(event) === 'TENTATIVE' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                    :aria-pressed="myPartstat(event) === 'TENTATIVE' ? 'true' : 'false'"
+                    @click="onRsvp(event, 'TENTATIVE')"
+                  >Maybe</button>
+                  <button
+                    type="button"
+                    class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                    :class="myPartstat(event) === 'DECLINED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                    :aria-pressed="myPartstat(event) === 'DECLINED' ? 'true' : 'false'"
+                    @click="onRsvp(event, 'DECLINED')"
+                  >Can't</button>
+                </div>
+                <span class="type-caption text-muted-foreground">
                   {{ attendeesByPartstat(event)["ACCEPTED"].length }} going ·
                   {{ attendeesByPartstat(event)["TENTATIVE"].length }} maybe ·
-                  {{ attendeesByPartstat(event)["DECLINED"].length }} not going
+                  {{ attendeesByPartstat(event)["DECLINED"].length }} can't
                 </span>
               </div>
             </article>
           </section>
         </div>
 
-        <p
+        <div
           v-else-if="!isLoading"
-          class="type-caption rounded-lg border border-border px-4 py-6 text-center text-muted-foreground"
+          class="rounded-2xl border border-dashed border-border px-4 py-8 text-center"
         >
-          <template v-if="activeFilter === 'attending'">
-            No events you're attending in the next 7 days.
-          </template>
-          <template v-else>
-            Nothing scheduled in the next 7 days.
-            {{ canPost ? "Schedule one to get the community together." : "Check back later." }}
-          </template>
-        </p>
+          <p class="font-display text-lg font-semibold text-foreground">
+            {{ activeFilter === 'attending' ? "Nothing you're going to this week." : "Nothing scheduled this week." }}
+          </p>
+          <p class="type-caption mt-1 text-muted-foreground">
+            {{ activeFilter === 'attending'
+              ? "Say yes to something, or schedule one yourself."
+              : canPost ? "Schedule one to get the community together." : "Check back later." }}
+          </p>
+        </div>
       </template>
 
       <!-- ── Month calendar view ────────────────────────────────────────────── -->
       <template v-else>
+        <!-- Next event -->
+        <section v-if="nextEvent" class="grid gap-2" aria-label="Next event">
+          <h2 :class="isEventLive(nextEvent) ? liveKickerClass : kickerClass">Next up</h2>
+          <article :class="eventCard(nextEvent).root">
+            <p :class="eventCard(nextEvent).kicker">{{ formatStart(nextEvent) }}</p>
+            <h3 :class="eventCard(nextEvent).title">{{ nextEvent.summary }}</h3>
+            <p v-if="nextEvent.location" class="type-caption text-muted-foreground">{{ nextEvent.location }}</p>
+            <p v-if="nextEvent.description" class="line-clamp-3 whitespace-pre-wrap break-words text-sm text-foreground">
+              {{ nextEvent.description }}
+            </p>
+            <p v-if="nextEvent.organizer" class="type-caption text-muted-foreground">
+              Hosted by {{ authorLabel(nextEvent.organizer) }}
+            </p>
+            <div v-if="selfBareJid" :class="[eventCard(nextEvent).footer, 'flex-wrap']">
+              <div class="inline-flex gap-1 rounded-full border border-border bg-background p-0.5" role="group" aria-label="RSVP">
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                  :class="myPartstat(nextEvent) === 'ACCEPTED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="myPartstat(nextEvent) === 'ACCEPTED' ? 'true' : 'false'"
+                  @click="onRsvp(nextEvent, 'ACCEPTED')"
+                >Going</button>
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                  :class="myPartstat(nextEvent) === 'TENTATIVE' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="myPartstat(nextEvent) === 'TENTATIVE' ? 'true' : 'false'"
+                  @click="onRsvp(nextEvent, 'TENTATIVE')"
+                >Maybe</button>
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                  :class="myPartstat(nextEvent) === 'DECLINED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="myPartstat(nextEvent) === 'DECLINED' ? 'true' : 'false'"
+                  @click="onRsvp(nextEvent, 'DECLINED')"
+                >Can't</button>
+              </div>
+              <span class="type-caption text-muted-foreground">
+                {{ attendeesByPartstat(nextEvent)["ACCEPTED"].length }} going ·
+                {{ attendeesByPartstat(nextEvent)["TENTATIVE"].length }} maybe ·
+                {{ attendeesByPartstat(nextEvent)["DECLINED"].length }} can't
+              </span>
+            </div>
+          </article>
+        </section>
+
         <!-- Month navigation -->
         <div class="flex items-center justify-between">
           <button
             type="button"
-            class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-            :aria-label="`Previous month`"
+            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Previous month"
             @click="prevMonth"
           >
             <ChevronLeft class="h-4 w-4" aria-hidden="true" />
           </button>
           <div class="flex items-center gap-2">
-            <span class="type-control font-semibold text-foreground">{{ calTitle }}</span>
+            <span class="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">{{ calTitle }}</span>
             <button
               type="button"
-              class="inline-flex items-center rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+              :class="pillClass(false)"
               aria-label="Jump to today"
               @click="goToToday"
             >
@@ -977,8 +1091,8 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           </div>
           <button
             type="button"
-            class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-            :aria-label="`Next month`"
+            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Next month"
             @click="nextMonth"
           >
             <ChevronRight class="h-4 w-4" aria-hidden="true" />
@@ -986,13 +1100,13 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         </div>
 
         <!-- Calendar grid -->
-        <div class="rounded-lg border border-border bg-card overflow-hidden">
+        <div class="overflow-hidden rounded-2xl border border-border bg-card">
           <!-- Day-of-week headers -->
           <div class="grid grid-cols-7 border-b border-border">
             <div
               v-for="label in DOW_LABELS"
               :key="label"
-              class="py-1.5 text-center type-caption text-muted-foreground font-medium"
+              :class="[kickerClass, 'py-2 text-center']"
             >
               {{ label }}
             </div>
@@ -1010,37 +1124,39 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                 v-for="(cell, di) in week"
                 :key="di"
                 type="button"
-                class="min-h-[4rem] p-1.5 text-left align-top transition-colors"
+                class="min-h-[4.5rem] p-1.5 text-left align-top transition-colors"
                 :class="[
-                  cell.day === null ? 'bg-muted/20 cursor-default' : 'hover:bg-muted/30 cursor-pointer',
-                  cell.day !== null && cell.day === selectedDay ? 'bg-primary/10' : '',
+                  cell.day === null ? 'bg-background/40 cursor-default' : 'cursor-pointer hover:bg-muted',
+                  cell.day !== null && cell.day === selectedDay ? 'bg-muted' : '',
                 ]"
                 :disabled="cell.day === null"
+                :aria-pressed="cell.day !== null ? (cell.day === selectedDay ? 'true' : 'false') : undefined"
+                :aria-label="cell.day !== null ? `${cell.day}${cell.isToday ? ', today' : ''}, ${cell.events.length} ${cell.events.length === 1 ? 'event' : 'events'}` : undefined"
                 @click="cell.day !== null && (selectedDay = cell.day)"
               >
                 <span
                   v-if="cell.day !== null"
-                  class="inline-flex h-5 w-5 items-center justify-center rounded-full text-xs font-medium"
+                  class="inline-flex h-6 min-w-6 items-center justify-center px-1 font-mono text-xs tabular-nums"
                   :class="cell.isToday
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-foreground'"
+                    ? 'rounded-full border border-live font-bold text-live-text'
+                    : 'text-muted-foreground'"
                 >{{ cell.day }}</span>
 
                 <!-- Event pills (up to 3) -->
-                <div class="mt-1 grid gap-px">
+                <div class="mt-1 grid gap-0.5">
                   <div
-                    v-for="(ev, ei) in cell.events.slice(0, 3)"
+                    v-for="ev in cell.events.slice(0, 3)"
                     :key="ev.id"
-                    class="truncate rounded px-1 py-px text-[0.65rem] leading-tight"
+                    class="truncate rounded-full px-1.5 py-px text-[11px] leading-tight"
                     :class="myPartstat(ev) === 'ACCEPTED' || myPartstat(ev) === 'TENTATIVE'
-                      ? 'bg-primary/20 text-primary'
-                      : 'bg-muted/60 text-muted-foreground'"
+                      ? 'bg-primary/15 text-primary'
+                      : 'bg-muted text-muted-foreground'"
                   >
                     {{ monthPillLabel(ev, cell.rangeStartMs) }}
                   </div>
                   <div
                     v-if="cell.events.length > 3"
-                    class="px-1 text-[0.65rem] text-muted-foreground"
+                    class="px-1 text-[11px] text-muted-foreground"
                   >
                     +{{ cell.events.length - 3 }} more
                   </div>
@@ -1052,40 +1168,38 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
         <!-- Selected day event list -->
         <section v-if="selectedDay !== null && selectedDayEvents.length > 0" class="grid gap-2">
-          <h2 class="type-section-label text-muted-foreground">
-            {{ new Date(calYear, calMonth, selectedDay).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) }}
-          </h2>
+          <h2 :class="kickerClass">{{ selectedDayLabel }}</h2>
           <article
             v-for="event in selectedDayEvents"
             :key="event.id"
-            class="grid gap-1.5 rounded-lg border border-border bg-card px-4 py-3"
+            :class="eventCard(event).root"
           >
-            <header class="flex items-baseline justify-between gap-3">
-              <h3 class="type-control font-semibold text-foreground">{{ event.summary }}</h3>
-              <div class="flex shrink-0 items-center gap-1">
-                <span class="type-caption text-muted-foreground">{{ formatVisibleTime(event, selectedDayStartMs) }}</span>
-                <template v-if="isOrganiser(event)">
-                  <button
-                    type="button"
-                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                    aria-label="Edit event"
-                    @click="startEdit(event)"
-                  >
-                    <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                    aria-label="Cancel event"
-                    @click="onCancelEvent(event)"
-                  >
-                    <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
-                </template>
+            <header class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <p :class="eventCard(event).kicker">{{ eventKicker(event, selectedDayStartMs) }}</p>
+                <h3 :class="[eventCard(event).title, 'mt-1']">{{ event.summary }}</h3>
+              </div>
+              <div v-if="isOrganiser(event)" class="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="Edit event"
+                  @click="startEdit(event)"
+                >
+                  <Pencil class="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive-text"
+                  aria-label="Cancel event"
+                  @click="onCancelEvent(event)"
+                >
+                  <Trash2 class="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
               </div>
             </header>
             <p v-if="event.location" class="type-caption text-muted-foreground">
-              📍 {{ event.location }}
+              {{ event.location }}
             </p>
             <p v-if="event.description" class="whitespace-pre-wrap break-words text-sm text-foreground">
               {{ event.description }}
@@ -1095,37 +1209,36 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
               {{ summarizeRrule(event.rrule) }}
             </p>
             <p v-if="event.organizer" class="type-caption text-muted-foreground">
-              Organised by {{ authorLabel(event.organizer) }}
+              Hosted by {{ authorLabel(event.organizer) }}
             </p>
-            <div v-if="selfBareJid" class="mt-1 flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                :class="myPartstat(event) === 'ACCEPTED'
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
-                @click="onRsvp(event, 'ACCEPTED')"
-              >Going</button>
-              <button
-                type="button"
-                class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                :class="myPartstat(event) === 'TENTATIVE'
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
-                @click="onRsvp(event, 'TENTATIVE')"
-              >Maybe</button>
-              <button
-                type="button"
-                class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                :class="myPartstat(event) === 'DECLINED'
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
-                @click="onRsvp(event, 'DECLINED')"
-              >Not going</button>
-              <span class="type-caption ml-1 text-muted-foreground">
+            <div v-if="selfBareJid" :class="[eventCard(event).footer, 'flex-wrap']">
+              <div class="inline-flex gap-1 rounded-full border border-border bg-background p-0.5" role="group" aria-label="RSVP">
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                  :class="myPartstat(event) === 'ACCEPTED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="myPartstat(event) === 'ACCEPTED' ? 'true' : 'false'"
+                  @click="onRsvp(event, 'ACCEPTED')"
+                >Going</button>
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                  :class="myPartstat(event) === 'TENTATIVE' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="myPartstat(event) === 'TENTATIVE' ? 'true' : 'false'"
+                  @click="onRsvp(event, 'TENTATIVE')"
+                >Maybe</button>
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors"
+                  :class="myPartstat(event) === 'DECLINED' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                  :aria-pressed="myPartstat(event) === 'DECLINED' ? 'true' : 'false'"
+                  @click="onRsvp(event, 'DECLINED')"
+                >Can't</button>
+              </div>
+              <span class="type-caption text-muted-foreground">
                 {{ attendeesByPartstat(event)["ACCEPTED"].length }} going ·
                 {{ attendeesByPartstat(event)["TENTATIVE"].length }} maybe ·
-                {{ attendeesByPartstat(event)["DECLINED"].length }} not going
+                {{ attendeesByPartstat(event)["DECLINED"].length }} can't
               </span>
             </div>
           </article>
@@ -1133,9 +1246,9 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
         <p
           v-else-if="selectedDay !== null && selectedDayEvents.length === 0"
-          class="type-caption rounded-lg border border-border px-4 py-4 text-center text-muted-foreground"
+          class="type-caption rounded-2xl border border-dashed border-border px-4 py-4 text-center text-muted-foreground"
         >
-          No events on this day.
+          Nothing on this day. A good one to plan something.
         </p>
       </template>
 
@@ -1144,13 +1257,14 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     <!-- Cancel action sheet (recurring events only) -->
     <div
       v-if="cancelTarget"
-      class="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center"
+      class="fixed inset-0 z-50 flex items-end justify-center bg-background/70 p-4 sm:items-center"
       role="dialog"
       aria-modal="true"
+      aria-labelledby="events-cancel-title"
       @click.self="dismissCancelSheet"
     >
-      <div class="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-lg">
-        <h2 class="type-pane-title text-foreground">
+      <div class="w-full max-w-sm rounded-2xl border border-border bg-card p-4 shadow-[var(--shadow-elevated)]">
+        <h2 id="events-cancel-title" class="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">
           Cancel "{{ cancelTarget.summary }}"
         </h2>
         <p class="type-caption mt-1 text-muted-foreground">
@@ -1159,7 +1273,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         <div class="mt-3 grid gap-2">
           <button
             type="button"
-            class="inline-flex items-center justify-between rounded-md border border-input px-3 py-2 text-sm text-foreground hover:bg-muted/50"
+            class="inline-flex items-center justify-between rounded-[10px] border border-border px-3 py-2 text-sm text-foreground hover:bg-muted"
             @click="confirmCancelInstance"
           >
             <span>Just this occurrence</span>
@@ -1169,7 +1283,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           </button>
           <button
             type="button"
-            class="inline-flex items-center justify-between rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
+            :class="[dangerButtonClass, '!justify-between']"
             @click="confirmCancelSeries"
           >
             <span>The entire series</span>
@@ -1179,7 +1293,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         <div class="mt-3 flex justify-end">
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            :class="quietButtonClass"
             @click="dismissCancelSheet"
           >
             Keep event

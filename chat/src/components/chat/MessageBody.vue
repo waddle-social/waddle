@@ -723,7 +723,7 @@ watch(
                   Encrypted
                 </span>
               </div>
-              <div v-if="attachmentError(file)" class="type-caption text-destructive">
+              <div v-if="attachmentError(file)" class="type-caption text-destructive-text">
                 {{ attachmentError(file) }}
               </div>
             </div>

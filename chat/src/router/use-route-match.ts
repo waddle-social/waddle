@@ -1,4 +1,4 @@
-import { computed, shallowRef, type ComputedRef, type Ref, type ShallowRef } from "vue";
+import { shallowRef, type Ref, type ShallowRef } from "vue";
 import { matchLocation } from "./match";
 import type { RouteMatch } from "./registry";
 
@@ -7,7 +7,7 @@ import type { RouteMatch } from "./registry";
 //
 //   - `navigate(match)` writes here directly (pushState path).
 //   - A popstate listener syncs here on back/forward.
-//   - `useRouteMatch()` / `useTypedMatch()` just return this ref.
+//   - `useRouteMatch()` just returns this ref.
 //
 // Sharing a single ref across separate Vue islands (AppShell, the
 // per-route page, etc.) is correct because Vue's reactivity is keyed on
@@ -34,28 +34,4 @@ if (typeof window !== "undefined") {
 // `navigate()`), so callers don't need to pass an SSR initial value.
 export function useRouteMatch(): Readonly<Ref<RouteMatch>> {
   return currentMatch;
-}
-
-// Narrows the active match to a specific route id. Throws **at setup
-// time** if the active match isn't the expected route — a hard guarantee
-// that this composable is only used inside the route's Astro page.
-// (The returned computed also throws on reactive route changes, so a
-// stale per-route page can't outlive its match.)
-export function useTypedMatch<Id extends RouteMatch["id"]>(
-  id: Id,
-): ComputedRef<Extract<RouteMatch, { id: Id }>> {
-  const match = useRouteMatch();
-  if (match.value.id !== id) {
-    throw new Error(
-      `useTypedMatch(${JSON.stringify(id)}) called on a "${match.value.id}" match`,
-    );
-  }
-  return computed(() => {
-    if (match.value.id !== id) {
-      throw new Error(
-        `useTypedMatch(${JSON.stringify(id)}) called on a "${match.value.id}" match`,
-      );
-    }
-    return match.value as Extract<RouteMatch, { id: Id }>;
-  });
 }

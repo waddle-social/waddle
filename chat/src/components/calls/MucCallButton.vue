@@ -13,6 +13,7 @@ import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
 import { jidDomain } from "@/lib/xmpp/jid";
 import CallActivePill from "./CallActivePill.vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 
 const props = withDefaults(defineProps<{
   /** MUC room bare JID (`channel@muc.host`). The server uses this
@@ -117,32 +118,34 @@ function joinExistingCall(): void {
     class="flex items-center gap-1.5"
   >
     <template v-if="showStartControls">
-    <button
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="callBusy
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-      type="button"
-      title="Voice call in this channel"
-      aria-label="Start voice call in this channel"
-      :disabled="callBusy"
-      @click="startCall({ audio: true, video: false })"
-    >
-      <Phone class="w-3.5 h-3.5" />
-    </button>
-    <button
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="callBusy
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-      type="button"
-      title="Video call in this channel"
-      aria-label="Start video call in this channel"
-      :disabled="callBusy"
-      @click="startCall({ audio: true, video: true })"
-    >
-      <Video class="w-3.5 h-3.5" />
-    </button>
+    <AppTooltip label="Voice call in this channel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="callBusy
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        type="button"
+        aria-label="Start voice call in this channel"
+        :disabled="callBusy"
+        @click="startCall({ audio: true, video: false })"
+      >
+        <Phone class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
+    <AppTooltip label="Video call in this channel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="callBusy
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        type="button"
+        aria-label="Start video call in this channel"
+        :disabled="callBusy"
+        @click="startCall({ audio: true, video: true })"
+      >
+        <Video class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
     </template>
     <!-- Live-call pill: green dot + participant count, click to
          join. The pill component decides its own visibility (only

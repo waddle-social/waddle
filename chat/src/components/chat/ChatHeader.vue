@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue";
 import { Hash, Menu, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
 import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
@@ -292,34 +293,34 @@ const memberButtonCopy = computed(() => {
              the bg-muted treatment for a primary-tinted fill + a
              small primary ring. Hover stays bg-muted so the three
              visual states (rest / hover / armed) separate cleanly. -->
-        <button
-          v-if="channel || dmPeer"
-          class="chat-icon-button chat-icon-button--md transition-all duration-200"
-          :class="showSearch
-            ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
-            : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-          title="Search messages"
-          aria-label="Search messages"
-          :aria-pressed="showSearch"
-          type="button"
-          @click="showSearch = !showSearch"
-        >
-          <Search class="w-3.5 h-3.5" />
-        </button>
-        <button
-          v-if="channel || dmPeer"
-          class="chat-icon-button chat-icon-button--md transition-all duration-200"
-          :class="showPinnedPanel
-            ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
-            : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-          title="Pinned messages"
-          aria-label="Pinned messages"
-          :aria-pressed="showPinnedPanel"
-          type="button"
-          @click="showPinnedPanel = !showPinnedPanel"
-        >
-          <Pin class="w-3.5 h-3.5" />
-        </button>
+        <AppTooltip v-if="channel || dmPeer" label="Search messages">
+          <button
+            class="chat-icon-button chat-icon-button--md transition-all duration-200"
+            :class="showSearch
+              ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+            aria-label="Search messages"
+            :aria-pressed="showSearch"
+            type="button"
+            @click="showSearch = !showSearch"
+          >
+            <Search class="w-3.5 h-3.5" />
+          </button>
+        </AppTooltip>
+        <AppTooltip v-if="channel || dmPeer" label="Pinned messages">
+          <button
+            class="chat-icon-button chat-icon-button--md transition-all duration-200"
+            :class="showPinnedPanel
+              ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+            aria-label="Pinned messages"
+            :aria-pressed="showPinnedPanel"
+            type="button"
+            @click="showPinnedPanel = !showPinnedPanel"
+          >
+            <Pin class="w-3.5 h-3.5" />
+          </button>
+        </AppTooltip>
         <NotifyModeButton
           v-if="channel?.jid"
           :room-jid="channel.jid"
@@ -342,16 +343,16 @@ const memberButtonCopy = computed(() => {
           :client="xmppClient ?? null"
           :store="notifySettings"
         />
-        <button
-          v-if="canManageChannels && channel"
-          class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="Channel settings"
-          aria-label="Channel settings"
-          type="button"
-          @click="emit('editChannel')"
-        >
-          <Settings class="w-3.5 h-3.5" />
-        </button>
+        <AppTooltip v-if="canManageChannels && channel" label="Channel settings">
+          <button
+            class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Channel settings"
+            type="button"
+            @click="emit('editChannel')"
+          >
+            <Settings class="w-3.5 h-3.5" />
+          </button>
+        </AppTooltip>
         <CallButton
           v-if="dmPeer?.peerJid"
           :peer-bare-jid="dmPeer.peerJid"
@@ -370,11 +371,10 @@ const memberButtonCopy = computed(() => {
              changed my profile picture" rather than "these other
              people are here." Mobile gets the compact count button
              instead. -->
+        <AppTooltip v-if="channel" :label="memberButtonCopy.title">
         <button
-          v-if="channel"
           class="chat-presence-stack hidden lg:inline-flex"
           type="button"
-          :title="memberButtonCopy.title"
           :aria-label="`${memberButtonCopy.aria}. ${onlineCount} online.`"
           @click="emit('openDetails')"
         >
@@ -411,19 +411,20 @@ const memberButtonCopy = computed(() => {
             <span class="type-control">{{ memberButtonCopy.primary }}</span>
           </span>
         </button>
+        </AppTooltip>
         <!-- Mobile members button — same data, no avatars. Keeps the
              tap-target obvious and prevents the corner avatar from
              reading as the user's own profile picture. -->
-        <button
-          v-if="channel"
-          class="chat-icon-button chat-icon-button--md lg:hidden text-muted-foreground hover:bg-muted hover:text-foreground"
-          type="button"
-          :title="memberButtonCopy.title"
-          :aria-label="memberButtonCopy.aria"
-          @click="emit('openDetails')"
-        >
-          <Users class="w-4 h-4" />
-        </button>
+        <AppTooltip v-if="channel" :label="memberButtonCopy.title">
+          <button
+            class="chat-icon-button chat-icon-button--md lg:hidden text-muted-foreground hover:bg-muted hover:text-foreground"
+            type="button"
+            :aria-label="memberButtonCopy.aria"
+            @click="emit('openDetails')"
+          >
+            <Users class="w-4 h-4" />
+          </button>
+        </AppTooltip>
       </div>
     </div>
   </div>

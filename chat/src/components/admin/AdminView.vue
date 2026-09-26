@@ -99,8 +99,8 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   height: 100dvh;
-  background: var(--background, #f4f5f7);
-  color: var(--foreground, #0c0d12);
+  background: var(--background);
+  color: var(--foreground);
   gap: 0.75rem;
   text-align: center;
   padding: 2rem;
@@ -115,7 +115,7 @@ onMounted(() => {
 
 .admin-denied p {
   font-size: 0.95rem;
-  color: var(--muted-foreground, rgba(15, 18, 25, 0.65));
+  color: var(--muted-foreground);
   max-width: 28rem;
   margin: 0;
   line-height: 1.5;
@@ -128,8 +128,8 @@ onMounted(() => {
   margin-top: 0.5rem;
   padding: 0.45rem 0.875rem;
   border-radius: 0.5rem;
-  border: 1px solid var(--border, rgba(15, 18, 25, 0.12));
-  background: var(--card, #ffffff);
+  border: 1px solid var(--border);
+  background: var(--card);
   font: inherit;
   cursor: pointer;
 }

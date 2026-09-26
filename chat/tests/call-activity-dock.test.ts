@@ -1368,9 +1368,10 @@ describe("CallActivityDock rendering", () => {
     expect(html).not.toContain("Live call in this channel");
   });
 
-  test("is mounted in the desktop sidebar and visible mobile shell", () => {
+  test("is mounted in the desktop context column and visible mobile shell", () => {
     const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
     const mobileDrawers = readFileSync(new URL("../src/components/chat/ChatMobileDrawers.vue", import.meta.url), "utf8");
+    const roomsPage = readFileSync(new URL("../src/components/community/pages/RoomsPage.vue", import.meta.url), "utf8");
     const callActivityDock = readFileSync(new URL("../src/components/calls/CallActivityDock.vue", import.meta.url), "utf8");
     const contentArea = readFileSync(new URL("../src/components/chat/ContentArea.vue", import.meta.url), "utf8");
     const chatHeader = readFileSync(new URL("../src/components/chat/ChatHeader.vue", import.meta.url), "utf8");
@@ -1388,7 +1389,8 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell.match(/<CurrentCallPanel/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(readyShell).toContain("class=\"current-call-panel--mobile\"");
     expect(readyShell).toContain("class=\"call-activity-dock--mobile\"");
-    expect(readyShell.match(/hide-current-call/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(readyShell.match(/hide-current-call/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(roomsPage).toContain("hide-current-call");
     expect(readyShell).toContain(":join-channel-call=\"joinChannelCallFromActivity\"");
     expect(readyShell).toContain(":leave-channel-call=\"leaveRetainedChannelCall\"");
     expect(readyShell).toContain(":answer-dm=\"answerDmFromActivity\"");
@@ -1409,21 +1411,22 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell).toContain("@end-dm=\"endRecoveredDmFromActivity\"");
 
     expect(mobileDrawers).not.toContain("CallActivityDock");
-    expect(mobileDrawers).toContain("@join-channel-call=\"joinChannelCallFromMobile\"");
-    expect(mobileDrawers).toContain("@leave-channel-call=\"leaveChannelCallFromMobile\"");
-    expect(mobileDrawers).toContain("@answer-dm=\"answerDmFromMobile\"");
-    expect(mobileDrawers).toContain("@reconnect-dm=\"reconnectDmFromMobile\"");
-    expect(mobileDrawers).toContain("@end-dm=\"endDmFromMobile\"");
+    // The room list (TopicsPanel / DmPanel) moved from the mobile drawer to
+    // the Rooms page; its call rows forward to the shell handlers from there.
+    expect(roomsPage).toContain("@join-channel-call=\"joinChannelCallFromPage\"");
+    expect(roomsPage).toContain("@leave-channel-call=\"leaveChannelCallFromPage\"");
+    expect(roomsPage).toContain("@answer-dm=\"answerDmFromPage\"");
+    expect(roomsPage).toContain("@reconnect-dm=\"reconnectDmFromPage\"");
+    expect(roomsPage).toContain("@end-dm=\"endDmFromPage\"");
     expect(readyShell).toContain(":call-participants=\"retainedMucCallParticipantsStore\"");
     expect(readyShell).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
-    expect(mobileDrawers).toContain(":active-channel-call-count=\"visibleActiveChannelCallCount\"");
-    expect(mobileDrawers).toContain(":active-dm-call-count=\"visibleActiveDmCallCount\"");
+    expect(mobileDrawers).toContain("visibleActiveChannelCallCount");
+    expect(mobileDrawers).toContain("visibleActiveDmCallCount");
     expect(mobileDrawers).toContain("visibleCallParticipants");
     expect(mobileDrawers).toContain(":call-participants=\"visibleCallParticipants\"");
-    expect(mobileDrawers).toContain(":call-media-by-room=\"visibleCallMediaByRoom\"");
-    expect(mobileDrawers).toContain(":managed-muc-domain=\"visibleManagedMucDomain\"");
-    expect(mobileDrawers).toContain("@toggle-dms=\"openDmList\"");
-    expect(mobileDrawers).toContain("hide-current-call");
+    expect(mobileDrawers).toContain("visibleCallMediaByRoom");
+    expect(mobileDrawers).toContain("<PeopleRail");
+    expect(mobileDrawers).not.toContain("hide-current-call");
     expect(callActivityDock).toContain("entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase()");
 
     expect(contentArea).toContain("import ConversationCallBanner");
@@ -1922,24 +1925,24 @@ describe("CallActivityDock rendering", () => {
     expect($callUiMode.get()).toBe("expanded");
   });
 
-  test("renders rail-level active call indicators for spaces and DMs", async () => {
-    const html = await renderVueComponent("../src/components/chat/WaddlesSidebar.vue", {
-      waddles: [],
-      activeSpaceId: null,
-      activeSidebarMode: "channels",
-      activePage: "chat",
-      hasUnreadDms: true,
+  test("names rail-level active call activity for rooms and DMs in the mobile drawer", async () => {
+    // The icon rail (WaddlesSidebar) is gone; the mobile navigation drawer
+    // summarises the same rail-level counts as a live kicker.
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {},
       activeChannelCallCount: 2,
       activeDmCallCount: 1,
-      session: null,
+      callMediaByRoom: { "general@conference.example.com": { audio: true, video: true } },
     });
 
-    expect(html).toContain('aria-label="Spaces, 2 active calls"');
-    expect(html).toContain('title="Spaces, 2 active calls"');
-    expect(html).toContain('aria-label="Direct messages, unread messages, 1 active call"');
-    expect(html).toContain('title="Direct messages, unread messages, 1 active call"');
-    expect(html).toContain('title="2 active calls"');
-    expect(html).toContain('title="1 active call"');
+    expect(setupBindingRefValue(bindings, "liveSummary")).toBe("2 room huddles · 1 call with video");
+
+    const quiet = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {},
+      activeChannelCallCount: 0,
+      activeDmCallCount: 0,
+    });
+    expect(setupBindingRefValue(quiet, "liveSummary")).toBe("");
   });
 
   test("counts local current calls in the rail before discovery echoes activity", () => {
@@ -2841,16 +2844,16 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
-  test("mobile drawer forwards sidebar join-call events to the shell handler", async () => {
+  test("rooms page forwards sidebar join-call events to the shell handler", async () => {
     const forwarded: unknown[][] = [];
-    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+    const bindings = await setupVueComponent("../src/components/community/pages/RoomsPage.vue", {
       controller: {},
       joinChannelCall: (...args: unknown[]) => {
         forwarded.push(args);
       },
     });
 
-    setupBindingFunction(bindings, "joinChannelCallFromMobile")(
+    setupBindingFunction(bindings, "joinChannelCallFromPage")(
       "general",
       "general@conference.example.com",
       { audio: true, video: false },
@@ -2861,16 +2864,16 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
-  test("mobile drawer forwards sidebar leave-call events to the shell handler", async () => {
+  test("rooms page forwards sidebar leave-call events to the shell handler", async () => {
     const forwarded: unknown[][] = [];
-    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+    const bindings = await setupVueComponent("../src/components/community/pages/RoomsPage.vue", {
       controller: {},
       leaveChannelCall: (...args: unknown[]) => {
         forwarded.push(args);
       },
     });
 
-    setupBindingFunction(bindings, "leaveChannelCallFromMobile")(
+    setupBindingFunction(bindings, "leaveChannelCallFromPage")(
       "general@conference.example.com",
     );
 
@@ -2879,16 +2882,16 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
-  test("mobile drawer forwards DM answer rows to the shell handler", async () => {
+  test("rooms page forwards DM answer rows to the shell handler", async () => {
     const forwarded: unknown[][] = [];
-    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+    const bindings = await setupVueComponent("../src/components/community/pages/RoomsPage.vue", {
       controller: {},
       answerDm: (...args: unknown[]) => {
         forwarded.push(args);
       },
     });
 
-    setupBindingFunction(bindings, "answerDmFromMobile")(
+    setupBindingFunction(bindings, "answerDmFromPage")(
       "bob@example.com",
       "bob@example.com/phone",
       "dm-call-1",
@@ -2900,16 +2903,16 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
-  test("mobile drawer forwards DM reconnect rows to the shell handler", async () => {
+  test("rooms page forwards DM reconnect rows to the shell handler", async () => {
     const forwarded: unknown[][] = [];
-    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+    const bindings = await setupVueComponent("../src/components/community/pages/RoomsPage.vue", {
       controller: {},
       reconnectDm: (...args: unknown[]) => {
         forwarded.push(args);
       },
     });
 
-    setupBindingFunction(bindings, "reconnectDmFromMobile")(
+    setupBindingFunction(bindings, "reconnectDmFromPage")(
       "bob@example.com",
       { audio: true, video: true },
     );
@@ -2919,16 +2922,16 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
-  test("mobile drawer forwards recovered DM end actions to the shell handler", async () => {
+  test("rooms page forwards recovered DM end actions to the shell handler", async () => {
     const forwarded: unknown[][] = [];
-    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+    const bindings = await setupVueComponent("../src/components/community/pages/RoomsPage.vue", {
       controller: {},
       endDm: (...args: unknown[]) => {
         forwarded.push(args);
       },
     });
 
-    setupBindingFunction(bindings, "endDmFromMobile")("bob@example.com");
+    setupBindingFunction(bindings, "endDmFromPage")("bob@example.com");
 
     expect(forwarded).toEqual([["bob@example.com"]]);
   });
@@ -2944,8 +2947,6 @@ describe("CallActivityDock rendering", () => {
       callParticipantCounts: { "general@conference.example.com": 1 },
       callParticipants: { "general@conference.example.com": ["alice"] },
       callMediaByRoom: { "general@conference.example.com": { audio: true, video: true } },
-      managedMucDomain: "conference.example.com",
-      selfFullJid: "alice@example.com/web",
     });
 
     expect(setupBindingRefValue(bindings, "visibleActiveChannelCallCount")).toBe(1);
@@ -2958,8 +2959,6 @@ describe("CallActivityDock rendering", () => {
     expect(setupBindingRefValue(bindings, "visibleCallMediaByRoom")).toEqual({
       "general@conference.example.com": { audio: true, video: true },
     });
-    expect(setupBindingRefValue(bindings, "visibleManagedMucDomain")).toBe("conference.example.com");
-    expect(setupBindingRefValue(bindings, "visibleSelfFullJid")).toBe("alice@example.com/web");
   });
 
   test("shell surfaces pending retained group-call video media after failed cleanup", async () => {
@@ -2974,7 +2973,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: {
             client: { fullJid: "alice@example.com/web" },
             session: { username: "alice", jid: "alice@example.com" },
@@ -3039,7 +3038,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: {
             client: { fullJid: "alice@example.com/web" },
             session: { username: "alice", jid: "alice@example.com" },
@@ -3099,12 +3098,12 @@ describe("CallActivityDock rendering", () => {
     expect(selected).toEqual([["feed"]]);
   });
 
-  test("mobile drawer preserves room JID when channel call rows open or return", async () => {
+  test("rooms page preserves room JID when channel call rows open or return", async () => {
     const selected: unknown[][] = [];
     const ui = {
       activeCommunitySurface: { value: "feed" },
     };
-    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+    const bindings = await setupVueComponent("../src/components/community/pages/RoomsPage.vue", {
       controller: {
         ui,
         selectChannel: (...args: unknown[]) => {
@@ -3113,7 +3112,7 @@ describe("CallActivityDock rendering", () => {
       },
     });
 
-    setupBindingFunction(bindings, "selectChannelFromMobile")(
+    setupBindingFunction(bindings, "selectChannelFromPage")(
       "general",
       "general@conference.example.com",
     );
@@ -3124,12 +3123,12 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
-  test("mobile drawer opens refreshed group call rows by room JID", async () => {
+  test("rooms page opens refreshed group call rows by room JID", async () => {
     const selected: unknown[][] = [];
     const ui = {
       activeCommunitySurface: { value: "feed" },
     };
-    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+    const bindings = await setupVueComponent("../src/components/community/pages/RoomsPage.vue", {
       controller: {
         ui,
         selectChannel: (...args: unknown[]) => {
@@ -3141,7 +3140,7 @@ describe("CallActivityDock rendering", () => {
       },
     });
 
-    setupBindingFunction(bindings, "selectChannelFromMobile")(
+    setupBindingFunction(bindings, "selectChannelFromPage")(
       null,
       "general@conference.example.com",
     );
@@ -3387,6 +3386,7 @@ describe("CallActivityDock rendering", () => {
     const selected: unknown[][] = [];
     const ui = {
       activeCommunitySurface: { value: "feed" },
+      actionError: { value: "" },
     };
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
@@ -3438,6 +3438,7 @@ describe("CallActivityDock rendering", () => {
     let ensureJoinedCalls = 0;
     const ui = {
       activeCommunitySurface: { value: "feed" },
+      actionError: { value: "" },
     };
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
@@ -3515,7 +3516,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: {
             client: { fullJid: "alice@example.com/web", xmpp: { send_call_proceed: sendCallProceed } },
             session: null,
@@ -3581,7 +3582,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: {
             client: { fullJid: "alice@example.com/web" },
             session: null,
@@ -3652,7 +3653,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: shellConnectionStore,
           waddles: { mucServiceJid: { value: "" } },
           selfDomain: { value: "" },
@@ -3718,7 +3719,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: {
             client: {
               fullJid: "alice@example.com/web",
@@ -3790,7 +3791,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: {
             client: {
               fullJid: "alice@example.com/web",
@@ -3858,7 +3859,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
       setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
         controller: {
-          ui: { activeCommunitySurface: { value: null } },
+          ui: { activeCommunitySurface: { value: null }, actionError: { value: "" } },
           connectionStore: {
             client: { fullJid: "alice@example.com/web" },
             session: null,
@@ -4061,8 +4062,11 @@ describe("CallActivityDock rendering", () => {
       callRoomJid: "general@custom-muc.example.test",
     });
 
-    expect(withoutRoom).not.toContain('data-vue-stub="true"');
-    expect(withRoom).toContain('data-vue-stub="true"');
+    // Every child SFC is stubbed here (tooltips included), so compare
+    // stub counts: the room JID mounts exactly one more child — the
+    // group call button.
+    const countStubs = (html: string) => html.split('data-vue-stub="true"').length - 1;
+    expect(countStubs(withRoom)).toBe(countStubs(withoutRoom) + 1);
   });
 
   test("suppresses the header DM activity status when the conversation banner owns it", async () => {

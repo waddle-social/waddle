@@ -129,7 +129,7 @@ function onKeydown(event: KeyboardEvent) {
       class="z-modal fixed inset-0 flex items-end justify-center p-3 sm:items-center sm:p-6"
       role="presentation"
     >
-      <div class="absolute inset-0 bg-background/75 backdrop-blur-md" @click="emit('close')" />
+      <div class="absolute inset-0 bg-background/75" @click="emit('close')" />
       <article
         ref="dialogEl"
         class="relative grid max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden rounded-lg border border-border bg-card shadow-2xl animate-slide-up"

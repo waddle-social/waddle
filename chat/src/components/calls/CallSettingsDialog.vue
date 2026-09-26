@@ -996,7 +996,7 @@ function close(): void {
 }
 
 .call-ai-filter__error {
-  color: var(--destructive, #dc2626);
+  color: var(--destructive);
 }
 
 .call-background-grid {

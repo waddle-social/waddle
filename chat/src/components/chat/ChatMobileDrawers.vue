@@ -12,15 +12,12 @@ import {
   activeChannelRailCallCount,
   activeDmRailCallCount,
 } from "@/lib/calls/call-rail-counts";
-import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
-import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
-import TopicsPanel from "@/components/chat/TopicsPanel.vue";
-import DmPanel from "@/components/chat/DmPanel.vue";
+import PeopleRail from "@/components/community/PeopleRail.vue";
 import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import { extensionRouteIconComponent, extensionRouteRailItems } from "./extension-route-rail-model";
-import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
+import { buildHref, type RouteMatch } from "@/router";
 import type { CallMedia } from "@/lib/calls/types";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -32,94 +29,70 @@ const props = defineProps<{
   callParticipantCounts?: Record<string, number>;
   callParticipants?: Record<string, string[]>;
   callMediaByRoom?: Record<string, CallMedia>;
-  managedMucDomain?: string | null;
-  selfFullJid?: string | null;
-  joinChannelCall?: (channelId: string | null, roomJid: string, media: CallMedia) => void;
-  leaveChannelCall?: (roomJid: string) => void;
-  answerDm?: (peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) => void;
-  reconnectDm?: (peerJid: string, media: CallMedia) => void;
-  endDm?: (peerJid: string, sid?: string) => void;
 }>();
 
 const {
   connectionStore,
   ui,
   waddles,
-  messaging,
-  dmConversations,
   channelUnread,
   notifications,
   version,
-  displayedMemberCount,
-  displayedMemberState,
   memberCountLabel,
-  computedChannelUnreadMap,
-  groupDmConversations,
-  activeChannelRoomJid,
   channelExtensionRoutes,
   activeExtensionRouteKey,
   activeRightPanel,
-  selfDomain,
   openUserSettings,
   openHome,
-  openUnread,
-  openDmList,
+  openRooms,
+  openMembers,
   openCommunitySurface,
   handleLogout,
   handleRequestNotifications,
   handleToggleNotifications,
   handleToggleMessageSounds,
-  selectChannel,
-  selectChannelByRoomJid,
-  selectGroupDm,
-  onSelectThread,
-  selectDm,
-  handleNewGroupDm,
-  handleAddPeopleToDm,
   selectExtensionRoute,
-  openCreateChannelDialog,
   openChannelEdit,
   openThreads,
-  stories,
-  communityEvents,
 } = props.controller;
+
+type DrawerNavId = "home" | "rooms" | "threads" | "events" | "members";
+
+/** Compact list of the five community destinations for the drawer. */
+const drawerNav: { id: DrawerNavId; label: string; href: string; go: () => void }[] = [
+  { id: "home", label: "Home", href: buildHref({ id: "home" } as RouteMatch), go: () => openHome() },
+  { id: "rooms", label: "Rooms", href: buildHref({ id: "rooms" } as RouteMatch), go: () => openRooms() },
+  { id: "threads", label: "Discussions", href: buildHref({ id: "threads" } as RouteMatch), go: () => openThreads() },
+  { id: "events", label: "Events", href: buildHref({ id: "events" } as RouteMatch), go: () => selectCommunitySurface("events") },
+  { id: "members", label: "Members", href: buildHref({ id: "members" } as RouteMatch), go: () => openMembers() },
+];
+
+const activeDrawerNav = computed<DrawerNavId | null>(() => {
+  if (ui.activeCommunitySurface.value === "events") return "events";
+  if (ui.activeCommunitySurface.value === "feed") return null;
+  switch (ui.activePage.value) {
+    case "dashboard":
+      return "home";
+    case "rooms":
+    case "chat":
+      return "rooms";
+    case "threads":
+    case "unread":
+      return "threads";
+    case "members":
+      return "members";
+    default:
+      return null;
+  }
+});
 
 function selectCommunitySurface(surface: "feed" | "events") {
   openCommunitySurface(surface);
 }
 
-function selectChannelFromMobile(id: string | null, roomJid?: string) {
-  ui.activeCommunitySurface.value = null;
-  if (id) {
-    void selectChannel(id, roomJid ? { roomJid } : undefined);
-    return;
-  }
-  if (roomJid) void selectChannelByRoomJid(roomJid);
-}
-
-function joinChannelCallFromMobile(channelId: string | null, roomJid: string, media: CallMedia) {
-  props.joinChannelCall?.(channelId, roomJid, media);
-}
-
-function leaveChannelCallFromMobile(roomJid: string) {
-  props.leaveChannelCall?.(roomJid);
-}
-
-function answerDmFromMobile(peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) {
-  props.answerDm?.(peerJid, remoteFullJid, sid, media);
-}
-
-function reconnectDmFromMobile(peerJid: string, media: CallMedia) {
-  props.reconnectDm?.(peerJid, media);
-}
-
-function endDmFromMobile(peerJid: string, sid?: string) {
-  props.endDm?.(peerJid, sid);
-}
-
-// XEP-0272 Muji participant counts keyed by room JID — same derived
-// reactive state as ChatReadyShell uses, so the mobile sidebar shows
-// the same "call ongoing" chip.
+// XEP-0272 Muji participants keyed by room JID — the same retained
+// reactive state ChatReadyShell derives, so the drawer's people rail
+// shows the same huddle membership as the desktop rail.
 const mucCallParticipantsStore = useStore($mucCallParticipants);
 const mucCallMediaStore = useStore($mucCallMedia);
 const dmCallActivitiesStore = useStore($dmCallActivities);
@@ -144,16 +117,17 @@ const visibleActiveDmCallCount = computed(() => {
   return props.activeDmCallCount ??
     activeDmRailCallCount(dmCallActivitiesStore.value, callStateStore.value);
 });
-const visibleManagedMucDomain = computed(() =>
-  props.managedMucDomain ??
-  (normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : "")),
-);
-const visibleSelfFullJid = computed(() =>
-  props.selfFullJid ??
-  connectionStore.selfFullJid ??
-  (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid ??
-  null
-);
+/** Live-call summary for the drawer header: the desktop header's
+ * "Start a huddle" affordance is not in the drawer, so name what is live. */
+const liveSummary = computed(() => {
+  const parts: string[] = [];
+  const rooms = visibleActiveChannelCallCount.value;
+  const dms = visibleActiveDmCallCount.value;
+  if (rooms > 0) parts.push(`${rooms} room huddle${rooms === 1 ? "" : "s"}`);
+  if (dms > 0) parts.push(`${dms} call${dms === 1 ? "" : "s"}`);
+  const media = Object.values(visibleCallMediaByRoom.value).some((entry) => entry.video) ? " with video" : "";
+  return parts.length > 0 ? `${parts.join(" · ")}${media}` : "";
+});
 
 const drawerExtensionRoutes = computed(() =>
   extensionRouteRailItems(
@@ -184,78 +158,30 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
         <span class="type-pane-title">Navigation</span>
       </template>
       <div class="chat-mobile-nav-body">
-        <div class="border-b border-border">
-          <WaddlesSidebar
-            :waddles="[]"
-            :active-space-id="null"
-            :active-sidebar-mode="ui.sidebarMode.value"
-            :active-page="ui.activePage.value"
-            :has-unread-dms="dmConversations.hasUnread.value"
-            :active-channel-call-count="visibleActiveChannelCallCount"
-            :active-dm-call-count="visibleActiveDmCallCount"
-            :session="null"
-            horizontal
-            @open-home="openHome"
-            @toggle-channels="ui.sidebarMode.value = 'channels'"
-            @toggle-dms="openDmList"
-          />
-        </div>
-        <TopicsPanel
-          v-if="ui.sidebarMode.value === 'channels'"
-          :waddle="waddles.currentSpace.value"
-          :spaces="waddles.sortedSpaces.value"
-          :channels="waddles.sortedChannels.value"
-          :active-channel-id="waddles.activeChannelId.value"
-          :can-manage-channels="waddles.canManageChannels.value"
-          :can-manage-community="waddles.canManageCommunity.value"
-          :is-loading="waddles.isLoadingStructure.value"
-          :member-count="displayedMemberCount"
-          :member-state="displayedMemberState"
-          :active-channel-jids="messaging.activeChannels.value"
-          :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
-          :channel-unread-map="computedChannelUnreadMap"
-          :call-participant-counts="visibleCallParticipantCounts"
+        <nav class="flex flex-col gap-0.5 border-b border-border p-2" aria-label="Community">
+          <a
+            v-for="item in drawerNav"
+            :key="item.id"
+            :href="item.href"
+            class="community-nav__pill"
+            :aria-current="activeDrawerNav === item.id ? 'page' : undefined"
+            @click.prevent="item.go()"
+          >
+            {{ item.label }}
+            <span
+              v-if="item.id === 'threads' && channelUnread.totalThreadUnreadCount.value > 0"
+              class="community-count text-live-text"
+              :aria-label="`${channelUnread.totalThreadUnreadCount.value} unread`"
+            >{{ channelUnread.totalThreadUnreadCount.value }}</span>
+          </a>
+          <span v-if="liveSummary" class="community-kicker community-kicker--live px-3 py-1.5">
+            <span class="community-ember" aria-hidden="true" />
+            {{ liveSummary }}
+          </span>
+        </nav>
+        <PeopleRail
+          :controller="controller"
           :call-participants="visibleCallParticipants"
-          :call-media-by-room="visibleCallMediaByRoom"
-          :managed-muc-domain="visibleManagedMucDomain"
-          :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
-          :active-community-surface="ui.activeCommunitySurface.value"
-          :stories-active-count="stories.activeStories.value.length"
-          :upcoming-event-count="communityEvents.events.value.filter((event) => isEventUpcomingOrOngoing(event)).length"
-          :is-threads-active="ui.activePage.value === 'threads'"
-          :is-unread-active="ui.activePage.value === 'unread'"
-          :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
-          class="!w-full !border-r-0 !flex-1"
-          @select-channel="selectChannelFromMobile"
-          @join-channel-call="joinChannelCallFromMobile"
-          @leave-channel-call="leaveChannelCallFromMobile"
-          @select-thread="onSelectThread"
-          @select-community-surface="selectCommunitySurface"
-          @select-threads-view="openThreads"
-          @select-unread-view="openUnread"
-          @create-channel="openCreateChannelDialog()"
-          @create-channel-in-space="openCreateChannelDialog"
-          @open-settings="ui.showWaddleSettings.value = true"
-          @open-members="ui.showMembers.value = true"
-          @update-collapsed-group-ids="ui.collapsedSpaceGroupIds.value = $event"
-        />
-        <DmPanel
-          v-else
-          :conversations="dmConversations.conversations.value"
-          :group-dms="groupDmConversations"
-          :active-peer-jid="dmConversations.activePeerJid.value"
-          :active-group-dm-room-jid="ui.sidebarMode.value === 'dms' && !dmConversations.activePeerJid.value ? activeChannelRoomJid : null"
-          :self-full-jid="visibleSelfFullJid"
-          hide-current-call
-          class="!w-full !border-r-0 !flex-1"
-          @answer-dm="answerDmFromMobile"
-          @select-dm="selectDm"
-          @select-group-dm="selectGroupDm"
-          @reconnect-dm="reconnectDmFromMobile"
-          @end-dm="endDmFromMobile"
-          @new-dm="ui.showNewDm.value = true"
-          @new-group-dm="handleNewGroupDm"
-          @add-people-to-dm="handleAddPeopleToDm"
         />
         <ProfilePanel
           v-if="connectionStore.session"

@@ -78,7 +78,7 @@ const rows = computed(() => notableSafetyScores(props.scores));
           </span>
         </li>
       </ul>
-      <p class="type-meta mt-1.5 truncate text-muted-foreground/60" :title="scores.modelVersion">
+      <p class="type-meta mt-1.5 truncate text-muted-foreground" :title="scores.modelVersion">
         Model {{ scores.modelVersion }}
       </p>
     </div>

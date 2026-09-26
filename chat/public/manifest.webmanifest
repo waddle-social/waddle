@@ -4,8 +4,8 @@
   "description": "Chat with your community",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0c0d12",
-  "theme_color": "#00b4a0",
+  "background_color": "#0b1219",
+  "theme_color": "#0b1219",
   "icons": [
     {
       "src": "/waddle-logo.svg",
