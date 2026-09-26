@@ -158,6 +158,11 @@ extension SessionCoordinator {
             await loadLatest(active)
             await markDisplayedIfVisible(active)
         }
+        // A thread opened offline, or open across the drop, loads now.
+        if let thread = visibleThread {
+            await loadThreadHistory(thread)
+            await markThreadReadIfVisible(thread)
+        }
     }
 
     func ingestArchive(_ page: ArchivePage) {

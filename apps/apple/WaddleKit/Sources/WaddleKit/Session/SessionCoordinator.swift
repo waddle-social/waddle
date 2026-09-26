@@ -84,6 +84,10 @@ public final class SessionCoordinator {
     /// Server inbox reads made offline, replayed after the next hydrate.
     @ObservationIgnored var pendingInboxReads: [InboxReadKey: PendingInboxRead] = [:]
     @ObservationIgnored var inboxHydrateTask: Task<Void, Never>?
+    @ObservationIgnored var inboxHydrateRetryDelays: [TimeInterval] = [2, 8]
+    /// Rows whose last `<mark-read/>` the server refused; they are not read
+    /// again automatically until a read succeeds.
+    @ObservationIgnored var failedInboxReads: Set<InboxReadKey> = []
     @ObservationIgnored var visibleConversation: ConversationID?
     /// The room thread on screen, if any.
     @ObservationIgnored var visibleThread: ThreadKey?
@@ -341,8 +345,8 @@ public final class SessionCoordinator {
         typingPauseTasks.removeAll()
         pendingDisplayed.removeAll()
         pendingInboxReads.removeAll()
-        inboxHydrateTask?.cancel()
-        inboxHydrateTask = nil
+        failedInboxReads.removeAll()
+        cancelInboxHydrate()
         threadHistory.clear()
         unreadOverview.reset()
         onDemandRooms.removeAll()
@@ -360,6 +364,7 @@ public final class SessionCoordinator {
             connectionEpoch += 1
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil
+            cancelInboxHydrate()
             retryWhenConnectSettles = false
             connectWatchdog?.cancel()
             connectWatchdog = nil
@@ -383,6 +388,7 @@ public final class SessionCoordinator {
             foregroundProbeTask = nil
             readyTask?.cancel()
             readyTask = nil
+            cancelInboxHydrate()
             isSendReady = false
             // Messages may have been missed while offline: loaded pages are
             // no longer known to be current.
@@ -584,7 +590,8 @@ public final class SessionCoordinator {
             guard applied.kind == .room else { return }
             let thread = ThreadKey(room: applied.partner, threadID: threadID)
             unread.setThread(applied.unread, for: thread)
-            if applied.unread > 0, thread == unread.activeThread {
+            if applied.unread > 0, thread == unread.activeThread,
+               !failedInboxReads.contains(InboxReadKey(partner: thread.room, threadID: thread.threadID)) {
                 Task { await self.markThreadReadIfVisible(thread) }
             }
             return
@@ -597,7 +604,8 @@ public final class SessionCoordinator {
         // The server counted something (a thread reply, a reaction) while
         // the conversation is on screen: read it so the row does not stay
         // unread on the server.
-        if applied.unread > 0, conversation == unread.activeConversation {
+        if applied.unread > 0, conversation == unread.activeConversation,
+           !failedInboxReads.contains(InboxReadKey(partner: conversation.jid, threadID: nil)) {
             Task { await self.markDisplayedIfVisible(conversation) }
         }
     }

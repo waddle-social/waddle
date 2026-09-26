@@ -274,8 +274,49 @@ struct UnreadOverviewTests {
         #expect(coordinator.unread.count(for: .room(other)) == 2)
     }
 
+    @Test func openingAnUnreadRoomReadsItOnTheServer() async {
+        let (coordinator, port) = online()
+        coordinator.handle(.inboxPush(roomRow(unread: 3, last: "s3", updated: 10)))
+        await coordinator.open(roomConversation)
+        #expect(port.inboxReads == [room])
+        // Reopening with nothing new sends nothing.
+        coordinator.close(roomConversation)
+        await coordinator.open(roomConversation)
+        #expect(port.inboxReads == [room])
+    }
+
+    @Test func refusedReadOnScreenDoesNotLoop() async {
+        let (coordinator, port) = online()
+        coordinator.inboxHydrateRetryDelays = [0]
+        await coordinator.open(roomConversation)
+        port.failingInboxReads = 1000
+        port.inbox = [roomRow(unread: 2, last: "s2", updated: 10)]
+        coordinator.handle(.inboxPush(roomRow(unread: 2, last: "s2", updated: 10)))
+        await eventually(timeout: 0.3) { port.inboxReadRequests.count > 5 }
+        #expect(port.inboxReadRequests.count == 1)
+    }
+
+    @Test func streamChangeFreesTheHydrateRetrySlot() {
+        let (coordinator, _) = online()
+        coordinator.scheduleInboxHydrate(delays: [60])
+        #expect(coordinator.inboxHydrateTask != nil)
+        coordinator.handle(.disconnected)
+        #expect(coordinator.inboxHydrateTask == nil)
+    }
+
+    @Test func reconnectLoadsTheThreadOnScreen() async {
+        let (coordinator, port) = online()
+        coordinator.status.connection = .offline(retryAt: nil)
+        await coordinator.openThread(thread)
+        #expect(port.threadRequests.isEmpty)
+        coordinator.status.connection = .online
+        await coordinator.reloadActiveConversation()
+        #expect(port.threadRequests.map(\.threadID) == [thread.threadID])
+    }
+
     @Test func rejectedReadDropsTheBarrierAndRehydrates() async {
         let (coordinator, port) = online()
+        coordinator.inboxHydrateRetryDelays = [0]
         coordinator.handle(.inboxPush(roomRow(unread: 2, last: "s2", updated: 10)))
         port.failingInboxReads = 1
         port.inbox = [roomRow(unread: 2, last: "s2", updated: 10)]

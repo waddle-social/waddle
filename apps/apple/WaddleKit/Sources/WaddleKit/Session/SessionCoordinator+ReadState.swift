@@ -47,20 +47,30 @@ extension SessionCoordinator {
     }
 
     /// Retries a failed hydrate off the ready pipeline, so sends are not
-    /// held behind it: after 2 s, then 8 s, abandoned if the stream changes.
-    func scheduleInboxHydrate(delays: [TimeInterval] = [2, 8]) {
+    /// held behind it: after `inboxHydrateRetryDelays` (2 s, then 8 s),
+    /// abandoned if the stream changes.
+    func scheduleInboxHydrate(delays: [TimeInterval]? = nil) {
         guard inboxHydrateTask == nil else { return }
+        let delays = delays ?? inboxHydrateRetryDelays
         let epoch = connectionEpoch
         inboxHydrateTask = Task { [weak self] in
             for delay in delays {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                // Cancelled only by `clearStores`, which also resets the slot.
+                // Cancelled when the stream changes, which also frees the slot.
                 guard let self, !Task.isCancelled else { return }
                 guard epoch == self.connectionEpoch, self.connection == .online else { break }
                 if await self.hydrateInbox() { break }
             }
-            self?.inboxHydrateTask = nil
+            guard let self, !Task.isCancelled else { return }
+            self.inboxHydrateTask = nil
         }
+    }
+
+    /// A new or lost stream: a retry scheduled for the old one must not
+    /// hold the slot the next session's retry needs.
+    func cancelInboxHydrate() {
+        inboxHydrateTask?.cancel()
+        inboxHydrateTask = nil
     }
 
     /// XEP-0490 bootstrap: seed cursors, then subscribe for sibling updates.
@@ -112,8 +122,9 @@ extension SessionCoordinator {
     /// newest visible message. Offline, both are parked for the next
     /// session.
     public func markDisplayed(_ conversation: ConversationID) async {
-        let serverCounts = (inbox.entry(for: conversation.jid)?.unread ?? 0) > 0
-        let needsServerRead = serverCounts || unread.count(for: conversation) > 0
+        // `open` clears the badge and the local row before calling here, so
+        // the decision rests on what the server last reported.
+        let needsServerRead = inbox.isUnreadOnServer(conversation.jid) || unread.count(for: conversation) > 0
         unread.clear(conversation)
         let covered = inbox.markRead(conversation.jid)
         if needsServerRead {
@@ -124,8 +135,8 @@ extension SessionCoordinator {
 
     /// Marks one room thread read on the server inbox's thread row.
     public func markThreadRead(_ thread: ThreadKey) async {
-        let serverCounts = (inbox.entry(for: thread.room, threadID: thread.threadID)?.unread ?? 0) > 0
-        let needsServerRead = serverCounts || unread.threadCount(for: thread) > 0
+        let needsServerRead = inbox.isUnreadOnServer(thread.room, threadID: thread.threadID)
+            || unread.threadCount(for: thread) > 0
         unread.clearThread(thread)
         let covered = inbox.markRead(thread.room, threadID: thread.threadID)
         if needsServerRead {
@@ -146,10 +157,18 @@ extension SessionCoordinator {
         let epoch = connectionEpoch
         do {
             try await port.markInboxRead(partner: key.partner, threadID: key.threadID)
+            guard epoch == connectionEpoch else { return }
+            inbox.serverTookRead(key.partner, threadID: key.threadID)
+            failedInboxReads.remove(key)
         } catch {
             guard epoch == connectionEpoch else { return }
             inbox.forgetBarrier(key.partner, threadID: key.threadID)
-            scheduleInboxHydrate(delays: [0])
+            // The re-fetch brings the count back; the row on screen must not
+            // read it again automatically, or a server that keeps refusing
+            // the read would get it in a tight loop. The next open or new
+            // message retries.
+            failedInboxReads.insert(key)
+            scheduleInboxHydrate()
         }
     }
 
