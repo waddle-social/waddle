@@ -60,7 +60,9 @@ impl exports::waddle::extension::framework::Guest for GitHub {
         let effects = match event {
             types::ExtensionEvent::ProviderWebhook(webhook) => handle_provider_webhook(webhook)?,
             types::ExtensionEvent::Command(command) => handle_command(command, current_config()?)?,
-            types::ExtensionEvent::MessageHook(_) | types::ExtensionEvent::Launch(_) => vec![],
+            types::ExtensionEvent::MessageHook(_)
+            | types::ExtensionEvent::Launch(_)
+            | types::ExtensionEvent::DurableJob(_) => vec![],
         };
         Ok(types::ExtensionResponse { effects })
     }
@@ -100,6 +102,7 @@ fn manifest() -> types::ExtensionManifest {
             bot_hat_label: Some(display("Bot")),
         }),
         artifact: None,
+        durable_job_kinds: vec![],
     }
 }
 

@@ -25,6 +25,32 @@ typed_non_empty_string!(UiActionId, "ui action id");
 typed_non_empty_string!(UiViewId, "ui view id");
 typed_non_empty_string!(Url, "url");
 typed_non_empty_string!(WaddleId, "waddle id");
+typed_non_empty_string!(JobKind, "job kind");
+typed_non_empty_string!(DurableJobId, "durable job id");
+typed_non_empty_string!(JudgmentCategory, "judgment category");
+typed_non_empty_string!(JudgmentModelVersion, "judgment model version");
+typed_non_empty_string!(JudgmentTaxonomyVersion, "judgment taxonomy version");
+
+/// A probability in `0.0..=1.0`. Mirrors
+/// `waddle_xmpp_client::xep::safety_scores::SafetyProbability` (the client
+/// parser's own validated newtype for the same wire value), kept as a
+/// separate type here since the two crates do not share a dependency edge.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct JudgmentProbability(f64);
+
+impl JudgmentProbability {
+    pub fn new(value: f64) -> Result<Self, FrameworkTypeError> {
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(FrameworkTypeError::InvalidProbability)
+        }
+    }
+
+    pub fn value(self) -> f64 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProviderFieldText(String);

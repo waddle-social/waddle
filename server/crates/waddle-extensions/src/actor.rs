@@ -187,6 +187,7 @@ fn invocation_kind_for_event(event: &ExtensionEvent) -> InvocationKind {
         ExtensionEvent::Command(_) => InvocationKind::Command,
         ExtensionEvent::Launch(_) => InvocationKind::Launch,
         ExtensionEvent::ProviderWebhook(_) => InvocationKind::ProviderWebhook,
+        ExtensionEvent::DurableJob(_) => InvocationKind::DurableJob,
     }
 }
 
@@ -211,6 +212,10 @@ fn requester_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::Bare
             .ok()
             .map(|jid| jid.to_bare()),
         ExtensionEvent::ProviderWebhook(_) => None,
+        // A durable job has no live requester — it is dispatched by the
+        // drain worker long after whatever message triggered it was sent,
+        // never in response to a request from a connected client.
+        ExtensionEvent::DurableJob(_) => None,
     }
 }
 
@@ -231,5 +236,9 @@ fn source_room_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::Ba
             .as_ref()
             .and_then(|room| room.as_str().parse().ok()),
         ExtensionEvent::ProviderWebhook(_) => None,
+        ExtensionEvent::DurableJob(job) => job
+            .room
+            .as_ref()
+            .and_then(|room| room.as_str().parse().ok()),
     }
 }

@@ -270,6 +270,12 @@ impl ExtensionManager {
                             emitted_effects.push(ExtensionEffect::HostWarning(warning));
                         }
                         ExtensionEffect::Noop => {}
+                        // Only ever produced in response to a `DurableJob`
+                        // event, which the message-hook path never sends —
+                        // the drain worker calls the actor directly and
+                        // interprets this effect itself (see
+                        // `waddle-server::extension_job_outbox`).
+                        ExtensionEffect::DurableJobResult(_) => {}
                     }
                 }
             }

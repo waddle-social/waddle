@@ -90,6 +90,7 @@ fn sample_manifest() -> ExtensionManifest {
         )],
         profile: None,
         artifact: None,
+        durable_job_kinds: Vec::new(),
     }
 }
 

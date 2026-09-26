@@ -29,6 +29,7 @@ pub(crate) fn handle_event_with_executor(
         }
         types::ExtensionEvent::Launch(_) => vec![],
         types::ExtensionEvent::ProviderWebhook(_) => vec![],
+        types::ExtensionEvent::DurableJob(_) => vec![],
     };
     Ok(types::ExtensionResponse { effects })
 }

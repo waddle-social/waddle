@@ -51,6 +51,7 @@ impl exports::waddle::extension::framework::Guest for LinkBoard {
             types::ExtensionEvent::Launch(launch) => save_link(launch),
             types::ExtensionEvent::Command(_) => vec![],
             types::ExtensionEvent::ProviderWebhook(_) => vec![],
+            types::ExtensionEvent::DurableJob(_) => vec![],
         };
         Ok(types::ExtensionResponse { effects })
     }

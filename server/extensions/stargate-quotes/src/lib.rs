@@ -40,7 +40,8 @@ impl exports::waddle::extension::framework::Guest for StargateQuotes {
             types::ExtensionEvent::Command(command) => handle_command(command)?,
             types::ExtensionEvent::MessageHook(_)
             | types::ExtensionEvent::Launch(_)
-            | types::ExtensionEvent::ProviderWebhook(_) => vec![],
+            | types::ExtensionEvent::ProviderWebhook(_)
+            | types::ExtensionEvent::DurableJob(_) => vec![],
         };
         Ok(types::ExtensionResponse { effects })
     }

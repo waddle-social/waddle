@@ -32,6 +32,8 @@ pub enum ExtensionCapability {
     ArtifactReference,
     #[serde(rename = "ui.declarative")]
     UiDeclarative,
+    #[serde(rename = "durable.job")]
+    DurableJob,
 }
 
 impl ExtensionCapability {
@@ -52,6 +54,7 @@ impl ExtensionCapability {
             Self::PubSubPublish => "pubsub.publish",
             Self::ArtifactReference => "artifact.reference",
             Self::UiDeclarative => "ui.declarative",
+            Self::DurableJob => "durable.job",
         }
     }
 }
@@ -68,11 +71,23 @@ pub struct ExtensionManifest {
     pub pubsub_nodes: Vec<PubSubNode>,
     pub profile: Option<ExtensionProfile>,
     pub artifact: Option<ArtifactReference>,
+    /// Job kinds this extension's `durable-job` handler processes. See
+    /// `waddle-extension.wit`'s `extension-manifest.durable-job-kinds` doc
+    /// comment for the routing/enqueue-gate contract.
+    #[serde(default)]
+    pub durable_job_kinds: Vec<JobKind>,
 }
 
 impl ExtensionManifest {
     pub fn declares_capability(&self, capability: ExtensionCapability) -> bool {
         self.capabilities.contains(&capability)
+    }
+
+    /// Whether this extension declares it can process durable jobs of
+    /// `kind`. Meaningless (and never consulted) unless the extension also
+    /// declares and is granted [`ExtensionCapability::DurableJob`].
+    pub fn declares_job_kind(&self, kind: &JobKind) -> bool {
+        self.durable_job_kinds.contains(kind)
     }
 
     pub fn declares_payload(&self, surface: PayloadSurface, payload: &ExtensionPayload) -> bool {

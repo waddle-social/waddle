@@ -415,6 +415,7 @@ fn runtime_grants_are_host_configured_and_manifest_bounded() {
         pubsub_nodes: Vec::new(),
         profile: None,
         artifact: None,
+        durable_job_kinds: vec![],
     };
 
     let grants = runtime_grants_for_module(&module, &manifest);

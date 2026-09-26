@@ -621,7 +621,7 @@ pub(crate) async fn room_observer_test_manager(
                     &std::env::var_os("CARGO_MANIFEST_DIR")
                         .expect("test runner sets CARGO_MANIFEST_DIR"),
                 )
-                .join("../waddle-extensions/tests/fixtures/message_hook.wat")
+                .join("../waddle-extensions/tests/fixtures/message_hook.wasm")
                 .display()
                 .to_string(),
             ),

@@ -54,6 +54,7 @@ impl exports::waddle::extension::framework::Guest for DecisionPolls {
             types::ExtensionEvent::Command(command) => handle_command(command)?,
             types::ExtensionEvent::Launch(launch) => handle_vote(launch),
             types::ExtensionEvent::ProviderWebhook(_) => vec![],
+            types::ExtensionEvent::DurableJob(_) => vec![],
         };
         Ok(types::ExtensionResponse { effects })
     }

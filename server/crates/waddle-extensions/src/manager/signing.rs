@@ -11,7 +11,8 @@ impl ExtensionManager {
                 | ExtensionEffect::ReferenceArtifact(_)
                 | ExtensionEffect::CommandForm(_)
                 | ExtensionEffect::HostWarning(_)
-                | ExtensionEffect::Noop => {}
+                | ExtensionEffect::Noop
+                | ExtensionEffect::DurableJobResult(_) => {}
             }
         }
         effects

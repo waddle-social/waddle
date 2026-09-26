@@ -27,7 +27,7 @@ fn config(can_send: bool, rooms: &[&str]) -> ExtensionConfig {
                     std::env::var_os("CARGO_MANIFEST_DIR")
                         .expect("test runner sets CARGO_MANIFEST_DIR"),
                 )
-                .join("../waddle-extensions/tests/fixtures/message_hook.wat")
+                .join("../waddle-extensions/tests/fixtures/message_hook.wasm")
                 .to_string_lossy()
                 .into_owned(),
             ),

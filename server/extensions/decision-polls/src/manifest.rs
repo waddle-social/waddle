@@ -63,5 +63,6 @@ pub(super) fn manifest() -> types::ExtensionManifest {
             bot_hat_label: Some(display("Bot")),
         }),
         artifact: None,
+        durable_job_kinds: vec![],
     }
 }

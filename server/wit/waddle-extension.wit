@@ -196,6 +196,15 @@ interface types {
         pubsub-publish,
         artifact-reference,
         ui-declarative,
+        /// Durable, after-commit background jobs (issue #1831 Phase B): the
+        /// host owns a persistent queue (claim/lease/retry/dead-letter) and
+        /// invokes the guest's `framework.handle-event` with a
+        /// `durable-job` event once a job is claimed. Distinct from
+        /// `message-observe`/`message-enrich`, which run synchronously
+        /// on the message ingress path with a tight timeout: a durable job
+        /// may take arbitrarily long (a paid, rate-limited vendor call) and
+        /// is retried with backoff instead of failing the message.
+        durable-job,
     }
 
     enum extension-route-scope {
@@ -223,6 +232,14 @@ interface types {
         root: payload-root,
     }
 
+    record job-kind {
+        value: string,
+    }
+
+    record durable-job-id {
+        value: string,
+    }
+
     record extension-manifest {
         id: plugin-id,
         name: display-text,
@@ -234,6 +251,14 @@ interface types {
         pubsub-nodes: list<pubsub-node>,
         profile: option<extension-profile>,
         artifact: option<artifact-reference>,
+        /// Job kinds this extension's `durable-job` handler processes, e.g.
+        /// `message-judge`. Only meaningful alongside the `durable-job`
+        /// capability; the host uses `(capability granted) AND (job kind
+        /// declared here)` as the live routing/enqueue-gate decision for a
+        /// job of a given kind — never a static server config flag (a
+        /// revoked grant must stop new enqueues without a separate flag
+        /// flip).
+        durable-job-kinds: list<job-kind>,
     }
 
     enum command-scope {
@@ -496,17 +521,75 @@ interface types {
         payload: provider-payload,
     }
 
+    /// One claimed row from the host's durable job queue, handed to the
+    /// guest through the normal `framework.handle-event` export. The guest
+    /// never sees the queue, the lease, or its own attempt count — only the
+    /// job's typed content and how many times it has been attempted.
+    record durable-job {
+        kind: job-kind,
+        job-id: durable-job-id,
+        waddle-id: waddle-id,
+        room: option<room-jid>,
+        /// The already-sent message this job judges. The host's eventual
+        /// wire effect (see `durable-job-outcome`) fastens its result to
+        /// this exact stanza id (XEP-0422 `<apply-to id='…'/>`).
+        target-stanza-id: stanza-id,
+        body: display-text,
+        /// 1 on the first invocation, incremented by the host on every
+        /// reclaim — including a reclaim of a job whose previous guest
+        /// invocation never returned (attempt is bumped at claim time, not
+        /// at guest-return time, so a wedged guest still marches toward
+        /// dead-letter).
+        attempt: u32,
+    }
+
     variant extension-event {
         message-hook(message-hook),
         command(command-invocation),
         launch(launch-invocation),
         provider-webhook(provider-webhook),
+        durable-job(durable-job),
     }
 
     record pubsub-publish {
         node: pubsub-node,
         item-id: option<pubsub-item-id>,
         payload: extension-payload,
+    }
+
+    /// One named judgment score, e.g. `category: "is_question"`. The wire
+    /// tokens for `category` and `taxonomy-version` are opaque strings as
+    /// far as the framework is concerned — the host forwards them verbatim
+    /// into the `urn:waddle:safety-scores:1` payload's `<score/>`
+    /// attributes; only the guest and the client parser need agree on
+    /// their meaning.
+    record judgment-score {
+        category: string,
+        probability: f64,
+        taxonomy-version: string,
+    }
+
+    /// Every score one durable-job invocation produced, batched under one
+    /// model run. Mirrors `urn:waddle:safety-scores:1`'s
+    /// `<safety-scores model-version='…'>` batch shape exactly.
+    record judgment-result {
+        model-version: string,
+        scores: list<judgment-score>,
+    }
+
+    record durable-job-failure {
+        message: display-text,
+        /// When `true`, the host reschedules this job with backoff (up to
+        /// its own retry budget, after which it is dead-lettered
+        /// regardless). When `false`, the host dead-letters it immediately
+        /// — for a guest-detected permanent condition (e.g. a malformed
+        /// job) that would never succeed on retry.
+        retryable: bool,
+    }
+
+    variant durable-job-outcome {
+        success(judgment-result),
+        failure(durable-job-failure),
     }
 
     variant extension-effect {
@@ -516,6 +599,12 @@ interface types {
         command-form(data-form),
         host-warning(display-text),
         noop,
+        /// The guest's answer to a `durable-job` event. Only the host may
+        /// act on this — it decides whether to mark the row done and emit
+        /// the XEP-0422 wire effect (`success`), or to retry/dead-letter it
+        /// (`failure`) — the same way every other effect here is only ever
+        /// interpreted by the host, never re-entrant into the guest.
+        durable-job-result(durable-job-outcome),
     }
 
     record extension-response {

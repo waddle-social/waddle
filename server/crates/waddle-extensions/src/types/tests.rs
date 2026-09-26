@@ -12,6 +12,7 @@ fn manifest_with(capabilities: Vec<ExtensionCapability>) -> ExtensionManifest {
         pubsub_nodes: Vec::new(),
         profile: None,
         artifact: None,
+        durable_job_kinds: vec![],
     }
 }
 
@@ -83,6 +84,7 @@ fn pubsub_publish_accepts_framework_extension_item_without_manifest_payload_rule
         pubsub_nodes: vec![PubSubNode::new("urn:waddle:test-extension:1:items").expect("node")],
         profile: None,
         artifact: None,
+        durable_job_kinds: vec![],
     };
     let framework_namespace = PayloadNamespace::framework();
     let payload = ExtensionPayload::new(
@@ -117,6 +119,7 @@ fn pubsub_publish_in_extension_namespace_still_requires_manifest_payload_rule() 
         pubsub_nodes: vec![PubSubNode::new("urn:waddle:test-extension:1:items").expect("node")],
         profile: None,
         artifact: None,
+        durable_job_kinds: vec![],
     };
     let extension_namespace =
         PayloadNamespace::new("urn:waddle:test-extension:1").expect("extension namespace");

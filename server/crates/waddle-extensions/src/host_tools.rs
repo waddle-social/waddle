@@ -24,6 +24,7 @@ pub enum InvocationKind {
     Command,
     Launch,
     ProviderWebhook,
+    DurableJob,
 }
 
 #[derive(Debug, Clone)]

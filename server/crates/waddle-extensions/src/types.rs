@@ -60,6 +60,10 @@ pub enum FrameworkTypeError {
     NamespacedXmlAttributeUnsupported,
     #[error("XML payload exceeds {limit}")]
     XmlLimitExceeded { limit: &'static str },
+    #[error("judgment probability must be finite and within 0.0..=1.0")]
+    InvalidProbability,
+    #[error("durable job attempt must be at least 1")]
+    InvalidDurableJobAttempt,
 }
 
 macro_rules! typed_non_empty_string {

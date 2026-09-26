@@ -1,11 +1,11 @@
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtensionResponse {
     pub effects: Vec<ExtensionEffect>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ExtensionEffect {
     EnrichMessage(ExtensionEnvelope),
     PublishPubSub(PubSubPublish),
@@ -13,6 +13,40 @@ pub enum ExtensionEffect {
     CommandForm(DataForm),
     HostWarning(DisplayText),
     Noop,
+    /// The guest's answer to a `DurableJob` event (see `types::events`).
+    /// Only ever produced in response to that event; the host, not the
+    /// message-hook pipeline, interprets and executes it (see
+    /// `waddle-server::extension_job_outbox`).
+    DurableJobResult(DurableJobOutcome),
+}
+
+/// One named judgment score. See `waddle-extension.wit`'s `judgment-score`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgmentScore {
+    pub category: JudgmentCategory,
+    pub probability: JudgmentProbability,
+    pub taxonomy_version: JudgmentTaxonomyVersion,
+}
+
+/// See `waddle-extension.wit`'s `judgment-result`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgmentResult {
+    pub model_version: JudgmentModelVersion,
+    pub scores: Vec<JudgmentScore>,
+}
+
+/// See `waddle-extension.wit`'s `durable-job-failure`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableJobFailure {
+    pub message: DisplayText,
+    pub retryable: bool,
+}
+
+/// See `waddle-extension.wit`'s `durable-job-outcome`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DurableJobOutcome {
+    Success(JudgmentResult),
+    Failure(DurableJobFailure),
 }
 
 impl ExtensionEffect {
@@ -69,6 +103,16 @@ impl ExtensionEffect {
             }
             Self::HostWarning(_) => true,
             Self::Noop => true,
+            // Only ever produced in direct response to a `DurableJob` event
+            // that the host itself only dispatches to an actor holding the
+            // grant (see `ExtensionManager::durable_job_handler`), so no
+            // further per-payload validation is needed here — unlike
+            // `EnrichMessage`/`PublishPubSub`, this effect never reaches an
+            // untrusted wire surface through the ordinary message-hook path.
+            Self::DurableJobResult(_) => {
+                manifest.declares_capability(ExtensionCapability::DurableJob)
+                    && grants.contains(&ExtensionCapability::DurableJob)
+            }
         }
     }
 }

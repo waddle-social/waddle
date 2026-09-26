@@ -23,9 +23,10 @@ use crate::runtime::{LoadedExtension, WasmRuntime};
 use crate::types::{
     is_official_namespace, message_has_framework_envelope, CommandAction, CommandInvocation,
     CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect,
-    ExtensionEnvelope, ExtensionEvent, ExtensionManifest, FullJidValue, LaunchContext, LaunchId,
-    LaunchInvocation, LinkTarget, MessageContext, MessageHook, PayloadNamespace, PluginId,
-    ProviderWebhook, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId, FRAMEWORK_NAMESPACE,
+    ExtensionEnvelope, ExtensionEvent, ExtensionManifest, FullJidValue, JobKind, LaunchContext,
+    LaunchId, LaunchInvocation, LinkTarget, MessageContext, MessageHook, PayloadNamespace,
+    PluginId, ProviderWebhook, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId,
+    FRAMEWORK_NAMESPACE,
 };
 
 const MAX_DETECTED_LINKS: usize = 3;
@@ -121,6 +122,7 @@ pub struct ExtensionManager {
 }
 
 mod construction;
+mod durable_job;
 mod invocation;
 mod launch_signing;
 mod manifest;

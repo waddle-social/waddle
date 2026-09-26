@@ -3,11 +3,13 @@ use anyhow::Result;
 use super::exports::waddle::extension as wit_exports;
 use super::waddle::extension::types as wit_types;
 use crate::types::{
-    CommandDescriptor, CommandNode, CommandScope, DisplayText, EnrichmentId, ExtensionCapability,
-    ExtensionEffect, ExtensionEnvelope, ExtensionManifest, ExtensionProfile, ExtensionResponse,
-    ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FullJidValue,
-    MessageEnrichment, PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId,
-    PluginVersion, PubSubNode, ReplyTarget, RouteId, StanzaId, Timestamp,
+    CommandDescriptor, CommandNode, CommandScope, DisplayText, DurableJobFailure,
+    DurableJobOutcome, EnrichmentId, ExtensionCapability, ExtensionEffect, ExtensionEnvelope,
+    ExtensionManifest, ExtensionProfile, ExtensionResponse, ExtensionRouteDescriptor,
+    ExtensionRouteScope, ExtensionRouteSurface, FullJidValue, JobKind, JudgmentCategory,
+    JudgmentModelVersion, JudgmentProbability, JudgmentResult, JudgmentScore,
+    JudgmentTaxonomyVersion, MessageEnrichment, PayloadNamespace, PayloadRoot, PayloadRule,
+    PayloadSurface, PluginId, PluginVersion, PubSubNode, ReplyTarget, RouteId, StanzaId, Timestamp,
 };
 
 impl TryFrom<wit_exports::lifecycle::ExtensionManifest> for ExtensionManifest {
@@ -41,6 +43,11 @@ impl TryFrom<wit_exports::lifecycle::ExtensionManifest> for ExtensionManifest {
                 .collect::<Result<Vec<_>>>()?,
             profile: value.profile.map(TryInto::try_into).transpose()?,
             artifact: value.artifact.map(TryInto::try_into).transpose()?,
+            durable_job_kinds: value
+                .durable_job_kinds
+                .into_iter()
+                .map(|kind| wit_newtype_to_domain!(kind, JobKind))
+                .collect::<Result<Vec<_>>>()?,
         })
     }
 }
@@ -188,6 +195,50 @@ impl TryFrom<wit_types::ExtensionEffect> for ExtensionEffect {
                 Self::HostWarning(wit_newtype_to_domain!(message, DisplayText)?)
             }
             wit_types::ExtensionEffect::Noop => Self::Noop,
+            wit_types::ExtensionEffect::DurableJobResult(outcome) => {
+                Self::DurableJobResult(outcome.try_into()?)
+            }
+        })
+    }
+}
+
+impl TryFrom<wit_types::DurableJobOutcome> for DurableJobOutcome {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::DurableJobOutcome) -> Result<Self> {
+        Ok(match value {
+            wit_types::DurableJobOutcome::Success(result) => Self::Success(result.try_into()?),
+            wit_types::DurableJobOutcome::Failure(failure) => Self::Failure(DurableJobFailure {
+                message: wit_newtype_to_domain!(failure.message, DisplayText)?,
+                retryable: failure.retryable,
+            }),
+        })
+    }
+}
+
+impl TryFrom<wit_types::JudgmentResult> for JudgmentResult {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::JudgmentResult) -> Result<Self> {
+        Ok(Self {
+            model_version: JudgmentModelVersion::new(value.model_version)?,
+            scores: value
+                .scores
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::JudgmentScore> for JudgmentScore {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::JudgmentScore) -> Result<Self> {
+        Ok(Self {
+            category: JudgmentCategory::new(value.category)?,
+            probability: JudgmentProbability::new(value.probability)?,
+            taxonomy_version: JudgmentTaxonomyVersion::new(value.taxonomy_version)?,
         })
     }
 }
@@ -269,6 +320,7 @@ impl From<wit_types::ExtensionCapability> for ExtensionCapability {
             wit_types::ExtensionCapability::PubsubPublish => Self::PubSubPublish,
             wit_types::ExtensionCapability::ArtifactReference => Self::ArtifactReference,
             wit_types::ExtensionCapability::UiDeclarative => Self::UiDeclarative,
+            wit_types::ExtensionCapability::DurableJob => Self::DurableJob,
         }
     }
 }

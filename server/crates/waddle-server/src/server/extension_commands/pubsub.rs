@@ -229,6 +229,10 @@ pub(crate) async fn extension_command_result(
                 }
             }
             ExtensionEffect::Noop => {}
+            // Commands never emit a `DurableJob` event, so a command
+            // extension can never legitimately produce this effect; drop it
+            // rather than surfacing it as a note.
+            ExtensionEffect::DurableJobResult(_) => {}
         }
     }
     if notes.is_empty() {

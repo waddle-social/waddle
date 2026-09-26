@@ -1,14 +1,14 @@
 use super::waddle::extension::types as wit_types;
 use crate::types::{
     ActionId, CommandAction, CommandInvocation, CommandNode, CommandSessionId, DataForm,
-    DataFormField, DataFormType, DataFormValue, DisplayText, EnrichmentId, ExtensionEvent,
-    ExtensionPayload, FormFieldOption, FormFieldType, FormFieldValue, FullJidValue, LaunchContext,
-    LaunchId, LaunchInvocation, LinkTarget, ListId, ListItemId, MediaType, MessageContext,
-    MessageHook, PayloadNamespace, PayloadRoot, PluginId, ProviderDeliveryId, ProviderEventType,
-    ProviderField, ProviderFieldName, ProviderFieldNumber, ProviderFieldText, ProviderFieldValue,
-    ProviderId, ProviderPayload, ProviderWebhook, PubSubItemId, PubSubNode, ReplyTarget, RoomJid,
-    Sha256Digest, StanzaId, ThreadId, Timestamp, UiActionId, UiViewId, Url, WaddleId, XmlAttribute,
-    XmlElement, XmlNode,
+    DataFormField, DataFormType, DataFormValue, DisplayText, DurableJob, EnrichmentId,
+    ExtensionEvent, ExtensionPayload, FormFieldOption, FormFieldType, FormFieldValue, FullJidValue,
+    LaunchContext, LaunchId, LaunchInvocation, LinkTarget, ListId, ListItemId, MediaType,
+    MessageContext, MessageHook, PayloadNamespace, PayloadRoot, PluginId, ProviderDeliveryId,
+    ProviderEventType, ProviderField, ProviderFieldName, ProviderFieldNumber, ProviderFieldText,
+    ProviderFieldValue, ProviderId, ProviderPayload, ProviderWebhook, PubSubItemId, PubSubNode,
+    ReplyTarget, RoomJid, Sha256Digest, StanzaId, ThreadId, Timestamp, UiActionId, UiViewId, Url,
+    WaddleId, XmlAttribute, XmlElement, XmlNode,
 };
 
 impl From<ExtensionEvent> for wit_types::ExtensionEvent {
@@ -18,6 +18,25 @@ impl From<ExtensionEvent> for wit_types::ExtensionEvent {
             ExtensionEvent::Command(event) => Self::Command(event.into()),
             ExtensionEvent::Launch(event) => Self::Launch(event.into()),
             ExtensionEvent::ProviderWebhook(event) => Self::ProviderWebhook(event.into()),
+            ExtensionEvent::DurableJob(event) => Self::DurableJob(event.into()),
+        }
+    }
+}
+
+impl From<DurableJob> for wit_types::DurableJob {
+    fn from(value: DurableJob) -> Self {
+        Self {
+            kind: wit_types::JobKind {
+                value: value.kind.into_string(),
+            },
+            job_id: wit_types::DurableJobId {
+                value: value.job_id.into_string(),
+            },
+            waddle_id: value.waddle_id.into(),
+            room: value.room.map(Into::into),
+            target_stanza_id: value.target_stanza_id.into(),
+            body: value.body.into(),
+            attempt: value.attempt,
         }
     }
 }

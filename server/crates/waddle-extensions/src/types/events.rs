@@ -6,6 +6,22 @@ pub enum ExtensionEvent {
     Command(CommandInvocation),
     Launch(LaunchInvocation),
     ProviderWebhook(ProviderWebhook),
+    DurableJob(DurableJob),
+}
+
+/// One claimed durable-job row, handed to the guest through the same
+/// `framework.handle-event` export every other event uses. See
+/// `waddle-extension.wit`'s `durable-job` record for the field-by-field
+/// contract; kept in lockstep with it by `runtime::domain_to_wit`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableJob {
+    pub kind: JobKind,
+    pub job_id: DurableJobId,
+    pub waddle_id: WaddleId,
+    pub room: Option<RoomJid>,
+    pub target_stanza_id: StanzaId,
+    pub body: DisplayText,
+    pub attempt: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
