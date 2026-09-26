@@ -1,7 +1,8 @@
 import SwiftUI
 import WaddleKit
 
-/// Mentions and unread conversations, newest first.
+/// Everything unread in your rooms, grouped by room and thread, newest
+/// first: the native counterpart of the web client's unread view.
 struct ActivityView: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -9,79 +10,83 @@ struct ActivityView: View {
     init() {}
 
     var body: some View {
-        let feed = currentFeed
+        let overview = session.unreadOverview
         List {
-            if !feed.mentions.isEmpty {
-                Section("Mentions") {
-                    ForEach(feed.mentions) { entry in
-                        ActivityRow(entry: entry) { open(entry.conversation) }
+            ForEach(overview.groups) { group in
+                Section {
+                    ActivityGroupRow(group: group) { open(group.conversation) }
+                    ForEach(group.messages) { item in
+                        ActivityMessageRow(item: item) { open(group.conversation) }
                     }
-                }
-            }
-            if !feed.unread.isEmpty {
-                Section("Unread") {
-                    ForEach(feed.unread) { entry in
-                        ActivityRow(entry: entry) { open(entry.conversation) }
+                    ForEach(group.threads) { thread in
+                        ActivityThreadRow(thread: thread) { open(thread.key) }
+                        ForEach(thread.messages) { item in
+                            ActivityMessageRow(item: item, isThreadReply: true) { open(thread.key) }
+                        }
+                    }
+                    if group.isIncomplete {
+                        Label("Some messages couldn't be loaded. Pull to retry.", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
         }
         .navigationTitle("Activity")
-        .overlay {
-            if feed.isEmpty {
-                ContentUnavailableView(
-                    "You're all caught up",
-                    systemImage: "checkmark.circle",
-                    description: Text("Mentions and unread messages show up here.")
-                )
-            }
+        .overlay { placeholder(overview) }
+        .refreshable {
+            await session.refreshInbox()
+            await session.refreshUnreadOverview()
+        }
+        // Re-runs when a count changes; the short sleep coalesces a burst
+        // of inbox pushes into one refresh, since a newer key cancels it.
+        .task(id: ActivityRefreshKey(session: session)) {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await session.refreshUnreadOverview()
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    markAllRead(feed.conversations)
+                    markAllRead()
                 } label: {
                     Label("Mark all as read", systemImage: "checkmark.circle")
                 }
-                .disabled(feed.isEmpty)
+                .disabled(overview.groups.isEmpty)
                 .help("Mark all as read")
             }
         }
     }
 
-    private var currentFeed: ActivityFeed {
-        ActivityFeed.build(
-            counts: session.unread.counts,
-            mentions: session.unread.mentions,
-            recency: { recency(of: $0) },
-            title: { session.directory.title(for: $0) }
-        )
-    }
-
-    private func recency(of conversation: ConversationID) -> Date? {
-        if let item = session.timelines.timeline(for: conversation).lastContentItem {
-            return item.sentAt
+    @ViewBuilder
+    private func placeholder(_ overview: UnreadOverviewStore) -> some View {
+        if overview.groups.isEmpty {
+            if overview.isLoading, !overview.hasLoaded {
+                ProgressView()
+            } else {
+                ContentUnavailableView(
+                    "You're all caught up",
+                    systemImage: "checkmark.circle",
+                    description: Text("Unread messages and threads from your rooms show up here.")
+                )
+            }
         }
-        guard !conversation.isRoom else { return nil }
-        return session.directory.directConversations.first { $0.peer == conversation.jid }?.lastActivity
     }
 
-    /// On the phone Activity tab the conversation pushes onto that tab's
-    /// stack; anywhere else it opens through the shared navigation.
+    /// Activity is a phone tab, so rooms and threads push onto its stack.
     private func open(_ conversation: ConversationID) {
-        if navigation.tab == .activity {
-            navigation.activityPath.append(.conversation(conversation))
-        } else {
-            navigation.open(conversation)
-        }
+        navigation.activityPath.append(.conversation(conversation))
     }
 
-    private func markAllRead(_ conversations: [ConversationID]) {
+    private func open(_ thread: ThreadKey) {
+        navigation.activityPath.append(.thread(.room(thread.room), rootID: thread.threadID))
+    }
+
+    private func markAllRead() {
         let session = self.session
         Task {
-            for conversation in conversations {
-                await session.markDisplayed(conversation)
-            }
+            await session.markOverviewRead()
+            await session.refreshUnreadOverview()
         }
     }
 }
