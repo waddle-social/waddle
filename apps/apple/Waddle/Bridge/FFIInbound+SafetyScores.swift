@@ -40,6 +40,7 @@ extension FFIInbound {
         case .harassment: return .harassment
         case .violence: return .violence
         case .selfHarm: return .selfHarm
+        case .spamScam: return .spamScam
         }
     }
 }
