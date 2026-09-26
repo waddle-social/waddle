@@ -271,7 +271,7 @@ function selectCommunitySurface(surface: "feed" | "events") {
             <div class="room-card__footer">
               <div class="flex min-w-0 items-center gap-2">
                 <div v-if="tile.nicks.length > 0" class="room-card__avatars" :aria-label="`${tile.nicks.length} in the huddle`">
-                  <span v-for="avatar in tileAvatars(tile)" :key="avatar.nick" class="huddle-ring">
+                  <span v-for="avatar in tileAvatars(tile)" :key="avatar.nick" class="inline-flex rounded-full ring-2 ring-card">
                     <AppAvatar :name="avatar.nick" :src="avatar.src" size="xs" />
                   </span>
                 </div>

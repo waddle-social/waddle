@@ -70,7 +70,7 @@ function ringClass(person: PeopleRailPerson): string {
               :name="person.name"
               :src="person.avatarUrl"
               :presence="person.presence"
-              :in-call="person.inCall"
+              :in-call="person.inCall && person.status !== 'in-huddle' && person.status !== 'speaking'"
               size="sm"
             />
           </span>

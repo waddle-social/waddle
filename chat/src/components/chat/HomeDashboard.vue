@@ -219,8 +219,10 @@ function contactLabel(contact: RosterContact): string {
   return contact.name || contact.username || contact.jid;
 }
 
+// Same rule as the people rail: available (and chat) or do-not-disturb
+// count as around; away and extended-away sit with offline.
 function contactIsAround(contact: RosterContact): boolean {
-  return Boolean(contact.presenceShow && contact.presenceShow !== "offline");
+  return contact.presenceShow === "available" || contact.presenceShow === "dnd";
 }
 
 const aroundContacts = computed(() => props.contacts.filter(contactIsAround));
@@ -977,7 +979,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
           </p>
         </div>
         <template v-if="awayContacts.length > 0">
-          <h3 :class="kickerClass">Away for now · {{ awayContacts.length }}</h3>
+          <h3 :class="kickerClass">Away and offline · {{ awayContacts.length }}</h3>
           <div class="grid gap-2 md:grid-cols-2">
             <button
               v-for="contact in awayContacts"

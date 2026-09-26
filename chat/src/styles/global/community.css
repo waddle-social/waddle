@@ -35,7 +35,7 @@
 .community-header__brand {
   display: inline-flex;
   min-width: 0;
-  flex-shrink: 0;
+  flex-shrink: 1;
   align-items: center;
   gap: var(--space-xs);
   border-radius: var(--radius-md);
@@ -74,7 +74,7 @@
 }
 
 .community-header__name {
-  max-width: 14rem;
+  max-width: min(14rem, 38vw);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -188,6 +188,10 @@
   min-height: 0;
   flex: 1 1 0%;
   flex-direction: column;
+  /* Page grids size themselves to this column, not the viewport, because
+   * the rail and context column take 600px of a 1440px window. */
+  container-type: inline-size;
+  container-name: community-main;
 }
 
 /* ── Bottom tab bar (phones) ──────────────────────────────────────── */
@@ -338,7 +342,7 @@
 .huddle-ring {
   display: inline-flex;
   flex-shrink: 0;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-pill);
   box-shadow: 0 0 0 2px var(--sidebar), 0 0 0 4px var(--primary);
 }
 
@@ -687,7 +691,9 @@
 }
 
 .room-card__title {
+  display: block;
   overflow: hidden;
+  white-space: nowrap;
   font-family: var(--font-display);
   font-size: 1.125rem;
   font-weight: 600;
@@ -909,13 +915,13 @@
   padding-inline: var(--chat-content-inline);
 }
 
-@media (max-width: 80rem) {
+@container community-main (max-width: 62rem) {
   .community-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 48rem) {
+@container community-main (max-width: 38rem) {
   .community-grid {
     grid-template-columns: minmax(0, 1fr);
   }

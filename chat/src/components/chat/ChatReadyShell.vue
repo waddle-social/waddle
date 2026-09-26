@@ -772,7 +772,7 @@ async function recoverSupersededFromShell() {
     <!-- Community shell: header + people rail + page + context column -->
     <CommunityShell
       :controller="controller"
-      :hide-rail="ui.activePage.value === 'settings'"
+      :hide-rail="ui.activePage.value === 'settings' || ui.activePage.value === 'members'"
       :can-search="canSearchMessages"
       :open-search="openMessageSearch"
       :start-huddle="startHuddleFromHeader"
