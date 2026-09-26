@@ -16,8 +16,11 @@ pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod error;
 mod extension_grants;
-mod judgment_outbox;
-pub(crate) use judgment_outbox::MessageJudgmentOutboxRepository;
+mod room_observation;
+pub(crate) use room_observation::{
+    initialize_room_observations, CapturedRoomSource, RoomObservationRepository,
+};
+pub use room_observation::{ObservationError, RoomPublication};
 mod pending_receipts;
 mod recovery_receipts;
 pub(crate) use pending_receipts::PendingReceiptRepository;
@@ -69,61 +72,37 @@ pub enum IngressFencing {
 /// Dialect-aware factory for ingress transactions bound to one lineage policy.
 #[derive(Clone)]
 pub struct IngressUnitOfWork {
+    observations: std::sync::Arc<std::sync::atomic::AtomicBool>,
     db: Database,
     lineage: LineageConfig,
     /// The server's canonical node identity source. Bound once at
     /// construction so claim fences can only be minted against the real
     /// rotation gate, never a caller-constructed one.
     fencing: IngressFencing,
-    /// Operator control for the `is_question`/safety community-enrichment
-    /// judgment outbox (#1831 Phase 2). `false` (the default from every
-    /// [`Self::open`]/[`Self::open_with_node_identity`] call) means every
-    /// [`IngressUowTransaction`] this factory opens reports
-    /// [`IngressUowTransaction::judgment_outbox_enabled`] as `false`, so
-    /// `ingress::durable::apply_durable` never enqueues a row — this
-    /// measurement-only feature stays fully inert unless a caller
-    /// deliberately opts in via [`Self::with_judgment_outbox_enabled`].
-    judgment_outbox_enabled: bool,
 }
 
 impl IngressUnitOfWork {
+    pub(crate) fn enable_room_observations(&self) {
+        self.observations
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Open against the main database pool in single-node mode.
     ///
     /// A unit of work opened this way cannot mint claim fences; use
     /// [`Self::open_with_node_identity`] where fenced SM writes are needed.
     pub fn open(db: Database, lineage: LineageConfig) -> Result<Self, IngressUowError> {
         Ok(Self {
+            observations: Default::default(),
             db,
             lineage,
             fencing: IngressFencing::SingleNode,
-            judgment_outbox_enabled: false,
         })
     }
 
     /// Ownership fencing configured for transactions opened by this factory.
     pub fn fencing(&self) -> &IngressFencing {
         &self.fencing
-    }
-
-    /// Opt this factory's transactions into enqueueing a
-    /// `message_judgment_outbox` row alongside every freshly archived
-    /// direct/groupchat message (#1831 Phase 2). Additive and narrow by
-    /// design: every existing `open`/`open_with_node_identity` call site
-    /// keeps building a disabled unit of work unless it explicitly chains
-    /// this or [`Self::set_judgment_outbox_enabled`].
-    pub fn with_judgment_outbox_enabled(mut self, enabled: bool) -> Self {
-        self.set_judgment_outbox_enabled(enabled);
-        self
-    }
-
-    /// In-place form of [`Self::with_judgment_outbox_enabled`]. Production
-    /// wiring uses this from
-    /// [`crate::ingress::IngressAuthority::with_judgment_outbox_enabled`],
-    /// which cannot move `self.uow` out of `self` — `IngressAuthority`
-    /// implements `Drop`, and Rust forbids partially moving a field out of
-    /// any type that does, even to immediately move it back in.
-    pub fn set_judgment_outbox_enabled(&mut self, enabled: bool) {
-        self.judgment_outbox_enabled = enabled;
     }
 
     /// Open with the server's canonical [`SharedNodeIdentity`] bound, so
@@ -224,6 +203,7 @@ impl IngressUnitOfWork {
         };
 
         Ok(IngressUowTransaction {
+            observations: self.observations.load(std::sync::atomic::Ordering::Acquire),
             transaction,
             protocol_epoch,
             lineage,
@@ -232,7 +212,6 @@ impl IngressUnitOfWork {
             fencing: self.fencing.clone(),
             #[cfg(feature = "clustering")]
             authority_guards: Vec::new(),
-            judgment_outbox_enabled: self.judgment_outbox_enabled,
         })
     }
 }
@@ -261,6 +240,7 @@ pub enum IngressLineage {
 /// There is intentionally no rollback method: dropping this value without
 /// [`Self::commit`] rolls back the underlying database transaction.
 pub struct IngressUowTransaction<'a> {
+    observations: bool,
     transaction: Transaction<'a>,
     protocol_epoch: ProtocolEpoch,
     lineage: IngressLineage,
@@ -278,10 +258,6 @@ pub struct IngressUowTransaction<'a> {
     /// commits or rolls back, never between a fenced write and its commit.
     #[cfg(feature = "clustering")]
     authority_guards: Vec<CurrentNodeIdentityGuard>,
-    /// Snapshot of [`IngressUnitOfWork::with_judgment_outbox_enabled`] taken
-    /// when this transaction opened. See
-    /// [`Self::judgment_outbox_enabled`].
-    judgment_outbox_enabled: bool,
 }
 
 impl<'a> IngressUowTransaction<'a> {
@@ -300,12 +276,8 @@ impl<'a> IngressUowTransaction<'a> {
         &self.lineage
     }
 
-    /// Whether `ingress::durable::apply_durable` may enqueue a
-    /// `message_judgment_outbox` row inside this same transaction (#1831
-    /// Phase 2). `false` unless the owning [`IngressUnitOfWork`] was built
-    /// with [`IngressUnitOfWork::with_judgment_outbox_enabled`].
-    pub(crate) fn judgment_outbox_enabled(&self) -> bool {
-        self.judgment_outbox_enabled
+    pub(crate) fn room_observers_enabled(&self) -> bool {
+        self.observations
     }
 
     /// Commit all ingress and related durable writes atomically.
@@ -369,9 +341,6 @@ impl<'a> IngressUowTransaction<'a> {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod judgment_outbox_tests;
 
 #[cfg(test)]
 mod lock_timeout_tests;

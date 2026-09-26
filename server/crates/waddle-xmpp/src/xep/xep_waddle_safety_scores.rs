@@ -4,8 +4,7 @@
 //! This is the send side only. Client-side receive/parse/display for this
 //! exact wire shape already ships in `waddle-xmpp-client`'s
 //! `xep::safety_scores` (consumed by the Apple, Android, and web clients);
-//! this module produces the stanza the `message_judgment_outbox` drain
-//! worker broadcasts once a judgment is durably recorded.
+//! this module materializes a host-verified score result as a room broadcast.
 //!
 //! Only the bare room JID may send this payload (`type='groupchat'`, `from`
 //! carrying no resource) — the same authority rule every client-side parser
@@ -15,6 +14,7 @@
 
 use jid::BareJid;
 use minidom::Element;
+use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::xep0334::{build_hint_element, Hint};
@@ -33,23 +33,51 @@ pub struct SafetyScoreToSend<'a> {
     pub taxonomy_version: &'a str,
 }
 
-/// Builds the room-broadcast message carrying a safety-scores fastening
-/// for the message identified by `target_stanza_id` (the room-assigned
-/// XEP-0359 stanza-id of the judged message — the same identifier every
-/// client-side parser resolves against).
-pub fn build_safety_scores_message(
+/// Host-verified source identity for a score result. The fastening uses the
+/// sender's origin-id, while the payload binds it to the room's two stable
+/// stanza IDs so equal origin IDs from different occupants cannot collide.
+pub struct SafetyScoresTarget<'a> {
+    pub origin_id: &'a OriginId,
+    pub stanza_id: &'a StanzaId,
+    pub revision_id: &'a StanzaId,
+}
+
+/// Materialize a validated score result after the host has bound the source.
+/// A guest never chooses the target or the room publisher.
+pub fn build_room_safety_scores_message(
     room_jid: &BareJid,
-    target_stanza_id: &str,
+    target: SafetyScoresTarget<'_>,
     model_version: &str,
     scores: &[SafetyScoreToSend<'_>],
-) -> Message {
-    let mut safety_scores_builder = Element::builder("safety-scores", NS_WADDLE_SAFETY_SCORES)
+) -> Option<Message> {
+    let room_by = jid::Jid::from(room_jid.clone());
+    if target.origin_id.as_str().is_empty()
+        || target.stanza_id.id.is_empty()
+        || target.revision_id.id.is_empty()
+        || target.stanza_id.by != room_by
+        || target.revision_id.by != room_by
+    {
+        return None;
+    }
+    let mut payload = Element::builder("safety-scores", NS_WADDLE_SAFETY_SCORES)
         .attr(
             minidom::rxml::xml_ncname!("model-version").to_owned(),
             model_version,
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("target-stanza-id").to_owned(),
+            target.stanza_id.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("target-stanza-by").to_owned(),
+            room_jid.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("source-revision-id").to_owned(),
+            target.revision_id.as_str(),
         );
     for score in scores {
-        safety_scores_builder = safety_scores_builder.append(
+        payload = payload.append(
             Element::builder("score", NS_WADDLE_SAFETY_SCORES)
                 .attr(
                     minidom::rxml::xml_ncname!("category").to_owned(),
@@ -57,7 +85,7 @@ pub fn build_safety_scores_message(
                 )
                 .attr(
                     minidom::rxml::xml_ncname!("probability").to_owned(),
-                    format!("{}", score.probability),
+                    score.probability.to_string(),
                 )
                 .attr(
                     minidom::rxml::xml_ncname!("taxonomy-version").to_owned(),
@@ -69,16 +97,16 @@ pub fn build_safety_scores_message(
     let apply_to = Element::builder("apply-to", NS_FASTEN)
         .attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
-            target_stanza_id,
+            target.origin_id.as_str(),
         )
-        .append(safety_scores_builder.build())
+        .append(payload.build())
         .build();
-    let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.from = Some(jid::Jid::from(room_jid.clone()));
+    let mut message = Message::new(Some(room_by.clone()));
+    message.from = Some(room_by);
     message.type_ = MessageType::Groupchat;
     message.payloads.push(apply_to);
     message.payloads.push(build_hint_element(Hint::Store));
-    message
+    Some(message)
 }
 
 #[cfg(test)]
@@ -103,12 +131,19 @@ mod tests {
                 taxonomy_version: "safety-hate-speech-v1",
             },
         ];
-        let message = build_safety_scores_message(
+        let target_id = StanzaId::new("judged-stanza-id", jid::Jid::from(room()));
+        let revision_id = StanzaId::new("revision-stanza-id", jid::Jid::from(room()));
+        let message = build_room_safety_scores_message(
             &room(),
-            "judged-stanza-id",
+            SafetyScoresTarget {
+                origin_id: &OriginId::new("origin-id"),
+                stanza_id: &target_id,
+                revision_id: &revision_id,
+            },
             "typesafe/jev-1.13-20260917",
             &scores,
-        );
+        )
+        .expect("valid room target");
 
         assert_eq!(message.type_, MessageType::Groupchat);
         assert_eq!(
@@ -125,7 +160,7 @@ mod tests {
             .iter()
             .find(|p| p.name() == "apply-to" && p.ns() == NS_FASTEN)
             .expect("apply-to present");
-        assert_eq!(apply_to.attr("id"), Some("judged-stanza-id"));
+        assert_eq!(apply_to.attr("id"), Some("origin-id"));
         assert!(apply_to.attr("clear").is_none());
 
         let safety_scores = apply_to
@@ -135,6 +170,18 @@ mod tests {
         assert_eq!(
             safety_scores.attr("model-version"),
             Some("typesafe/jev-1.13-20260917")
+        );
+        assert_eq!(
+            safety_scores.attr("target-stanza-id"),
+            Some("judged-stanza-id")
+        );
+        assert_eq!(
+            safety_scores.attr("target-stanza-by"),
+            Some(room().to_string().as_str())
+        );
+        assert_eq!(
+            safety_scores.attr("source-revision-id"),
+            Some("revision-stanza-id")
         );
 
         let score_elements: Vec<&Element> = safety_scores

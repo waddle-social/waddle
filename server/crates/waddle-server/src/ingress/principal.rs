@@ -12,6 +12,7 @@ pub struct ExtensionPrincipal {
 
 #[derive(Clone, Debug)]
 pub enum IngressPrincipal {
+    RoomResult(Box<crate::ingress_uow::RoomPublication>),
     Authenticated(AuthenticatedPrincipalRef),
     Extension(ExtensionPrincipal),
 }
@@ -19,6 +20,7 @@ pub enum IngressPrincipal {
 impl IngressPrincipal {
     pub fn bare_jid(&self) -> &BareJid {
         match self {
+            Self::RoomResult(result) => &result.source.room,
             Self::Authenticated(principal) => principal.bare_jid(),
             Self::Extension(principal) => &principal.sender,
         }
@@ -53,7 +55,8 @@ pub(super) async fn assert_admission(
                 } if principal != expected => {
                     return Err(IngressUowError::PrincipalAssertionFailed)
                 }
-                IngressStreamIdentity::Extension { .. } => {
+                IngressStreamIdentity::Extension { .. }
+                | IngressStreamIdentity::RoomResult { .. } => {
                     return Err(IngressUowError::PrincipalAssertionFailed)
                 }
                 IngressStreamIdentity::Resumable { .. }
@@ -88,6 +91,19 @@ pub(super) async fn assert_admission(
             if let Some(requester) = &principal.requester {
                 ExtensionGrantRepository::assert_requester(tx, requester).await?;
             }
+        }
+        (
+            IngressPrincipal::RoomResult(result),
+            IngressStreamIdentity::RoomResult { id, room },
+            TransportGeneration::Host,
+        ) if id == &result.id
+            && room == &result.source.room
+            && result.subscription.room == *room
+            && submission.sender.to_bare() == *room
+            && submission.target == NormalizedTarget::Bare(room.clone()) =>
+        {
+            // Durable authority is checked after room/sequence locks in
+            // apply_durable, and retained through the archive commit.
         }
         _ => return Err(IngressUowError::PrincipalAssertionFailed),
     }

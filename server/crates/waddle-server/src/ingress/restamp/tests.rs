@@ -290,6 +290,7 @@ fn system_archive_and_peer_delivery_share_recorded_identity() {
                 message: Box::new(archive),
                 fence: RoomFenceRequirement::Unfenced,
                 archive_expectation: waddle_xmpp::mam::ArchiveExpectation::Fresh,
+                correction_target: None,
             },
         ))));
     let recipient = jid("bob@example.test");

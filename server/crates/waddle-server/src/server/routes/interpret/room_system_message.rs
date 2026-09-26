@@ -20,8 +20,18 @@ use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 pub(super) async fn broadcast_room_system_message_event(
     deps: &Deps<'_>,
     room: BareJid,
+    message: Box<Message>,
+    recursion_depth: u8,
+) -> Option<String> {
+    broadcast_room_system_message_with_identity(deps, room, message, recursion_depth, None).await
+}
+
+pub(super) async fn broadcast_room_system_message_with_identity(
+    deps: &Deps<'_>,
+    room: BareJid,
     mut message: Box<Message>,
     recursion_depth: u8,
+    identity: Option<StanzaId>,
 ) -> Option<String> {
     let Some(room_registry) = deps.room_registry else {
         debug!(
@@ -95,7 +105,15 @@ pub(super) async fn broadcast_room_system_message_event(
 
     // Stamp a canonical XEP-0359 `<stanza-id by='room'/>` so the
     // message is uniquely addressable in MAM and from clients.
-    let stanza_id = uuid::Uuid::new_v4().to_string();
+    let stanza_id = match identity {
+        Some(identity) if identity.by == *room => identity.id,
+        Some(_) => {
+            deps.effects
+                .fail_plan(effects::PlanFailure::InvalidSystemMessage);
+            return None;
+        }
+        None => uuid::Uuid::new_v4().to_string(),
+    };
     add_stanza_id(
         &mut message,
         &StanzaId::new(stanza_id.clone(), Jid::from(room.clone())),

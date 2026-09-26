@@ -187,7 +187,7 @@ extensions:
   cacheDir: /var/lib/waddle/extensions
   # Extensions are loaded from immutable OCI artifact digests. Release
   # automation enables and pins modules after publishing their WASM OCI
-  # artifacts. Production wires ai-chatbot provider secrets through
+  # artifacts. Production wires ai-chatbot and jev-judgments secrets through
   # configSecretFiles and a mounted ExternalSecret-backed file.
   modules: []
 

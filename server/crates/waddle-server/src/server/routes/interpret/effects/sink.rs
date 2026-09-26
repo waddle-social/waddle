@@ -30,6 +30,14 @@ pub trait EffectSink: Send + Sync {
         None
     }
     fn observe_sender(&self, _sender: &jid::FullJid) {}
+    /// Attach correction authority only to the archive for this room revision.
+    fn set_room_correction_target(
+        &self,
+        _room: &jid::BareJid,
+        _revision: &waddle_xmpp_core::xep0359::StanzaId,
+        _target: &waddle_xmpp_core::xep0359::StanzaId,
+    ) {
+    }
     fn fail_plan(&self, _failure: super::PlanFailure) {}
     fn set_rejection(&self, _rejection: super::PlanRejection) {}
     fn rejection(&self) -> Option<super::PlanRejection> {

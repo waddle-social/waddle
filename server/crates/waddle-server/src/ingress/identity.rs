@@ -15,6 +15,10 @@ use waddle_xmpp_core::xep0359::OriginId;
 
 #[derive(Clone, Debug)]
 pub enum IngressStreamIdentity {
+    RoomResult {
+        id: uuid::Uuid,
+        room: BareJid,
+    },
     Extension {
         plugin: waddle_extensions::PluginId,
         requester: Option<BareJid>,

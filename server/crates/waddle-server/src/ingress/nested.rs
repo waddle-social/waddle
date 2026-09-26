@@ -129,8 +129,11 @@ impl NestedIngressOperation {
         if !matches!(
             submission.identity,
             super::IngressStreamIdentity::Extension { .. }
-        ) || !matches!(submission.principal, super::IngressPrincipal::Extension(_))
-            || !matches!(submission.connection_generation, TransportGeneration::Host)
+                | super::IngressStreamIdentity::RoomResult { .. }
+        ) || !matches!(
+            submission.principal,
+            super::IngressPrincipal::Extension(_) | super::IngressPrincipal::RoomResult(_)
+        ) || !matches!(submission.connection_generation, TransportGeneration::Host)
         {
             return NestedOutcome::Refused(NestedRefusal::InvalidHostSubmission);
         }

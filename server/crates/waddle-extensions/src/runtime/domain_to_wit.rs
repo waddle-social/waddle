@@ -14,6 +14,7 @@ use crate::types::{
 impl From<ExtensionEvent> for wit_types::ExtensionEvent {
     fn from(value: ExtensionEvent) -> Self {
         match value {
+            ExtensionEvent::RoomMessageObserve(event) => Self::RoomMessageObserve(event.into()),
             ExtensionEvent::MessageHook(event) => Self::MessageHook(event.into()),
             ExtensionEvent::Command(event) => Self::Command(event.into()),
             ExtensionEvent::Launch(event) => Self::Launch(event.into()),
@@ -339,3 +340,28 @@ impl_domain_newtype_to_wit!(UiActionId, UiActionId);
 impl_domain_newtype_to_wit!(UiViewId, UiViewId);
 impl_domain_newtype_to_wit!(Url, Url);
 impl_domain_newtype_to_wit!(WaddleId, WaddleId);
+
+impl From<crate::types::RoomMessageObserve> for wit_types::RoomMessageObserve {
+    fn from(value: crate::types::RoomMessageObserve) -> Self {
+        let source = value.source;
+        Self {
+            source: wit_types::RoomMessageSource {
+                room: wit_types::RoomJid {
+                    value: source.room.to_string(),
+                },
+                stanza_id: source.stanza_id.into(),
+                revision_stanza_id: source.revision_stanza_id.into(),
+                origin_id: source.origin_id.map(|id| wit_types::OriginId {
+                    value: id.into_string(),
+                }),
+                sender: wit_types::BareJid {
+                    value: source.sender.to_string(),
+                },
+                revision: source.revision.get(),
+                body_digest: source.body_digest.into(),
+                observed_at: source.observed_at.into(),
+            },
+            body: value.body.into(),
+        }
+    }
+}

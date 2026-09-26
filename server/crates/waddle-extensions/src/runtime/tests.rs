@@ -368,6 +368,8 @@ async fn runtime_http_denies_unconfigured_origin_before_network() {
             body: None,
         },
         &[],
+        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &crate::config::RuntimeLimits::default(),
     )
     .await
     .expect_err("origin allowlist is enforced");
@@ -387,6 +389,8 @@ async fn runtime_http_caps_request_body_before_network() {
             body: Some("x".repeat(256 * 1024 + 1)),
         },
         &["https://api.example.test".to_string()],
+        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &crate::config::RuntimeLimits::default(),
     )
     .await
     .expect_err("request body cap is enforced");
@@ -409,6 +413,8 @@ async fn runtime_http_rejects_accept_encoding_before_network() {
             body: None,
         },
         &["https://api.example.test".to_string()],
+        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &crate::config::RuntimeLimits::default(),
     )
     .await
     .expect_err("accept-encoding is host-controlled");
@@ -482,6 +488,8 @@ fn host_state_with_kind(
         "{}".to_string(),
         grants,
         Vec::new(),
+        crate::config::RuntimeLimits::default(),
+        super::http::HttpRuntime::new().expect("HTTP runtime"),
     )
 }
 
@@ -490,4 +498,60 @@ fn unsupported() -> HostToolError {
         code: HostToolErrorCode::Unsupported,
         message: DisplayText::new("unsupported").expect("display text"),
     }
+}
+
+#[tokio::test]
+async fn observation_send_is_denied_even_with_a_command_send_grant() {
+    let tools = Arc::new(MockHostTools::default());
+    let mut state = host_state_with_kind(
+        tools.clone(),
+        HashSet::from([ExtensionCapability::HostMessageSend]),
+        InvocationKind::RoomMessageObserve,
+    );
+    let result = HostToolsHost::send_message(
+        &mut state,
+        wit_types::SendMessageRequest {
+            target: wit_types::MessageTarget::Muc(wit_types::RoomJid {
+                value: "room@muc.example.com".into(),
+            }),
+            body: wit_types::DisplayText {
+                value: "must not send".into(),
+            },
+            thread_id: None,
+            reply_to: None,
+            markup: vec![],
+            extensions: None,
+        },
+    )
+    .await
+    .expect("host call");
+    assert!(matches!(
+        result.expect_err("observation must not mutate").code,
+        wit_types::HostToolErrorCode::Denied
+    ));
+    assert_eq!(tools.send_message_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn runtime_http_uses_the_configured_body_limit_before_network() {
+    let limits = crate::config::RuntimeLimits {
+        http_max_request_bytes: 4,
+        ..Default::default()
+    };
+    let error = execute_runtime_http_request(
+        wit_types::OutgoingHttpRequest {
+            method: wit_types::HttpMethod::Post,
+            url: wit_types::Url {
+                value: "https://api.example.test/".into(),
+            },
+            headers: vec![],
+            body: Some("12345".into()),
+        },
+        &["https://api.example.test".into()],
+        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &limits,
+    )
+    .await
+    .expect_err("configured request limit");
+    assert_eq!(error.code, HostToolErrorCode::InvalidRequest);
 }

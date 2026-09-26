@@ -562,6 +562,9 @@ async fn delivered_copy_still_caches_a_warning_only_observer(f: IngressFixture) 
         .push(IngressEffectIntent::RoomObserver {
             room: room.clone(),
             plugin: plugin_id.clone(),
+            correction_target: None,
+            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
         });

@@ -58,6 +58,7 @@ type ClassifiedRoomMessage =
       linkPreviews?: LiveRoomMessage["linkPreviews"];
       extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
       extensionBodyFallback?: boolean;
+      sourceRevisionId?: string;
     }
   | { kind: "live"; raw: LiveRoomMessage }
   | { kind: "ignore" };
@@ -87,6 +88,7 @@ export function classifyRoomMessage(msg: LiveRoomMessage): ClassifiedRoomMessage
       replacesId: msg.replacesId,
       body: msg.body,
       sender: mucCorrectionSender(msg),
+      ...(msg.stanzaId ? { sourceRevisionId: msg.stanzaId } : {}),
     };
     if (msg.markup && msg.markup.length > 0) out.markup = msg.markup;
     if (msg.references && msg.references.length > 0) out.references = msg.references;

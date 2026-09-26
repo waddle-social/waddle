@@ -69,6 +69,7 @@ function mergeMissingThreadMetadata(
     assign({
       stanzaId: canonicalRoomMessage.stanzaId,
       stanzaIdBy: canonicalRoomMessage.stanzaIdBy,
+      ...(canonicalRoomMessage.originId ? { originId: canonicalRoomMessage.originId } : {}),
       ...(canonicalRoomMessage.replyableId
         ? { replyableId: canonicalRoomMessage.replyableId }
         : {}),
@@ -335,6 +336,7 @@ export function buildChannelTimelineFromMamResults(params: {
           linkPreviews: msg.linkPreviews,
           extensionAnnotations: msg.extensionAnnotations,
           extensionBodyFallback: msg.extensionBodyFallback,
+          sourceRevisionId: msg.stanzaId,
         },
       });
     } else if (msg.callThreadEnded) {
@@ -478,7 +480,7 @@ export function buildChannelTimelineFromMamResults(params: {
   // same target. Pages arrive in archive order; the stamp check also keeps
   // an older page from reverting a newer judgment already applied.
   for (const { fastening, at } of safetyScoresUpdates) {
-    const index = safetyScoresTargetIndex(timeline, fastening, "room", at);
+    const index = safetyScoresTargetIndex(timeline, fastening, at);
     if (index < 0) continue;
     timeline[index] = withSafetyScores(timeline[index]!, fastening, at);
   }

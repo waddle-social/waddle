@@ -54,7 +54,7 @@ impl ExtensionManager {
             };
 
             let loaded = match LoadedExtension::load(&runtime, &wasm_path) {
-                Ok(loaded) => loaded,
+                Ok(loaded) => loaded.with_limits(module.runtime_limits.clone())?,
                 Err(error) => {
                     if module.local_path.is_none() {
                         remove_invalid_cached_extension(module, &wasm_path);
@@ -78,7 +78,9 @@ impl ExtensionManager {
 
             let manifest = actor.manifest();
             validate_manifest_against_module(module, &manifest)?;
+            let observer = configured_room_observer(module, &manifest, &wasm_path, &config_json)?;
             let actor = actor
+                .with_room_observer(observer)
                 .with_grants(runtime_grants_for_module(module, &manifest))
                 .with_allowed_http_origins(module.allowed_http_origins.clone())
                 .with_provider_room_grants(parse_provider_room_grants(module)?);
@@ -243,4 +245,41 @@ fn parse_provider_room_grants(module: &ExtensionModuleConfig) -> Result<Vec<Bare
             })
         })
         .collect()
+}
+
+fn configured_room_observer(
+    module: &ExtensionModuleConfig,
+    manifest: &ExtensionManifest,
+    wasm_path: &Path,
+    effective_config: &str,
+) -> Result<Option<crate::types::ConfiguredRoomObserver>> {
+    let Some(observation) = &module.room_observation else {
+        return Ok(None);
+    };
+    let grants = runtime_grants_for_module(module, manifest);
+    if !grants.contains(&ExtensionCapability::MessageObserve)
+        || !manifest.declares_capability(ExtensionCapability::MessageObserve)
+    {
+        bail!(
+            "extension {} observation configuration requires message.observe",
+            manifest.id
+        );
+    }
+    let artifact = Sha256::digest(std::fs::read(wasm_path)?);
+    // Frozen identity includes effective secrets without persisting or logging their values.
+    let identity_input = serde_json::to_vec(&(
+        hex::encode(artifact),
+        effective_config,
+        &module.capability_grants,
+        &module.allowed_http_origins,
+        observation,
+        &module.runtime_limits,
+    ))?;
+    Ok(Some(crate::types::ConfiguredRoomObserver {
+        plugin: manifest.id.clone(),
+        generation: observation.generation,
+        identity: crate::types::Sha256Digest::new(hex::encode(Sha256::digest(identity_input)))?,
+        scope: observation.scope.clone(),
+        max_concurrent: observation.max_concurrent,
+    }))
 }

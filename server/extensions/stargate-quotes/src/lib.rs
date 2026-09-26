@@ -37,12 +37,16 @@ impl exports::waddle::extension::framework::Guest for StargateQuotes {
         event: types::ExtensionEvent,
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let effects = match event {
+            types::ExtensionEvent::RoomMessageObserve(_) => vec![],
             types::ExtensionEvent::Command(command) => handle_command(command)?,
             types::ExtensionEvent::MessageHook(_)
             | types::ExtensionEvent::Launch(_)
             | types::ExtensionEvent::ProviderWebhook(_) => vec![],
         };
-        Ok(types::ExtensionResponse { effects })
+        Ok(types::ExtensionResponse {
+            effects,
+            usage: None,
+        })
     }
 }
 

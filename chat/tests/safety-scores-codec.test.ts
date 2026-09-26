@@ -21,9 +21,11 @@ const MODEL = "typesafe/jev-1.13-20260917";
 
 /** The agreed wire contract, as the wasm bridge serializes it. */
 const contractFastening: WasmSafetyScoresFastening = {
-  target_id: "judged-stanza-id",
-  update: {
-    kind: "replace",
+  target_origin_id: "judged-origin-id",
+  target_stanza_id: "judged-stanza-id",
+  target_stanza_by: ROOM_JID,
+  source_revision_id: "judged-stanza-id",
+  scores: {
     model_version: MODEL,
     scores: [
       { category: "is_question", probability: 0.92, taxonomy_version: "is-question-v1" },
@@ -60,8 +62,10 @@ function archivedRoom(overrides: Partial<WasmArchivedMessage> = {}): WasmArchive
 describe("safetyScoresFasteningFromWasm", () => {
   test("decodes the contract fixture into typed scores", () => {
     expect(safetyScoresFasteningFromWasm(contractFastening)).toEqual({
-      targetId: "judged-stanza-id",
-      kind: "replace",
+      targetOriginId: "judged-origin-id",
+      targetStanzaId: "judged-stanza-id",
+      targetStanzaBy: ROOM_JID,
+      sourceRevisionId: "judged-stanza-id",
       scores: {
         modelVersion: MODEL,
         scores: [
@@ -78,9 +82,8 @@ describe("safetyScoresFasteningFromWasm", () => {
 
   test("skips unknown categories and out-of-range scores without dropping the batch", () => {
     const decoded = safetyScoresFasteningFromWasm({
-      target_id: "t",
-      update: {
-        kind: "replace",
+      ...contractFastening,
+      scores: {
         model_version: MODEL,
         scores: [
           { category: "safety:spam", probability: 0.4, taxonomy_version: "safety-spam-v1" },
@@ -93,8 +96,10 @@ describe("safetyScoresFasteningFromWasm", () => {
       },
     });
     expect(decoded).toEqual({
-      targetId: "t",
-      kind: "replace",
+      targetOriginId: "judged-origin-id",
+      targetStanzaId: "judged-stanza-id",
+      targetStanzaBy: ROOM_JID,
+      sourceRevisionId: "judged-stanza-id",
       scores: {
         modelVersion: MODEL,
         scores: [{ category: "is_question", probability: 0.7, taxonomyVersion: "is-question-v1" }],
@@ -102,16 +107,11 @@ describe("safetyScoresFasteningFromWasm", () => {
     });
   });
 
-  test("decodes an XEP-0422 clear", () => {
-    expect(safetyScoresFasteningFromWasm({ target_id: "t", update: { kind: "clear" } }))
-      .toEqual({ targetId: "t", kind: "clear" });
-  });
-
   test("rejects a fastening with no target or no model version", () => {
-    expect(safetyScoresFasteningFromWasm({ ...contractFastening, target_id: "" })).toBeNull();
+    expect(safetyScoresFasteningFromWasm({ ...contractFastening, target_origin_id: "" })).toBeNull();
     expect(safetyScoresFasteningFromWasm({
-      target_id: "t",
-      update: { kind: "replace", model_version: "", scores: [] },
+      ...contractFastening,
+      scores: { model_version: "", scores: [] },
     })).toBeNull();
   });
 });
@@ -142,15 +142,14 @@ describe("roomMessageFromArchived with a safety-scores fastening", () => {
       roomJid: ROOM_JID,
       body: "",
       type: "message",
-      safetyScoresFastening: { targetId: "judged-stanza-id", kind: "replace" },
+      safetyScoresFastening: { targetOriginId: "judged-origin-id", targetStanzaId: "judged-stanza-id" },
     });
-    expect(decoded?.safetyScoresFastening?.kind === "replace"
-      && decoded.safetyScoresFastening.scores.scores).toHaveLength(6);
+    expect(decoded?.safetyScoresFastening?.scores.scores).toHaveLength(6);
   });
 
   test("the live path decodes the same record", () => {
     const decoded = roomMessageFromArchived(archivedRoom(), "live");
-    expect(decoded?.safetyScoresFastening?.targetId).toBe("judged-stanza-id");
+    expect(decoded?.safetyScoresFastening?.targetStanzaId).toBe("judged-stanza-id");
   });
 
   test("an occupant-sent fastening is dropped entirely", () => {
@@ -166,11 +165,11 @@ describe("roomMessageFromArchived with a safety-scores fastening", () => {
 describe("DM safety-scores fastening", () => {
   const dmFastening = {
     from: "example.org",
-    safety_scores: { ...contractFastening, target_id: "dm-stanza-id" },
+    safety_scores: { ...contractFastening, target_stanza_id: "dm-stanza-id" },
   };
 
   test("accepted from the account's own server", () => {
-    expect(dmSafetyScoresFromWasm(dmFastening, SELF_BARE)?.targetId).toBe("dm-stanza-id");
+    expect(dmSafetyScoresFromWasm(dmFastening, SELF_BARE)?.targetStanzaId).toBe("dm-stanza-id");
   });
 
   test("rejected from the DM peer", () => {

@@ -27,6 +27,8 @@ const MAX_XML_SERIALIZED_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum FrameworkTypeError {
+    #[error("observation generation must be positive")]
+    InvalidObservationGeneration,
     #[error("{field} must not be empty")]
     Empty { field: &'static str },
     #[error("plugin id {0:?} must use lowercase ASCII letters, digits, and hyphens")]
@@ -139,3 +141,6 @@ fn validate_xml_local_name(value: String) -> Result<String, FrameworkTypeError> 
 
 #[cfg(test)]
 mod tests;
+
+mod observation;
+pub use observation::*;

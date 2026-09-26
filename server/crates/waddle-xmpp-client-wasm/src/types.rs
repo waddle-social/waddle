@@ -1,8 +1,6 @@
 use super::*;
 use serde::ser::SerializeStruct;
-use waddle_xmpp_client::xep::safety_scores::{
-    SafetyScore, SafetyScoresAction, SafetyScoresFastening,
-};
+use waddle_xmpp_client::xep::safety_scores::{SafetyScore, SafetyScoresFastening};
 
 #[derive(Debug, Serialize)]
 pub struct WaddleMarkupSpan {
@@ -36,40 +34,32 @@ pub struct WaddleCallThreadEnded {
 
 /// XEP-0422 `urn:waddle:safety-scores:1` fastening. The payload stays typed
 /// on the Rust side; `Serialize` (the JS boundary) writes the wire shape
-/// `{ target_id, update: { kind: "replace", model_version, scores: [{ category,
-/// probability, taxonomy_version }] } | { kind: "clear" } }`.
+/// `{ target_origin_id, target_stanza_id, target_stanza_by,
+/// source_revision_id, scores: { model_version, scores: [...] } }`.
 #[derive(Debug)]
 pub struct WaddleSafetyScoresFastening(pub SafetyScoresFastening);
 
 impl Serialize for WaddleSafetyScoresFastening {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut out = serializer.serialize_struct("WaddleSafetyScoresFastening", 2)?;
-        out.serialize_field("target_id", self.0.target_id.as_str())?;
-        out.serialize_field("update", &SafetyScoresActionView(&self.0.action))?;
+        let mut out = serializer.serialize_struct("WaddleSafetyScoresFastening", 5)?;
+        out.serialize_field("target_origin_id", self.0.target_origin_id.as_str())?;
+        out.serialize_field("target_stanza_id", self.0.target_stanza_id.as_str())?;
+        out.serialize_field("target_stanza_by", &self.0.target_stanza_id.by.to_string())?;
+        out.serialize_field("source_revision_id", self.0.source_revision_id.as_str())?;
+        out.serialize_field("scores", &SafetyScoresView(&self.0.scores))?;
         out.end()
     }
 }
 
-struct SafetyScoresActionView<'a>(&'a SafetyScoresAction);
+struct SafetyScoresView<'a>(&'a waddle_xmpp_client::xep::safety_scores::SafetyScores);
 
-impl Serialize for SafetyScoresActionView<'_> {
+impl Serialize for SafetyScoresView<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.0 {
-            SafetyScoresAction::Apply(scores) => {
-                let views: Vec<SafetyScoreView<'_>> =
-                    scores.scores.iter().map(SafetyScoreView).collect();
-                let mut out = serializer.serialize_struct("Replace", 3)?;
-                out.serialize_field("kind", "replace")?;
-                out.serialize_field("model_version", scores.model_version.as_str())?;
-                out.serialize_field("scores", &views)?;
-                out.end()
-            }
-            SafetyScoresAction::Clear => {
-                let mut out = serializer.serialize_struct("Clear", 1)?;
-                out.serialize_field("kind", "clear")?;
-                out.end()
-            }
-        }
+        let views: Vec<SafetyScoreView<'_>> = self.0.scores.iter().map(SafetyScoreView).collect();
+        let mut out = serializer.serialize_struct("SafetyScores", 2)?;
+        out.serialize_field("model_version", self.0.model_version.as_str())?;
+        out.serialize_field("scores", &views)?;
+        out.end()
     }
 }
 

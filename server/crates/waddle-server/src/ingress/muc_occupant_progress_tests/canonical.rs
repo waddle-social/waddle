@@ -528,6 +528,9 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
             plugin: plugin.clone(),
+            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+            correction_target: None,
         },
     ];
     submission.plan.room_canonical_message = Some(Box::new(message.clone()));

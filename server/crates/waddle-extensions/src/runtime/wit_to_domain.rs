@@ -136,6 +136,7 @@ impl TryFrom<wit_types::PayloadRule> for PayloadRule {
 impl From<wit_types::PayloadSurface> for PayloadSurface {
     fn from(value: wit_types::PayloadSurface) -> Self {
         match value {
+            wit_types::PayloadSurface::RoomResult => Self::RoomResult,
             wit_types::PayloadSurface::MessageEnrichment => Self::MessageEnrichment,
             wit_types::PayloadSurface::LaunchPayload => Self::LaunchPayload,
             wit_types::PayloadSurface::PubsubItem => Self::PubSubItem,
@@ -160,6 +161,7 @@ impl TryFrom<wit_types::ExtensionResponse> for ExtensionResponse {
 
     fn try_from(value: wit_types::ExtensionResponse) -> Result<Self> {
         Ok(Self {
+            usage: value.usage.map(TryInto::try_into).transpose()?,
             effects: value
                 .effects
                 .into_iter()
@@ -174,6 +176,9 @@ impl TryFrom<wit_types::ExtensionEffect> for ExtensionEffect {
 
     fn try_from(value: wit_types::ExtensionEffect) -> Result<Self> {
         Ok(match value {
+            wit_types::ExtensionEffect::PublishRoomResult(payload) => {
+                Self::PublishRoomResult(payload.try_into()?)
+            }
             wit_types::ExtensionEffect::EnrichMessage(envelope) => {
                 Self::EnrichMessage(envelope.try_into()?)
             }
@@ -254,6 +259,7 @@ impl TryFrom<wit_types::MessageEnrichment> for MessageEnrichment {
 impl From<wit_types::ExtensionCapability> for ExtensionCapability {
     fn from(value: wit_types::ExtensionCapability) -> Self {
         match value {
+            wit_types::ExtensionCapability::RoomResultPublish => Self::RoomResultPublish,
             wit_types::ExtensionCapability::MessageEnrich => Self::MessageEnrich,
             wit_types::ExtensionCapability::MessageObserve => Self::MessageObserve,
             wit_types::ExtensionCapability::HostChannelsRead => Self::HostChannelsRead,
@@ -270,6 +276,17 @@ impl From<wit_types::ExtensionCapability> for ExtensionCapability {
             wit_types::ExtensionCapability::ArtifactReference => Self::ArtifactReference,
             wit_types::ExtensionCapability::UiDeclarative => Self::UiDeclarative,
         }
+    }
+}
+
+impl TryFrom<wit_types::InvocationUsage> for crate::types::InvocationUsage {
+    type Error = anyhow::Error;
+    fn try_from(value: wit_types::InvocationUsage) -> Result<Self> {
+        Ok(Self {
+            provider: crate::types::ProviderId::new(value.provider.value)?,
+            model: crate::types::ModelId::new(value.model.value)?,
+            cost_micro_usd: value.cost_micro_usd,
+        })
     }
 }
 

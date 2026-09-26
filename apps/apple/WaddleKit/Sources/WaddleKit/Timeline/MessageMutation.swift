@@ -16,8 +16,8 @@ public enum MessageMutation: Hashable, Sendable {
     /// XEP-0425: only the room itself may moderate.
     case moderation(targetID: String, from: JID, moderatedBy: String?, reason: String?)
     /// XEP-0422 `urn:waddle:safety-scores:1`: only the room itself may set
-    /// scores. They replace any earlier scores; nil clears them.
-    case safetyScores(targetID: String, from: JID, scores: SafetyScores?)
+    /// scores for one room-verified original stanza and body revision.
+    case safetyScores(targetID: String, from: JID, fastening: WireMessage.SafetyScoresFastening)
 
     public var targetID: String {
         switch self {
@@ -66,7 +66,7 @@ public enum MessageMutation: Hashable, Sendable {
         // Scores are a room annotation. In 1:1 no sender is defined as
         // trusted to set them, so a peer's claim is ignored outright.
         if let fastening = message.safetyScores, isGroupchat {
-            return .safetyScores(targetID: fastening.targetID, from: from, scores: fastening.scores)
+            return .safetyScores(targetID: fastening.targetStanzaID, from: from, fastening: fastening)
         }
         if let retractsID = message.retractsID {
             return .retraction(targetID: retractsID, from: from)
@@ -112,13 +112,16 @@ public struct CorrectedContent: Hashable, Sendable {
     /// include.
     public let replyFallback: Range<Int>?
     public let sharedFiles: [SharedFile]
+    /// Room-assigned stanza-id of this accepted body revision, if present.
+    public let sourceRevisionID: String?
 
-    public init(body: String, markupSpans: [MarkupSpan], references: [Reference], replyFallback: Range<Int>?, sharedFiles: [SharedFile]) {
+    public init(body: String, markupSpans: [MarkupSpan], references: [Reference], replyFallback: Range<Int>?, sharedFiles: [SharedFile], sourceRevisionID: String? = nil) {
         self.body = body
         self.markupSpans = markupSpans
         self.references = references
         self.replyFallback = replyFallback
         self.sharedFiles = sharedFiles
+        self.sourceRevisionID = sourceRevisionID
     }
 
     /// From a received correction stanza.
@@ -128,7 +131,8 @@ public struct CorrectedContent: Hashable, Sendable {
             markupSpans: message.markupSpans,
             references: message.references,
             replyFallback: message.reply?.fallback,
-            sharedFiles: message.sharedFiles
+            sharedFiles: message.sharedFiles,
+            sourceRevisionID: message.from.flatMap { message.identity.stanzaID(assignedBy: $0.bare) }
         )
     }
 

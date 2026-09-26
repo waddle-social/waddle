@@ -11,6 +11,8 @@ fn config(can_send: bool, rooms: &[&str]) -> ExtensionConfig {
     };
     ExtensionConfig {
         modules: vec![ExtensionModuleConfig {
+            room_observation: None,
+            runtime_limits: Default::default(),
             name: "message-hook-fixture".into(),
             registry: String::new(),
             digest: None,

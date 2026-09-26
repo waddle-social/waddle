@@ -63,29 +63,20 @@ public struct SafetyScores: Hashable, Sendable {
 }
 
 extension WireMessage {
-    /// A XEP-0422 fastening that sets or clears the safety scores of the
-    /// message named by `targetID`. The sender is unverified here; only
-    /// the room itself may set scores on a room message.
+    /// A room-authored XEP-0422 score for one original stanza and revision.
     public struct SafetyScoresFastening: Hashable, Sendable {
-        public enum Action: Hashable, Sendable {
-            /// Replaces the sender's previous scores (XEP-0422 §Replacing).
-            case apply(SafetyScores)
-            /// Removes them (XEP-0422 §Removing, `clear='true'`).
-            case clear
-        }
+        public let targetOriginID: String
+        public let targetStanzaID: String
+        public let targetStanzaBy: BareJID
+        public let sourceRevisionID: String
+        public let scores: SafetyScores
 
-        public let targetID: String
-        public let action: Action
-
-        public init(targetID: String, action: Action) {
-            self.targetID = targetID
-            self.action = action
-        }
-
-        /// The scores after this fastening: nil for a clear.
-        public var scores: SafetyScores? {
-            guard case let .apply(scores) = action else { return nil }
-            return scores
+        public init(targetOriginID: String, targetStanzaID: String, targetStanzaBy: BareJID, sourceRevisionID: String, scores: SafetyScores) {
+            self.targetOriginID = targetOriginID
+            self.targetStanzaID = targetStanzaID
+            self.targetStanzaBy = targetStanzaBy
+            self.sourceRevisionID = sourceRevisionID
+            self.scores = scores
         }
     }
 }

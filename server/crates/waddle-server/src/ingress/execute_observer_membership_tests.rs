@@ -130,31 +130,22 @@ async fn frozen_membership(fixture: IngressFixture) {
     assert!(plugins.contains(&"observer-a"));
     assert!(plugins.contains(&"observer-b"));
     let report = execute_with_manager(&fixture, &replay, fresh).await;
-    assert_eq!(
-        report
-            .outcomes
-            .iter()
-            .filter(|(_, outcome)| *outcome == ExternalOutcome::Done)
-            .count(),
-        1
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::AwaitingPredecessor));
+    assert!(
+        a.invocations().is_empty(),
+        "ingress only wakes durable work"
     );
-    assert_eq!(
-        report
-            .outcomes
-            .iter()
-            .filter(|(_, outcome)| *outcome == ExternalOutcome::Failed)
-            .count(),
-        1
-    );
-    assert_eq!(a.invocations()[0].body.as_str(), "canonical body");
     assert!(
         b.invocations().is_empty(),
         "missing plugin remains unresolved"
     );
     assert!(c.invocations().is_empty(), "unrecorded plugin never runs");
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
 
-    // The missing member becomes available after restart; successful A is skipped.
+    // Frozen membership survives a replay even after the manager changes.
     let restored =
         ExtensionManager::with_observer_test_plugins(vec![a.clone(), b.clone(), c.clone()]).await;
     select_observers(&mut submission, &restored);
@@ -165,12 +156,11 @@ async fn frozen_membership(fixture: IngressFixture) {
     assert!(report
         .outcomes
         .iter()
-        .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
-    assert_eq!(a.invocations().len(), 1);
-    assert_eq!(b.invocations().len(), 1);
-    assert_eq!(b.invocations()[0].body.as_str(), "canonical body");
+        .all(|(_, outcome)| *outcome == ExternalOutcome::AwaitingPredecessor));
+    assert!(a.invocations().is_empty());
+    assert!(b.invocations().is_empty());
     assert!(c.invocations().is_empty());
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     fixture.close().await;
 }
 
@@ -224,7 +214,7 @@ async fn revoked_membership(fixture: IngressFixture) {
         .expect("reconstruct revoked observer");
     assert_eq!(replay.external.len(), 1);
     let report = execute_with_manager(&fixture, &replay, manager).await;
-    assert_eq!(report.outcomes[0].1, ExternalOutcome::Failed);
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::AwaitingPredecessor);
     assert!(a.invocations().is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert!(!terminalize_if_complete(

@@ -94,6 +94,32 @@ impl EffectSink for PlanSink {
             .expect("sender mutex")
             .get_or_insert_with(|| sender.clone());
     }
+    fn set_room_correction_target(
+        &self,
+        room: &jid::BareJid,
+        revision: &waddle_xmpp_core::xep0359::StanzaId,
+        target: &waddle_xmpp_core::xep0359::StanzaId,
+    ) {
+        if revision.by != *room || target.by != *room {
+            return;
+        }
+        for planned in self.plan.lock().expect("plan mutex").iter_mut() {
+            let super::Effect::Durable(super::DurableEffect::Room(
+                super::room::DurableRoomEffect::ArchiveGroupchat {
+                    room: archive_room,
+                    message,
+                    correction_target,
+                    ..
+                },
+            )) = &mut planned.effect
+            else {
+                continue;
+            };
+            if archive_room == room && message.id == revision.id {
+                *correction_target = Some(target.clone());
+            }
+        }
+    }
     fn record(&self, effect: PlannedEffect) {
         self.record_with_outcome(effect);
     }
@@ -133,3 +159,7 @@ impl PlanSink {
         outcome
     }
 }
+
+#[cfg(test)]
+#[path = "plan_tests.rs"]
+mod tests;

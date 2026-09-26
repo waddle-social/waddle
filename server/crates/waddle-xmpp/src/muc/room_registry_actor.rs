@@ -35,6 +35,9 @@ use crate::ownership::{
 };
 use crate::xep::xep0421::OccupantIdSecret;
 
+mod durable_restore;
+pub use durable_restore::GetOrRestoreDurableRoom;
+
 /// A locally-spawned room's actor ref plus the Postgres claim epoch this
 /// node acquired/won it under (ADR-0017 Phase 3 Slice 7). The epoch
 /// travels with the actor ref so [`RoomRegistryActor::DestroyRoom`] can

@@ -9,6 +9,8 @@ fn validates_reference_format() {
     let cache_dir = std::env::temp_dir().join("waddle-test");
     let puller = OciExtensionPuller::new(cache_dir);
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(
@@ -41,6 +43,8 @@ fn rejects_reference_with_mutable_registry_tag() {
     let cache_dir = std::env::temp_dir().join("waddle-test");
     let puller = OciExtensionPuller::new(cache_dir);
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension:latest".to_string(),
         digest: Some(
@@ -67,6 +71,8 @@ fn rejects_oci_module_tag_field_even_when_digest_is_set() {
     let cache_dir = std::env::temp_dir().join("waddle-test");
     let puller = OciExtensionPuller::new(cache_dir);
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(
@@ -170,6 +176,8 @@ fn rejects_unknown_wasm_binary_version() {
 fn rejects_invalid_cache_component() {
     let puller = OciExtensionPuller::new(std::env::temp_dir().join("waddle-test"));
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "../bad".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(
@@ -197,6 +205,8 @@ fn rejects_invalid_cache_component() {
 fn cache_path_uses_sanitized_digest() {
     let puller = OciExtensionPuller::new(std::env::temp_dir().join("waddle-test"));
     let module = ExtensionModuleConfig {
+        room_observation: None,
+        runtime_limits: Default::default(),
         name: "example-extension".to_string(),
         registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
         digest: Some(

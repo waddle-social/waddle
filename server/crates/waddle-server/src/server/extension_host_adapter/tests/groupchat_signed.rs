@@ -19,6 +19,8 @@ async fn signed_manager() -> Arc<ExtensionManager> {
     let manager = ExtensionManager::from_config(ExtensionConfig {
         enabled: true,
         modules: vec![ExtensionModuleConfig {
+            room_observation: None,
+            runtime_limits: Default::default(),
             name: "message-hook-fixture".into(),
             namespace: "urn:test:message-hook".into(),
             registry: Default::default(),

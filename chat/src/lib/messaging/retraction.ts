@@ -48,6 +48,8 @@ export function retractTimelineMessage(
   delete next.forumPostKind;
   delete next.forumTitle;
   delete next.forumThreadTitle;
+  delete next.safetyScores;
+  delete next.safetyScoresAt;
   return next;
 }
 

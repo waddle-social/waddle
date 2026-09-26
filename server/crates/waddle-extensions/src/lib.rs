@@ -6,7 +6,7 @@ pub mod oci;
 pub mod runtime;
 pub mod types;
 
-pub use config::{ExtensionConfig, ExtensionModuleConfig};
+pub use config::{ExtensionConfig, ExtensionModuleConfig, RoomObservationConfig, RuntimeLimits};
 pub use host_tools::{
     ArchivedMessage, ChannelSummary, DenyingExtensionHostTools, ExtensionHostTools,
     GetPresenceRequest, GetPresenceResponse, GetRosterRequest, GetRosterResponse, HostToolError,
@@ -35,3 +35,10 @@ pub use types::{
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod observer_test_support;
+
+pub use types::{
+    ConfiguredRoomObserver, InvocationUsage, MessageRevision, ModelId, ObservationFailure,
+    ObservationGeneration, ObservationSkip, OriginId, RoomMessageObserve, RoomMessageSource,
+    RoomObservationOutcome, RoomObservationResult, RoomObservationScope,
+    RoomObservationSubscription, Sha256Digest,
+};

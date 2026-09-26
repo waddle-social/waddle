@@ -8,9 +8,6 @@ use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
 use xmpp_parsers::message::Message;
 
-#[path = "execute_observer_fairness_tests.rs"]
-mod fairness;
-
 fn observer_plugin() -> waddle_extensions::PluginId {
     waddle_extensions::PluginId::new("message-hook-fixture").expect("fixture plugin")
 }
@@ -31,10 +28,13 @@ fn observer_intent(effect: &ExternalRoomEffect) -> IngressEffectIntent {
         requester: requester.clone(),
         sender: sender.clone(),
         plugin: plugin.clone(),
+        correction_target: None,
+        generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+        identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
     }
 }
 
-async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
+async fn observer_retry_preserves_payload_without_synchronous_invocation(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("observer-retry"), "observed message");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let submission_message = submission.plan.sanitized_message.clone();
@@ -60,7 +60,7 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
     assert_eq!(first.external_receipts[0].len(), 1);
     let registry = ConnectionRegistry::new();
     let unavailable_deps = Deps::new(&registry, "example.com");
-    let failed = execute_effects(
+    let deferred = execute_effects(
         &fixture.uow,
         &fixture.db,
         &first,
@@ -69,7 +69,7 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(failed.outcomes[0].1, ExternalOutcome::Failed);
+    assert_eq!(deferred.outcomes[0].1, ExternalOutcome::AwaitingPredecessor);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert!(
         !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
@@ -110,66 +110,39 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
         "observed message"
     );
 
-    let mut state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    std::sync::Arc::get_mut(&mut state)
-        .expect("unique test websocket state")
-        .deps
-        .protocol
-        .extension_manager =
-        crate::server::routes::interpret::tests::room_dispatch::room_observer_test_manager(
-            crate::server::routes::interpret::tests::room_dispatch::ObserverConfiguration::Observer,
-        )
-        .await;
-    let mut deps = Deps::new(&registry, "example.com");
-    deps.web_socket_state = Some(state.as_ref());
-    let completed = execute_effects(
+    let deferred_retry = execute_effects(
         &fixture.uow,
         &fixture.db,
         &retry,
-        &ImmediateSink,
-        &deps,
-        Duration::from_secs(5),
-    )
-    .await;
-    assert_eq!(completed.outcomes[0].1, ExternalOutcome::Done);
-    assert!(completed.receipt_failures.is_empty());
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(
-        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
-            .await
-            .expect("complete observer")
-    );
-
-    let duplicate = commit_submission(&fixture.uow, &submission, 1)
-        .await
-        .expect("receipted observer retry");
-    let skipped = execute_effects(
-        &fixture.uow,
-        &fixture.db,
-        &duplicate,
         &ImmediateSink,
         &unavailable_deps,
         Duration::from_secs(5),
     )
     .await;
     assert_eq!(
-        skipped.outcomes[0].1,
-        ExternalOutcome::Done,
-        "receipted invocation is not repeated against unavailable observer"
+        deferred_retry.outcomes[0].1,
+        ExternalOutcome::AwaitingPredecessor
     );
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert!(deferred_retry.receipt_failures.is_empty());
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending observer")
+    );
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn sqlite_observer_failure_retries_recorded_payload_and_receipts_success_once() {
-    observer_failure_retry_and_receipt(IngressFixture::sqlite().await).await;
+async fn sqlite_observer_retry_preserves_payload_without_synchronous_invocation() {
+    observer_retry_preserves_payload_without_synchronous_invocation(IngressFixture::sqlite().await)
+        .await;
 }
 
 #[tokio::test]
-async fn postgres_observer_failure_retries_recorded_payload_and_receipts_success_once() {
+async fn postgres_observer_retry_preserves_payload_without_synchronous_invocation() {
     if let Some(fixture) = IngressFixture::postgres("observer_retry").await {
-        observer_failure_retry_and_receipt(fixture).await;
+        observer_retry_preserves_payload_without_synchronous_invocation(fixture).await;
     }
 }
 
@@ -315,6 +288,27 @@ async fn two_observer_plugins_record_distinct_obligations(fixture: IngressFixtur
         .iter()
         .all(|receipts| receipts.len() == 1));
     assert_ne!(decision.external_receipts[0], decision.external_receipts[1]);
+    let registry = ConnectionRegistry::new();
+    let deps = Deps::new(&registry, "example.com");
+    let report = tokio::time::timeout(
+        Duration::from_millis(500),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        ),
+    )
+    .await
+    .expect("observer ingress wake stays nonblocking");
+    assert_eq!(report.outcomes.len(), 2);
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::AwaitingPredecessor));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     fixture.close().await;
 }
 

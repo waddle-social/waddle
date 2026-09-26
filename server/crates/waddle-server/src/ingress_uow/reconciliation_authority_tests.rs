@@ -110,6 +110,9 @@ async fn newly_enabled_observer(fixture: IngressFixture) {
             sender: submission.sender.clone(),
             plugin: waddle_extensions::PluginId::new("message-hook-fixture")
                 .expect("fixture plugin"),
+            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+            correction_target: None,
         });
     submission.plan.plan.push(
         PlannedEffect::new(Effect::External(ExternalEffect::Room(
@@ -175,6 +178,9 @@ fn room_observer_first_owner_acceptance_is_not_historical_policy_drift() {
         requester: "romeo@example.com".parse().expect("requester"),
         sender: "romeo@example.com/phone".parse().expect("sender"),
         plugin: waddle_extensions::PluginId::new("message-hook-fixture").expect("fixture plugin"),
+        correction_target: None,
+        generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+        identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
     };
     let mut recorded = vec![super::RecordedEffect {
         ordinal: 0,
@@ -211,6 +217,9 @@ fn room_observer_plugins_have_distinct_semantic_hashes() {
         requester: "romeo@example.com".parse().expect("requester"),
         sender: "romeo@example.com/phone".parse().expect("sender"),
         plugin: waddle_extensions::PluginId::new(plugin).expect("plugin"),
+        correction_target: None,
+        generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+        identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
     };
     let first = intent("observer-one");
     let second = intent("observer-two");

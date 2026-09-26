@@ -129,6 +129,7 @@ mod message_helpers;
 mod message_processing;
 #[cfg(any(test, feature = "test-support"))]
 mod observer_test_support;
+mod room_observation;
 mod signing;
 
 use launch_signing::*;

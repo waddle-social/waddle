@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
-use waddle_extensions::PluginId;
+use waddle_extensions::{ObservationGeneration, PluginId, Sha256Digest};
 use waddle_xmpp_core::mam::{ArchiveOrdinal, RichMessageId, ThreadId};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::{
@@ -1202,6 +1202,9 @@ pub enum IngressEffectIntent {
         requester: BareJid,
         sender: FullJid,
         plugin: PluginId,
+        generation: ObservationGeneration,
+        identity: Sha256Digest,
+        correction_target: Option<StanzaId>,
     },
     Extension {
         recipient: BareJid,
@@ -1305,7 +1308,7 @@ impl IngressEffectKind {
             Self::CallSignal => 8,
             Self::Pin => 9,
             Self::Extension => 10,
-            Self::RoomObserver => 27,
+            Self::RoomObserver => 28,
             Self::TombstoneReplayDeletion => 23,
             Self::ErrorReply => 11,
         }
@@ -1406,7 +1409,7 @@ pub enum IngressEffectKey {
     CallSignal(FullJid),
     Pin(BareJid, String),
     Extension(BareJid),
-    RoomObserver(BareJid, PluginId),
+    RoomObserver(BareJid, PluginId, ObservationGeneration, Sha256Digest),
     TombstoneReplayDeletion(String),
     ErrorReply(FullJid, String),
 }
@@ -1469,7 +1472,9 @@ impl IngressEffectKey {
             Self::CallSignal(value) => value.to_string(),
             Self::Pin(room, pin_identity) => format!("{}|{}", room, pin_identity),
             Self::Extension(value) => value.to_string(),
-            Self::RoomObserver(room, plugin) => format!("{}|{}", room, plugin),
+            Self::RoomObserver(room, plugin, generation, identity) => {
+                format!("{}|{}|{}|{}", room, plugin, generation.get(), identity)
+            }
             Self::TombstoneReplayDeletion(identity) => identity.clone(),
             Self::ErrorReply(value, error_identity) => format!("{}|{}", value, error_identity),
         }
@@ -1772,6 +1777,9 @@ impl IngressEffectIntent {
                 requester: bare("romeo@example.test"),
                 sender: full("romeo@example.test/phone"),
                 plugin: PluginId::new("message-hook-fixture").expect("valid fixture plugin"),
+                generation: ObservationGeneration::new(1).expect("generation"),
+                identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+                correction_target: None,
             },
             Self::TombstoneReplayDeletion {
                 target: TombstoneReplayTarget::Direct {
@@ -2106,9 +2114,18 @@ impl IngressEffectIntent {
             Self::Pin { room, mutation } => {
                 IngressEffectKey::Pin(room.clone(), mutation.storage_identity())
             }
-            Self::RoomObserver { room, plugin, .. } => {
-                IngressEffectKey::RoomObserver(room.clone(), plugin.clone())
-            }
+            Self::RoomObserver {
+                room,
+                plugin,
+                generation,
+                identity,
+                ..
+            } => IngressEffectKey::RoomObserver(
+                room.clone(),
+                plugin.clone(),
+                *generation,
+                identity.clone(),
+            ),
             Self::Extension { recipient, .. } => IngressEffectKey::Extension(recipient.clone()),
             Self::TombstoneReplayDeletion {
                 target,
@@ -3202,6 +3219,9 @@ enum StoredEffectIntent {
         requester: BareJid,
         sender: FullJid,
         plugin: PluginId,
+        generation: ObservationGeneration,
+        identity: Sha256Digest,
+        correction_target: Option<StanzaId>,
     },
     Extension {
         recipient: BareJid,
@@ -3249,7 +3269,7 @@ impl IngressEffectIntent {
             (22, "pending_delivery"),
             (23, "tombstone_replay_deletion"),
             (24, "relay_carbons"),
-            (27, "room_observer"),
+            (28, "room_observer"),
             (26, "dm_call_thread_state"),
         ]
     }
@@ -3281,7 +3301,7 @@ impl StoredEffectIntent {
             Self::CallSignal { .. } => 8,
             Self::Pin { .. } => 9,
             Self::Extension { .. } => 10,
-            Self::RoomObserver { .. } => 27,
+            Self::RoomObserver { .. } => 28,
             Self::TombstoneReplayDeletion { .. } => 23,
             Self::ErrorReply { .. } => 11,
         }
@@ -3465,11 +3485,17 @@ impl StoredEffectIntent {
                 requester,
                 sender,
                 plugin,
+                generation,
+                identity,
+                correction_target,
             } => Self::RoomObserver {
                 room,
                 requester,
                 sender,
                 plugin,
+                generation,
+                identity,
+                correction_target,
             },
             IngressEffectIntent::Extension {
                 recipient,
@@ -3664,11 +3690,17 @@ impl StoredEffectIntent {
                 requester,
                 sender,
                 plugin,
+                generation,
+                identity,
+                correction_target,
             } => IngressEffectIntent::RoomObserver {
                 room,
                 requester,
                 sender,
                 plugin,
+                generation,
+                identity,
+                correction_target,
             },
             Self::Extension {
                 recipient,
@@ -4205,15 +4237,23 @@ mod tests {
             requester: bare("romeo@example.test"),
             sender: full("romeo@example.test/phone"),
             plugin: PluginId::new("message-hook-fixture").expect("plugin"),
+            generation: ObservationGeneration::new(1).expect("generation"),
+            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            correction_target: None,
         };
         let encoded = intent.encode_v1().expect("observer codec");
-        assert_eq!(encoded.kind(), 27);
+        assert_eq!(encoded.kind(), 28);
         assert_eq!(
-            std::str::from_utf8(encoded.payload()).expect("JSON"),
-            r#"{"version":1,"intent":{"type":"room_observer","room":"room@conference.example.test","requester":"romeo@example.test","sender":"romeo@example.test/phone","plugin":"message-hook-fixture"}}"#
+            IngressEffectIntent::decode_v1(27, encoded.payload()),
+            Err(EffectIntentCodecError::UnknownKind(27)),
+            "the unfrozen observer storage kind cannot carry the new contract"
         );
         assert_eq!(
-            IngressEffectIntent::decode_v1(27, encoded.payload()).expect("observer decode"),
+            std::str::from_utf8(encoded.payload()).expect("JSON"),
+            r#"{"version":1,"intent":{"type":"room_observer","room":"room@conference.example.test","requester":"romeo@example.test","sender":"romeo@example.test/phone","plugin":"message-hook-fixture","generation":1,"identity":"0000000000000000000000000000000000000000000000000000000000000000","correction_target":null}}"#
+        );
+        assert_eq!(
+            IngressEffectIntent::decode_v1(28, encoded.payload()).expect("observer decode"),
             intent
         );
         assert_eq!(
@@ -4230,6 +4270,8 @@ mod tests {
             IngressEffectKey::RoomObserver(
                 bare("room@conference.example.test"),
                 PluginId::new("message-hook-fixture").expect("plugin"),
+                ObservationGeneration::new(1).expect("generation"),
+                Sha256Digest::new("0".repeat(64)).expect("identity"),
             )
         );
         assert_eq!(
@@ -4238,6 +4280,28 @@ mod tests {
                 kind: IngressEffectKind::RoomObserver,
                 room: bare("room@conference.example.test"),
             }
+        );
+    }
+
+    #[test]
+    fn room_observer_freezes_the_validated_correction_archive_identity() {
+        let intent = IngressEffectIntent::RoomObserver {
+            room: bare("room@conference.example.test"),
+            requester: bare("romeo@example.test"),
+            sender: full("romeo@example.test/phone"),
+            plugin: PluginId::new("observer").expect("plugin"),
+            generation: ObservationGeneration::new(1).expect("generation"),
+            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            correction_target: Some(StanzaId::new(
+                "authoritative-archive-id",
+                bare("room@conference.example.test").into(),
+            )),
+        };
+        let encoded = intent.encode_v1().expect("encode correction target");
+        assert_eq!(
+            IngressEffectIntent::decode_v1(28, encoded.payload())
+                .expect("decode correction target"),
+            intent
         );
     }
 
@@ -4260,11 +4324,14 @@ mod tests {
             requester: room,
             sender,
             plugin: PluginId::new("message-hook-fixture").expect("plugin"),
+            generation: ObservationGeneration::new(1).expect("generation"),
+            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            correction_target: None,
         };
         let encoded = intent.encode_v1().expect("bounded observer metadata");
         assert!(encoded.payload().len() < 16_384);
         assert_eq!(
-            IngressEffectIntent::decode_v1(27, encoded.payload()).expect("maximum JIDs decode"),
+            IngressEffectIntent::decode_v1(28, encoded.payload()).expect("maximum JIDs decode"),
             intent
         );
     }
@@ -4276,6 +4343,9 @@ mod tests {
             requester: bare("romeo@example.test"),
             sender: full("romeo@example.test/phone"),
             plugin: PluginId::new("message-hook-fixture").expect("plugin"),
+            generation: ObservationGeneration::new(1).expect("generation"),
+            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            correction_target: None,
         };
         let mut payload = intent
             .encode_v1()
@@ -4284,12 +4354,12 @@ mod tests {
             .to_vec();
         payload.resize(MAX_EFFECT_INTENT_PAYLOAD_BYTES, b' ');
         assert_eq!(
-            IngressEffectIntent::decode_v1(27, &payload).expect("at limit"),
+            IngressEffectIntent::decode_v1(28, &payload).expect("at limit"),
             intent
         );
         payload.push(b' ');
         assert_eq!(
-            IngressEffectIntent::decode_v1(27, &payload),
+            IngressEffectIntent::decode_v1(28, &payload),
             Err(EffectIntentCodecError::PayloadTooLarge)
         );
     }
@@ -4423,7 +4493,7 @@ mod tests {
                 (22, "pending_delivery"),
                 (23, "tombstone_replay_deletion"),
                 (24, "relay_carbons"),
-                (27, "room_observer"),
+                (28, "room_observer"),
                 (26, "dm_call_thread_state"),
             ]
         );

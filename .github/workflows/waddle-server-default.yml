@@ -411,7 +411,7 @@ jobs:
         upstream-cache-filter: 'true'
         version: v2.0.0
     - name: nixBuildExtensionModules
-      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-extension-modules
+      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-extension-runtime
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

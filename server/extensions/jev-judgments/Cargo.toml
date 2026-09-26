@@ -1,0 +1,14 @@
+[package]
+name = "jev-judgments"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+wit-bindgen = "0.57.1"

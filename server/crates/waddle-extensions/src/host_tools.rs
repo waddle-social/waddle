@@ -20,6 +20,7 @@ pub struct InvocationContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvocationKind {
+    RoomMessageObserve,
     MessageHook,
     Command,
     Launch,

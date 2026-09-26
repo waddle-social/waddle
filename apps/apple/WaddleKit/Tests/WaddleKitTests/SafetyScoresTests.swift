@@ -6,7 +6,9 @@ import Testing
 /// as the Rust core hands it over after parsing.
 private func scoresFastening(
     to target: String,
-    _ scores: SafetyScores?,
+    _ scores: SafetyScores,
+    originID: String = "origin-1",
+    revisionID: String? = nil,
     from sender: JID = jid("general@muc.waddle.test"),
     type: MessageType = .groupchat,
     at timestamp: Date? = nil
@@ -18,10 +20,21 @@ private func scoresFastening(
         identity: MessageIdentity(messageID: UUID().uuidString, originID: nil),
         timestamp: timestamp,
         safetyScores: WireMessage.SafetyScoresFastening(
-            targetID: target,
-            action: scores.map { .apply($0) } ?? .clear
+            targetOriginID: originID,
+            targetStanzaID: target,
+            targetStanzaBy: room,
+            sourceRevisionID: revisionID ?? target,
+            scores: scores
         )
     )
+}
+
+private func scoredRoomMessage(
+    _ body: String?, from nick: String, stanzaID: String,
+    originID: String = "origin-1",
+    at timestamp: Date? = nil, source: WireMessage.Source = .live
+) -> WireMessage {
+    roomMessage(body, from: nick, stanzaID: stanzaID, originID: originID, at: timestamp, source: source)
 }
 
 private func score(_ category: SafetyCategory, _ value: Double, _ taxonomy: String = "v1") -> SafetyScore {
@@ -60,7 +73,7 @@ struct SafetyScoresTests {
 
     @Test func roomScoresAttachToTheRowTheyTarget() {
         let store = store()
-        store.ingest(roomMessage("is this on?", from: "bob", stanzaID: "s1"))
+        store.ingest(scoredRoomMessage("is this on?", from: "bob", stanzaID: "s1"))
         let result = store.ingest(scoresFastening(to: "s1", firstBatch))
         #expect(result == .mutation)
         #expect(store.timeline(for: roomConversation).items.count == 1)
@@ -70,23 +83,29 @@ struct SafetyScoresTests {
 
     @Test func aNewerFasteningReplacesTheScores() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1"))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1"))
         store.ingest(scoresFastening(to: "s1", firstBatch))
         store.ingest(scoresFastening(to: "s1", secondBatch))
         #expect(row(store)?.safetyScores == secondBatch)
     }
 
-    @Test func aClearRemovesTheScores() {
+    @Test func aCorrectionClearsOldScoresAndRejectsOldRevisionReplay() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1"))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1"))
         store.ingest(scoresFastening(to: "s1", firstBatch))
-        store.ingest(scoresFastening(to: "s1", nil))
+        var correction = scoredRoomMessage("edited", from: "bob", stanzaID: "edit-1")
+        correction.replacesID = "origin-1"
+        store.ingest(correction)
         #expect(row(store)?.safetyScores == nil)
+        store.ingest(scoresFastening(to: "s1", firstBatch))
+        #expect(row(store)?.safetyScores == nil)
+        store.ingest(scoresFastening(to: "s1", secondBatch, revisionID: "edit-1"))
+        #expect(row(store)?.safetyScores == secondBatch)
     }
 
     @Test func anOlderArchivedFasteningDoesNotOverrideANewerOne() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1")))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1")))
         store.ingest(scoresFastening(to: "s1", secondBatch, at: date(10)))
         store.ingest(scoresFastening(to: "s1", firstBatch, at: date(5)))
         #expect(row(store)?.safetyScores == secondBatch)
@@ -97,31 +116,40 @@ struct SafetyScoresTests {
         let store = store()
         store.ingest(scoresFastening(to: "s1", firstBatch, at: date(10)))
         #expect(store.timeline(for: roomConversation).items.isEmpty)
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1")))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1")))
         #expect(row(store)?.safetyScores == firstBatch)
+    }
+
+    @Test func newestFirstArchiveKeepsScoreUntilItsCorrectionArrives() {
+        let store = store()
+        store.ingest(scoresFastening(to: "s1", secondBatch, revisionID: "edit-1", at: date(10)))
+        var correction = scoredRoomMessage("edited", from: "bob", stanzaID: "edit-1", at: date(5), source: .archive(mamID: "edit-1"))
+        correction.replacesID = "origin-1"
+        store.ingest(correction)
+        store.ingest(scoredRoomMessage("original", from: "bob", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1")))
+        #expect(row(store)?.body == "edited")
+        #expect(row(store)?.safetyScores == secondBatch)
     }
 
     @Test func anOccupantCannotSetScores() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1"))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1"))
         store.ingest(scoresFastening(to: "s1", firstBatch, from: jid("general@muc.waddle.test/eve")))
         #expect(row(store)?.safetyScores == nil)
     }
 
     @Test func anotherRoomCannotSetScores() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1"))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1"))
         // Routed to its own room, so it never reaches this row.
         store.ingest(scoresFastening(to: "s1", firstBatch, from: jid("other@muc.waddle.test")))
         #expect(row(store)?.safetyScores == nil)
     }
 
-    @Test func onlyTheRoomAssignedStanzaIDIsATarget() {
-        // An origin-id is sender-controlled; in a room only the id the room
-        // assigned names a row.
+    @Test func originAndRoomStanzaMustMatchTheSameSource() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "room-1", originID: "client-1"))
-        store.ingest(scoresFastening(to: "client-1", firstBatch))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "room-1"))
+        store.ingest(scoresFastening(to: "room-1", firstBatch, originID: "wrong-origin"))
         #expect(row(store)?.safetyScores == nil)
         store.ingest(scoresFastening(to: "room-1", firstBatch))
         #expect(row(store)?.safetyScores == firstBatch)
@@ -138,7 +166,7 @@ struct SafetyScoresTests {
 
     @Test func aRemovedMessageShowsNoScores() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1"))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1"))
         store.ingest(scoresFastening(to: "s1", firstBatch))
         var moderation = WireMessage(
             type: .groupchat,
@@ -154,22 +182,22 @@ struct SafetyScoresTests {
 
     @Test func scoresSurviveTheArchiveCopyOfTheirRow() {
         let store = store()
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1", source: .archive(mamID: "s1")))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1", source: .archive(mamID: "s1")))
         store.ingest(scoresFastening(to: "s1", firstBatch))
         // The live copy replaces its archived twin; mutations are kept.
-        store.ingest(roomMessage("msg", from: "bob", stanzaID: "s1"))
+        store.ingest(scoredRoomMessage("msg", from: "bob", stanzaID: "s1"))
         #expect(row(store)?.safetyScores == firstBatch)
     }
 
     @Test func aFasteningIsAMutationNotContent() {
         let fastening = scoresFastening(to: "s1", firstBatch)
         #expect(fastening.isMutation)
-        guard case let .safetyScores(target, _, scores) = MessageMutation.of(fastening, isMine: false) else {
+        guard case let .safetyScores(target, _, parsed) = MessageMutation.of(fastening, isMine: false) else {
             Issue.record("expected a safety-scores mutation")
             return
         }
         #expect(target == "s1")
-        #expect(scores == firstBatch)
+        #expect(parsed.scores == firstBatch)
     }
 
     @Test func aFasteningNeitherCountsUnreadNorAlerts() {
@@ -178,7 +206,7 @@ struct SafetyScoresTests {
         coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
         var alerts: [IncomingAlert] = []
         coordinator.onAlert = { alerts.append($0) }
-        coordinator.route(roomMessage("msg", from: "bob", stanzaID: "s1"))
+        coordinator.route(scoredRoomMessage("msg", from: "bob", stanzaID: "s1"))
         coordinator.route(scoresFastening(to: "s1", firstBatch))
         #expect(coordinator.unread.count(for: roomConversation) == 1)
         #expect(alerts.isEmpty)

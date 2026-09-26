@@ -2,6 +2,8 @@ use super::*;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ExtensionCapability {
+    #[serde(rename = "room.result.publish")]
+    RoomResultPublish,
     #[serde(rename = "message.enrich")]
     MessageEnrich,
     #[serde(rename = "message.observe")]
@@ -37,6 +39,7 @@ pub enum ExtensionCapability {
 impl ExtensionCapability {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::RoomResultPublish => "room.result.publish",
             Self::MessageEnrich => "message.enrich",
             Self::MessageObserve => "message.observe",
             Self::HostChannelsRead => "host.channels.read",
@@ -200,6 +203,7 @@ pub struct ExtensionRouteDescriptor {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PayloadSurface {
+    RoomResult,
     MessageEnrichment,
     LaunchPayload,
     PubSubItem,

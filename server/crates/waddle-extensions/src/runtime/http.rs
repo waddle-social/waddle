@@ -5,14 +5,32 @@ use super::waddle::extension::types as wit_types;
 use crate::host_tools::{HostToolError, HostToolErrorCode};
 use crate::types::DisplayText;
 
-const EXTENSION_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const EXTENSION_HTTP_MAX_BODY_BYTES: u64 = 1024 * 1024;
+#[derive(Debug, Clone)]
+pub(super) struct HttpRuntime {
+    pub client: reqwest::Client,
+    pub permits: std::sync::Arc<tokio::sync::Semaphore>,
+}
+impl HttpRuntime {
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
+                .no_zstd()
+                .build()?,
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
+        })
+    }
+}
 
 pub(super) async fn execute_runtime_http_request(
     request: wit_types::OutgoingHttpRequest,
     allowed_origins: &[String],
+    runtime: &HttpRuntime,
+    limits: &crate::config::RuntimeLimits,
 ) -> std::result::Result<wit_types::HttpResponse, HostToolError> {
-    const MAX_EXTENSION_HTTP_REQUEST_BODY_BYTES: usize = 256 * 1024;
     let url = request.url.value;
     let parsed = reqwest::Url::parse(&url).map_err(|_| {
         HostToolError::invalid_request(
@@ -43,26 +61,21 @@ pub(super) async fn execute_runtime_http_request(
         ));
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(EXTENSION_HTTP_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
-        .build()
-        .map_err(|error| HostToolError {
-            code: HostToolErrorCode::TemporaryFailure,
-            message: DisplayText::new(format!("extension HTTP client failed: {error}"))
-                .expect("HTTP error is non-empty"),
-        })?;
+    let _permit = runtime.permits.acquire().await.map_err(|_| HostToolError {
+        code: HostToolErrorCode::TemporaryFailure,
+        message: DisplayText::new("extension HTTP capacity unavailable").expect("static error"),
+    })?;
+    let client = &runtime.client;
     let mut builder = match request.method {
         wit_types::HttpMethod::Get => client.get(&url),
         wit_types::HttpMethod::Post => client.post(&url),
     };
+    builder = builder.timeout(std::time::Duration::from_millis(u64::from(
+        limits.http_timeout_ms,
+    )));
     builder = apply_runtime_http_headers(builder, request.headers)?;
     if let Some(body) = request.body {
-        if body.len() > MAX_EXTENSION_HTTP_REQUEST_BODY_BYTES {
+        if body.len() > limits.http_max_request_bytes as usize {
             return Err(HostToolError::invalid_request(
                 DisplayText::new("extension HTTP request body is too large")
                     .expect("static HTTP error is non-empty"),
@@ -70,21 +83,21 @@ pub(super) async fn execute_runtime_http_request(
         }
         builder = builder.body(body);
     }
-    let response = builder.send().await.map_err(|error| HostToolError {
+    let response = builder.send().await.map_err(|_| HostToolError {
         code: HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new(format!("extension HTTP request failed: {error}"))
+        message: DisplayText::new("extension HTTP request failed")
             .expect("HTTP error is non-empty"),
     })?;
     let status = response.status().as_u16();
     let mut stream = response.bytes_stream();
     let mut body = BytesMut::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| HostToolError {
+        let chunk = chunk.map_err(|_| HostToolError {
             code: HostToolErrorCode::TemporaryFailure,
-            message: DisplayText::new(format!("extension HTTP response body failed: {error}"))
+            message: DisplayText::new("extension HTTP response body failed")
                 .expect("HTTP error is non-empty"),
         })?;
-        if body.len() + chunk.len() > EXTENSION_HTTP_MAX_BODY_BYTES as usize {
+        if body.len() + chunk.len() > limits.http_max_response_bytes as usize {
             return Err(HostToolError::invalid_request(
                 DisplayText::new("extension HTTP response body exceeded limit")
                     .expect("static HTTP error is non-empty"),
@@ -92,12 +105,10 @@ pub(super) async fn execute_runtime_http_request(
         }
         body.extend_from_slice(&chunk);
     }
-    let body = String::from_utf8(body.to_vec()).map_err(|error| HostToolError {
+    let body = String::from_utf8(body.to_vec()).map_err(|_| HostToolError {
         code: HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new(format!(
-            "extension HTTP response body was not UTF-8: {error}"
-        ))
-        .expect("HTTP error is non-empty"),
+        message: DisplayText::new("extension HTTP response body was not UTF-8")
+            .expect("HTTP error is non-empty"),
     })?;
     Ok(wit_types::HttpResponse { status, body })
 }

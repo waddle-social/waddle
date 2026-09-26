@@ -63,6 +63,20 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     scrollToPinnedEdgeAndPin,
     persistLastSeen,
   } = deps;
+  const pendingScores: Array<{ fastening: SafetyScoresFastening; at?: string }> = [];
+
+  function drainPendingScores() {
+    for (let index = 0; index < pendingScores.length;) {
+      const pending = pendingScores[index]!;
+      const next = applySafetyScoresFastening(messages.value, pending.fastening, pending.at);
+      if (!next) {
+        index += 1;
+        continue;
+      }
+      messages.value = next;
+      pendingScores.splice(index, 1);
+    }
+  }
 
   /** XEP-0333 displayed marker — shared merge, no channel divergences. */
   function applyDisplayed(messageId: string, nick: string) {
@@ -134,24 +148,33 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
     linkPreviews?: LiveRoomMessage["linkPreviews"],
+    sourceRevisionId?: string,
   ) {
     const next = applyCorrectionUpdate(
       messages.value,
       replacesId,
-      { body: newBody, markup, references, linkPreviews, extensionAnnotations, extensionBodyFallback },
+      { body: newBody, markup, references, linkPreviews, extensionAnnotations, extensionBodyFallback, sourceRevisionId },
       { senderMatches: (target) => isSameMucCorrectionSender(target, correctionSender) },
     );
-    if (next) messages.value = next;
+    if (next) {
+      messages.value = next;
+      drainPendingScores();
+    }
   }
 
   /**
    * XEP-0422 safety-scores fastening (`urn:waddle:safety-scores:1`),
-   * sender already gated by the decoder. A target outside the loaded
-   * timeline is a no-op, like reactions to unloaded messages.
+   * sender already gated by the decoder. Room relays can deliver a score
+   * before the source or its correction; retry those when either arrives.
    */
   function applySafetyScores(fastening: SafetyScoresFastening, at?: string) {
-    const next = applySafetyScoresFastening(messages.value, fastening, "room", at);
-    if (next) messages.value = next;
+    const next = applySafetyScoresFastening(messages.value, fastening, at);
+    if (next) {
+      messages.value = next;
+    } else {
+      if (pendingScores.length === 100) pendingScores.shift();
+      pendingScores.push({ fastening, at });
+    }
   }
 
   function applyCallThreadEnded(ended: NonNullable<LiveRoomMessage["callThreadEnded"]>) {
@@ -194,6 +217,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
       finalize: (timeline) => applyForumContext(timeline),
     });
     messages.value = result.messages;
+    drainPendingScores();
     if (!result.appended) return;
     void scrollToPinnedEdgeAndPin();
     if (channelId && isFeedVisible(msg)) {
@@ -231,6 +255,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
           classified.extensionAnnotations,
           classified.extensionBodyFallback,
           classified.linkPreviews,
+          classified.sourceRevisionId,
         );
         break;
       case "live":

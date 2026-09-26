@@ -735,6 +735,9 @@ mod family_tests {
             .push(IngressEffectIntent::RoomObserver {
                 room: room.clone(),
                 plugin: plugin_id.clone(),
+                correction_target: None,
+                generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+                identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
             });
@@ -745,6 +748,11 @@ mod family_tests {
                 .push(IngressEffectIntent::RoomObserver {
                     room: room.clone(),
                     plugin: sibling_id.clone(),
+                    correction_target: None,
+                    generation: waddle_extensions::ObservationGeneration::new(1)
+                        .expect("generation"),
+                    identity: waddle_extensions::Sha256Digest::new("0".repeat(64))
+                        .expect("identity"),
                     requester: submission.sender.to_bare(),
                     sender: submission.sender.clone(),
                 });
@@ -944,6 +952,9 @@ mod family_tests {
             .push(IngressEffectIntent::RoomObserver {
                 room: room.clone(),
                 plugin: plugin_id.clone(),
+                correction_target: None,
+                generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+                identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
             });

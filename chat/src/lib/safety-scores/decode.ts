@@ -21,10 +21,10 @@ function decodeScore(score: { category: string; probability: number; taxonomy_ve
 }
 
 export function safetyScoresFasteningFromWasm(fastening: WasmSafetyScoresFastening): SafetyScoresFastening | null {
-  const targetId = fastening.target_id;
-  if (!targetId) return null;
-  if (fastening.update.kind === "clear") return { targetId, kind: "clear" };
-  const { model_version: modelVersion, scores } = fastening.update;
+  const { target_origin_id: targetOriginId, target_stanza_id: targetStanzaId,
+    target_stanza_by: targetStanzaBy, source_revision_id: sourceRevisionId } = fastening;
+  if (!targetOriginId || !targetStanzaId || !targetStanzaBy || !sourceRevisionId) return null;
+  const { model_version: modelVersion, scores } = fastening.scores;
   if (!modelVersion) return null;
   const decoded = scores.flatMap((score) => {
     const typed = decodeScore(score);
@@ -33,5 +33,6 @@ export function safetyScoresFasteningFromWasm(fastening: WasmSafetyScoresFasteni
   const unique = decoded.filter(
     (score, index) => decoded.findIndex((other) => other.category === score.category) === index,
   );
-  return { targetId, kind: "replace", scores: { modelVersion, scores: unique } };
+  return { targetOriginId, targetStanzaId, targetStanzaBy, sourceRevisionId,
+    scores: { modelVersion, scores: unique } };
 }

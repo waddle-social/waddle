@@ -218,7 +218,7 @@ rendering fails for mutable tags, missing digests, all-zero placeholder
 digests, duplicate names, or official XMPP namespaces used as Waddle-specific
 extension namespaces. The chart defaults to no extension modules; production
 release automation enables and digest-pins the published extension artifacts.
-The production GitOps path wires `ai-chatbot` to OpenRouter through a mounted
+The production GitOps path wires `ai-chatbot` and `jev-judgments` to OpenRouter through a mounted
 1Password-backed Secret file, explicit `capabilityGrants`, and
 `allowedHttpOrigins`.
 
@@ -240,7 +240,6 @@ extensions:
         api_key: /var/run/secrets/waddle-ai/api_key
       capabilityGrants:
         - message.enrich
-        - message.observe
         - host.mam.read
         - host.members.read
         - host.presence.read
@@ -253,6 +252,67 @@ extensions:
       allowedHttpOrigins:
         - https://api.example.test
 ```
+
+### Room observation actors
+
+`jev-judgments` is an opt-in room observer. The published module configuration
+in `server/deployment.cue` grants only `message.observe`, `room.result.publish`,
+and `outbound.http.request`, with an explicit HTTPS origin and mounted secret.
+Observation invocations cannot send messages through host imports. The host
+archives and publishes returned results through the room owner.
+
+Every observer needs `roomObservation.generation` and an explicit scope:
+
+```yaml
+roomObservation:
+  generation: 1
+  scope:
+    kind: rooms
+    rooms: [lobby@muc.example.test]
+  max_concurrent: 8
+runtimeLimits:
+  invocation_timeout_ms: 10000
+  http_timeout_ms: 4000
+  http_max_response_bytes: 65536
+  http_max_requests: 1
+```
+
+The operator may instead grant `scope: {kind: all-hosted-rooms}`; this is the
+explicit production Jev selection. Removing `roomObservation` disables new
+observation selection. Concurrency limits apply per server process; replicas
+do not share a global provider quota. Admission is fair between queued rooms,
+with up to four concurrent invocations in one room and 32 across all observers
+in a process. WASM fuel and memory limits are also
+bounded by the host.
+
+To revoke an observer, retain its installation and advance its generation with
+`scope: { kind: rooms, rooms: [] }`. Deploy that revocation before removing the
+module configuration. The shared generation fences older replicas and receipts
+obsolete work; simply omitting an installation cannot revoke an older replica.
+
+Increment the generation whenever the WASM artifact, effective configuration
+(including a rotated secret), grants, HTTP origins, scope, or runtime limits
+change. The host freezes their identity for a generation; reusing a generation
+with a different identity fails startup. Update the generation in deployment
+configuration and its render assertion together. A rollback must also use a
+higher generation. Publish all bundled guests with the server because the
+extension WIT contract is version 2.
+
+Room commit notifications start work immediately; a one-second durable sweep
+recovers missed/full-mailbox notifications and saved publications. Existing
+durable room actors can be restored with their fenced ownership after restart.
+Rooms without durable registry storage resume when their actor is opened.
+Metrics `waddle.extension.observation.queue.delay`, `.invocation.duration`, and
+`.publication.delay` distinguish admission delay, provider time, and publication
+delay. The fixed-category completion log includes the plugin, attempt, duration,
+and whether the result was saved; it contains no message/provider content.
+
+This cutover removes the bespoke core judgment worker and its environment
+flags. It does not drop its existing tables or rewrite archived messages.
+Previously queued core-worker rows remain retained for operator inspection;
+they are not imported or replayed as extension work. New observations use the
+generic durable observer and publication records. Plan the rollout boundary
+accordingly if a deployment already has old pending rows.
 
 ## Env overrides
 

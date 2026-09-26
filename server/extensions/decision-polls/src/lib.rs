@@ -50,12 +50,16 @@ impl exports::waddle::extension::framework::Guest for DecisionPolls {
         event: types::ExtensionEvent,
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let effects = match event {
+            types::ExtensionEvent::RoomMessageObserve(_) => vec![],
             types::ExtensionEvent::MessageHook(_) => vec![],
             types::ExtensionEvent::Command(command) => handle_command(command)?,
             types::ExtensionEvent::Launch(launch) => handle_vote(launch),
             types::ExtensionEvent::ProviderWebhook(_) => vec![],
         };
-        Ok(types::ExtensionResponse { effects })
+        Ok(types::ExtensionResponse {
+            effects,
+            usage: None,
+        })
     }
 }
 

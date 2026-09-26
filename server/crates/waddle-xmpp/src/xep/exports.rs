@@ -360,7 +360,8 @@ pub use super::xep_waddle_call_thread::{
 };
 
 pub use super::xep_waddle_safety_scores::{
-    build_safety_scores_message, SafetyScoreToSend, NS_WADDLE_SAFETY_SCORES,
+    build_room_safety_scores_message, SafetyScoreToSend, SafetyScoresTarget,
+    NS_WADDLE_SAFETY_SCORES,
 };
 
 pub use waddle_xmpp_core::xep0472::{

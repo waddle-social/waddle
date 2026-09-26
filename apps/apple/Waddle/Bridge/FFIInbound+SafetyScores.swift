@@ -6,14 +6,18 @@ extension FFIInbound {
     /// unknown categories and out-of-range probabilities; the checks here
     /// only keep an invalid record from ever becoming a typed value.
     static func safetyScoresFastening(_ fastening: WaddleSafetyScoresFastening) -> WireMessage.SafetyScoresFastening? {
-        guard !fastening.targetId.isEmpty else { return nil }
-        switch fastening.action {
-        case let .apply(scores):
-            guard let parsed = safetyScores(scores) else { return nil }
-            return WireMessage.SafetyScoresFastening(targetID: fastening.targetId, action: .apply(parsed))
-        case .clear:
-            return WireMessage.SafetyScoresFastening(targetID: fastening.targetId, action: .clear)
-        }
+        guard !fastening.targetOriginId.isEmpty,
+              !fastening.targetStanzaId.isEmpty,
+              !fastening.sourceRevisionId.isEmpty,
+              let targetStanzaBy = bareJID(fastening.targetStanzaBy),
+              let parsed = safetyScores(fastening.scores) else { return nil }
+        return WireMessage.SafetyScoresFastening(
+            targetOriginID: fastening.targetOriginId,
+            targetStanzaID: fastening.targetStanzaId,
+            targetStanzaBy: targetStanzaBy,
+            sourceRevisionID: fastening.sourceRevisionId,
+            scores: parsed
+        )
     }
 
     static func safetyScores(_ scores: WaddleSafetyScores) -> SafetyScores? {

@@ -31,8 +31,11 @@ export interface SafetyScores {
   scores: SafetyScore[];
 }
 
-/** XEP-0422 replace (§Replacing fastenings) or clear (§Removing
- * fastenings) of the safety-scores fastening on `targetId`. */
-export type SafetyScoresFastening =
-  | { targetId: string; kind: "replace"; scores: SafetyScores }
-  | { targetId: string; kind: "clear" };
+/** Room-authored XEP-0422 result bound to one original stanza and revision. */
+export interface SafetyScoresFastening {
+  targetOriginId: string;
+  targetStanzaId: string;
+  targetStanzaBy: string;
+  sourceRevisionId: string;
+  scores: SafetyScores;
+}

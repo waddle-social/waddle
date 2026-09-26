@@ -4,7 +4,7 @@ import social.waddle.android.client.bareJid
 import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
-import social.waddle.client.ffi.WaddleSafetyScoresAction
+import social.waddle.client.ffi.WaddleSafetyScoresFastening
 
 /**
  * A message that mutates an existing timeline row instead of inserting a
@@ -40,6 +40,7 @@ sealed interface MessageMutation {
         override val targetId: String,
         override val from: String,
         val newBody: String,
+        val sourceRevisionId: String? = null,
     ) : MessageMutation
 
     /** XEP-0424: the original sender retracts their own message. */
@@ -58,8 +59,7 @@ sealed interface MessageMutation {
 
     /**
      * XEP-0422 `urn:waddle:safety-scores:1` fastening: the room's
-     * automated per-category scores for the target. [action] replaces
-     * the previous scores (XEP-0422 replace) or clears them; only the
+     * automated per-category scores for the target. Only the
      * room itself (bare room JID) may apply it. [fasteningIds] are the
      * fastening stanza's own wire identities, so a MAM re-delivery of a
      * fastening already applied is recognised as a replay.
@@ -67,7 +67,7 @@ sealed interface MessageMutation {
     data class SafetyScores(
         override val targetId: String,
         override val from: String,
-        val action: WaddleSafetyScoresAction,
+        val fastening: WaddleSafetyScoresFastening,
         val fasteningIds: Set<String>,
     ) : MessageMutation
 }
@@ -124,6 +124,11 @@ private fun mutationOf(source: TimelineSource, isGroupchat: Boolean, mine: Boole
             targetId = replacesId,
             from = from,
             newBody = body,
+            sourceRevisionId = source.stanzaIds.firstOrNull {
+                it.by.equals(bareJid(from), ignoreCase = true)
+            }?.id ?: source.stanzaId.takeIf {
+                source.stanzaIdBy?.equals(bareJid(from), ignoreCase = true) == true
+            },
         )
         reactionTargetId != null -> MessageMutation.Reaction(
             targetId = reactionTargetId,
@@ -135,9 +140,9 @@ private fun mutationOf(source: TimelineSource, isGroupchat: Boolean, mine: Boole
         // Room-only, like XEP-0425: no 1:1 sender is trusted to score
         // messages yet (the Rust parser already drops non-room senders).
         safetyScores != null && isGroupchat -> MessageMutation.SafetyScores(
-            targetId = safetyScores.targetId,
+            targetId = safetyScores.targetStanzaId,
             from = from,
-            action = safetyScores.action,
+            fastening = safetyScores,
             fasteningIds = setOfNotNull(source.stanzaId, source.originId, source.messageId) +
                 source.stanzaIds.map { it.id },
         )
