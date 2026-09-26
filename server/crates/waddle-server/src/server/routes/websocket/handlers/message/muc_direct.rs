@@ -1094,6 +1094,7 @@ mod tests {
         let recipient: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
         room_actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_string(),
                 real_jid: sender.clone(),
                 role: Role::Participant,
@@ -1103,6 +1104,7 @@ mod tests {
             .expect("join alice");
         room_actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "bob".to_string(),
                 real_jid: recipient.clone(),
                 role: Role::Participant,
@@ -1156,6 +1158,7 @@ mod tests {
         for (nick, jid) in [("alice", &sender), ("bob", &recipient)] {
             actor
                 .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                     nick: nick.to_owned(),
                     real_jid: jid.clone(),
                     role: Role::Participant,
@@ -1296,6 +1299,7 @@ mod tests {
         for (nick, jid) in [("alice", &sender), ("bob", &recipient)] {
             actor
                 .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                     nick: nick.to_owned(),
                     real_jid: jid.clone(),
                     role: Role::Participant,

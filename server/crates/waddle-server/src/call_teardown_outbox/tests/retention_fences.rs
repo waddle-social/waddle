@@ -615,7 +615,7 @@ async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
 }
 
 #[tokio::test]
-async fn confirmed_departure_without_sid_waits_for_restoration_then_executes_without_room_owner() {
+async fn confirmed_departure_without_sid_preserves_a_later_restored_participant() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
         fixture_config(),
@@ -665,8 +665,8 @@ async fn confirmed_departure_without_sid_waits_for_restoration_then_executes_wit
         ))
     );
 
-    // A webhook or reconciliation restores this participant without its old
-    // occupant generation, recording the observation time as its registration.
+    // After a restart this could be a replacement whose token was issued on
+    // another node. An unbound observation cannot identify the departed call.
     sfu.register_call_participant_observed(&call_id, &identity, &ObservedCallSids::none());
     assert_eq!(sfu.participant_occupant_session(&call_id, &identity), None);
     let restored =
@@ -675,14 +675,12 @@ async fn confirmed_departure_without_sid_waits_for_restoration_then_executes_wit
             .expect("restored drain");
 
     assert_eq!(restored.drained, 1);
-    assert_eq!(
-        admin
-            .remove_calls
-            .lock()
-            .expect("recording lock")
-            .as_slice(),
-        &[(call_id, identity)]
-    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert!(sfu.has_call_participant(&call_id, &identity));
     assert_eq!(
         store
             .find(&intent_id)
@@ -692,6 +690,81 @@ async fn confirmed_departure_without_sid_waits_for_restoration_then_executes_wit
             .status,
         CallTeardownStatus::Done
     );
+}
+
+#[tokio::test]
+async fn restored_participant_teardown_requires_matching_sid_and_no_later_mint() {
+    for (observed_sid, mint_token, expected_removals, expected_requeued) in [
+        (Some("PA_departed"), false, 1, 0),
+        (Some("PA_replacement"), false, 0, 0),
+        (None, false, 0, 1),
+        (Some("PA_departed"), true, 0, 0),
+    ] {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+            fixture_config(),
+            Arc::clone(&admin) as Arc<_>,
+        ));
+        let state = state_with_executor(Arc::clone(&sfu)).await;
+        let call_id = CallId::new("restored-participant@muc.example.test").unwrap();
+        let identity = Identity::from_jid("alice@example.test/device".parse().unwrap());
+        sfu.register_call_participant_observed(
+            &call_id,
+            &identity,
+            &ObservedCallSids::new(
+                None,
+                observed_sid.map(|sid| ParticipantSid::new(sid).unwrap()),
+            ),
+        );
+        let token = mint_token.then(|| {
+            sfu.issue_join_token(&call_id, &identity, MediaCapabilities::direct_call_peer())
+                .unwrap()
+        });
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .enqueue_at(
+                CallTeardownIntent {
+                    call_id: call_id.clone(),
+                    target: TeardownTarget::Participant {
+                        identity: identity.as_jid().clone(),
+                        participant_sid: Some(ParticipantSid::new("PA_departed").unwrap()),
+                    },
+                    generation: None,
+                    occupant: Some(occupant_generation()),
+                    unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
+                    room_sid: None,
+                    session: None,
+                },
+                crate::time::now_ms() - 10_000,
+            )
+            .await
+            .unwrap();
+
+        let summary = drain_due(&state, 8).await.unwrap();
+        assert_eq!(
+            admin.remove_calls.lock().unwrap().len(),
+            expected_removals,
+            "observed SID {observed_sid:?}, later mint {mint_token}"
+        );
+        assert_eq!(
+            summary.requeued, expected_requeued,
+            "unknown SID must await evidence"
+        );
+        if expected_requeued == 0 {
+            assert_eq!(summary.drained, 1);
+        }
+        if expected_removals == 0 {
+            assert!(sfu.has_call_participant(&call_id, &identity));
+        }
+        if let Some(token) = token {
+            assert!(
+                !sfu.is_revoked(&token.jti),
+                "the later join token stays valid"
+            );
+        }
+    }
 }
 
 #[tokio::test]

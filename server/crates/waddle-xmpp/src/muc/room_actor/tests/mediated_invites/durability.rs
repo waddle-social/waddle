@@ -12,6 +12,7 @@ async fn unacknowledged_rollback_blocks_dormancy_and_both_seal_guards() {
     let invitee = test_full_jid("invitee").to_bare();
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "inviter".to_string(),
             real_jid: inviter.clone(),
             role: Role::Moderator,

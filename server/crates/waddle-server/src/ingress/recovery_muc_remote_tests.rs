@@ -516,6 +516,7 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         .expect("room");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "foreign".into(),
             real_jid: occupant.clone(),
             role: waddle_xmpp::Role::Participant,
@@ -860,6 +861,7 @@ async fn departed_occupant_cluster_recovery(f: IngressFixture, case: DepartedEls
     if case == DepartedElsewhere::StillSeated {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "foreign".into(),
                 real_jid: occupant.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -1171,6 +1173,7 @@ async fn sqlite_stalled_ghosts_of_one_room_are_repaired_within_the_repair_budget
     for ghost in &ghosts {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: ghost.node().expect("node").to_string(),
                 real_jid: ghost.clone(),
                 role: waddle_xmpp::Role::Participant,

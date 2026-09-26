@@ -88,6 +88,7 @@ impl GroupchatFixture {
         }
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "romeo".into(),
                 real_jid: live,
                 role: Role::Participant,

@@ -255,6 +255,7 @@ async fn invite_room(
     };
     actor
         .ask(waddle_xmpp::muc::room_actor::Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".into(),
             real_jid: sender.clone(),
             role: waddle_xmpp::Role::Moderator,

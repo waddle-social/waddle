@@ -123,12 +123,21 @@ pub(crate) async fn remote_registration_request(
     )
     .await
     .expect("publish fixture binding authority");
+    remote_registration_request_from_entry(jid, socket_node, &entry)
+}
+
+#[cfg(test)]
+pub(crate) fn remote_registration_request_from_entry(
+    jid: jid::FullJid,
+    socket_node: NodeId,
+    entry: &ConnectionEntry,
+) -> RelayRegisterRemoteUserResource {
     RelayRegisterRemoteUserResource {
         jid,
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_generation: RemoteResourceSocketGeneration::next(None),
         socket_node,
-        state: RemoteResourceStateSnapshot::from_entry(&entry, None),
+        state: RemoteResourceStateSnapshot::from_entry(entry, None),
         trace: RelayTraceContext::default(),
     }
 }

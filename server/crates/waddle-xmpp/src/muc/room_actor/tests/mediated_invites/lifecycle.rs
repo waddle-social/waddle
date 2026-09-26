@@ -409,6 +409,7 @@ async fn no_grant_invite_operation_is_replayed_finalized_and_acknowledged() {
     let invitee = test_full_jid("invitee").to_bare();
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "inviter".to_string(),
             real_jid: inviter.clone(),
             role: Role::Participant,
@@ -493,6 +494,7 @@ async fn completed_no_grant_operations_are_bounded_without_forgetting_known_ids(
     let inviter = test_full_jid("inviter");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "inviter".to_string(),
             real_jid: inviter.clone(),
             role: Role::Participant,
@@ -590,6 +592,7 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
     let inviter = test_full_jid("inviter");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "inviter".to_string(),
             real_jid: inviter.clone(),
             role: Role::Participant,

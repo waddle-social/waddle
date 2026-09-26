@@ -13,6 +13,7 @@ async fn xep_0045_room_plan_foreign_occupant_uses_room_origin_and_gate_keeps_cal
     for (nick, jid) in [("alice", &alice), ("bob", &bob)] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid: jid.clone(),
                 role: waddle_xmpp::Role::Participant,

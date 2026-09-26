@@ -43,6 +43,7 @@ async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repea
     for (resource, nick) in [(&sender, "sender"), (&persistent, "persistent")] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -58,6 +59,7 @@ async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repea
         if let Some(resource) = newcomer {
             actor
                 .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                     nick: text.into(),
                     real_jid: resource.clone(),
                     role: waddle_xmpp::Role::Participant,

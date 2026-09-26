@@ -7,6 +7,75 @@ tokio::task_local! {
 }
 
 impl OrderedRelayDeliveryBridge {
+    /// Finish an owner-local socket's retirement independently of the relay
+    /// request lifetime. The transferred gate prevents concurrent admission;
+    /// its pending generations survive timeout or task cancellation.
+    pub(super) fn schedule_local_incumbent_retirement(
+        &self,
+        services: Arc<OrderedRelayDeliveryServices>,
+        jid: jid::FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+        mut guard: waddle_xmpp::registry::ConnectionBindGuard,
+    ) {
+        tokio::spawn(async move {
+            let retirement =
+                async {
+                    use waddle_xmpp::registry::{ForceDetachOrigin, SocketCleanupState};
+                    let incumbent = guard.incumbent();
+                    let resumed = incumbent
+                        .as_ref()
+                        .is_some_and(|incumbent| incumbent.generation == generation);
+                    if let Some(incumbent) = &incumbent {
+                        if incumbent.state() == SocketCleanupState::Running {
+                            let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+                            let _ = incumbent.entry.force_detach_sender().try_send(
+                                ForceDetachRequest {
+                                    origin: if resumed {
+                                        ForceDetachOrigin::CrossNodeResume
+                                    } else {
+                                        ForceDetachOrigin::FreshBindReplacement
+                                    },
+                                    requester_bare_jid: jid.to_bare(),
+                                    ack,
+                                },
+                            );
+                            // Route removal and the detach ACK can both precede
+                            // handler shutdown. Only the lifecycle is proof.
+                            incumbent.wait_stopped().await;
+                        }
+                    }
+                    if !guard.pending_retirements().is_empty() {
+                        let Some(state) = services.web_socket_state.upgrade() else {
+                            return;
+                        };
+                        if !crate::server::routes::websocket::complete_bind_retirements(
+                            &state, &jid, generation, &mut guard, resumed,
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                    }
+                    if let Some(incumbent) = &incumbent {
+                        let owner = incumbent.entry.carbons_handle();
+                        if !matches!(
+                            unregister_remote_owner_actor_entry(&services, &jid, &owner).await,
+                            RemoteOwnerActorUnregisterOutcome::Unregistered
+                        ) {
+                            return;
+                        }
+                        services
+                            .connection_registry
+                            .unregister_if_owner(&jid, &owner);
+                        if !resumed {
+                            incumbent.finish(SocketCleanupState::Retired);
+                        }
+                    }
+                };
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), retirement).await;
+        });
+    }
+
     /// A socket bound on the UserActor owner bypasses the remote registration
     /// endpoint. It must still retire a foreign incumbent before publishing
     /// its local route. Same-generation resume keeps the occupancy intact.

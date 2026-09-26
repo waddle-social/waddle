@@ -50,6 +50,7 @@ async fn user_groupchat_with_bot(f: IngressFixture, another_user: bool) {
     for (real_jid, nick) in occupants {
         actor
             .ask(waddle_xmpp::muc::room_actor::Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid,
                 role: waddle_xmpp::Role::Participant,

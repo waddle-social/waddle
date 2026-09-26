@@ -717,6 +717,17 @@ impl JingleHandler {
         ctx: &StanzaContext<'_>,
         attempt: CallSetupAttempt,
     ) -> Vec<OutboundEvent> {
+        // XEP-0166 §7.2 requires at least one content definition,
+        // including when XEP-0272 associates the session with a room.
+        // Reject before token issuance can replace an existing binding.
+        if jingle.contents.is_empty() {
+            attempt.failed(CallSetupFailureReason::BadRequest);
+            return error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Muji session-initiate requires at least one content definition",
+            );
+        }
         let call_id = match CallId::new(room_jid.to_string()) {
             Ok(c) => c,
             Err(_) => {

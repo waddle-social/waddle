@@ -2333,6 +2333,8 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
 
 /// Add an occupant to the room.
 pub struct Join {
+    /// The connection generation already authorized at bind time.
+    pub session: OccupancySessionGeneration,
     pub nick: String,
     pub real_jid: FullJid,
     pub role: Role,
@@ -2367,7 +2369,7 @@ impl kameo::message::Message<Join> for RoomActor {
         let Some(durable_nick) = super::durable::MucOccupantNick::new(msg.nick.clone()) else {
             return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         };
-        let session = OccupancySessionGeneration::mint();
+        let session = msg.session;
         let gate = self
             .commit_projection(RoomProjection::OccupancyJoin {
                 occupant: msg.real_jid.clone(),

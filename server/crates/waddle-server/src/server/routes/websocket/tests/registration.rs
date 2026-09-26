@@ -62,6 +62,10 @@ use waddle_xmpp::{
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 
+#[cfg(feature = "clustering")]
+#[path = "registration_owner_local.rs"]
+mod owner_local;
+
 async fn bind_fresh_test_connection(
     state: Arc<super::super::WebSocketState>,
     jid: FullJid,

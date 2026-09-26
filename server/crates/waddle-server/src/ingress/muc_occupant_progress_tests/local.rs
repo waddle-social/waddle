@@ -71,6 +71,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
     socket_tests::register_test_connection(&state, &submission.sender, sender_tx).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".into(),
             real_jid: submission.sender.clone(),
             role: waddle_xmpp::Role::Participant,
@@ -88,6 +89,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
         store_detached(&sm, &target).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "juliet".into(),
                 real_jid: target.clone(),
                 role: waddle_xmpp::Role::Participant,

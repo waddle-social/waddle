@@ -133,6 +133,22 @@ fn prune(slots: &BindSlots, jid: &FullJid) {
 }
 
 impl ConnectionRegistry {
+    /// Never wait for a local binder while holding a remote registration or
+    /// durable generation lock: that binder may be waiting for those locks.
+    pub fn try_lock_bind(&self, jid: &FullJid) -> Option<ConnectionBindGuard> {
+        let slot = self
+            .bind_slots
+            .entry(jid.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(BindState::default())))
+            .clone();
+        let guard = slot.try_lock_owned().ok()?;
+        Some(ConnectionBindGuard {
+            slots: self.bind_slots.clone(),
+            jid: jid.clone(),
+            guard: Some(guard),
+        })
+    }
+
     pub fn probe_socket_lifecycle(
         &self,
         jid: &FullJid,

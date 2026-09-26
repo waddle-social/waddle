@@ -41,6 +41,7 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
     socket_tests::register_test_connection(&state, &submission.sender, sender_tx).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".into(),
             real_jid: submission.sender.clone(),
             role: waddle_xmpp::Role::Participant,
@@ -53,6 +54,7 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
     socket_tests::register_test_connection(&state, &a, a_tx).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".into(),
             real_jid: a.clone(),
             role: waddle_xmpp::Role::Participant,
@@ -76,6 +78,7 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
     {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "juliet".into(),
                 real_jid: target.clone(),
                 role: waddle_xmpp::Role::Participant,

@@ -8836,6 +8836,7 @@ mod room_dormancy_tests {
             .expect("create");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_string(),
                 real_jid: full_jid("alice@example.com/r1"),
                 role: Role::Participant,
@@ -8898,6 +8899,7 @@ mod room_dormancy_tests {
         let alice = full_jid("alice@example.com/r1");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_string(),
                 real_jid: alice.clone(),
                 role: Role::Participant,
@@ -9597,6 +9599,7 @@ mod local_muc_departure_tests {
     ) {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_string(),
                 real_jid: jid.clone(),
                 role: Role::Participant,

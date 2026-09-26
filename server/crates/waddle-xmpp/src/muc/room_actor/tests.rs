@@ -275,6 +275,7 @@ async fn test_join_and_occupant_count() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -293,6 +294,7 @@ async fn test_join_duplicate_nick_rejected() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -303,6 +305,7 @@ async fn test_join_duplicate_nick_rejected() {
 
     let result = actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Participant,
@@ -326,6 +329,7 @@ async fn test_join_rejected_when_room_full() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -336,6 +340,7 @@ async fn test_join_rejected_when_room_full() {
 
     let result = actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Participant,
@@ -358,6 +363,7 @@ async fn test_join_owner_affiliation_allowed_when_room_full() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -368,6 +374,7 @@ async fn test_join_owner_affiliation_allowed_when_room_full() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "owner".to_string(),
             real_jid: test_full_jid("owner"),
             role: Role::Moderator,
@@ -508,6 +515,7 @@ async fn test_leave() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -554,6 +562,7 @@ async fn test_get_occupant_by_nick() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -581,6 +590,7 @@ async fn test_get_occupant_by_jid() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: jid.clone(),
             role: Role::Participant,
@@ -637,6 +647,7 @@ async fn members_only_enforcement_ejects_current_non_members_with_status_322() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -752,6 +763,7 @@ async fn test_list_occupants() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -762,6 +774,7 @@ async fn test_list_occupants() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Moderator,
@@ -780,6 +793,7 @@ async fn test_destroy() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -800,6 +814,7 @@ async fn test_apply_admin_items_rejects_moderator_role_change_on_admin() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Moderator,
@@ -854,6 +869,7 @@ async fn test_apply_admin_items_rejects_admin_role_change_on_admin() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Moderator,
@@ -901,6 +917,7 @@ async fn test_apply_admin_items_rejects_moderator_grant_from_role_only_moderator
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Moderator,
@@ -910,6 +927,7 @@ async fn test_apply_admin_items_rejects_moderator_grant_from_role_only_moderator
         .expect("join bob");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "carol".to_string(),
             real_jid: test_full_jid("carol"),
             role: Role::Participant,
@@ -1406,6 +1424,7 @@ async fn unmanaged_members_only_post_enforcement_snapshot_excludes_removed_confi
     ] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid,
                 role: Role::Participant,
@@ -1523,6 +1542,7 @@ async fn managed_members_only_enforcement_persists_survivor_voice_changes() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Visitor,
@@ -1734,6 +1754,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_true_for_default_rooms() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -1772,6 +1793,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -1817,6 +1839,7 @@ async fn is_dormant_false_while_occupants_present() {
     let actor = spawn_room_actor().await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -2030,6 +2053,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
     for nick in ["alice", "alice-ghost"] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_string(),
                 real_jid: alice.clone(),
                 role: Role::Participant,
@@ -2040,6 +2064,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
     }
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: bob.clone(),
             role: Role::Participant,
@@ -2160,6 +2185,7 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -2301,6 +2327,7 @@ async fn room_snapshot_includes_durable_member_recipients_from_same_actor_read()
     let sender = test_full_jid("sender");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "sender".to_string(),
             real_jid: sender.clone(),
             role: Role::Participant,
@@ -2582,6 +2609,7 @@ async fn space_entitled_member_survives_members_only_enforcement() {
     let _source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -2666,6 +2694,7 @@ async fn enforce_members_only_affiliations_prunes_hydrated_durable_recipient() {
     source.set_members(Vec::new());
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -2828,6 +2857,7 @@ async fn upsert_muji_presence_active_stores_and_returns_muji() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3146,6 +3176,7 @@ async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3191,6 +3222,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
     let bob = test_full_jid("bob");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3200,6 +3232,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
         .expect("alice join");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: bob.clone(),
             role: Role::Participant,
@@ -3268,6 +3301,7 @@ async fn clear_muji_presence_reflects_plain_presence_when_no_state_exists() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3357,6 +3391,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3407,6 +3442,7 @@ async fn leaving_occupant_clears_muji_state() {
     let carol = test_full_jid("carol");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -6885,6 +6921,7 @@ async fn legacy_join_is_gated_by_projection_commit() {
     assert!(matches!(
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: test_full_jid("alice"),
                 role: Role::Participant,
@@ -7913,6 +7950,7 @@ async fn update_config_persists_moderation_flip_voice_changes() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Visitor,
@@ -8027,6 +8065,7 @@ async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Moderator,
@@ -8113,6 +8152,7 @@ async fn destroy_seal_blocks_members_only_enforcement() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice,
             role: Role::Participant,
@@ -8144,6 +8184,7 @@ async fn leave_under_destroying_seal_is_deferred_without_memory_change() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8193,6 +8234,7 @@ async fn store_less_leave_under_destroying_seal_is_suppressed_and_recorded() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_owned(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8225,6 +8267,7 @@ async fn unseal_destroy_then_retried_leave_projects_departure() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_owned(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8272,6 +8315,7 @@ async fn destroy_seal_blocks_presence_reflection() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8300,6 +8344,7 @@ async fn destroy_seal_blocks_muji_upserts() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8340,6 +8385,7 @@ async fn destroy_seal_blocks_muji_clears() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8388,6 +8434,7 @@ async fn destroy_seal_blocks_in_call_state_updates() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8432,6 +8479,7 @@ async fn destroy_seal_defers_leave_handler() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -8468,6 +8516,7 @@ async fn destroy_seal_blocks_groupchat_broadcasts() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8503,6 +8552,7 @@ async fn destroy_seal_blocks_room_dispatch_snapshots() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8712,6 +8762,7 @@ async fn unknown_durable_commit_outcome_seals_actor_before_it_can_serve_stale_me
 
     let join = actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -8843,6 +8894,7 @@ async fn role_only_admin_items_stay_direct_without_an_outbox_reservation() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -9210,6 +9262,7 @@ async fn update_group_dm_config_surfaces_ambiguous_commit_outcome_without_compen
         .expect("member grant");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -10073,6 +10126,7 @@ async fn sealed_room_reports_dormant_so_the_sweep_converges() {
 async fn join_with(actor: &ActorRef<RoomActor>, user: &str, affiliation: Affiliation, role: Role) {
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: user.to_string(),
             real_jid: test_full_jid(user),
             role,

@@ -82,6 +82,30 @@ async fn prepare_socket_bind(
             }
         }
     }
+    if !complete_bind_retirements(state, jid, generation, &mut guard, resumed).await {
+        return None;
+    }
+    if !crate::occupancy_authority::is_current(db, jid, generation)
+        .await
+        .ok()?
+    {
+        return None;
+    }
+    // A remote-resource mirror may occupy this route without a local socket
+    // lifecycle. Its owner registration is separately generation-fenced.
+    Some(guard)
+}
+
+/// Drain exact-generation obligations with the bind gate held. Callers retain
+/// obligations on timeout/cancellation, so later admission must finish them.
+pub(crate) async fn complete_bind_retirements(
+    state: &WebSocketState,
+    jid: &FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+    guard: &mut waddle_xmpp::registry::ConnectionBindGuard,
+    resumed: bool,
+) -> bool {
+    let registry = &state.deps.protocol.connection_registry;
     if !resumed {
         for displaced in guard.pending_retirements() {
             let removed = state
@@ -89,8 +113,10 @@ async fn prepare_socket_bind(
                 .protocol
                 .sm_session_registry
                 .invalidate_sessions_for_generation(jid, displaced)
-                .await
-                .ok()?;
+                .await;
+            let Ok(removed) = removed else {
+                return false;
+            };
             // Enter promotion's cancellation-safe custody guard before any
             // other await. Never accumulate handed-off batches across another
             // generation's storage operation.
@@ -113,22 +139,14 @@ async fn prepare_socket_bind(
     }
     for pending in guard.pending_retirements() {
         if resumed && pending == generation {
-            return None;
+            return false;
         }
         if !super::cleanup::retire_occupancy_before_bind(state, jid, pending).await {
-            return None;
+            return false;
         }
         guard.complete_retirement(pending);
     }
-    if !crate::occupancy_authority::is_current(db, jid, generation)
-        .await
-        .ok()?
-    {
-        return None;
-    }
-    // A remote-resource mirror may occupy this route without a local socket
-    // lifecycle. Its owner registration is separately generation-fenced.
-    Some(guard)
+    true
 }
 
 fn resume_registration_busy_backoff(attempt: usize) -> std::time::Duration {

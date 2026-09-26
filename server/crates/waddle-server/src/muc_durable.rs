@@ -5871,6 +5871,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_join_preserves_authorized_connection_generation() {
+        use waddle_xmpp::muc::room_actor::{Join, RoomActorError};
+        use waddle_xmpp::{Affiliation, Role};
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("legacy-join-generation").await else {
+            return;
+        };
+        let occupant = "alice@example.com/desktop".parse().expect("full JID");
+        let current = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        crate::occupancy_authority::publish(&room.db, &occupant, current)
+            .await
+            .expect("publish replacement bind");
+        let store: Arc<dyn MucDurableStore> = Arc::new(room.store);
+        let actor = RoomActor::spawn(RoomActor::new(
+            MucRoom::new(
+                room.room_jid.clone(),
+                "waddle-projection-test".to_string(),
+                "channel-projection-test".to_string(),
+                RoomConfig::default(),
+            ),
+            OccupantIdSecret::new(b"muc-durable-legacy-join-test-secret".to_vec())
+                .expect("valid test secret"),
+        ));
+        actor
+            .ask(RestoreDurableRoomState {
+                store: Arc::clone(&store),
+                claim_fence: room.fence.clone(),
+            })
+            .await
+            .expect("restore room");
+
+        let stale = actor
+            .ask(Join {
+                session: projection_test_generation(),
+                real_jid: occupant.clone(),
+                nick: "alice".to_string(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await;
+        assert!(matches!(
+            stale,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ));
+        assert_eq!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot")
+                .room
+                .occupant_count(),
+            0,
+            "a displaced connection generation must not enter the live roster"
+        );
+        assert_eq!(
+            store
+                .load_room_state_fenced(&room.room_jid, &room.fence)
+                .await
+                .expect("load unchanged room")
+                .expect("room state")
+                .coordinates,
+            Some(room.create.coordinates),
+            "a displaced generation must not commit a join"
+        );
+
+        actor
+            .ask(Join {
+                session: current,
+                real_jid: occupant.clone(),
+                nick: "alice".to_string(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("the current bind generation can join through the public Join message");
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+        assert_eq!(snapshot.room.occupant_count(), 1);
+        assert_eq!(snapshot.room.session_generation(&occupant), Some(current));
+        assert_ne!(
+            store
+                .load_room_state_fenced(&room.room_jid, &room.fence)
+                .await
+                .expect("load committed room")
+                .expect("room state")
+                .coordinates,
+            Some(room.create.coordinates),
+            "the authorized generation commits its join before entering the roster"
+        );
+    }
+
+    #[tokio::test]
     async fn departed_generation_cannot_commit_after_replacement_bind() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(room) = projection_test_room("displaced-generation").await else {

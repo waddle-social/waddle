@@ -88,6 +88,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
         receivers.push(rx);
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,

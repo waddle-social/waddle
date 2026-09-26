@@ -4322,6 +4322,7 @@ mod eviction_tests {
         let alice = full_jid("alice@example.com/r1");
         room_actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_string(),
                 real_jid: alice.clone(),
                 role: Role::Participant,
@@ -4402,6 +4403,7 @@ mod eviction_tests {
         let alice = full_jid("alice@example.com/r1");
         room_actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_string(),
                 real_jid: alice.clone(),
                 role: Role::Participant,
@@ -4465,6 +4467,7 @@ mod eviction_tests {
         for (nick, jid) in [("alice", &alice), ("bob", &bob)] {
             room_actor
                 .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                     nick: nick.to_string(),
                     real_jid: jid.clone(),
                     role: Role::Participant,

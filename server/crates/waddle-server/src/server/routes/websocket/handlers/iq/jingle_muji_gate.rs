@@ -600,6 +600,7 @@ mod tests {
         }
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_string(),
                 real_jid: jid.clone(),
                 role,

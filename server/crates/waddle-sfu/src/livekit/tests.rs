@@ -1613,6 +1613,42 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
 }
 
 #[tokio::test]
+async fn teardown_executor_defers_missing_call_when_live_participant_sid_is_unknown() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-live-fence-unknown").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+    admin.set_live_with_sids(&call, vec![(alice.clone(), None)]);
+    assert!(sfu.teardown_executor().current_generation(&call).is_none());
+
+    let intent = CallTeardownIntentLite {
+        call_id: call,
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: None,
+        occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
+        session: None,
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed unresolved no-op"),
+        TeardownExecution::Occupied
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "an unknown live SID cannot authorize removal under a captured SID fence"
+    );
+}
+
+#[tokio::test]
 async fn inline_teardown_reports_participant_and_room_intents_before_admin_work_completes() {
     let admin = Arc::new(RecordingAdmin::default());
     let gate = Arc::new(Semaphore::new(0));

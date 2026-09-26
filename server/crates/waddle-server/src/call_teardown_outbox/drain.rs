@@ -315,12 +315,18 @@ fn stale_superseded_by_live_participant(
         return true;
     }
     let identity = Identity::from_jid(participant.clone());
-    // Reconciliation restores connected participants without occupant or
-    // signaling bindings and stamps their registration with its observation
-    // time. That timestamp cannot supersede a confirmed departure's occupant
-    // fence. Preserve the independent token-mint check: a later local issuance
-    // still proves a rejoin even if the restored registration remains unbound.
-    let restored_confirmed_departure = intent.occupant.is_some()
+    // A restored unbound participant may be a replacement, including one
+    // whose token was minted elsewhere. Occupant/TearDown evidence alone
+    // cannot identify it. Only a participant-SID-fenced removal can defer the
+    // restoration timestamp decision to the executor, which must match that
+    // SID before removing the participant. Keep the later-token-mint fence.
+    let restored_sid_fenced_departure = matches!(
+        &intent.target,
+        TeardownTarget::Participant {
+            participant_sid: Some(_),
+            ..
+        }
+    ) && intent.occupant.is_some()
         && intent.unbound_occupant == waddle_sfu::UnboundOccupantPolicy::TearDown
         && sfu.has_call_participant(&intent.call_id, &identity)
         && sfu
@@ -330,7 +336,7 @@ fn stale_superseded_by_live_participant(
             .participant_session_binding(&intent.call_id, &identity)
             .is_none();
     [
-        if restored_confirmed_departure {
+        if restored_sid_fenced_departure {
             None
         } else {
             sfu.participant_registered_at(&intent.call_id, &identity)

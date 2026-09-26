@@ -144,6 +144,7 @@ async fn groupchat_rich_target_failure(fixture: IngressFixture, stop_actor: bool
         .expect("create room");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".into(),
             real_jid: sender.clone(),
             role: waddle_xmpp::Role::Participant,

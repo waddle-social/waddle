@@ -481,7 +481,10 @@ impl LiveKitTeardownExecutor {
                     Some((_, Some(live))) if live != fence => {
                         return Ok(TeardownExecution::StaleGeneration)
                     }
-                    Some(_) => {}
+                    Some((_, Some(_))) => {}
+                    // A live identity without its SID cannot prove the
+                    // captured fence still names this incarnation.
+                    Some((_, None)) => return Ok(TeardownExecution::Occupied),
                 }
             }
         } else if entry_missing {

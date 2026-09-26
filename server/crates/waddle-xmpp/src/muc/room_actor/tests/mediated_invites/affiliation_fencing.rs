@@ -17,6 +17,7 @@ async fn rolled_back_unacknowledged_invite_fences_regrant_join_and_mutation_unti
         .expect("temporary grant");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "invitee".to_string(),
             real_jid: invitee_session.clone(),
             role: Role::Participant,
@@ -57,6 +58,7 @@ async fn rolled_back_unacknowledged_invite_fences_regrant_join_and_mutation_unti
     assert!(matches!(
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "invitee".to_string(),
                 real_jid: invitee_session.clone(),
                 role: Role::Participant,
@@ -125,6 +127,7 @@ async fn rolled_back_unacknowledged_invite_fences_regrant_join_and_mutation_unti
         .expect("mutation proceeds after acknowledgement");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "invitee".to_string(),
             real_jid: invitee_session,
             role: Role::Participant,
@@ -436,6 +439,7 @@ async fn prepared_rollback_blocks_guarded_and_batched_affiliation_paths() {
     assert!(matches!(
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "invitee-phone".to_string(),
                 real_jid: test_full_jid_resource("invitee", "phone"),
                 role: Role::Participant,

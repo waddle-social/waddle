@@ -198,6 +198,7 @@ async fn subject_broadcast_after_actor_commit(
     for (jid, nick) in [(&sender, "romeo"), (&occupant, "juliet")] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: jid.clone(),
                 role: waddle_xmpp::Role::Moderator,

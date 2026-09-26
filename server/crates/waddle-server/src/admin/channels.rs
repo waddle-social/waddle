@@ -6907,6 +6907,7 @@ mod group_dm_durable_reconciliation_tests {
             seed_group_dm(&state, &room_jid, "Leave", std::slice::from_ref(&member)).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_string(),
                 real_jid: caller_full.clone(),
                 role: Role::Participant,
@@ -7311,6 +7312,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("insert initial lifecycle");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,
@@ -7469,6 +7471,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("insert initial lifecycle");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,
@@ -7832,6 +7835,7 @@ mod group_dm_durable_reconciliation_tests {
         let recipient: FullJid = "alice@example.com/admin".parse().expect("recipient JID");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: recipient,
                 role: Role::Participant,
@@ -7933,6 +7937,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("create durable exact room");
         exact_actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: "alice@example.com/exact"
                     .parse()
@@ -8063,6 +8068,7 @@ mod group_dm_durable_reconciliation_tests {
             seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,
@@ -8161,6 +8167,7 @@ mod group_dm_durable_reconciliation_tests {
             seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,
@@ -8267,6 +8274,7 @@ mod group_dm_durable_reconciliation_tests {
             seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,
@@ -8372,6 +8380,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("create durable room");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: "alice@example.com/admin".parse().expect("recipient JID"),
                 role: Role::Participant,
@@ -8595,6 +8604,7 @@ mod group_dm_durable_reconciliation_tests {
         ] {
             actor
                 .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                     nick: nick.to_owned(),
                     real_jid,
                     role: Role::Participant,
@@ -8804,6 +8814,7 @@ mod group_dm_durable_reconciliation_tests {
         ] {
             actor
                 .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                     nick: nick.to_owned(),
                     real_jid,
                     role: Role::Participant,
@@ -8927,6 +8938,7 @@ mod group_dm_durable_reconciliation_tests {
             seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,
@@ -8961,6 +8973,7 @@ mod group_dm_durable_reconciliation_tests {
                         );
                         actor
                             .ask(Join {
+                                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                                 nick: "bob".to_owned(),
                                 real_jid: joiner.clone(),
                                 role: Role::Participant,
@@ -9038,6 +9051,7 @@ mod group_dm_durable_reconciliation_tests {
         .await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "owner".to_owned(),
                 real_jid: owner.clone(),
                 role: Role::Moderator,
@@ -9072,6 +9086,7 @@ mod group_dm_durable_reconciliation_tests {
                         );
                         actor
                             .ask(Join {
+                                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                                 nick: "bob".to_owned(),
                                 real_jid: joiner.clone(),
                                 role: Role::Participant,
@@ -9163,6 +9178,7 @@ mod group_dm_durable_reconciliation_tests {
         // read the seeded coordinates only after it.
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Moderator,
@@ -9302,6 +9318,7 @@ mod group_dm_durable_reconciliation_tests {
             seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,
@@ -9462,6 +9479,7 @@ mod group_dm_durable_reconciliation_tests {
             seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: caller.clone(),
                 role: Role::Participant,

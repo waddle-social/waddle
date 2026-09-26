@@ -236,6 +236,43 @@ impl OrderedRelayDeliveryBridge {
             };
         }
 
+        // Local binds take the socket gate before publishing their durable
+        // generation. Never await that gate while holding authority SHARE or
+        // the remote registration lock: a local binder can need both next.
+        let Some(mut bind_guard) = services.connection_registry.try_lock_bind(&msg.jid) else {
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::Busy,
+            };
+        };
+        let incumbent = bind_guard.incumbent();
+        if let Some(incumbent) = &incumbent {
+            if incumbent.generation != generation
+                && incumbent.state() != waddle_xmpp::registry::SocketCleanupState::Retired
+            {
+                bind_guard.retain_retirement(incumbent.generation);
+            }
+        }
+        if incumbent.as_ref().is_some_and(|incumbent| {
+            incumbent.state() == waddle_xmpp::registry::SocketCleanupState::Running
+                || services
+                    .connection_registry
+                    .is_owned_by(&msg.jid, &incumbent.entry.carbons_handle())
+        }) || !bind_guard.pending_retirements().is_empty()
+        {
+            self.schedule_local_incumbent_retirement(
+                services.clone(),
+                msg.jid.clone(),
+                generation,
+                bind_guard,
+            );
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::Busy,
+            };
+        }
+        // Retain the gate until the mirror is published, including when no
+        // local lifecycle exists. Conditional registry admission below still
+        // refuses an untracked incumbent instead of guessing it is retired.
+
         if let Some(displaced) = self
             .remote_owner_resources
             .lock()

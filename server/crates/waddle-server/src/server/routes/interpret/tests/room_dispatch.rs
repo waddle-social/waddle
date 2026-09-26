@@ -91,6 +91,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         .expect("create room");
     for (nick, real_jid) in [("alice", alice.clone()), ("bob", bob.clone())] {
         room.ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: nick.to_string(),
             real_jid,
             role: Role::Participant,
@@ -676,6 +677,7 @@ async fn assert_room_observer_planning(configuration: ObserverConfiguration, exp
         .await
         .expect("room");
     room.ask(Join {
+        session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         nick: "alice".to_owned(),
         real_jid: sender.clone(),
         role: Role::Participant,
