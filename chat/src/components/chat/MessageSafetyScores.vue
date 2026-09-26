@@ -4,15 +4,20 @@ import { Gauge } from "lucide-vue-next";
 import type { SafetyScores } from "@/lib/safety-scores/types";
 import {
   formatSafetyProbability,
-  orderedSafetyScores,
+  notableSafetyScores,
   safetyCategoryLabel,
+  safetyProbabilityBarClass,
   safetyProbabilityWidth,
+  safetyScoresSeverity,
   safetyScoresToggleLabel,
+  safetySeverityTextClass,
 } from "@/components/chat/message-safety-scores";
 
 // Server judgments fastened to a message (XEP-0422,
-// `urn:waddle:safety-scores:1`). Collapsed by default to a quiet chip in
-// the reactions row; the breakdown expands inline, matching the reply
+// `urn:waddle:safety-scores:1`). The parent only mounts this once a
+// content-safety category has crossed the notice threshold, so the chip is
+// always amber or red, never neutral. Collapsed by default to a quiet chip
+// in the reactions row; the breakdown expands inline, matching the reply
 // chip's disclosure idiom, so it works identically on touch and desktop.
 const props = defineProps<{
   scores: SafetyScores;
@@ -21,18 +26,23 @@ const props = defineProps<{
 
 const expanded = ref(false);
 const panelId = computed(() => `safety-scores-${props.messageId}`);
-const rows = computed(() => orderedSafetyScores(props.scores));
+const severity = computed(() => safetyScoresSeverity(props.scores) ?? "notice");
+const severityClass = computed(() => safetySeverityTextClass(severity.value));
+const toggleLabel = computed(() => safetyScoresToggleLabel(expanded.value, severity.value));
+const rows = computed(() => notableSafetyScores(props.scores));
 </script>
 
 <template>
   <div class="chat-safety-scores flex flex-col items-start gap-1">
     <button
       type="button"
-      class="chat-safety-scores__toggle type-caption inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-muted-foreground/70 transition-colors hover:bg-muted/50 hover:text-foreground"
+      class="chat-safety-scores__toggle type-caption inline-flex h-6 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-muted/50"
+      :class="severityClass"
+      :data-severity="severity"
       :aria-expanded="expanded"
       :aria-controls="panelId"
-      :aria-label="safetyScoresToggleLabel(expanded)"
-      :title="safetyScoresToggleLabel(expanded)"
+      :aria-label="toggleLabel"
+      :title="toggleLabel"
       @click="expanded = !expanded"
     >
       <Gauge class="h-3 w-3" aria-hidden="true" />
@@ -54,7 +64,8 @@ const rows = computed(() => orderedSafetyScores(props.scores));
           </span>
           <span class="h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
             <span
-              class="block h-full rounded-full bg-muted-foreground/45"
+              class="block h-full rounded-full"
+              :class="safetyProbabilityBarClass(score.probability)"
               :style="{ width: safetyProbabilityWidth(score.probability) }"
             />
           </span>
