@@ -49,16 +49,22 @@ struct MessageReactionsBar: View {
 
 /// One emoji with its count; highlighted when the account reacted.
 struct MessageReactionPill: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var taps = 0
     let reaction: ReactionGroup
     let onToggle: () -> Void
 
     var body: some View {
-        Button(action: onToggle) {
+        Button {
+            taps += 1
+            onToggle()
+        } label: {
             HStack(spacing: Theme.Spacing.xs) {
                 Text(reaction.emoji)
                 Text("\(reaction.count)")
                     .font(.caption.weight(.semibold).monospacedDigit())
                     .foregroundStyle(reaction.includesMine ? Color.accentColor : Color.secondary)
+                    .contentTransition(.numericText(value: Double(reaction.count)))
             }
             .padding(.horizontal, Theme.Spacing.s)
             .padding(.vertical, 3)
@@ -67,6 +73,9 @@ struct MessageReactionPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.25), value: reaction.count)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: reaction.includesMine)
+        .sensoryFeedback(.impact(weight: .light), trigger: taps)
         .help(reaction.reactors.joined(separator: ", "))
         .accessibilityLabel(Text(MessageAccessibilityText.label(for: reaction)))
         .accessibilityAddTraits(reaction.includesMine ? .isSelected : [])

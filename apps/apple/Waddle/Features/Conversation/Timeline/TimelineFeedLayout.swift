@@ -8,8 +8,9 @@ struct TimelineFeedEntry: Identifiable, Hashable {
     let item: TimelineItem
     /// Start of the day when a day separator precedes this row.
     let daySeparator: Date?
-    /// The "Unread" divider precedes this row.
-    let showsUnreadDivider: Bool
+    /// The "Unread" divider precedes this row, and which side of it the
+    /// unread rows are on.
+    let unreadDivider: TimelineUnreadDivider.Edge?
     /// First row of an author run: shows the avatar and name header.
     let startsGroup: Bool
     /// XEP-0201 replies in the thread rooted at this row.
@@ -19,28 +20,40 @@ struct TimelineFeedEntry: Identifiable, Hashable {
 }
 
 /// Derives day separators, author grouping and the unread divider from the
-/// ordered feed. Pure, so it runs once per timeline change.
+/// feed. Pure, so it runs once per timeline change.
+///
+/// `items` are oldest first. With `newestFirst` the entries come out
+/// newest first, as the social timeline shows them: each day's separator
+/// heads its newest row, an author run's header sits on its newest row,
+/// and the unread divider goes under the oldest unread row, since the
+/// unread rows are the ones above it.
 enum TimelineFeedLayout {
     static func entries(
         for items: [TimelineItem],
         unreadAnchorID: String?,
         groupingWindow: TimeInterval,
+        newestFirst: Bool = false,
         calendar: Calendar = .current,
         replyCount: (TimelineItem) -> Int = { _ in 0 },
         replyParent: (String) -> TimelineItem? = { _ in nil }
     ) -> [TimelineFeedEntry] {
+        let ordered: [TimelineItem] = newestFirst ? items.reversed() : items
+        let dividerID = unreadAnchorID.flatMap { anchor in
+            newestFirst ? rowAfter(anchor, in: ordered) : anchor
+        }
+        let edge: TimelineUnreadDivider.Edge = newestFirst ? .unreadAbove : .unreadBelow
         var entries: [TimelineFeedEntry] = []
-        entries.reserveCapacity(items.count)
+        entries.reserveCapacity(ordered.count)
         var previous: TimelineItem?
-        for item in items {
+        for item in ordered {
             let separator = daySeparator(before: item, previous: previous, calendar: calendar)
-            let unread = item.id == unreadAnchorID
+            let unread = item.id == dividerID
             let starts = separator != nil || unread
                 || !continuesGroup(item, after: previous, window: groupingWindow)
             entries.append(TimelineFeedEntry(
                 item: item,
                 daySeparator: separator,
-                showsUnreadDivider: unread,
+                unreadDivider: unread ? edge : nil,
                 startsGroup: starts,
                 replyCount: replyCount(item),
                 replyParent: item.message.reply.flatMap { replyParent($0.id) }
@@ -48,6 +61,14 @@ enum TimelineFeedLayout {
             previous = item
         }
         return entries
+    }
+
+    /// The row after `id`: in a newest-first feed, the newest row that was
+    /// already read. Nil when `id` is the last row loaded, so every loaded
+    /// row is unread and there is nothing to divide.
+    private static func rowAfter(_ id: String, in items: [TimelineItem]) -> String? {
+        guard let index = items.firstIndex(where: { $0.id == id }), index + 1 < items.count else { return nil }
+        return items[index + 1].id
     }
 
     static func daySeparator(before item: TimelineItem, previous: TimelineItem?, calendar: Calendar) -> Date? {

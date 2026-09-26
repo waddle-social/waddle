@@ -9,7 +9,7 @@ struct ComposerCard: View {
     @Binding var text: String
     @Binding var selection: Range<Int>?
     @Binding var showsFormatting: Bool
-    var isFocused: FocusState<Bool>.Binding
+    @Binding var isFocused: Bool
     let placeholder: String
     let showsMention: Bool
     let uploader: AttachmentUploader
@@ -31,7 +31,7 @@ struct ComposerCard: View {
                 text: $text,
                 selection: $selection,
                 placeholder: model.isEditing ? "Edit message" : placeholder,
-                isFocused: isFocused,
+                isFocused: $isFocused,
                 onSubmit: actions.submit,
                 onAcceptSuggestion: actions.acceptSuggestion,
                 onCancel: actions.cancelContext,
@@ -58,7 +58,7 @@ struct ComposerCard: View {
             RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
                 .strokeBorder(borderColor, lineWidth: 1)
         )
-        .animation(.easeInOut(duration: 0.18), value: isFocused.wrappedValue)
+        .animation(.easeInOut(duration: 0.18), value: isFocused)
     }
 
     @ViewBuilder
@@ -74,9 +74,9 @@ struct ComposerCard: View {
 
     private var borderColor: Color {
         #if os(iOS)
-        isFocused.wrappedValue ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.08)
+        isFocused ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.08)
         #else
-        isFocused.wrappedValue ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.2)
+        isFocused ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.2)
         #endif
     }
 }

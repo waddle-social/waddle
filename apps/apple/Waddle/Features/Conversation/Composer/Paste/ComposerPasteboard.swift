@@ -9,7 +9,9 @@ import UIKit
 
 /// Reads the system pasteboard through WaddleKit's `PastePlan`: a copied
 /// file, GIF or picture becomes an attachment; anything else pastes as
-/// text.
+/// text. On iOS, call `read()` only from a paste the person started (the
+/// edit menu's Paste or Cmd-V), which may read the pasteboard without the
+/// system's paste prompt.
 @MainActor
 enum ComposerPasteboard {
     /// Whether a paste now would attach something rather than paste text.
@@ -79,8 +81,11 @@ enum ComposerPasteboard {
         return items[index].data(forType: NSPasteboard.PasteboardType(identifier))
     }
     #else
+    /// Types only: unlike reading an item's values, this does not count as
+    /// reading the pasteboard, so checking for attachments (to offer Paste
+    /// in the edit menu) never asks the person for permission.
     private static func itemTypes() -> [[String]] {
-        UIPasteboard.general.items.map { Array($0.keys) }
+        UIPasteboard.general.types(forItemSet: nil) ?? []
     }
 
     private static func plainText() -> String? {

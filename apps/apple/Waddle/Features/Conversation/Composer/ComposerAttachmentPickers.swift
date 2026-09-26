@@ -9,6 +9,8 @@ struct ComposerAttachmentPickers: ViewModifier {
     @Binding var showsFileImporter: Bool
     @Binding var photoSelection: [PhotosPickerItem]
     let intake: ComposerAttachmentIntake
+    @State private var isDropTargeted = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
@@ -25,15 +27,40 @@ struct ComposerAttachmentPickers: ViewModifier {
                     intake.attachFiles(urls)
                 }
             }
-            .dropDestination(for: URL.self) { urls, _ in
-                let files = urls.filter(\.isFileURL)
-                intake.attachFiles(files)
-                return !files.isEmpty
+            .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted) { providers in
+                intake.attachDropped(providers)
             }
+            .overlay {
+                if isDropTargeted {
+                    ComposerDropHighlight()
+                        .transition(.opacity)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isDropTargeted)
             .onChange(of: photoSelection) { _, items in
                 guard !items.isEmpty else { return }
                 photoSelection = []
                 intake.attachPhotos(items)
             }
+    }
+}
+
+/// Shown over the composer while a file or picture is dragged over it.
+private struct ComposerDropHighlight: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
+            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+            .background(
+                RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.1))
+            )
+            .overlay {
+                Label("Drop to attach", systemImage: "paperclip")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .padding(Theme.Spacing.xs)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }

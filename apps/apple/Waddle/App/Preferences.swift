@@ -30,6 +30,32 @@ final class Preferences {
         }
     }
 
+    /// Where the newest message sits. `social` flips the timeline so the
+    /// newest message leads and the composer sits above it, as the web
+    /// client's "Newest at top" scroll direction does.
+    enum MessageOrder: String, CaseIterable, Identifiable {
+        case chat
+        case social
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .chat: return "Chat"
+            case .social: return "Social"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .chat: return "Newest at bottom"
+            case .social: return "Newest at top"
+            }
+        }
+
+        var isNewestFirst: Bool { self == .social }
+    }
+
     var appearance: Appearance {
         didSet { defaults.set(appearance.rawValue, forKey: Keys.appearance) }
     }
@@ -50,6 +76,10 @@ final class Preferences {
         didSet { defaults.set(compactMessages, forKey: Keys.compact) }
     }
 
+    var messageOrder: MessageOrder {
+        didSet { defaults.set(messageOrder.rawValue, forKey: Keys.messageOrder) }
+    }
+
     @ObservationIgnored private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -58,6 +88,7 @@ final class Preferences {
         sendsReadReceipts = defaults.object(forKey: Keys.readReceipts) as? Bool ?? true
         showsNotificationPreviews = defaults.object(forKey: Keys.previews) as? Bool ?? true
         compactMessages = defaults.object(forKey: Keys.compact) as? Bool ?? false
+        messageOrder = defaults.string(forKey: Keys.messageOrder).flatMap(MessageOrder.init(rawValue:)) ?? .chat
     }
 
     private enum Keys {
@@ -65,5 +96,6 @@ final class Preferences {
         static let readReceipts = "waddle.apple.read-receipts"
         static let previews = "waddle.apple.notification-previews"
         static let compact = "waddle.apple.compact-messages"
+        static let messageOrder = "waddle.apple.message-order"
     }
 }

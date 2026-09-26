@@ -30,6 +30,7 @@ struct ThreadScreen: View {
 
 private struct ThreadContent: View {
     @Environment(SessionCoordinator.self) private var session
+    @Environment(AppState.self) private var app
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var actions: MessageActionModel
 
@@ -52,35 +53,47 @@ private struct ThreadContent: View {
         let fetched = roomThread.flatMap { session.threadHistory.history(for: $0) }
         let root = ThreadLookup.root(rootID, in: timeline) ?? fetched?.root
         let replies = ThreadHistory.merged(live: timeline.threadReplies(threadID: rootID), fetched: fetched?.replies ?? [])
+        // The social order shows the newest reply first and the root,
+        // the oldest message, last.
+        let newestFirst = app.preferences.messageOrder.isNewestFirst
         let entries = TimelineFeedLayout.entries(
             for: (root.map { [$0] } ?? []) + replies,
             unreadAnchorID: nil,
             groupingWindow: Theme.groupingWindow,
+            newestFirst: newestFirst,
             replyParent: { timeline.item(withID: $0) }
         )
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if root == nil {
+                    if root == nil, !newestFirst {
                         missingRoot
                     }
                     ForEach(entries) { entry in
-                        MessageRow(entry: entry, showsThreadChip: false)
-                            .id(entry.id)
-                        if entry.id == root?.id {
+                        let isRoot = entry.id == root?.id
+                        if isRoot, newestFirst {
                             ThreadRepliesDivider(count: replies.count)
                         }
+                        MessageRow(entry: entry, showsThreadChip: false)
+                            .id(entry.id)
+                        if isRoot, !newestFirst {
+                            ThreadRepliesDivider(count: replies.count)
+                        }
+                    }
+                    if root == nil, newestFirst {
+                        missingRoot
                     }
                 }
                 .frame(maxWidth: Theme.Size.readableWidth)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, Theme.Spacing.s)
             }
-            .defaultScrollAnchor(.bottom)
+            .defaultScrollAnchor(newestFirst ? UnitPoint.top : UnitPoint.bottom)
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: replies.last?.id) { _, last in
                 guard let last else { return }
                 withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) {
-                    proxy.scrollTo(last, anchor: .bottom)
+                    proxy.scrollTo(last, anchor: newestFirst ? UnitPoint.top : UnitPoint.bottom)
                 }
             }
             .onChange(of: actions.scrollRequest) { _, target in
@@ -92,13 +105,15 @@ private struct ThreadContent: View {
                 actions.highlight(target)
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if app.preferences.messageOrder.isNewestFirst {
+                replyComposer
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ConversationComposer(
-                model: composer,
-                conversation: conversation,
-                thread: rootID,
-                placeholder: "Reply in thread"
-            )
+            if !app.preferences.messageOrder.isNewestFirst {
+                replyComposer
+            }
         }
         .navigationTitle("Thread")
         #if os(iOS)
@@ -115,6 +130,15 @@ private struct ThreadContent: View {
                 session.closeThread(roomThread)
             }
         }
+    }
+
+    private var replyComposer: some View {
+        ConversationComposer(
+            model: composer,
+            conversation: conversation,
+            thread: rootID,
+            placeholder: "Reply in thread"
+        )
     }
 
     /// Room threads have their own inbox row and a MAM thread filter;

@@ -7,58 +7,115 @@ enum ComposerSuggestionKey {
     case returnKey
 }
 
-/// Multi-line field. On Mac, Return sends, Shift or Option with Return
-/// adds a line, Tab or Return accepts the first suggestion, and pasting
-/// files or images attaches them. Escape cancels an edit or reply
-/// everywhere a hardware keyboard is attached.
+/// Multi-line field. Return sends on a hardware keyboard (the on-screen
+/// keyboard's Return adds a line), Shift or Option with Return adds a
+/// line, Tab or Return accepts the first suggestion, Escape cancels an
+/// edit or reply, and pasting files or images attaches them.
 ///
-/// On iOS 18 and macOS 15 the field reports its selection (as Unicode
-/// scalar offsets) so formatting wraps the selected text; on earlier
-/// systems `selection` stays nil and formatting wraps the whole draft.
+/// The field reports its selection (as Unicode scalar offsets) so
+/// formatting wraps the selected text; on macOS before 15 `selection`
+/// stays nil and formatting wraps the whole draft.
 struct ComposerTextField: View {
     @Binding var text: String
     @Binding var selection: Range<Int>?
     let placeholder: String
-    var isFocused: FocusState<Bool>.Binding
+    /// Kept in step with the system's focus both ways.
+    @Binding var isFocused: Bool
     let onSubmit: () -> Void
     /// Returns true when a suggestion was inserted.
     let onAcceptSuggestion: (ComposerSuggestionKey) -> Bool
     /// Returns true when an edit or reply was cancelled.
     let onCancel: () -> Bool
-    /// A paste the field cannot take as text (Mac only).
+    /// A paste the field cannot take as text: a copied file, GIF or picture.
     let onPaste: () -> Void
+
+    var body: some View {
+        #if os(iOS)
+        ComposerTextView(
+            text: $text,
+            selection: $selection,
+            isFocused: $isFocused,
+            placeholder: placeholder,
+            onSubmit: onSubmit,
+            onAcceptSuggestion: onAcceptSuggestion,
+            onCancel: onCancel,
+            onPasteAttachments: onPaste
+        )
+        .overlay(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .font(.body)
+                    .foregroundStyle(Color(uiColor: .placeholderText))
+                    .lineLimit(1)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.vertical, Theme.Spacing.xs + 2)
+        #else
+        MacComposerTextField(
+            text: $text,
+            selection: $selection,
+            placeholder: placeholder,
+            isFocused: $isFocused,
+            onSubmit: onSubmit,
+            onAcceptSuggestion: onAcceptSuggestion,
+            onCancel: onCancel,
+            onPaste: onPaste
+        )
+        #endif
+    }
+}
+
+#if os(macOS)
+/// The Mac field: SwiftUI's text field, with Cmd-V of a file or image
+/// taken by `ComposerPasteKeyMonitor` before AppKit's field editor.
+private struct MacComposerTextField: View {
+    @Binding var text: String
+    @Binding var selection: Range<Int>?
+    let placeholder: String
+    @Binding var isFocused: Bool
+    let onSubmit: () -> Void
+    let onAcceptSuggestion: (ComposerSuggestionKey) -> Bool
+    let onCancel: () -> Bool
+    let onPaste: () -> Void
+
+    @FocusState private var focus: Bool
 
     var body: some View {
         field
             .textFieldStyle(.plain)
             .lineLimit(1...8)
             .font(.body)
-            .focused(isFocused)
+            .focused($focus)
             .padding(.vertical, Theme.Spacing.xs + 2)
-            #if os(macOS)
             .onKeyPress(.return, phases: .down) { press in
                 handleReturn(press)
             }
             .onKeyPress(.tab, phases: .down) { _ in
                 onAcceptSuggestion(.tab) ? .handled : .ignored
             }
-            .modifier(ComposerPasteKeyMonitor(isFocused: isFocused.wrappedValue, onPaste: onPaste))
-            #endif
+            .modifier(ComposerPasteKeyMonitor(isFocused: focus, onPaste: onPaste))
             .onKeyPress(.escape) {
                 onCancel() ? .handled : .ignored
+            }
+            .onChange(of: focus) { _, focused in
+                if isFocused != focused { isFocused = focused }
+            }
+            .onChange(of: isFocused, initial: true) { _, wanted in
+                if focus != wanted { focus = wanted }
             }
     }
 
     @ViewBuilder
     private var field: some View {
-        if #available(iOS 18.0, macOS 15.0, *) {
+        if #available(macOS 15.0, *) {
             ComposerSelectableField(text: $text, selection: $selection, placeholder: placeholder)
         } else {
             TextField(placeholder, text: $text, axis: .vertical)
         }
     }
 
-    #if os(macOS)
     private func handleReturn(_ press: KeyPress) -> KeyPress.Result {
         // Option-Return is the text system's own newline, inserted at the
         // caret; let it through.
@@ -79,7 +136,6 @@ struct ComposerTextField: View {
         onSubmit()
         return .handled
     }
-    #endif
 }
 
 /// The text field with its own `TextSelection`, bridged to the composer's
@@ -93,7 +149,7 @@ struct ComposerTextField: View {
 /// reports `text` and `selection` separately, and a render between the
 /// two would otherwise push the previous keystroke's caret back into the
 /// field, so the next character lands before the last one.
-@available(iOS 18.0, macOS 15.0, *)
+@available(macOS 15.0, *)
 private struct ComposerSelectableField: View {
     @Binding var text: String
     @Binding var selection: Range<Int>?
@@ -161,3 +217,4 @@ private struct ComposerSelectableField: View {
         selection = range
     }
 }
+#endif

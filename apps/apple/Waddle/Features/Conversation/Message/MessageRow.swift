@@ -12,8 +12,8 @@ struct MessageRow: View {
             if let day = entry.daySeparator {
                 TimelineDaySeparator(day: day)
             }
-            if entry.showsUnreadDivider {
-                TimelineUnreadDivider()
+            if let edge = entry.unreadDivider {
+                TimelineUnreadDivider(edge: edge)
             }
             MessageRowContent(entry: entry, showsThreadChip: showsThreadChip)
         }
@@ -26,6 +26,7 @@ private struct MessageRowContent: View {
     @Environment(AppState.self) private var app
     @Environment(NavigationModel.self) private var navigation
     @Environment(MessageActionModel.self) private var actions
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
     @State private var imagePreviewFile: SharedFile?
     @State private var isImagePreviewPresented = false
@@ -71,7 +72,9 @@ private struct MessageRowContent: View {
         .padding(.top, topPadding)
         .padding(.bottom, Theme.Spacing.xxs)
         .background(background)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: actions.highlightedID == item.id)
         .contentShape(Rectangle())
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
         .onHover { isHovering = $0 }
         .contextMenu {
             MessageContextMenu(item: item, session: session, actions: actions, openThread: openThread)

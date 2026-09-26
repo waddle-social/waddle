@@ -26,6 +26,7 @@ private struct SettingsTabs: View {
         TabView {
             SettingsTabForm {
                 SettingsAppearanceSection(preferences: app.preferences)
+                SettingsMessageOrderSection(preferences: app.preferences)
                 SettingsPrivacySection(preferences: app.preferences)
                 SettingsAboutSection()
             }
@@ -68,6 +69,7 @@ private struct SettingsForm: View {
     var body: some View {
         Form {
             SettingsAppearanceSection(preferences: app.preferences)
+            SettingsMessageOrderSection(preferences: app.preferences)
             SettingsNotificationsSection(
                 preferences: app.preferences,
                 pushRegistrationStatus: app.pushRegistrationStatus,
