@@ -34,7 +34,8 @@ fn live_fastening_maps_every_score() {
                <score category='safety:harassment' probability='0.02' taxonomy-version='safety-harassment-v1'/>\
                <score category='safety:violence' probability='0.0' taxonomy-version='safety-violence-v1'/>\
                <score category='safety:self_harm' probability='0.0' taxonomy-version='safety-self-harm-v1'/>\
-               <score category='safety:spam' probability='0.5' taxonomy-version='safety-spam-v1'/>\
+               <score category='safety:spam_scam' probability='0.04' taxonomy-version='safety-spam-scam-v1'/>\
+               <score category='safety:future' probability='0.5' taxonomy-version='safety-future-v1'/>\
              </safety-scores>\
            </apply-to>\
          </message>",
@@ -67,6 +68,7 @@ fn live_fastening_maps_every_score() {
             ),
             score(WaddleSafetyCategory::Violence, 0.0, "safety-violence-v1"),
             score(WaddleSafetyCategory::SelfHarm, 0.0, "safety-self-harm-v1"),
+            score(WaddleSafetyCategory::SpamScam, 0.04, "safety-spam-scam-v1"),
         ]
     );
 }

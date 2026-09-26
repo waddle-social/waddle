@@ -192,6 +192,7 @@ pub enum WaddleSafetyCategory {
     Harassment,
     Violence,
     SelfHarm,
+    SpamScam,
 }
 
 /// One XEP-0359 `<stanza-id/>` entry. Mirrors the core `StanzaId`

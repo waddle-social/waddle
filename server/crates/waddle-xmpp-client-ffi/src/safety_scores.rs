@@ -46,5 +46,6 @@ fn safety_category_to_ffi(category: SafetyCategory) -> WaddleSafetyCategory {
         SafetyCategory::Harassment => WaddleSafetyCategory::Harassment,
         SafetyCategory::Violence => WaddleSafetyCategory::Violence,
         SafetyCategory::SelfHarm => WaddleSafetyCategory::SelfHarm,
+        SafetyCategory::SpamScam => WaddleSafetyCategory::SpamScam,
     }
 }

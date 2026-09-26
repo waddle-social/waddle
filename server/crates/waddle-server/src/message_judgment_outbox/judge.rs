@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use super::store::{
     IS_QUESTION_JUDGMENT_NAME, SAFETY_EXPLICIT_JUDGMENT_NAME, SAFETY_HARASSMENT_JUDGMENT_NAME,
     SAFETY_HATE_SPEECH_JUDGMENT_NAME, SAFETY_SELF_HARM_JUDGMENT_NAME,
-    SAFETY_VIOLENCE_JUDGMENT_NAME,
+    SAFETY_SPAM_SCAM_JUDGMENT_NAME, SAFETY_VIOLENCE_JUDGMENT_NAME,
 };
 
 /// The fixed, closed set of judgment categories this outbox asks about a
@@ -29,6 +29,7 @@ pub enum JudgmentKind {
     SafetyHarassment,
     SafetyViolence,
     SafetySelfHarm,
+    SafetySpamScam,
 }
 
 impl JudgmentKind {
@@ -43,6 +44,7 @@ impl JudgmentKind {
             JudgmentKind::SafetyHarassment => SAFETY_HARASSMENT_JUDGMENT_NAME,
             JudgmentKind::SafetyViolence => SAFETY_VIOLENCE_JUDGMENT_NAME,
             JudgmentKind::SafetySelfHarm => SAFETY_SELF_HARM_JUDGMENT_NAME,
+            JudgmentKind::SafetySpamScam => SAFETY_SPAM_SCAM_JUDGMENT_NAME,
         }
     }
 }

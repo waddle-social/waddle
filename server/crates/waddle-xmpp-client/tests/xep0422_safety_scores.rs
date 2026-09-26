@@ -34,6 +34,7 @@ const FULL_BATCH: &str = r#"<message xmlns='jabber:client' from='room@conference
       <score category='safety:harassment' probability='0.02' taxonomy-version='safety-harassment-v1'/>
       <score category='safety:violence' probability='0.0' taxonomy-version='safety-violence-v1'/>
       <score category='safety:self_harm' probability='0.0' taxonomy-version='safety-self-harm-v1'/>
+      <score category='safety:spam_scam' probability='0.04' taxonomy-version='safety-spam-scam-v1'/>
     </safety-scores>
   </apply-to>
 </message>"#;
@@ -123,6 +124,7 @@ fn parses_every_category_of_a_full_batch() {
             (SafetyCategory::Harassment, 0.02, "safety-harassment-v1"),
             (SafetyCategory::Violence, 0.0, "safety-violence-v1"),
             (SafetyCategory::SelfHarm, 0.0, "safety-self-harm-v1"),
+            (SafetyCategory::SpamScam, 0.04, "safety-spam-scam-v1"),
         ]
     );
 }
@@ -136,11 +138,12 @@ fn category_tokens_round_trip_the_server_judgment_names() {
         (SafetyCategory::Harassment, "safety:harassment"),
         (SafetyCategory::Violence, "safety:violence"),
         (SafetyCategory::SelfHarm, "safety:self_harm"),
+        (SafetyCategory::SpamScam, "safety:spam_scam"),
     ] {
         assert_eq!(category.as_wire(), token);
         assert_eq!(SafetyCategory::from_wire(token), Some(category));
     }
-    assert_eq!(SafetyCategory::from_wire("safety:spam"), None);
+    assert_eq!(SafetyCategory::from_wire("safety:future"), None);
 }
 
 #[test]
@@ -172,7 +175,7 @@ fn unknown_categories_are_skipped_not_fatal() {
     let scores = applied(
         "<apply-to xmlns='urn:xmpp:fasten:0' id='stanza-1'>
            <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='m1'>
-             <score category='safety:spam' probability='0.5' taxonomy-version='safety-spam-v1'/>
+             <score category='safety:future' probability='0.5' taxonomy-version='safety-future-v1'/>
              <score category='is_question' probability='0.4' taxonomy-version='is-question-v1'/>
            </safety-scores>
          </apply-to>",
@@ -186,7 +189,7 @@ fn a_batch_of_only_unknown_categories_is_still_a_batch() {
     let scores = applied(
         "<apply-to xmlns='urn:xmpp:fasten:0' id='stanza-1'>
            <safety-scores xmlns='urn:waddle:safety-scores:1' model-version='m1'>
-             <score category='safety:spam' probability='0.5' taxonomy-version='safety-spam-v1'/>
+             <score category='safety:future' probability='0.5' taxonomy-version='safety-future-v1'/>
            </safety-scores>
          </apply-to>",
     );
