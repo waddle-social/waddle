@@ -281,8 +281,9 @@ describe("HomeDashboard activity rendering", () => {
       ],
     });
 
-    // SSR leaves fragment markers inside the heading; compare text only.
-    const text = html.replace(/<!--[^>]*-->/g, "");
+    // SSR leaves Vue fragment markers inside the heading; drop exactly
+    // those two markers and compare the text around them.
+    const text = html.split("<!--[-->").join("").split("<!--]-->").join("");
     expect(text).toContain("2 around");
     expect(text).not.toContain("in a huddle");
     expect(text).toContain("<strong>2</strong> friends online");
