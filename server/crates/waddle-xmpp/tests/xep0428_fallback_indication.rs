@@ -406,7 +406,7 @@ fn xep_0428_set_fallback_payloads_replaces_existing_indications() {
     );
 }
 
-// ── strip_fallback_ranges UTF-16 model ────────────────────────────────────
+// ── strip_fallback_ranges Unicode code-point model ────────────────────────────────────
 
 #[test]
 fn xep_0428_strip_fallback_ranges_drops_specified_substrings() {
@@ -419,14 +419,14 @@ fn xep_0428_strip_fallback_ranges_drops_specified_substrings() {
 
 #[test]
 fn xep_0428_strip_fallback_ranges_handles_overlapping_and_non_bmp() {
-    // "👋 hi\n\n" is a 7-UTF-16-unit prefix (surrogate pair counts as 2).
+    // "👋 hi\n\n" is six Unicode code points; the emoji counts as one.
     let body = "👋 hi\n\nreply";
-    let prefix_units = "👋 hi\n\n".encode_utf16().count();
+    let prefix_points = "👋 hi\n\n".chars().count();
     let stripped = strip_fallback_ranges(
         body,
         &[FallbackRange {
             start: 0,
-            end: prefix_units,
+            end: prefix_points,
         }],
     );
     assert_eq!(stripped, "reply");
@@ -469,4 +469,22 @@ fn xep_0428_empty_range_list_canonicalises_to_whole_body() {
     let indication =
         FallbackIndication::for_ranges("urn:xmpp:sfs:0", std::iter::empty::<FallbackRange>());
     assert_eq!(indication.body, Some(FallbackRegion::Whole));
+}
+
+#[test]
+fn xep_0428_ranges_count_each_code_point_and_union_overlaps() {
+    assert_eq!(
+        strip_fallback_ranges("a🙂e\u{301}z", &[FallbackRange { start: 1, end: 2 }]),
+        "ae\u{301}z"
+    );
+    assert_eq!(
+        strip_fallback_ranges(
+            "a🙂e\u{301}z",
+            &[
+                FallbackRange { start: 1, end: 3 },
+                FallbackRange { start: 2, end: 4 }
+            ],
+        ),
+        "az"
+    );
 }
