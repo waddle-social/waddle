@@ -34,7 +34,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Reactions | 0444 | 🟡 | ✅ | XEP-0444 replace-set semantics, room-assigned ids only in rooms. Baseline: rendered, never sent |
 | Safety scores | 0422 | ❌ | 🟡 | Receives the room's `urn:waddle:safety-scores:1` fastening (room-assigned ids only; only the bare room JID may set them; latest wins; `clear='true'` removes) and shows a gauge on scored rows that opens the per-category breakdown. Inert until the server broadcasts scores (#1831); 1:1 fastenings are ignored until the contract names a trusted DM sender |
 | Replies | 0461, 0428 | ✅ | ✅ | Reply ids follow XEP-0461 (room-assigned ids in rooms) |
-| Threads | 0201 | 🟡 | ✅ | Thread panel (inspector on iPad/Mac), reply counts |
+| Threads | 0201 | 🟡 | ✅ | Thread panel (inspector on iPad/Mac), reply counts; room threads load their replies with the Waddle MAM thread filter, keep their own unread row, and are marked read when opened |
 | Delivery acks | 0198 | ❌ | ✅ | Sending / queued / sent / acknowledged / failed with retry and discard; unsent and unconfirmed messages survive the app being killed and resend with the same origin-id. Baseline: acks were logged and dropped |
 | Typing / chat states | 0085 | 🟡 | ✅ | Sent with pause timeout; received with expiry. Baseline: received; `sendChatState` was an empty stub |
 | Read markers + sync | 0333, 0490 | ❌ | ✅ | XEP-0333 (room ids, 1:1 @id when requested) and XEP-0490 cursors. Baseline: `sendDisplayedMarker` was an empty stub |
@@ -49,6 +49,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Nick colors | 0392 | ❌ | ✅ | Shared Rust hue, HSL 55%/45% like web |
 | Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications |
 | Inbox / unread counts | 0430 | ❌ | ✅ | Server-authoritative with read-clear barrier; mention badges; app badge. Baseline: unread counts were hardcoded to 0 |
+| Unread overview (Activity) | 0430, 0313 | ❌ | 🟡 | iPhone Activity tab matches web `/unread`: rooms with unread room or thread rows, newest first, with their unread messages and unread thread replies (Waddle MAM thread filter); pull to refresh; mark all read on the server, room and thread rows. iPad/Mac have no Activity surface yet |
 | Room create | 0045 | ❌ | ✅ | Baseline: `createChannel` was a stub returning nil |
 | Slash commands | 0050, 0004 | ❌ | ✅ | Built-ins (`/me`, `/shrug`, `/giphy`, `/away`, `/active`, `/dnd`) plus server extension commands discovered over XEP-0050 at session start; popover completion, inline single-field execution, XEP-0004 form sheet for multi-step commands |
 | Composer | 0394, 0372 | 🟡 | ✅ | Slack-style card: `+` menu (photo, file, GIF), `Aa` formatting bar (bold, italic, strikethrough, code, code block, quote as XEP-0394 markup; links inserted as bare URLs), emoji, `@` and `/` buttons, send |

@@ -403,6 +403,8 @@ struct Actor {
     device: String,
     username: String,
     resource: String,
+    #[serde(default, rename = "startDisconnected")]
+    start_disconnected: bool,
     #[serde(rename = "bareJid")]
     bare_jid: String,
     jid: String,
@@ -1081,6 +1083,14 @@ fn known_xep_evidence_rules() -> BTreeSet<&'static str> {
 
 fn scenario_xep_evidence(scenario: &Scenario) -> BTreeSet<&'static str> {
     let mut evidence = BTreeSet::new();
+    if scenario
+        .users
+        .values()
+        .flat_map(|user| user.devices.values())
+        .any(|actor| actor.start_disconnected)
+    {
+        evidence.insert("XEP-0160");
+    }
     for step in &scenario.steps {
         add_step_xep_evidence(step, &mut evidence);
     }
@@ -1735,6 +1745,9 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
 
     for user in scenario.users.values() {
         for actor in user.devices.values() {
+            if actor.start_disconnected {
+                continue;
+            }
             let password = account_password(&accounts, &admin_password, &actor.username)?;
             let client = WsXmppClient::connect_and_auth(
                 &ws_url,

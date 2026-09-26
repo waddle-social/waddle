@@ -135,7 +135,7 @@ struct ReviewRegressionTests {
         let (coordinator, _) = online()
         coordinator.route(roomMessage("old", from: "bob", stanzaID: "s1"))
         coordinator.handle(.disconnected)
-        coordinator.handle(.inboxPush(InboxEntry(partner: room, kind: .room, lastStanzaID: "s30", lastUpdated: 30, unread: 20, preview: nil, threadID: nil)))
+        coordinator.handle(.inboxPush(InboxEntry(partner: room, kind: .room, lastStanzaID: "s30", lastUpdated: 30, unread: 20, preview: nil)))
         coordinator.applyDisplayedCursor(DisplayedCursor(conversation: room, stanzaID: "s1", stanzaIDBy: room))
         #expect(coordinator.unread.count(for: roomConversation) == 20)
     }

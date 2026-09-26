@@ -125,7 +125,20 @@ public struct InboxEntry: Hashable, Sendable {
     public let lastUpdated: Int64?
     public let unread: Int
     public let preview: String?
-    public let threadID: String?
+    /// Set on a room-thread row, which the server keeps beside the room's.
+    public let thread: Thread?
+
+    /// A thread row's identity: the XEP-0201 thread id and the Waddle
+    /// `thread-title`, the thread root's text.
+    public struct Thread: Hashable, Sendable {
+        public let id: String
+        public let title: String?
+
+        public init(id: String, title: String?) {
+            self.id = id
+            self.title = title
+        }
+    }
 
     public init(
         partner: BareJID,
@@ -134,7 +147,7 @@ public struct InboxEntry: Hashable, Sendable {
         lastUpdated: Int64?,
         unread: Int,
         preview: String?,
-        threadID: String?
+        thread: Thread? = nil
     ) {
         self.partner = partner
         self.kind = kind
@@ -142,7 +155,23 @@ public struct InboxEntry: Hashable, Sendable {
         self.lastUpdated = lastUpdated
         self.unread = unread
         self.preview = preview
-        self.threadID = threadID
+        self.thread = thread
+    }
+
+    public var threadID: String? { thread?.id }
+    public var threadTitle: String? { thread?.title }
+
+    /// The same row with a different unread count.
+    public func withUnread(_ unread: Int) -> InboxEntry {
+        InboxEntry(
+            partner: partner,
+            kind: kind,
+            lastStanzaID: lastStanzaID,
+            lastUpdated: lastUpdated,
+            unread: unread,
+            preview: preview,
+            thread: thread
+        )
     }
 
     public var lastUpdatedDate: Date? {

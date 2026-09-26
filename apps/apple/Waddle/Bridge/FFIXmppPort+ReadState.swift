@@ -13,6 +13,18 @@ extension FFIXmppPort {
         return try Self.checked(page)
     }
 
+    func fetchThreadHistory(in room: BareJID, threadID: String, before cursor: String?, max: Int) async throws -> ArchivePage {
+        let page = try await mappingPortErrors {
+            try await client.fetchRoomThreadHistory(
+                roomJid: room.description,
+                threadId: threadID,
+                maxMessages: UInt32(clamping: max),
+                beforeId: cursor
+            )
+        }
+        return FFIInbound.archivePage(page)
+    }
+
     func searchHistory(of conversation: ConversationID, query: String, max: Int) async throws -> ArchivePage {
         let jid = conversation.jid.description
         let limit = UInt32(clamping: max)

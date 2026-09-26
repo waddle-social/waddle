@@ -12,6 +12,9 @@ scenario: #Scenario & {
 			domain:   scenario.domain
 		}
 		bob: devices: phone: #Actor & {
+			// A close acknowledgement precedes routing cleanup, so disconnecting
+			// an initially connected actor cannot establish offline intake.
+			startDisconnected: true
 			user:     "bob"
 			device:   "phone"
 			username: "bob"
@@ -24,7 +27,6 @@ scenario: #Scenario & {
 	let bobPhone = users.bob.devices.phone
 
 	steps: [
-		#DisconnectActor & {actor: bobPhone},
 		#SendMessage & {
 			from:  alicePhone
 			toJid: bobPhone.bareJid

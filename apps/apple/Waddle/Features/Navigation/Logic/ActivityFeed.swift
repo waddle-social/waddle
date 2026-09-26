@@ -1,69 +1,47 @@
 import Foundation
 import WaddleKit
 
-/// A conversation that needs attention.
-struct ActivityEntry: Identifiable, Hashable {
-    let conversation: ConversationID
-    let title: String
-    let unread: Int
-    let isMention: Bool
-    /// Newest known activity; nil when nothing is loaded yet.
-    let recency: Date?
+/// What the Activity overview depends on: room and thread unread counts
+/// and whether the session can fetch. A change re-runs its refresh.
+struct ActivityRefreshKey: Hashable {
+    let rooms: [ConversationID: Int]
+    let threads: [ThreadKey: Int]
+    let isOnline: Bool
 
-    var id: ConversationID { conversation }
+    @MainActor
+    init(session: SessionCoordinator) {
+        rooms = session.unread.counts.filter { $0.key.isRoom }
+        threads = session.unread.threadCounts
+        isOnline = session.connection == .online
+    }
 }
 
-/// Mentions first, then other unread conversations, each most recent
-/// first.
-struct ActivityFeed: Equatable {
-    var mentions: [ActivityEntry]
-    var unread: [ActivityEntry]
-
-    var isEmpty: Bool { mentions.isEmpty && unread.isEmpty }
-
-    /// Every conversation "Mark all as read" should clear.
-    var conversations: [ConversationID] {
-        (mentions + unread).map(\.conversation)
+/// VoiceOver copy for Activity rows.
+enum ActivityCopy {
+    static func groupLabel(_ group: UnreadOverviewGroup) -> String {
+        var parts = [group.title]
+        if group.unread > 0 {
+            parts.append(group.unread == 1 ? "1 unread" : "\(group.unread) unread")
+        }
+        if group.mentionsMe {
+            parts.append("mentions you")
+        }
+        let threads = group.threads.count
+        if threads > 0 {
+            parts.append(threads == 1 ? "1 thread with replies" : "\(threads) threads with replies")
+        }
+        return parts.joined(separator: ", ")
     }
 
-    static func build(
-        counts: [ConversationID: Int],
-        mentions: Set<ConversationID>,
-        recency: (ConversationID) -> Date?,
-        title: (ConversationID) -> String
-    ) -> ActivityFeed {
-        let unreadIDs = counts.filter { $0.value > 0 }.map(\.key)
-        let all = Set(unreadIDs).union(mentions)
-        let entries = all.map { conversation in
-            ActivityEntry(
-                conversation: conversation,
-                title: title(conversation),
-                unread: counts[conversation] ?? 0,
-                isMention: mentions.contains(conversation),
-                recency: recency(conversation)
-            )
-        }
-        let ordered = entries.sorted(by: isOrderedBefore)
-        return ActivityFeed(
-            mentions: ordered.filter(\.isMention),
-            unread: ordered.filter { !$0.isMention }
-        )
+    static func threadLabel(_ thread: UnreadOverviewThread) -> String {
+        let replies = thread.unread == 1 ? "1 unread reply" : "\(thread.unread) unread replies"
+        return "Thread \(thread.title), \(replies)"
     }
 
-    /// Newest first; unknown recency last; then by title for stability.
-    static func isOrderedBefore(_ lhs: ActivityEntry, _ rhs: ActivityEntry) -> Bool {
-        switch (lhs.recency, rhs.recency) {
-        case let (left?, right?) where left != right:
-            return left > right
-        case (.some, nil):
-            return true
-        case (nil, .some):
-            return false
-        default:
-            let left = lhs.title.lowercased()
-            let right = rhs.title.lowercased()
-            if left != right { return left < right }
-            return lhs.conversation.description < rhs.conversation.description
-        }
+    static func messageLabel(_ item: TimelineItem, isThreadReply: Bool) -> String {
+        let content = RowPreview.content(of: item) ?? ""
+        let time = ListTimestamp.string(for: item.sentAt)
+        let prefix = isThreadReply ? "Reply from" : "From"
+        return "\(prefix) \(item.authorName), \(time): \(content)"
     }
 }

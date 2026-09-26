@@ -6,9 +6,10 @@
 //! [`MamPage`] when the server signals completion via `<fin/>`.
 
 use chrono::{DateTime, Utc};
+use jid::BareJid;
 use minidom::Element;
 use waddle_xmpp_core::mam::{
-    DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, STANZA_ID_FILTER_FIELD,
+    ThreadId, DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, STANZA_ID_FILTER_FIELD,
     WADDLE_MAM_THREAD_FIELD,
 };
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId as StableStanzaId, NS_SID as XEP0359_NS};
@@ -137,6 +138,17 @@ pub trait MamExt {
         before: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 
+    /// Fetch one room thread's archived replies: the room archive filtered
+    /// by the Waddle MAM thread field. `before = None` requests the newest
+    /// page, like [`MamExt::fetch_room_history`].
+    fn fetch_room_history_by_thread<'a>(
+        &'a self,
+        room: &'a BareJid,
+        thread: &'a ThreadId,
+        max: u32,
+        before: Option<&'a ArchivedMessageId>,
+    ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
+
     /// Full-text search of a MUC room archive via the XEP-0313 extended
     /// form field `{urn:xmpp:fulltext:0}fulltext` (Clark notation per
     /// XEP-0068). Returns the newest matching page first.
@@ -184,6 +196,20 @@ impl MamExt for ClientHandle {
         let iq_id = Uuid::new_v4().to_string();
 
         let iq = build_mam_iq(&iq_id, &query_id, max, before, Some(peer_jid), None);
+        run_mam_query(self, iq, &query_id).await
+    }
+
+    async fn fetch_room_history_by_thread(
+        &self,
+        room: &BareJid,
+        thread: &ThreadId,
+        max: u32,
+        before: Option<&ArchivedMessageId>,
+    ) -> ClientResult<MamPage> {
+        let query_id = Uuid::new_v4().to_string();
+        let iq_id = Uuid::new_v4().to_string();
+
+        let iq = build_room_thread_history_iq(&iq_id, &query_id, max, room, thread, before);
         run_mam_query(self, iq, &query_id).await
     }
 
@@ -410,6 +436,25 @@ pub fn build_mam_iq(
         builder = builder.to_jid(value);
     }
     builder.build()
+}
+
+/// Build a thread-filtered room-archive query IQ: targets the room archive
+/// (`to=room`) with the Waddle MAM thread field. A missing cursor becomes an
+/// empty `<before/>`, which XEP-0059 §2.5 reads as "the last page", so the
+/// newest replies come back first; omitting it would return the oldest page.
+pub fn build_room_thread_history_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    room: &BareJid,
+    thread: &ThreadId,
+    before: Option<&ArchivedMessageId>,
+) -> Element {
+    MamIqBuilder::new(iq_id, query_id, max)
+        .to_jid(room.as_str())
+        .thread_id(thread.as_str())
+        .before(before.map_or("", ArchivedMessageId::as_str))
+        .build()
 }
 
 /// Build a full-text room-archive search IQ: targets the room archive

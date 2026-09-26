@@ -71,6 +71,9 @@ public protocol MessagingPort: AnyObject, Sendable {
 /// failure is never mistaken for an empty archive.
 public protocol ArchivePort: AnyObject, Sendable {
     func fetchHistory(of conversation: ConversationID, before cursor: String?, max: Int) async throws -> ArchivePage
+    /// One room thread's replies: the room archive filtered by the Waddle
+    /// MAM thread field, newest page first when `cursor` is nil.
+    func fetchThreadHistory(in room: BareJID, threadID: String, before cursor: String?, max: Int) async throws -> ArchivePage
     func searchHistory(of conversation: ConversationID, query: String, max: Int) async throws -> ArchivePage
 }
 
