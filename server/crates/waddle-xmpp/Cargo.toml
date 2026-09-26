@@ -96,6 +96,7 @@ tracing-opentelemetry = { workspace = true }
 serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
+waddle-xmpp-client = { path = "../waddle-xmpp-client" }
 mockito = "1.7"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }

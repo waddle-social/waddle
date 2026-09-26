@@ -7895,6 +7895,7 @@ dependencies = [
  "uuid",
  "waddle-extensions",
  "waddle-sfu",
+ "waddle-xmpp-client",
  "waddle-xmpp-core",
  "xmpp-parsers",
  "zeroize",
