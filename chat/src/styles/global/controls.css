@@ -7,9 +7,10 @@
   border: 1px solid var(--border);
 }
 
+/* Bars (headers, search strips) that pick their own edge, e.g.
+ * `border-b`; a full box border here draws side rails on them. */
 .glass-surface {
   background: var(--surface);
-  border: 1px solid var(--border);
 }
 
 .chat-icon-button {
