@@ -51,11 +51,13 @@ private struct ConversationContent: View {
     var body: some View {
         let header = ConversationHeaderText.make(for: conversation, session: session)
         ConversationTimelineContainer(conversation: conversation, header: header, unreadAnchorID: unreadAnchorID)
-            .overlay(alignment: .top) {
+            // Opposite the jump-to-latest pill, which sits at the newest
+            // edge: the top in the social order.
+            .overlay(alignment: newestFirst ? .bottom : .top) {
                 ZStack {
                     if let phase = revealPhase {
-                        TimelineRevealBanner(phase: phase)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                        TimelineRevealBanner(phase: phase, edge: newestFirst ? .bottom : .top)
+                            .transition(.move(edge: newestFirst ? .bottom : .top).combined(with: .opacity))
                     }
                 }
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: revealPhase)

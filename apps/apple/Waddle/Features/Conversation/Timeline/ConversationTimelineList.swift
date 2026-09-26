@@ -39,7 +39,8 @@ private struct TimelineScroller: View {
     @State private var isAtLiveEdge = true
     @State private var unseenCount = 0
     /// The row at the top of the viewport. The social order inserts new
-    /// rows above it, so it is put back there to keep the reader's place.
+    /// rows above it; bound through `scrollPosition(id:)`, the scroll view
+    /// keeps that row where it was, part-scrolled offset included.
     @State private var topRowID: String?
 
     private static let liveEdgeID = "timeline-live-edge"
@@ -149,11 +150,6 @@ private struct TimelineScroller: View {
             return
         }
         unseenCount += TimelineUnreadAnchor.arrivals(after: oldNewest, in: items)
-        // New rows went in above the reader: put the row they were
-        // reading back at the top.
-        if newestFirst, let topRowID, topRowID != Self.liveEdgeID {
-            restore(topRowID, proxy: proxy)
-        }
     }
 
     /// Chat order: older rows were inserted above, so put the previously

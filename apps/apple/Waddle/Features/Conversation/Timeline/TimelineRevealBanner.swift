@@ -9,6 +9,8 @@ struct TimelineRevealBanner: View {
     }
 
     let phase: Phase
+    /// The timeline edge the banner floats at.
+    var edge: VerticalEdge = .top
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
@@ -28,7 +30,7 @@ struct TimelineRevealBanner: View {
         .padding(.vertical, Theme.Spacing.s)
         .waddleGlass(in: Capsule())
         .shadow(color: Color.black.opacity(0.12), radius: 6, y: 2)
-        .padding(.top, Theme.Spacing.m)
+        .padding(edge == .top ? .top : .bottom, Theme.Spacing.m)
         .accessibilityElement(children: .combine)
     }
 }
