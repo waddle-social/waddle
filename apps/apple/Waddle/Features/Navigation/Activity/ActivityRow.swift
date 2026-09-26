@@ -1,80 +1,105 @@
 import SwiftUI
 import WaddleKit
 
-/// One conversation in Activity: who, the newest message, and the count.
-struct ActivityRow: View {
+/// A room's heading in Activity: its symbol, name, recency and count.
+struct ActivityGroupRow: View {
     @Environment(SessionCoordinator.self) private var session
-    let entry: ActivityEntry
+    let group: UnreadOverviewGroup
     let onOpen: () -> Void
 
     var body: some View {
-        let preview = session.timelines.timeline(for: entry.conversation).lastContentItem.flatMap(RowPreview.text(for:))
         Button(action: onOpen) {
-            HStack(alignment: .top, spacing: Theme.Spacing.m) {
-                ActivityRowIcon(conversation: entry.conversation, title: entry.title)
+            HStack(spacing: Theme.Spacing.m) {
+                RoomSymbolTile(
+                    symbol: session.directory.channel(for: group.room).map { ChannelSymbol.name(for: $0) } ?? "number",
+                    colorKey: group.room.description,
+                    size: Theme.Size.avatar
+                )
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                    HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
-                        Text(entry.title)
-                            .font(.body.weight(.semibold))
-                            .lineLimit(1)
-                        Spacer(minLength: Theme.Spacing.xs)
-                        if let recency = entry.recency {
-                            Text(ListTimestamp.string(for: recency))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
-                        Text(preview ?? fallbackPreview)
-                            .font(.subheadline)
+                    Text(group.title)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(1)
+                    if let updated = group.lastUpdated {
+                        Text(ListTimestamp.string(for: Date(timeIntervalSince1970: TimeInterval(updated))))
+                            .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        Spacer(minLength: Theme.Spacing.xs)
-                        UnreadBadge(count: entry.unread, isMention: entry.isMention)
                     }
                 }
+                Spacer(minLength: Theme.Spacing.xs)
+                UnreadBadge(count: group.unread, isMention: group.mentionsMe)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
             .padding(.vertical, Theme.Spacing.xs)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(accessibilityText(preview: preview)))
+        .accessibilityLabel(Text(ActivityCopy.groupLabel(group)))
         .accessibilityAddTraits(.isButton)
-    }
-
-    private var fallbackPreview: String {
-        entry.isMention ? "You were mentioned" : "New messages"
-    }
-
-    private func accessibilityText(preview: String?) -> String {
-        let label = RowAccessibility.label(title: entry.title, unread: entry.unread, isMention: entry.isMention, isMuted: false)
-        return "\(label), \(preview ?? fallbackPreview)"
     }
 }
 
-/// Room symbol or DM avatar for an Activity row.
-struct ActivityRowIcon: View {
-    @Environment(SessionCoordinator.self) private var session
-    let conversation: ConversationID
-    let title: String
+/// An unread thread inside a room: its title and unread count.
+struct ActivityThreadRow: View {
+    let thread: UnreadOverviewThread
+    let onOpen: () -> Void
 
     var body: some View {
-        switch conversation.kind {
-        case .direct:
-            PeerPresenceAvatar(
-                jid: conversation.jid,
-                name: title,
-                availability: session.presence.availability(of: conversation.jid),
-                size: Theme.Size.avatar
-            )
-        case .room:
-            RoomSymbolTile(
-                symbol: session.directory.channel(for: conversation.jid).map { ChannelSymbol.name(for: $0) } ?? "number",
-                colorKey: conversation.jid.description,
-                size: Theme.Size.avatar
-            )
+        Button(action: onOpen) {
+            HStack(spacing: Theme.Spacing.s) {
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text(thread.title)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                Spacer(minLength: Theme.Spacing.xs)
+                UnreadBadge(count: thread.unread)
+            }
+            .padding(.leading, Theme.Spacing.l)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(ActivityCopy.threadLabel(thread)))
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// One unread message: author, time and a few lines of its text.
+struct ActivityMessageRow: View {
+    let item: TimelineItem
+    var isThreadReply = false
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(item.authorName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.consistent(for: item.authorName))
+                        .lineLimit(1)
+                    Spacer(minLength: Theme.Spacing.s)
+                    Text(ListTimestamp.string(for: item.sentAt))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(RowPreview.content(of: item) ?? "")
+                    .font(.callout)
+                    .lineLimit(3)
+            }
+            .padding(.leading, isThreadReply ? Theme.Spacing.l : 0)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(ActivityCopy.messageLabel(item, isThreadReply: isThreadReply)))
+        .accessibilityAddTraits(.isButton)
     }
 }
 

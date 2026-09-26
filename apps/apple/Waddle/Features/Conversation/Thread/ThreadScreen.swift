@@ -46,8 +46,12 @@ private struct ThreadContent: View {
 
     var body: some View {
         let timeline = session.timelines.timeline(for: conversation)
-        let root = ThreadLookup.root(rootID, in: timeline)
-        let replies = timeline.threadReplies(threadID: rootID)
+        // A room thread also shows replies fetched with the MAM thread
+        // filter, so a thread opened from Activity is complete even when
+        // the room's loaded page does not reach back to it.
+        let fetched = roomThread.flatMap { session.threadHistory.history(for: $0) }
+        let root = ThreadLookup.root(rootID, in: timeline) ?? fetched?.root
+        let replies = ThreadHistory.merged(live: timeline.threadReplies(threadID: rootID), fetched: fetched?.replies ?? [])
         let entries = TimelineFeedLayout.entries(
             for: (root.map { [$0] } ?? []) + replies,
             unreadAnchorID: nil,
@@ -102,6 +106,21 @@ private struct ThreadContent: View {
         #endif
         .environment(actions)
         .modifier(MessageActionDialogs(actions: actions))
+        .task(id: roomThread) {
+            guard let roomThread else { return }
+            await session.openThread(roomThread)
+        }
+        .onDisappear {
+            if let roomThread {
+                session.closeThread(roomThread)
+            }
+        }
+    }
+
+    /// Room threads have their own inbox row and a MAM thread filter;
+    /// direct-message threads have neither.
+    private var roomThread: ThreadKey? {
+        conversation.isRoom ? ThreadKey(room: conversation.jid, threadID: rootID) : nil
     }
 
     private var missingRoot: some View {

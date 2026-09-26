@@ -21,6 +21,9 @@ public final class InboxStore {
 
     private var entries: [Key: InboxEntry] = [:]
     private var barriers: [Key: String] = [:]
+    /// Rows whose last server report counted unread, before any local
+    /// read clamped them: the server still needs a `<mark-read/>`.
+    private var unreadOnServer: Set<Key> = []
     private var accounted: [BareJID: [String]] = [:]
     private let accountedCap = 20
 
@@ -32,6 +35,11 @@ public final class InboxStore {
         if isStale(entry, against: entries[key]) {
             return nil
         }
+        if entry.unread > 0 {
+            unreadOnServer.insert(key)
+        } else {
+            unreadOnServer.remove(key)
+        }
         let reconciled = applyingBarrier(entry, key: key)
         entries[key] = reconciled
         rememberAccounted(reconciled)
@@ -42,29 +50,37 @@ public final class InboxStore {
         entries[Key(partner: partner, threadID: threadID)]
     }
 
-    /// Room-thread entries (Activity surface).
-    public var threadEntries: [InboxEntry] {
-        entries.values.filter { $0.threadID != nil }
-    }
-
-    /// Local read: zero unread and arm the barrier.
-    public func markRead(_ partner: BareJID, threadID: String? = nil) {
+    /// Local read: zero unread and arm the barrier. Returns the newest
+    /// stanza id the read covers, so a read replayed later can check that
+    /// nothing newer arrived in between.
+    @discardableResult
+    public func markRead(_ partner: BareJID, threadID: String? = nil) -> String? {
         let key = Key(partner: partner, threadID: threadID)
-        guard let existing = entries[key] else { return }
+        guard let existing = entries[key] else { return nil }
         if let id = existing.lastStanzaID {
             barriers[key] = id
         }
         if existing.unread != 0 {
-            entries[key] = InboxEntry(
-                partner: existing.partner,
-                kind: existing.kind,
-                lastStanzaID: existing.lastStanzaID,
-                lastUpdated: existing.lastUpdated,
-                unread: 0,
-                preview: existing.preview,
-                threadID: existing.threadID
-            )
+            entries[key] = existing.withUnread(0)
         }
+        return existing.lastStanzaID
+    }
+
+    /// Whether the server last reported unread for the row and has not
+    /// taken a read since. A local read zeroes the row but not this.
+    public func isUnreadOnServer(_ partner: BareJID, threadID: String? = nil) -> Bool {
+        unreadOnServer.contains(Key(partner: partner, threadID: threadID))
+    }
+
+    /// The server took a `<mark-read/>` for the row.
+    public func serverTookRead(_ partner: BareJID, threadID: String? = nil) {
+        unreadOnServer.remove(Key(partner: partner, threadID: threadID))
+    }
+
+    /// Drops the read-clear barrier after the server did not take the read,
+    /// so the next hydrate or push shows the server's count again.
+    public func forgetBarrier(_ partner: BareJID, threadID: String? = nil) {
+        barriers[Key(partner: partner, threadID: threadID)] = nil
     }
 
     /// Whether the server inbox already counted one of `ids` as the
@@ -77,6 +93,7 @@ public final class InboxStore {
     public func clear() {
         entries.removeAll()
         barriers.removeAll()
+        unreadOnServer.removeAll()
         accounted.removeAll()
     }
 
@@ -97,15 +114,7 @@ public final class InboxStore {
             return incoming
         }
         guard incoming.unread != 0 else { return incoming }
-        return InboxEntry(
-            partner: incoming.partner,
-            kind: incoming.kind,
-            lastStanzaID: incoming.lastStanzaID,
-            lastUpdated: incoming.lastUpdated,
-            unread: 0,
-            preview: incoming.preview,
-            threadID: incoming.threadID
-        )
+        return incoming.withUnread(0)
     }
 
     private func rememberAccounted(_ entry: InboxEntry) {

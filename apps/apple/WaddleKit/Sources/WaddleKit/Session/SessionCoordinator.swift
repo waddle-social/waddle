@@ -32,6 +32,12 @@ public final class SessionCoordinator {
     public let history: HistoryStore
     @ObservationIgnored let inbox: InboxStore
     @ObservationIgnored let readCursors: ReadCursorStore
+    /// Thread replies fetched for a thread screen, kept out of the
+    /// conversation timeline so they never shift its paging or read cursor.
+    public let threadHistory: ThreadHistoryStore
+    /// The Activity overview: unread rooms with their unread messages and
+    /// threads.
+    public let unreadOverview: UnreadOverviewStore
     /// XEP-0050 extension commands, discovered once the session is ready.
     public internal(set) var extensionCommands: [ExtensionCommand] = []
 
@@ -75,7 +81,17 @@ public final class SessionCoordinator {
     @ObservationIgnored var sentChatStates: [ConversationID: ChatState] = [:]
     @ObservationIgnored var typingPauseTasks: [ConversationID: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingDisplayed: Set<ConversationID> = []
+    /// Server inbox reads made offline, replayed after the next hydrate.
+    @ObservationIgnored var pendingInboxReads: [InboxReadKey: PendingInboxRead] = [:]
+    @ObservationIgnored var inboxHydrateTask: Task<Void, Never>?
+    @ObservationIgnored var inboxHydrateRetryDelays: [TimeInterval] = [2, 8]
+    /// Rows whose last `<mark-read/>` the server refused, with the newest
+    /// stanza id that read covered. The row is not read again automatically
+    /// while the server still reports that id; a newer message retries.
+    @ObservationIgnored var refusedInboxReads: [InboxReadKey: PendingInboxRead] = [:]
     @ObservationIgnored var visibleConversation: ConversationID?
+    /// The room thread on screen, if any.
+    @ObservationIgnored var visibleThread: ThreadKey?
     @ObservationIgnored var isAppActive = true
     @ObservationIgnored var mdsPublishSupported: Bool?
     /// Rooms opened or created this session; rejoined after reconnects.
@@ -123,6 +139,8 @@ public final class SessionCoordinator {
         self.history = HistoryStore()
         self.inbox = InboxStore()
         self.readCursors = ReadCursorStore()
+        self.threadHistory = ThreadHistoryStore()
+        self.unreadOverview = UnreadOverviewStore()
         timelines.account = account
         timelines.onArchiveTrimmed = { [weak self] conversation, cursor in
             self?.archiveTrimmed(conversation, cursor: cursor)
@@ -327,6 +345,11 @@ public final class SessionCoordinator {
         typingPauseTasks.values.forEach { $0.cancel() }
         typingPauseTasks.removeAll()
         pendingDisplayed.removeAll()
+        pendingInboxReads.removeAll()
+        refusedInboxReads.removeAll()
+        cancelInboxHydrate()
+        threadHistory.clear()
+        unreadOverview.reset()
         onDemandRooms.removeAll()
         extensionCommands.removeAll()
     }
@@ -342,6 +365,7 @@ public final class SessionCoordinator {
             connectionEpoch += 1
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil
+            cancelInboxHydrate()
             retryWhenConnectSettles = false
             connectWatchdog?.cancel()
             connectWatchdog = nil
@@ -365,6 +389,7 @@ public final class SessionCoordinator {
             foregroundProbeTask = nil
             readyTask?.cancel()
             readyTask = nil
+            cancelInboxHydrate()
             isSendReady = false
             // Messages may have been missed while offline: loaded pages are
             // no longer known to be current.
@@ -410,7 +435,9 @@ public final class SessionCoordinator {
         guard !Task.isCancelled else { return }
         await refreshDirectory()
         guard !Task.isCancelled else { return }
-        await hydrateInbox()
+        if await !hydrateInbox() {
+            scheduleInboxHydrate()
+        }
         guard !Task.isCancelled else { return }
         await bootstrapDisplayedCursors()
         guard !Task.isCancelled else { return }
@@ -556,11 +583,31 @@ public final class SessionCoordinator {
     }
 
     func applyInbox(_ entry: InboxEntry) {
-        guard let applied = inbox.apply(entry), applied.threadID == nil else { return }
+        guard let applied = inbox.apply(entry) else { return }
+        if let threadID = applied.threadID {
+            // Only room threads have a badge; the server also keeps thread
+            // rows for direct conversations (call threads), which must not
+            // overwrite the conversation's own count.
+            guard applied.kind == .room else { return }
+            let thread = ThreadKey(room: applied.partner, threadID: threadID)
+            unread.setThread(applied.unread, for: thread)
+            if applied.unread > 0, thread == unread.activeThread,
+               !wasRefused(InboxReadKey(partner: thread.room, threadID: thread.threadID), newest: applied.lastStanzaID) {
+                Task { await self.markThreadReadIfVisible(thread) }
+            }
+            return
+        }
         let conversation: ConversationID = applied.kind == .room ? .room(applied.partner) : .direct(applied.partner)
         unread.set(applied.unread, for: conversation)
         if applied.kind == .direct, let date = applied.lastUpdatedDate {
             directory.touchDirect(applied.partner, at: date, preview: applied.preview)
+        }
+        // The server counted something (a thread reply, a reaction) while
+        // the conversation is on screen: read it so the row does not stay
+        // unread on the server.
+        if applied.unread > 0, conversation == unread.activeConversation,
+           !wasRefused(InboxReadKey(partner: conversation.jid, threadID: nil), newest: applied.lastStanzaID) {
+            Task { await self.markDisplayedIfVisible(conversation) }
         }
     }
 }

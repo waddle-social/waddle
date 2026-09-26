@@ -1103,6 +1103,13 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         return mamPage
     }
 
+    override suspend fun fetchRoomThreadHistory(
+        roomJid: String,
+        threadId: String,
+        maxMessages: UInt,
+        beforeId: String?,
+    ): WaddleMamPage = mamPage
+
     /** Recorded full-text search queries, room and DM alike. */
     val searchCalls = CopyOnWriteArrayList<SearchCall>()
 

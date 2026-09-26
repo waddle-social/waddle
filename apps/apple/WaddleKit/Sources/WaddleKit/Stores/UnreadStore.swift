@@ -12,6 +12,12 @@ public final class UnreadStore {
     /// Conversations with an unread mention of the account.
     public private(set) var mentions: Set<ConversationID> = []
     public private(set) var activeConversation: ConversationID?
+    /// Room-thread badges from the server inbox's thread rows. Kept apart
+    /// from `counts`: the server counts a thread reply in both the room row
+    /// and the thread row, and each is read separately.
+    public private(set) var threadCounts: [ThreadKey: Int] = [:]
+    /// The thread on screen, whose badge the local read path owns.
+    public private(set) var activeThread: ThreadKey?
 
     public init() {}
 
@@ -66,8 +72,36 @@ public final class UnreadStore {
         }
     }
 
+    public func threadCount(for thread: ThreadKey) -> Int {
+        threadCounts[thread] ?? 0
+    }
+
+    public func setActiveThread(_ thread: ThreadKey?) {
+        activeThread = thread
+        if let thread {
+            threadCounts[thread] = nil
+        }
+    }
+
+    public func clearActiveThread(ifMatches thread: ThreadKey) {
+        if activeThread == thread {
+            activeThread = nil
+        }
+    }
+
+    /// Absolute set from the server inbox, unless the thread is on screen.
+    public func setThread(_ count: Int, for thread: ThreadKey) {
+        guard thread != activeThread else { return }
+        threadCounts[thread] = count > 0 ? count : nil
+    }
+
+    public func clearThread(_ thread: ThreadKey) {
+        threadCounts[thread] = nil
+    }
+
     public func clearAll() {
         counts.removeAll()
         mentions.removeAll()
+        threadCounts.removeAll()
     }
 }

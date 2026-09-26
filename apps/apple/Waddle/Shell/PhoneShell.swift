@@ -30,7 +30,7 @@ struct PhoneShell: View {
                     .routeDestinations()
             }
             .tabItem { Label("Activity", systemImage: "at") }
-            .badge(session.unread.mentions.count)
+            .badge(session.unreadOverviewRoomCount)
             .tag(PhoneTab.activity)
 
             NavigationStack {

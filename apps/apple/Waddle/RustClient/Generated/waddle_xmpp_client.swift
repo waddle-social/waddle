@@ -915,6 +915,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     func fetchRoomHistory(roomJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
 
+    /**
+     * One room thread's archived replies, newest page first (`before_id =
+     * None`) or older from an RSM cursor, from the room archive filtered by
+     * the Waddle MAM thread field. Unlike the older history verbs, failures
+     * are typed errors rather than an empty page.
+     */
+    func fetchRoomThreadHistory(roomJid: String, threadId: String, maxMessages: UInt32, beforeId: String?) async throws  -> WaddleMamPage
+
     func joinRoom(roomJid: String, nick: String) async
 
     func leaveRoom(roomJid: String, nick: String) async
@@ -2436,6 +2444,29 @@ open func fetchRoomHistory(roomJid: String, maxMessages: UInt32, beforeId: Strin
             liftFunc: FfiConverterTypeWaddleMamPage_lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * One room thread's archived replies, newest page first (`before_id =
+     * None`) or older from an RSM cursor, from the room archive filtered by
+     * the Waddle MAM thread field. Unlike the older history verbs, failures
+     * are typed errors rather than an empty page.
+     */
+open func fetchRoomThreadHistory(roomJid: String, threadId: String, maxMessages: UInt32, beforeId: String?)async throws  -> WaddleMamPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_thread_history(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(threadId),FfiConverterUInt32.lower(maxMessages),FfiConverterOptionString.lower(beforeId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleMamPage_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -17391,6 +17422,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history() != 15759) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_thread_history() != 61904) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room() != 29937) {
