@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { format } from "node:util";
 import { defineConfig } from "astro/config";
 import cloudflare from "@astrojs/cloudflare";
+import pandacss from "@pandacss/postcss";
 import faroUploader from "@grafana/faro-rollup-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
@@ -155,6 +156,15 @@ export default defineConfig({
         },
       },
     },
+    // Panda CSS runs as a PostCSS plugin (there is no Vite plugin on the
+    // 1.x line). It is registered inline rather than via postcss.config
+    // because Vite's config loader hands the plugin's ESM namespace object
+    // to PostCSS instead of the factory, which fails the build.
+    css: {
+      postcss: {
+        plugins: [pandacss()],
+      },
+    },
     plugins: [
       tailwindcss(),
       // Serve the DTLN (@workadventure/noise-suppression) AudioWorklet module
@@ -202,6 +212,7 @@ export default defineConfig({
     resolve: {
       alias: {
         "@": fileURLToPath(new URL("./src", import.meta.url)),
+        "styled-system": fileURLToPath(new URL("./styled-system", import.meta.url)),
         events: "events",
       },
     },

@@ -11,7 +11,7 @@ export type FeedSurfaceComposerMode = "post" | "story";
 export type ChatShellState = ReturnType<typeof useChatShellState>;
 
 export function useChatShellState() {
-  const activePage = ref<"dashboard" | "chat" | "settings" | "admin" | "threads" | "unread">("dashboard");
+  const activePage = ref<"dashboard" | "chat" | "settings" | "admin" | "threads" | "unread" | "rooms" | "members">("dashboard");
   const adminTab = ref<AdminTab>("rooms");
   const sidebarMode = ref<"channels" | "dms">("channels");
   /** Which community pseudo-channel is currently active (if any).

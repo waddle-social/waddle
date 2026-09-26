@@ -77,9 +77,7 @@
         <item quantity="other">%1$d replies</item>
     </plurals>
     <!-- XEP-0422 urn:waddle:safety-scores:1 (automated message scores) -->
-    <string name="safety_scores_chip">Scores</string>
-    <string name="safety_scores_chip_notice">At least one automated score is 50 percent or higher; view them</string>
-    <string name="safety_scores_chip_alert">At least one automated score is 80 percent or higher; view them</string>
+    <string name="safety_scores_chip_description">%1$s score; view message scores</string>
     <string name="safety_scores_title">Message scores</string>
     <string name="safety_scores_explainer">Automated estimates, visible to everyone in this conversation. Only categories at 50 percent or higher are listed. They are measurements, not moderation decisions.</string>
     <string name="safety_scores_model">Model: %1$s</string>

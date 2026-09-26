@@ -1,6 +1,11 @@
 @import "@fontsource-variable/outfit";
 @import "@fontsource-variable/jetbrains-mono";
+@import "@fontsource-variable/space-grotesk";
 @import "tailwindcss";
+/* Panda CSS (@pandacss/postcss) injects the generated styles here. Layers
+   are prefixed so they never merge with Tailwind's base/utilities while
+   both systems are installed. */
+@layer pd_reset, pd_base, pd_tokens, pd_recipes, pd_utilities;
 @import "./global/tokens.css";
 @import "./global/motion.css";
 @import "./global/controls.css";
@@ -10,5 +15,5 @@
 @import "./global/surfaces.css";
 @import "./global/type.css";
 @import "./global/rich-text.css";
-@import "./global/home-hero.css";
 @import "./global/extension-cards.css";
+@import "./global/community.css";

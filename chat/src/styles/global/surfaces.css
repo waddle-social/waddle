@@ -9,36 +9,6 @@
   gap: var(--space-sm);
 }
 
-.chat-rail-logo-slot {
-  width: var(--chat-rail-logo-size);
-  height: var(--chat-rail-logo-size);
-}
-
-.chat-rail-logo-mark {
-  width: var(--chat-rail-logo-mark-size);
-  height: var(--chat-rail-logo-mark-size);
-}
-
-.chat-rail-divider-horizontal {
-  width: 1px;
-  height: var(--chat-rail-divider-length);
-}
-
-.chat-rail-divider-vertical {
-  width: var(--chat-rail-divider-length);
-  height: 1px;
-}
-
-.chat-rail-indicator-horizontal {
-  width: var(--chat-rail-indicator-length);
-  height: var(--chat-rail-indicator-thickness);
-}
-
-.chat-rail-indicator-vertical {
-  width: var(--chat-rail-indicator-thickness);
-  height: var(--chat-rail-indicator-length);
-}
-
 .chat-lightbox-frame {
   max-width: var(--chat-lightbox-max-width);
   max-height: var(--chat-lightbox-max-height);
@@ -57,28 +27,27 @@
 
 /* Lightbox control buttons — close, download, prev, next.
  * Shared treatment so all four chrome controls speak one language:
- * frosted-card background, soft hover lift, primary-tinted focus ring
- * for keyboard nav. Position/size come from the component's own
+ * opaque card pill with a hairline, soft hover lift, ring-coloured
+ * focus for keyboard nav. Position/size come from the component's own
  * inline classes; only the visual chrome lives here. */
 .chat-lightbox-control {
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-pill);
-  border: 1px solid color-mix(in oklab, var(--border) 90%, transparent);
-  background: color-mix(in oklab, var(--card) 80%, transparent);
+  border: 1px solid var(--border);
+  background: var(--card);
   color: var(--foreground);
-  backdrop-filter: blur(8px);
   transition:
-    background-color 0.15s ease,
-    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.18s ease;
+    background-color 0.16s ease-out,
+    transform 0.16s ease-out,
+    box-shadow 0.16s ease-out;
 }
 
 .chat-lightbox-control:hover {
-  background: var(--card);
+  background: var(--muted);
   transform: translateY(-1px);
-  box-shadow: 0 6px 18px color-mix(in oklab, oklch(0.12 0.012 248) 22%, transparent);
+  box-shadow: var(--shadow-floating);
 }
 
 .chat-lightbox-control:active {
@@ -87,7 +56,7 @@
 }
 
 .chat-lightbox-control:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
@@ -102,20 +71,19 @@
 
 /* Connection status chip — header pill that surfaces XMPP connection
  * state (offline / reconnecting / error / reconnected). The base chip
- * shape lives inline in ChatHeader.vue; these modifiers add tone-
- * specific glow halos so an active connection event registers in
- * peripheral vision without resorting to a banner. Matches the
- * iter-54 bell badge + iter-56 collapsed-group halo pattern. */
+ * shape lives inline in ChatHeader.vue; these modifiers add a tone-
+ * coloured 1px ring. Connection state is not a live thing, so it gets
+ * a hairline rather than a glow. */
 .chat-connection-chip-glow--warning {
-  box-shadow: 0 0 10px color-mix(in oklab, var(--warning) 30%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--warning) 45%, transparent);
 }
 
 .chat-connection-chip-glow--destructive {
-  box-shadow: 0 0 10px color-mix(in oklab, var(--destructive) 30%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--destructive) 45%, transparent);
 }
 
 .chat-connection-chip-glow--primary {
-  box-shadow: 0 0 10px var(--glow-strong);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent);
 }
 
 @media (min-width: 40rem) {

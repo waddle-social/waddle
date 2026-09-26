@@ -53,7 +53,7 @@
   color: var(--rich-code-foreground);
   background: var(--rich-code-bg);
   border: 1px solid var(--rich-code-border);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
 }
 :where(.styled-body, .chat-editor .ProseMirror) pre {
   font-family: var(--font-code);
@@ -62,7 +62,7 @@
   color: var(--rich-code-foreground);
   background: var(--rich-code-bg);
   border: 1px solid var(--rich-code-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   /* `max-width: 100%` pins the pre to its container so very-long lines
      scroll inside the pre instead of pushing the styled-body wider —
      a sibling-element defense matching the one on `.styled-body`. */
@@ -88,7 +88,7 @@
 }
 :where(.styled-body, .chat-editor .ProseMirror) blockquote {
   border: 1px solid var(--rich-quote-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--rich-quote-foreground);
   padding: 0.65em 0.85em;
   margin: 0.5em 0;
@@ -125,11 +125,11 @@
   transition: text-decoration-color 0.18s ease, color 0.18s ease;
 }
 :where(.styled-body, .chat-editor .ProseMirror) a:hover {
-  color: color-mix(in oklab, var(--rich-link), white 14%);
+  color: color-mix(in oklab, var(--rich-link) 80%, var(--foreground));
   text-decoration-color: currentColor;
 }
 .rich-mention {
   color: var(--primary);
-  font-weight: 650;
+  font-weight: 600;
 }
 }

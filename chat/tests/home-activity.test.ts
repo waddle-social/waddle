@@ -263,7 +263,39 @@ async function renderHomeDashboard(props: Record<string, unknown>) {
 }
 
 describe("HomeDashboard activity rendering", () => {
-  test("renders channel, direct-message, and empty-space activity states", async () => {
+  test("hero, summary and the Around section count the same people by one rule", async () => {
+    const html = await renderHomeDashboard({
+      spaces: [],
+      channels: [],
+      contacts: [
+        { jid: "bob@example.com", username: "bob", name: "Bob B", subscription: "both", groups: [], presenceShow: "available" },
+        // Auto-away is routine; away is not around anywhere on Home.
+        { jid: "carol@example.com", username: "carol", subscription: "both", groups: [], presenceShow: "away" },
+      ],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set(),
+      // A DM peer who is not on the roster still counts as around.
+      dmConversations: [
+        { peerJid: "amy@example.com", peerUsername: "amy", unreadCount: 0, presenceShow: "available" },
+      ],
+    });
+
+    // SSR leaves Vue fragment markers inside the heading; drop exactly
+    // those two markers and compare the text around them.
+    const text = html.split("<!--[-->").join("").split("<!--]-->").join("");
+    expect(text).toContain("2 around");
+    expect(text).not.toContain("in a huddle");
+    expect(text).toContain("<strong>2</strong> friends online");
+    expect(text).toContain("Around · 2");
+    expect(html).toContain('aria-label="amy, available, open direct message"');
+    expect(html).toContain('aria-label="Bob B, available, open direct message"');
+    expect(html).toContain("Away and offline · 1");
+    expect(html).toContain('aria-label="carol, away, open direct message"');
+    expect(html).not.toContain("Nobody is around right now");
+  });
+
+  test("renders happening-now rooms, needs-someone rows, and direct messages", async () => {
     const html = await renderHomeDashboard({
       spaces: [
         { id: "team", name: "Team" },
@@ -308,26 +340,37 @@ describe("HomeDashboard activity rendering", () => {
     const forumLabel = `Forum, channel, 1 mention, 3 thread replies, preview: Forum thread reply, last updated: ${formatTimelineStamp(new Date(1_767_000_060 * 1000).toISOString())}`;
     const bobLabel = `bob (bob@example.com), direct message, available, 2 unread, last message: Can you review the plan?, last updated: ${formatTimelineStamp("2026-05-08T13:00:00Z")}`;
 
+    // Busiest rooms land under "Happening now" with an honest kicker.
+    expect(html).toContain("Happening now");
     expect(html).toContain(`aria-label="${generalLabel}"`);
+    expect(html).toContain("Room · 4 unread");
     expect(html).toContain("New launch plan");
-    expect(html).toContain('aria-label="Team, opens Forum, 2 channels, 1 mention, 4 unread, 3 thread replies, preview: Forum thread reply"');
-    expect(html).toContain("2 channels · Opens Forum · Forum thread reply");
+    expect(html).toContain('aria-label="Random, channel, live activity"');
+    expect(html).toContain("Room · Active");
+    expect(buttonForLabel(html, generalLabel)).toContain("Enter");
+
+    // A room with a mention or a thread reply waiting is where someone is expected.
+    expect(html).toContain("Needs someone like you");
     expect(html).toContain(`aria-label="${forumLabel}"`);
     expect(html).toContain("Forum thread reply");
     expect(buttonForLabel(html, forumLabel)).toContain(">@1</span>");
     expect(buttonForLabel(html, forumLabel)).toContain(">3 replies</span>");
-    expect(html).toContain('aria-label="Random, channel, live activity"');
-    expect(buttonForLabel(html, generalLabel)).toContain(">4</span>");
+    expect(buttonForLabel(html, forumLabel)).toContain("1 mention and 3 thread replies waiting");
+    expect(buttonForLabel(html, forumLabel)).toContain(">Open</span>");
+
+    // Spaces are no longer a Home surface; they stay reachable via Rooms.
+    expect(html).not.toContain("Team");
+    expect(html).not.toContain('aria-label="Empty, 0 channels, no unread activity"');
+
     expect(html).toContain("Direct messages");
     expect(html).toContain('data-vue-stub="@/components/ui/AppAvatar.vue"');
     expect(html).toContain(`aria-label="${bobLabel}"`);
     expect(html).toContain("bob@example.com · Can you review the plan?");
     expect(buttonForLabel(html, bobLabel)).toContain(">available</span>");
-    expect(html).toContain('aria-label="Empty, 0 channels, no unread activity"');
-    expect(buttonForLabel(html, "Empty, 0 channels, no unread activity")).toContain("disabled");
+    expect(buttonForLabel(html, bobLabel)).toContain(">2</span>");
   });
 
-  test("keeps empty spaces out of the channel overview empty state", async () => {
+  test("keeps empty spaces out of the quiet home state", async () => {
     const html = await renderHomeDashboard({
       spaces: [{ id: "empty", name: "Empty" }],
       channels: [],
@@ -338,11 +381,15 @@ describe("HomeDashboard activity rendering", () => {
       dmConversations: [],
     });
 
-    expect(html).toContain("No channels discovered.");
+    // Quiet is an invitation: no zero counts, no empty room grid, the
+    // mascot keeps the hero company and nothing claims to be happening.
+    expect(html).not.toContain("Happening now");
+    expect(html).not.toContain("Needs someone like you");
+    expect(html).not.toContain("Empty");
+    expect(html).toContain('src="/waddle-logo.svg"');
     expect(html).toContain("No direct messages yet.");
-    expect(html).toContain('aria-label="Empty, 0 channels, no unread activity"');
-    expect(buttonForLabel(html, "Empty, 0 channels, no unread activity")).toContain("disabled");
-    expect(buttonForLabel(html, "Empty, 0 channels, no unread activity")).not.toContain("opacity-75");
+    expect(html).toContain("No contacts yet.");
+    expect(html).not.toContain("Browse channels");
   });
 
   test("renders refresh-discovered active calls on the home dashboard", async () => {
@@ -391,7 +438,7 @@ describe("HomeDashboard activity rendering", () => {
       selfFullJid: "alice@example.com/web",
     });
 
-    expect(html).toContain("Active calls");
+    expect(html).toContain("Happening now");
     expect(html).toContain("<strong>2</strong> active calls");
     expect(html).toContain("2 live conversations");
     expect(html).toContain("Live now");
@@ -402,7 +449,8 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).toContain('aria-label="Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call"');
     expect(html).toContain(`aria-label="Reconnect Bob, Video call, Live, Live now, The video call is still live., Live video call · Updated ${updated}"`);
     expect(buttonForLabel(html, "Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call")).toContain("Join");
-    expect(buttonForLabel(html, "General, channel, no unread activity, active call with 2 people, click to join call")).toContain("Active call");
+    // A room already shown as a live call card is not repeated as a room card.
+    expect(html).not.toContain('aria-label="General, channel, no unread activity');
     expect(buttonForLabel(html, `Reconnect Bob, Video call, Live, Live now, The video call is still live., Live video call · Updated ${updated}`)).toContain("Live");
     expect(html).not.toContain("Bob (bob@example.com), direct message, available, no unread activity, Video call live");
   });

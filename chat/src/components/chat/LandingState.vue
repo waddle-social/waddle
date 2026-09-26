@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { button } from "styled-system/recipes";
+
+const actionButtonClass = button({ variant: "primary", size: "lg" });
+
 defineProps<{
   title: string;
   copy?: string;
@@ -13,8 +17,8 @@ defineEmits<{
 <template>
   <div class="min-h-screen flex items-center justify-center p-6 bg-background">
     <div class="w-full max-w-sm animate-slide-up">
-      <div class="glass-panel flex flex-col gap-4 rounded-lg border border-border p-6 shadow-2xl">
-        <div class="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center shadow-[0_0_20px_var(--glow)]">
+      <div class="flex flex-col gap-5 rounded-2xl border border-border bg-card p-6">
+        <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-background">
           <img
             src="/waddle-logo.svg"
             alt="Waddle"
@@ -24,16 +28,16 @@ defineEmits<{
           />
         </div>
         <div class="chat-field-stack">
-          <h1 class="type-display-title">
+          <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">
             {{ title }}
           </h1>
-          <p v-if="copy" class="type-field text-muted-foreground">
+          <p v-if="copy" class="text-sm text-muted-foreground">
             {{ copy }}
           </p>
         </div>
         <button
           v-if="actionLabel"
-          class="chat-action-button chat-action-button--primary type-action w-full"
+          :class="[actionButtonClass, 'w-full']"
           type="button"
           @click="$emit('action')"
         >

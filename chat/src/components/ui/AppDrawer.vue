@@ -1,54 +1,56 @@
 <script setup lang="ts">
+import { Dialog } from "@ark-ui/vue/dialog";
+import type { DialogOpenChangeDetails } from "@ark-ui/vue/dialog";
 import { X } from "lucide-vue-next";
 
+/**
+ * Edge-anchored modal panel (Ark Dialog positioned at the left or right
+ * edge). Keeps the `side` / `widthClass` / `label` contract and the
+ * `title` + default slots; the close button is a `Dialog.CloseTrigger`.
+ */
 const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{ side: "left" | "right"; widthClass?: string; label?: string }>();
 
-function close() {
-  open.value = false;
+function onOpenChange(details: DialogOpenChangeDetails) {
+  open.value = details.open;
 }
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition name="drawer">
-      <div
-        v-if="open"
-        class="z-modal fixed top-0 left-0 right-0 h-[100dvh]"
-        @keydown.esc="close"
+  <Dialog.Root
+    :open="open"
+    lazy-mount
+    unmount-on-exit
+    @open-change="onOpenChange"
+  >
+    <Teleport to="body">
+      <Dialog.Backdrop class="app-drawer__backdrop z-modal fixed inset-0 bg-background/70 data-[state=open]:animate-fade-in" />
+      <Dialog.Positioner
+        class="app-drawer__positioner z-modal fixed top-0 flex h-[100dvh]"
+        :class="side === 'left' ? 'left-0' : 'right-0'"
       >
-        <div
-          class="absolute inset-0 bg-background/60 backdrop-blur-md animate-fade-in"
-          aria-hidden="true"
-          @click="close"
-        />
-        <div
-          class="absolute top-0 h-[100dvh] glass-panel border-border shadow-2xl flex flex-col"
+        <Dialog.Content
+          class="app-drawer flex h-[100dvh] max-w-full flex-col border-border bg-card text-card-foreground shadow-[var(--shadow-floating)] outline-none data-[state=open]:animate-fade-in"
           :class="[
             props.widthClass ?? 'w-[var(--chat-drawer-width)]',
-            side === 'left' ? 'left-0 border-r' : 'right-0 border-l',
+            side === 'left' ? 'border-r' : 'border-l',
           ]"
-          role="dialog"
-          aria-modal="true"
+          :data-side="side"
           :aria-label="props.label ?? 'Drawer'"
-          @click.stop
         >
-          <div class="h-14 flex-shrink-0 flex items-center justify-between px-4 py-0 border-b border-border glass-panel">
+          <div class="flex h-14 flex-shrink-0 items-center justify-between border-b border-border px-4 py-0">
             <slot name="title" />
-            <button
-              class="chat-icon-button hover:bg-muted"
-              type="button"
-              aria-label="Close drawer"
-              @click="close"
-            >
-              <X class="w-4 h-4" />
-            </button>
+            <Dialog.CloseTrigger as-child>
+              <button class="chat-icon-button hover:bg-muted" type="button" aria-label="Close drawer">
+                <X class="h-4 w-4" />
+              </button>
+            </Dialog.CloseTrigger>
           </div>
-          <div class="chat-pane-scroll flex-1 min-h-0">
+          <div class="chat-pane-scroll min-h-0 flex-1">
             <slot />
           </div>
-        </div>
-      </div>
-    </Transition>
-  </Teleport>
+        </Dialog.Content>
+      </Dialog.Positioner>
+    </Teleport>
+  </Dialog.Root>
 </template>

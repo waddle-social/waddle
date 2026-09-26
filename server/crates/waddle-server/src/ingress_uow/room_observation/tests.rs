@@ -1,3 +1,5 @@
+mod reply_fallback;
+
 use chrono::Utc;
 use jid::BareJid;
 use waddle_extensions::{

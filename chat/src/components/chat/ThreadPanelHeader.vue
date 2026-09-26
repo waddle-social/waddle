@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { X, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 import type { CallAnchorCardState } from "@/lib/call-thread-anchor";
 import {
@@ -46,13 +47,14 @@ const overflowParticipants = computed(() => overflowThreadParticipantCount(props
           <span class="chat-thread-header__breadcrumb-label">Threads</span>
           <template v-for="(label, i) in breadcrumbLabels" :key="i">
             <ChevronRight class="chat-thread-header__breadcrumb-sep" aria-hidden="true" />
-            <button
-              type="button"
-              class="chat-thread-header__breadcrumb-crumb"
-              :class="i === breadcrumbLabels.length - 1 ? 'chat-thread-header__breadcrumb-crumb--active' : ''"
-              :title="label"
-              @click="emit('popTo', i)"
-            >{{ label }}</button>
+            <AppTooltip :label="label" placement="bottom">
+              <button
+                type="button"
+                class="chat-thread-header__breadcrumb-crumb"
+                :class="i === breadcrumbLabels.length - 1 ? 'chat-thread-header__breadcrumb-crumb--active' : ''"
+                @click="emit('popTo', i)"
+              >{{ label }}</button>
+            </AppTooltip>
           </template>
         </div>
       </template>
@@ -65,25 +67,26 @@ const overflowParticipants = computed(() => overflowThreadParticipantCount(props
         <p v-else class="chat-thread-header__preview chat-thread-header__preview--empty">Thread</p>
       </template>
       <div class="chat-thread-header__actions">
-        <button
-          v-if="breadcrumbLabels.length > 1"
-          type="button"
-          class="chat-icon-button hover:bg-muted lg:hidden"
-          title="Go back"
-          aria-label="Go back"
-          @click="emit('popTo', breadcrumbLabels.length - 2)"
-        >
-          <ChevronLeft class="w-4 h-4" />
-        </button>
-        <button
-          type="button"
-          class="chat-icon-button hover:bg-muted"
-          title="Close thread"
-          aria-label="Close thread"
-          @click="emit('close')"
-        >
-          <X class="w-4 h-4" />
-        </button>
+        <AppTooltip v-if="breadcrumbLabels.length > 1" label="Go back" placement="bottom">
+          <button
+            type="button"
+            class="chat-icon-button hover:bg-muted lg:hidden"
+            aria-label="Go back"
+            @click="emit('popTo', breadcrumbLabels.length - 2)"
+          >
+            <ChevronLeft class="w-4 h-4" />
+          </button>
+        </AppTooltip>
+        <AppTooltip label="Close thread" placement="bottom">
+          <button
+            type="button"
+            class="chat-icon-button hover:bg-muted"
+            aria-label="Close thread"
+            @click="emit('close')"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </AppTooltip>
       </div>
     </div>
     <div v-if="callAnchorState" class="chat-thread-header__row">

@@ -189,7 +189,7 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
           <span class="type-section-label text-muted-foreground">Icon URL</span>
           <input v-model="editIconUrl" type="url" class="chat-field-control type-field" />
         </label>
-        <div v-if="editError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ editError }}</div>
+        <div v-if="editError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ editError }}</div>
         <div class="flex justify-end">
           <button
             type="button"
@@ -205,7 +205,7 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
       <!-- Members -->
       <section class="flex flex-col gap-3 border-t border-border pt-4">
         <h3 class="type-section-label text-muted-foreground">Members</h3>
-        <div v-if="membersError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ membersError }}</div>
+        <div v-if="membersError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ membersError }}</div>
         <div v-if="membersLoading" class="type-caption text-muted-foreground">Loading…</div>
         <div v-else-if="members.length > 0" class="flex flex-col gap-2">
           <ul class="flex flex-col gap-1.5" role="list">
@@ -237,13 +237,13 @@ const hasMoreMembers = computed(() => memberCursor.value !== null);
 
       <!-- Danger -->
       <section class="flex flex-col gap-3 border-t border-border pt-4">
-        <h3 class="type-section-label text-destructive">Danger zone</h3>
+        <h3 class="type-section-label text-destructive-text">Danger zone</h3>
         <p class="type-caption text-muted-foreground">
           Deleting this space cascade-destroys
           <strong>{{ space.channel_count }}</strong>
           {{ space.channel_count === 1 ? "channel" : "channels" }} under it. This cannot be undone.
         </p>
-        <div v-if="deleteError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ deleteError }}</div>
+        <div v-if="deleteError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ deleteError }}</div>
         <button
           type="button"
           class="chat-action-button chat-action-button--destructive type-action"

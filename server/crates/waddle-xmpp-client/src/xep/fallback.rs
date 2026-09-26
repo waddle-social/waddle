@@ -81,8 +81,8 @@ pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
     if ranges.is_empty() {
         return body.to_string();
     }
-    let units: Vec<u16> = body.encode_utf16().collect();
-    let total = units.len();
+    let points: Vec<char> = body.chars().collect();
+    let total = points.len();
     let mut keep = vec![true; total];
     for range in ranges {
         let start = range.start.min(total);
@@ -91,12 +91,11 @@ pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
             *flag = false;
         }
     }
-    let kept: Vec<u16> = units
-        .iter()
-        .zip(keep.iter())
-        .filter_map(|(unit, keep)| keep.then_some(*unit))
-        .collect();
-    String::from_utf16_lossy(&kept)
+    points
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(point, keep)| keep.then_some(point))
+        .collect()
 }
 
 #[cfg(test)]
@@ -166,8 +165,26 @@ mod tests {
     }
 
     #[test]
-    fn strips_utf16_fallback_ranges() {
-        let ranges = [FallbackRange { start: 0, end: 4 }];
+    fn code_point_ranges_preserve_unselected_scalars_and_union_overlaps() {
+        assert_eq!(
+            strip_fallback_ranges("a🙂e\u{301}z", &[FallbackRange { start: 1, end: 2 }]),
+            "ae\u{301}z"
+        );
+        assert_eq!(
+            strip_fallback_ranges(
+                "a🙂e\u{301}z",
+                &[
+                    FallbackRange { start: 1, end: 3 },
+                    FallbackRange { start: 2, end: 4 }
+                ],
+            ),
+            "az"
+        );
+    }
+
+    #[test]
+    fn strips_unicode_code_point_fallback_ranges() {
+        let ranges = [FallbackRange { start: 0, end: 3 }];
 
         assert_eq!(
             strip_fallback_ranges("\u{1f642}ab visible", &ranges),

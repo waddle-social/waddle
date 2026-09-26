@@ -51,12 +51,14 @@ onBeforeUnmount(() => {
       />
       <div v-else class="call-pip-panel__empty">No active video</div>
     </div>
+    <!-- No tooltips here: this panel lives in a Document Picture-in-Picture
+         window, a separate document a body-portalled tooltip cannot reach.
+         The aria-labels carry the names. -->
     <div class="call-pip-panel__controls">
       <button
         type="button"
         class="call-pip-panel__button"
         :aria-label="micEnabled ? 'Mute' : 'Unmute'"
-        :title="micEnabled ? 'Mute' : 'Unmute'"
         @click="emit('toggleMic')"
       >
         <component :is="micEnabled ? Mic : MicOff" class="w-4 h-4" />
@@ -65,7 +67,6 @@ onBeforeUnmount(() => {
         type="button"
         class="call-pip-panel__button"
         :aria-label="camEnabled ? 'Camera off' : 'Camera on'"
-        :title="camEnabled ? 'Camera off' : 'Camera on'"
         @click="emit('toggleCam')"
       >
         <component :is="camEnabled ? Video : VideoOff" class="w-4 h-4" />
@@ -74,7 +75,6 @@ onBeforeUnmount(() => {
         type="button"
         class="call-pip-panel__button"
         aria-label="Return to call"
-        title="Return to call"
         @click="emit('returnToCall')"
       >
         <RotateCcw class="w-4 h-4" />
@@ -83,7 +83,6 @@ onBeforeUnmount(() => {
         type="button"
         class="call-pip-panel__button call-pip-panel__button--danger"
         aria-label="Hang up"
-        title="Hang up"
         @click="emit('hangup')"
       >
         <PhoneOff class="w-4 h-4" />

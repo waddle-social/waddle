@@ -140,7 +140,7 @@ const isStub = computed(() => {
           @keydown.esc="sidebarOpen = false"
         >
           <div
-            class="absolute inset-0 bg-background/60 backdrop-blur-md"
+            class="absolute inset-0 bg-background/60"
             aria-hidden="true"
             @click="sidebarOpen = false"
           />

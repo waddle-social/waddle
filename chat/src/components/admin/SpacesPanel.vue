@@ -171,7 +171,7 @@ const showEmptyState = computed(
 
     <div
       v-if="errorMessage"
-      class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive"
+      class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text"
       role="alert"
     >
       {{ errorMessage }}

@@ -1,27 +1,22 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Monitor, Moon, Sun } from "lucide-vue-next";
+import { Moon, Sun } from "lucide-vue-next";
 import { useTheme, type ThemeMode } from "@/preferences/theme";
 
 const { mode, setTheme } = useTheme();
 
-const CYCLE: ReadonlyArray<ThemeMode> = ["light", "system", "dark"];
+const CYCLE: ReadonlyArray<ThemeMode> = ["dark", "light"];
 
 const current = computed(() => {
-  switch (mode.value) {
-    case "light":
-      return { icon: Sun, label: "Light" };
-    case "dark":
-      return { icon: Moon, label: "Dark" };
-    default:
-      return { icon: Monitor, label: "System" };
-  }
+  return mode.value === "light"
+    ? { icon: Sun, label: "Daylight" }
+    : { icon: Moon, label: "Night" };
 });
 
 const nextLabel = computed(() => {
   const idx = CYCLE.indexOf(mode.value);
   const next = CYCLE[(idx + 1) % CYCLE.length];
-  return next.charAt(0).toUpperCase() + next.slice(1);
+  return next === "light" ? "Daylight" : "Night";
 });
 
 function cycle() {

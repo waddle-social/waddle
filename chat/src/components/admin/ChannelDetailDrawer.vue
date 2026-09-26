@@ -268,7 +268,7 @@ const occupantCountLabel = computed(() => {
             settings.
           </p>
         </div>
-        <div v-if="editError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ editError }}</div>
+        <div v-if="editError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ editError }}</div>
         <div class="flex justify-end">
           <button
             type="button"
@@ -281,12 +281,12 @@ const occupantCountLabel = computed(() => {
         </div>
 
         <div class="flex flex-col gap-2 border-t border-border pt-4 mt-2">
-          <h3 class="type-section-label text-destructive">Danger zone</h3>
+          <h3 class="type-section-label text-destructive-text">Danger zone</h3>
           <p class="type-caption text-muted-foreground">
             Deleting this channel destroys the MUC room. Occupants are
             ejected and history may be lost.
           </p>
-          <div v-if="deleteError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ deleteError }}</div>
+          <div v-if="deleteError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ deleteError }}</div>
           <button
             type="button"
             class="chat-action-button chat-action-button--destructive type-action"
@@ -299,7 +299,7 @@ const occupantCountLabel = computed(() => {
 
       <!-- Affiliations tab -->
       <section v-else-if="tab === 'affiliations'" class="flex flex-col gap-2">
-        <div v-if="affiliationsError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ affiliationsError }}</div>
+        <div v-if="affiliationsError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ affiliationsError }}</div>
         <p v-if="affiliationsLoading" class="type-caption text-muted-foreground">Loading…</p>
         <template v-else>
           <AffiliationRow
@@ -315,7 +315,7 @@ const occupantCountLabel = computed(() => {
 
       <!-- Occupants tab -->
       <section v-else class="flex flex-col gap-2">
-        <div v-if="occupantsError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ occupantsError }}</div>
+        <div v-if="occupantsError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive-text" role="alert">{{ occupantsError }}</div>
         <p v-if="occupantsLoading" class="type-caption text-muted-foreground">Loading…</p>
         <template v-else>
           <OccupantRow

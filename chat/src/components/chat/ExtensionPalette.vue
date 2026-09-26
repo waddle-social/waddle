@@ -165,7 +165,7 @@ function actionLabel(action: ExtensionCommandAction): string {
         Loading extensions
       </div>
 
-      <p v-else-if="state === 'error'" class="type-caption text-destructive" role="alert">
+      <p v-else-if="state === 'error'" class="type-caption text-destructive-text" role="alert">
         {{ detail || "Could not load extensions." }}
       </p>
 
@@ -198,7 +198,7 @@ function actionLabel(action: ExtensionCommandAction): string {
               <AlertCircle
                 v-else-if="commandStates[command.node]?.state === 'warning' || commandStates[command.node]?.state === 'error'"
                 class="h-4 w-4"
-                :class="commandStates[command.node]?.state === 'error' ? 'text-destructive' : 'text-warning'"
+                :class="commandStates[command.node]?.state === 'error' ? 'text-destructive-text' : 'text-warning'"
                 aria-hidden="true"
               />
               <Play v-else class="h-4 w-4 text-primary" aria-hidden="true" />
@@ -243,7 +243,7 @@ function actionLabel(action: ExtensionCommandAction): string {
           <p v-if="stateDetail(command)" class="type-caption break-words text-muted-foreground">{{ stateDetail(command) }}</p>
         </div>
 
-        <p v-if="blockedReason(command)" class="type-caption text-destructive" role="alert">
+        <p v-if="blockedReason(command)" class="type-caption text-destructive-text" role="alert">
           {{ blockedReason(command) }}
         </p>
         <p v-else-if="missingRequiredFields(command).length > 0" class="type-caption text-muted-foreground">

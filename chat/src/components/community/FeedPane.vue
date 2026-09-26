@@ -6,9 +6,7 @@ import {
   Camera,
   Film,
   IdCard,
-  Inbox,
   Menu,
-  MessageSquareText,
   Music,
   RefreshCw,
   Smile,
@@ -26,6 +24,7 @@ import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import type { FeedEntry, FeedPostInput, FeedSourceKind, Story, StoryPostInput, StoryReactionSummary } from "@/lib/xmpp-client";
 import { jidLocalpart } from "@/lib/xmpp/jid";
 import { safeExternalUrl } from "@/lib/chat-ui";
+import { button, kicker } from "styled-system/recipes";
 
 const SOURCE_ICONS = {
   mood: Smile,
@@ -46,36 +45,25 @@ const SOURCE_LABELS: Record<FeedSourceKind, string> = {
 };
 
 /**
- * Per-kind accent palette. Tailwind utility classes (text + bg) are
- * paired so the badge and the card's left accent line stay tonally
- * consistent. Chosen for contrast in both light and dark theme.
+ * Per-kind accent, on tokens only. Teal acts, ember is live (an RSVP is
+ * someone committing to show up), gold is kudos-adjacent (a mood), moss is
+ * settled (a tune playing), and profile changes stay neutral.
  */
 const SOURCE_ACCENT: Record<FeedSourceKind, { chip: string; rail: string }> = {
-  mood: {
-    chip: "bg-amber-500/15 text-amber-700 dark:text-amber-300 ring-amber-500/20",
-    rail: "bg-amber-500/70",
-  },
-  activity: {
-    chip: "bg-sky-500/15 text-sky-700 dark:text-sky-300 ring-sky-500/20",
-    rail: "bg-sky-500/70",
-  },
-  tune: {
-    chip: "bg-violet-500/15 text-violet-700 dark:text-violet-300 ring-violet-500/20",
-    rail: "bg-violet-500/70",
-  },
-  avatar: {
-    chip: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-emerald-500/20",
-    rail: "bg-emerald-500/70",
-  },
-  vcard: {
-    chip: "bg-rose-500/15 text-rose-700 dark:text-rose-300 ring-rose-500/20",
-    rail: "bg-rose-500/70",
-  },
-  rsvp: {
-    chip: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 ring-indigo-500/20",
-    rail: "bg-indigo-500/70",
-  },
+  mood: { chip: "text-gold-text", rail: "bg-gold" },
+  activity: { chip: "text-primary", rail: "bg-primary" },
+  tune: { chip: "text-moss", rail: "bg-moss" },
+  avatar: { chip: "text-primary", rail: "bg-primary" },
+  vcard: { chip: "text-muted-foreground", rail: "bg-border" },
+  rsvp: { chip: "text-live-text", rail: "bg-live" },
 };
+
+const kickerClass = kicker();
+const refreshButtonClass = button({ variant: "quiet", size: "sm" });
+const CHIP_CLASS = "inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[11px] uppercase leading-none tracking-[0.08em]";
+const PILL_BASE = "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[13px] font-semibold transition-colors";
+const PILL_IDLE = "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground";
+const PILL_ON = "border-primary bg-primary text-primary-foreground";
 
 function iconFor(source: FeedSourceKind | undefined) {
   return source ? SOURCE_ICONS[source] : null;
@@ -332,25 +320,22 @@ function selectStoryReaction(emoji: string) {
 <template>
   <div class="chat-pane-scroll flex-1 min-h-0 bg-background px-[var(--chat-content-inline)] py-6">
     <div class="mx-auto grid w-full max-w-2xl gap-5">
-      <header class="flex items-center gap-2">
+      <header class="flex items-center gap-3">
         <button
           type="button"
-          class="md:hidden inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
           aria-label="Open navigation"
           @click="emit('openNav')"
         >
           <Menu class="h-4 w-4" aria-hidden="true" />
         </button>
-        <span class="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary">
-          <MessageSquareText class="h-4.5 w-4.5" aria-hidden="true" />
-        </span>
-        <div class="min-w-0">
-          <h1 class="type-pane-title text-foreground leading-tight">Community Feed</h1>
-          <p class="type-caption text-muted-foreground">Highlights from across the community</p>
+        <div class="min-w-0 flex-1">
+          <h1 class="font-display text-[30px] font-bold leading-none tracking-[-0.03em] text-foreground">Feed</h1>
+          <p class="type-caption mt-1.5 text-muted-foreground">What people across the community are sharing</p>
         </div>
         <button
           type="button"
-          class="ml-auto inline-flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          :class="refreshButtonClass"
           :disabled="loadingAny"
           :aria-label="loadingAny ? 'Refreshing' : 'Refresh feed'"
           @click="emit('refresh')"
@@ -365,13 +350,12 @@ function selectStoryReaction(emoji: string) {
           v-for="filter in filters"
           :key="filter.id"
           type="button"
-          class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors"
-          :class="activeFilter === filter.id ? 'border-primary bg-primary/10 text-primary' : 'border-input text-muted-foreground hover:bg-muted/50 hover:text-foreground'"
+          :class="[PILL_BASE, activeFilter === filter.id ? PILL_ON : PILL_IDLE]"
           :aria-pressed="activeFilter === filter.id ? 'true' : 'false'"
           @click="activeFilter = filter.id"
         >
           {{ filter.label }}
-          <span class="text-[0.65rem] opacity-75">{{ filter.count }}</span>
+          <span class="font-mono text-[11px] opacity-75">{{ filter.count }}</span>
         </button>
       </div>
 
@@ -392,13 +376,13 @@ function selectStoryReaction(emoji: string) {
 
       <div
         v-if="error"
-        class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
       >
         Couldn't load the feed: {{ error }}
       </div>
       <div
         v-if="storiesError"
-        class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
       >
         Couldn't load stories: {{ storiesError }}
       </div>
@@ -406,11 +390,11 @@ function selectStoryReaction(emoji: string) {
         <article
           v-for="item in feedItems"
           :key="item.id"
-          class="group relative overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-colors hover:bg-card/80"
+          class="group relative overflow-hidden rounded-2xl border border-border bg-card transition-colors hover:bg-muted"
         >
           <span
             class="absolute inset-y-0 left-0 w-1"
-            :class="item.kind === 'story' ? (isStoryRead(item.story.id) ? 'bg-border' : 'bg-primary/70') : railClassFor(item.entry.source)"
+            :class="item.kind === 'story' ? (isStoryRead(item.story.id) ? 'bg-border' : 'bg-live') : railClassFor(item.entry.source)"
             aria-hidden="true"
           ></span>
           <div v-if="item.kind === 'entry'" class="grid gap-2 pl-4 pr-4 py-3.5">
@@ -423,8 +407,7 @@ function selectStoryReaction(emoji: string) {
                   </p>
                   <span
                     v-if="item.entry.source"
-                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] font-medium uppercase tracking-wide ring-1 ring-inset"
-                    :class="chipClassFor(item.entry.source)"
+                    :class="[CHIP_CLASS, chipClassFor(item.entry.source)]"
                     :aria-label="labelFor(item.entry.source)"
                   >
                     <component
@@ -437,8 +420,7 @@ function selectStoryReaction(emoji: string) {
                 </div>
                 <p
                   v-if="item.entry.publishedMs"
-                  class="type-caption text-muted-foreground"
-                  :title="new Date(item.entry.publishedMs).toLocaleString()"
+                  class="font-mono text-xs text-muted-foreground"
                 >
                   {{ timeAgo(item.entry.publishedMs) }}
                 </p>
@@ -446,7 +428,7 @@ function selectStoryReaction(emoji: string) {
             </header>
             <h2
               v-if="item.entry.title"
-              class="type-control font-semibold text-foreground"
+              class="font-display text-[15px] font-semibold tracking-[-0.01em] text-foreground"
             >
               {{ item.entry.title }}
             </h2>
@@ -477,21 +459,20 @@ function selectStoryReaction(emoji: string) {
                     <span class="type-control truncate font-semibold text-foreground">
                       {{ authorLabel(item.story.author) }}
                     </span>
-                    <span class="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[0.65rem] font-medium uppercase text-primary ring-1 ring-inset ring-primary/20">
+                    <span :class="[CHIP_CLASS, 'text-primary']">
                       <Camera class="h-3 w-3" aria-hidden="true" />
                       Story
                     </span>
                     <span
                       v-if="!isStoryRead(item.story.id)"
-                      class="rounded-full bg-primary/10 px-2 py-0.5 text-[0.65rem] font-medium uppercase text-primary ring-1 ring-inset ring-primary/20"
+                      :class="[CHIP_CLASS, 'rounded-full border-live-text text-live-text']"
                     >
                       New
                     </span>
                   </span>
                   <span
                     v-if="listedAgo(item.story)"
-                    class="type-caption block text-muted-foreground"
-                    :title="item.story.postedMs ? new Date(item.story.postedMs).toLocaleString() : undefined"
+                    class="block font-mono text-xs text-muted-foreground"
                   >
                     {{ listedAgo(item.story) }}
                   </span>
@@ -503,7 +484,7 @@ function selectStoryReaction(emoji: string) {
             </span>
             <span
               v-if="item.story.mediaUrl"
-              class="flex aspect-video w-full items-center justify-center overflow-hidden rounded-md bg-muted text-muted-foreground sm:aspect-square"
+              class="flex aspect-video w-full items-center justify-center overflow-hidden rounded-[10px] bg-muted text-muted-foreground sm:aspect-square"
             >
               <span v-if="isVideoStory(item.story)" class="inline-flex items-center gap-1 text-xs">
                 <Film class="h-4 w-4" aria-hidden="true" />
@@ -523,18 +504,18 @@ function selectStoryReaction(emoji: string) {
               v-for="chip in reactionChipsFor(item.story.id)"
               :key="chip.emoji"
               type="button"
-              class="inline-flex h-8 items-center gap-1 rounded-md border px-2 text-sm"
-              :class="chip.mine ? 'border-primary bg-primary/10 text-primary' : 'border-input text-foreground hover:bg-muted/60'"
+              class="inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-sm transition-colors"
+              :class="chip.mine ? 'border-primary bg-primary/10 text-primary' : 'border-border text-foreground hover:bg-muted'"
               :aria-label="`React with ${chip.emoji}, ${chip.count} so far`"
               :aria-pressed="chip.mine"
               @click="reactToStory(item.story.id, chip.emoji)"
             >
               <span aria-hidden="true">{{ chip.emoji }}</span>
-              <span class="type-numeric text-muted-foreground">{{ chip.count }}</span>
+              <span class="type-numeric font-mono text-xs text-muted-foreground">{{ chip.count }}</span>
             </button>
             <button
               type="button"
-              class="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-md border border-input text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              class="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground"
               :aria-expanded="reactionPickerStoryId === item.story.id"
               aria-haspopup="dialog"
               aria-label="React to story"
@@ -550,7 +531,7 @@ function selectStoryReaction(emoji: string) {
           <div
             v-for="i in 3"
             :key="`feed-skel-${i}`"
-            class="grid gap-3 rounded-xl border border-border bg-card px-4 py-3.5 shadow-sm"
+            class="grid gap-3 rounded-2xl border border-border bg-card px-4 py-3.5"
             aria-hidden="true"
           >
             <div class="flex items-center gap-3">
@@ -566,12 +547,9 @@ function selectStoryReaction(emoji: string) {
         </template>
         <div
           v-else-if="feedItems.length === 0"
-          class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-card/40 px-6 py-10 text-center"
+          class="flex flex-col items-center gap-1 rounded-2xl border border-dashed border-border px-6 py-10 text-center"
         >
-          <span class="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
-            <Inbox class="h-5 w-5" aria-hidden="true" />
-          </span>
-          <p class="type-control text-foreground">It's quiet in here</p>
+          <p class="font-display text-lg font-semibold text-foreground">It is quiet in here.</p>
           <p class="type-caption text-muted-foreground">
             {{ emptyCopy }}
           </p>

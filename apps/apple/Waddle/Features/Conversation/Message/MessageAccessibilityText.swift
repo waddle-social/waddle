@@ -20,10 +20,8 @@ enum MessageAccessibilityText {
         if item.safetyScores?.notableSignalRows.contains(where: { $0.category == .isQuestion }) == true {
             parts.append("Question signal")
         }
-        switch item.safetyScores?.severity {
-        case .alert: parts.append("Content alert")
-        case .notice: parts.append("Content notice")
-        case nil: break
+        if let row = item.safetyScores?.markerRow {
+            parts.append("Content signal: \(row.title) \(row.percentText)")
         }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }

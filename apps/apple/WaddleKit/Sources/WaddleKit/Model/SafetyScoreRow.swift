@@ -19,9 +19,8 @@ extension SafetyCategory {
     public var isSafety: Bool { self != .isQuestion }
 }
 
-/// How loudly a score is surfaced. Below `noticeThreshold` a score is
-/// not surfaced at all; the row marker is amber from `noticeThreshold`
-/// and red from `alertThreshold`.
+/// Probability band for a score. Below `noticeThreshold` it is not shown;
+/// category, rather than this band, determines the presentation style.
 public enum SafetyScoreSeverity: Comparable, Hashable, Sendable {
     case notice
     case alert
@@ -93,6 +92,15 @@ extension SafetyScores {
     public var notableSignalRows: [SafetyScoreRow] { notableRows.filter { !$0.category.isSafety } }
 
     public var notableSafetyRows: [SafetyScoreRow] { notableRows.filter(\.category.isSafety) }
+
+    /// The visible safety category represented by the collapsed marker.
+    /// The fixed category order breaks equal-probability ties consistently.
+    public var markerRow: SafetyScoreRow? {
+        notableSafetyRows.reduce(nil as SafetyScoreRow?) { current, row in
+            guard let current else { return row }
+            return row.probability > current.probability ? row : current
+        }
+    }
 
     /// "Question 92%, Hate speech 3%, …" for VoiceOver.
     public var spokenSummary: String {

@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { ArrowRight, MessageCircle, MessagesSquare, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, UserPlus, Video } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
 import type { MessageThreadEntry } from "@/channels/threads";
 import { $callState } from "@/lib/calls/call-store";
@@ -512,24 +513,26 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
         <h2 class="type-pane-title text-sidebar-foreground">Direct messages</h2>
       </div>
       <div class="flex items-center gap-1">
-        <button
-          class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
-          title="New group message"
-          aria-label="New group message"
-          type="button"
-          @click="emit('newGroupDm')"
-        >
-          <MessagesSquare class="w-4 h-4" />
-        </button>
-        <button
-          class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
-          title="New message"
-          aria-label="New direct message"
-          type="button"
-          @click="emit('newDm')"
-        >
-          <Plus class="w-4 h-4" />
-        </button>
+        <AppTooltip label="New group message">
+          <button
+            class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            aria-label="New group message"
+            type="button"
+            @click="emit('newGroupDm')"
+          >
+            <MessagesSquare class="w-4 h-4" />
+          </button>
+        </AppTooltip>
+        <AppTooltip label="New message">
+          <button
+            class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            aria-label="New direct message"
+            type="button"
+            @click="emit('newDm')"
+          >
+            <Plus class="w-4 h-4" />
+          </button>
+        </AppTooltip>
       </div>
     </div>
 
@@ -648,16 +651,16 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
               </span>
               <ArrowRight class="h-3.5 w-3.5 shrink-0" :class="callActivityAccentClass(row.activity)" aria-hidden="true" />
             </button>
-            <button
-              v-if="canEndCallActivity(row.activity)"
-              type="button"
-              class="chat-icon-button shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
-              :title="endCallActivityLabel(row)"
-              :aria-label="endCallActivityLabel(row)"
-              @click="endCallActivity(row.activity)"
-            >
-              <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
+            <AppTooltip v-if="canEndCallActivity(row.activity)" :label="endCallActivityLabel(row)">
+              <button
+                type="button"
+                class="chat-icon-button shrink-0 text-destructive-text hover:bg-destructive/10 hover:text-destructive-text"
+                :aria-label="endCallActivityLabel(row)"
+                @click="endCallActivity(row.activity)"
+              >
+                <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </AppTooltip>
           </div>
         </section>
 
@@ -704,7 +707,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
               </span>
               <span
                 v-if="(group.mentionCount ?? 0) > 0"
-                class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-live text-live-foreground"
                 aria-hidden="true"
               >@{{ group.mentionCount }}</span>
               <span
@@ -766,15 +769,16 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
               </div>
             </div>
           </button>
-          <button
-            class="chat-icon-button shrink-0 text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
-            type="button"
-            :title="addPeopleLabel(conversation)"
-            :aria-label="addPeopleLabel(conversation)"
-            @click.stop="emit('addPeopleToDm', conversation.peerJid)"
-          >
-            <UserPlus class="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
+          <AppTooltip :label="addPeopleLabel(conversation)">
+            <button
+              class="chat-icon-button shrink-0 text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              type="button"
+              :aria-label="addPeopleLabel(conversation)"
+              @click.stop="emit('addPeopleToDm', conversation.peerJid)"
+            >
+              <UserPlus class="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </AppTooltip>
         </div>
       </div>
     </div>

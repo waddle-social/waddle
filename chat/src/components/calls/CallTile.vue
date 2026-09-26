@@ -267,8 +267,6 @@ const emit = defineEmits<{
   height: min(36cqmin, 9rem);
   border-radius: 9999px;
   background: color-mix(in oklab, white 15%, transparent);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   font-weight: 700;
   letter-spacing: 0.02em;
   font-size: clamp(1.25rem, 14cqmin, 4rem);

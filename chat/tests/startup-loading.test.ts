@@ -35,7 +35,7 @@ describe("startup loading fallback", () => {
 
     expect(styles).toContain(".chat-app-shell");
     expect(styles).toContain("height: 100dvh;");
-    expect(styles).toContain(".chat-startup-main");
+    expect(styles).toContain(".chat-startup-shell");
     expect(styles).toContain("flex: 1 1 0%;");
   });
 });

@@ -3,16 +3,17 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneIncoming, Video } from "lucide-vue-next";
 import { $callState } from "@/lib/calls/call-store";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { dmCallActivityAction } from "@/lib/calls/call-activity-dock";
 import {
   hasKnownDmCallMedia,
   refreshDmCallActivityAffordances,
   useDmCallActivity,
 } from "@/lib/calls/dm-call-activity";
-import { answerIncomingDmCallActivity, resumeDmCallActivity, startDmCallAction } from "@/lib/calls/dm-call-actions";
+import { answerIncomingDmCallActivity, resumeDmCallActivity } from "@/lib/calls/dm-call-actions";
+import { useDmCallStart } from "@/lib/calls/use-call-start";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
-import type { CallMedia } from "@/lib/calls/types";
 
 const props = withDefaults(defineProps<{
   /** Peer's bare JID — the `<propose/>` per XEP-0353 §0.2 is
@@ -35,13 +36,14 @@ const { activity: peerCallActivity } = useDmCallActivity(() => props.peerBareJid
  *  caller can't start a parallel call while one is ringing or
  *  active. Hydrated peer activity only becomes a reconnect affordance
  *  when the archived LiveKit credentials still belong to this resource. */
-const inCall = computed(
-  () => state.value.phase !== "idle" && state.value.phase !== "ended",
-);
+const {
+  canStart: showStartControls,
+  busy: inCall,
+  start: startCall,
+} = useDmCallStart(() => props.peerBareJid);
 
 const hasPeerCallActivity = computed(() => !!peerCallActivity.value);
 const showPeerCallActivity = computed(() => props.showActivityControls !== false && hasPeerCallActivity.value);
-const showStartControls = computed(() => !hasPeerCallActivity.value);
 const voiceLabel = computed(() => "Start voice call");
 const videoLabel = computed(() => "Start video call");
 const peerActivityAction = computed(() => {
@@ -97,15 +99,6 @@ function getInitiator(): string | undefined {
     (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
 }
 
-async function startCall(media: CallMedia): Promise<void> {
-  await startDmCallAction({
-    peerBareJid: props.peerBareJid,
-    media,
-    getSender,
-    getInitiator,
-  });
-}
-
 async function handlePeerCallActivity(): Promise<void> {
   const activity = peerCallActivity.value;
   if (!activity) return;
@@ -149,49 +142,51 @@ async function handlePeerCallActivity(): Promise<void> {
     >
       {{ activityBannerLabel }}
     </span>
-    <button
-      v-if="showPeerCallActivity"
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="activityButtonDisabled
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-success-foreground hover:bg-success/10 hover:text-success-foreground'"
-      type="button"
-      :title="activityButtonLabel"
-      :aria-label="activityButtonLabel"
-      :disabled="activityButtonDisabled"
-      @click="handlePeerCallActivity"
-    >
-      <PhoneIncoming v-if="peerActivityAction === 'answer'" class="w-3.5 h-3.5" />
-      <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" class="w-3.5 h-3.5" />
-      <Phone v-else class="w-3.5 h-3.5" />
-    </button>
+    <AppTooltip v-if="showPeerCallActivity" :label="activityButtonLabel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="activityButtonDisabled
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-success-foreground hover:bg-success/10 hover:text-success-foreground'"
+        type="button"
+        :aria-label="activityButtonLabel"
+        :disabled="activityButtonDisabled"
+        @click="handlePeerCallActivity"
+      >
+        <PhoneIncoming v-if="peerActivityAction === 'answer'" class="w-3.5 h-3.5" />
+        <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" class="w-3.5 h-3.5" />
+        <Phone v-else class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
     <template v-else-if="showStartControls">
-    <button
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="inCall
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-      type="button"
-      :title="voiceLabel"
-      :aria-label="voiceLabel"
-      :disabled="inCall"
-      @click="startCall({ audio: true, video: false })"
-    >
-      <Phone class="w-3.5 h-3.5" />
-    </button>
-    <button
-      class="chat-icon-button chat-icon-button--md transition-all duration-200"
-      :class="inCall
-        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-      type="button"
-      :title="videoLabel"
-      :aria-label="videoLabel"
-      :disabled="inCall"
-      @click="startCall({ audio: true, video: true })"
-    >
-      <Video class="w-3.5 h-3.5" />
-    </button>
+    <AppTooltip :label="voiceLabel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="inCall
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        type="button"
+        :aria-label="voiceLabel"
+        :disabled="inCall"
+        @click="startCall({ audio: true, video: false })"
+      >
+        <Phone class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
+    <AppTooltip :label="videoLabel">
+      <button
+        class="chat-icon-button chat-icon-button--md transition-all duration-200"
+        :class="inCall
+          ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        type="button"
+        :aria-label="videoLabel"
+        :disabled="inCall"
+        @click="startCall({ audio: true, video: true })"
+      >
+        <Video class="w-3.5 h-3.5" />
+      </button>
+    </AppTooltip>
     </template>
   </div>
 </template>

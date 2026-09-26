@@ -1437,7 +1437,7 @@ mod tests {
                 &waddle_xmpp::xep::FallbackIndication::for_range(
                     waddle_xmpp::xep::NS_REPLY,
                     0,
-                    fallback_prefix.encode_utf16().count(),
+                    fallback_prefix.chars().count(),
                 ),
             ));
         message

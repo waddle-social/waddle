@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   heroGreetingFor,
+  heroKickerFor,
   heroQuietMessageFor,
   heroSummaryPartsFor,
   heroTimeOfDayFor,
@@ -31,6 +32,23 @@ describe("heroTimeOfDayFor", () => {
       expect(heroQuietMessageFor(tod).length).toBeGreaterThan(0);
     }
     expect(heroGreetingFor("night")).toBe("Late one tonight.");
+  });
+
+  test("greeting names the person first when a name is known", () => {
+    expect(heroGreetingFor("day", "mara")).toBe("Good afternoon, mara.");
+    expect(heroGreetingFor("day", "  ")).toBe("Good afternoon.");
+    expect(heroGreetingFor("night", null)).toBe("Late one tonight.");
+  });
+});
+
+describe("heroKickerFor", () => {
+  test("leads with the date and only shows real counts", () => {
+    const date = new Date(2026, 8, 25, 14, 0, 0);
+    const day = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(date);
+    expect(heroKickerFor(date, 0, 0)).toBe(day);
+    expect(heroKickerFor(date, 3, 0)).toBe(`${day} · 3 around`);
+    expect(heroKickerFor(date, 3, 2)).toBe(`${day} · 3 around · 2 in a huddle`);
+    expect(heroKickerFor(date, 0, 1)).toBe(`${day} · 1 in a huddle`);
   });
 });
 

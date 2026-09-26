@@ -24,8 +24,7 @@
 //!   the fallback substitutes for; when absent, the indication applies to all
 //!   bodies and subjects of the message.
 //! - `<body/>` and `<subject/>` children may carry optional `start`/`end`
-//!   character offsets (XEP-0426 grapheme-aware UTF-16 code-unit positions —
-//!   we treat them as plain UTF-16 code units per the JS string-slice model).
+//!   character offsets counted as Unicode code points (XEP-0426).
 //! - A `<body/>` or `<subject/>` child with no offsets means the entire
 //!   element is fallback.
 //! - A `<fallback/>` with no children at all is shorthand for "every body and
@@ -38,9 +37,7 @@ use xmpp_parsers::message::Message;
 pub const NS_FALLBACK: &str = "urn:xmpp:fallback:0";
 
 /// A character range `[start, end)` inside a `<body/>` or `<subject/>` element,
-/// measured in UTF-16 code units (matches XEP-0426's grapheme-position model
-/// closely enough for the JS / browser substring slicing every existing
-/// client uses).
+/// measured in Unicode code points as specified by XEP-0426.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallbackRange {
     pub start: usize,
@@ -56,7 +53,7 @@ pub struct FallbackRange {
 pub enum FallbackRegion {
     /// The entire body or subject element is fallback content.
     Whole,
-    /// Specific UTF-16 ranges within the body or subject are fallback.
+    /// Specific Unicode code-point ranges within the body or subject are fallback.
     Ranges(Vec<FallbackRange>),
 }
 
@@ -97,13 +94,13 @@ impl FallbackIndication {
     }
 
     /// `<fallback for='X'><body start='S' end='E'/></fallback>` — a single
-    /// UTF-16 range inside the body is fallback.
+    /// Unicode code-point range inside the body is fallback.
     pub fn for_range(for_ns: impl Into<String>, start: usize, end: usize) -> Self {
         Self::for_ranges(for_ns, [FallbackRange { start, end }])
     }
 
     /// `<fallback for='X'><body start='…' end='…'/>…</fallback>` — multiple
-    /// UTF-16 ranges. An empty range list collapses to `whole_body`.
+    /// Unicode code-point ranges. An empty range list collapses to `whole_body`.
     pub fn for_ranges(
         for_ns: impl Into<String>,
         body_ranges: impl IntoIterator<Item = FallbackRange>,
@@ -284,16 +281,14 @@ pub fn set_fallback_payloads(msg: &mut Message, fallbacks: &[FallbackIndication]
 }
 
 /// Strip every fallback range from a body string, returning the
-/// caller-visible text. Offsets are treated as UTF-16 code units per the
-/// XEP-0426 character-position model the spec references; the body is
-/// round-tripped through UTF-16 so emoji and other non-BMP characters are
-/// stripped correctly.
+/// caller-visible text. XEP-0426 counts Unicode code points in the decoded
+/// body, without normalization. Overlapping ranges remove each point once.
 pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
     if ranges.is_empty() {
         return body.to_string();
     }
-    let units: Vec<u16> = body.encode_utf16().collect();
-    let total = units.len();
+    let points: Vec<char> = body.chars().collect();
+    let total = points.len();
     let mut keep = vec![true; total];
     for range in ranges {
         let start = range.start.min(total);
@@ -302,10 +297,9 @@ pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
             *flag = false;
         }
     }
-    let kept: Vec<u16> = units
-        .iter()
-        .zip(keep.iter())
-        .filter_map(|(u, k)| if *k { Some(*u) } else { None })
-        .collect();
-    String::from_utf16_lossy(&kept)
+    points
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(point, keep)| keep.then_some(point))
+        .collect()
 }

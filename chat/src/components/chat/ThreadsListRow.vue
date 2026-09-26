@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Phone, Video } from "lucide-vue-next";
+import { button, count, tag } from "styled-system/recipes";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import { jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { threadDisplayTitle } from "@/lib/threads-view-filters";
 import { useCallAnchorCardState, wasmThreadEntryToAnchorMessage } from "@/lib/call-thread-anchor";
+import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 
 const props = defineProps<{
@@ -19,10 +21,14 @@ const emit = defineEmits<{
   joinCall: [entry: WasmThreadEntry, media: CallMedia];
 }>();
 
+const channelTagClass = tag({ tone: "neutral" });
+const unreadCountClass = count();
+const markReadClass = button({ variant: "quiet", size: "sm" });
+
 // A MUC call-thread row shares the one live-state composable and the one
 // Join path with the in-channel anchor card and the call banner, so the
-// global Threads view reflects the same live/ended call state. Rows that
-// don't anchor a MUC call (DM anchors, plain threads) keep the title row.
+// global Discussions view reflects the same live/ended call state. Rows
+// that don't anchor a MUC call (DM anchors, plain threads) keep the card.
 const anchorMessage = computed(() => wasmThreadEntryToAnchorMessage(props.entry));
 const callState = useCallAnchorCardState(
   () => anchorMessage.value ?? { body: "", author: "", threadId: undefined, callThread: undefined },
@@ -41,12 +47,19 @@ const recencyLabel = computed(() => {
   return `${Math.floor(deltaSec / 86_400)}d ago`;
 });
 
-const channelLabel = computed(() => {
-  const local = jidLocalpart(props.entry.channel);
-  return `#${local}`;
-});
+const channelLabel = computed(() => `#${jidLocalpart(props.entry.channel)}`);
 
 const title = computed(() => threadDisplayTitle(props.entry));
+
+const replyLabel = computed(() => {
+  const replies = props.entry.reply_count;
+  return `${replies} ${replies === 1 ? "reply" : "replies"}`;
+});
+
+// The threads query carries only the person who started the discussion,
+// so the avatar stack shows exactly that: no invented participants.
+const rootAuthor = computed(() => props.entry.root_author?.trim() ?? "");
+
 const isDmCallThread = computed(() => props.entry.callThread?.kind === "dm");
 const dmCallFlagLabel = computed(() => {
   if (!isDmCallThread.value) return "";
@@ -60,7 +73,10 @@ const DmCallFlagIcon = computed(() => {
 </script>
 
 <template>
-  <div class="chat-thread-row glass-panel flex w-full items-stretch gap-2 rounded-md px-3 py-2 hover:bg-sidebar-accent/35">
+  <article
+    class="flex w-full items-stretch gap-3 rounded-xl border bg-card p-4 transition-colors hover:bg-muted"
+    :class="entry.has_unread ? 'border-live/60' : 'border-border'"
+  >
     <div
       v-if="isCallThread && callState"
       class="call-thread-row__open min-w-0 flex-1"
@@ -75,45 +91,45 @@ const DmCallFlagIcon = computed(() => {
     <button
       v-else
       type="button"
-      class="min-w-0 flex-1 text-left"
+      class="flex min-w-0 flex-1 items-start gap-3 text-left"
       @click="emit('open', entry)"
     >
-      <div class="flex items-center justify-between gap-2">
-        <div class="min-w-0 flex-1">
-          <div class="flex min-w-0 items-center gap-1.5">
-            <span
-              v-if="isDmCallThread"
-              class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-primary/10 text-primary"
-              role="img"
-              :aria-label="dmCallFlagLabel"
-              :title="dmCallFlagLabel"
-            >
-              <component :is="DmCallFlagIcon" class="h-3 w-3" aria-hidden="true" />
-            </span>
-            <div class="type-card-title min-w-0 flex-1 truncate">{{ title }}</div>
-          </div>
-          <div class="type-caption text-muted-foreground truncate">
-            {{ channelLabel }} · {{ recencyLabel }}
-            <span v-if="entry.reply_count > 0"> · {{ entry.reply_count }} replies</span>
-          </div>
-        </div>
-        <span
-          v-if="entry.has_unread"
-          class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
-          :aria-label="`${entry.unread} unread`"
-        >
-          {{ entry.unread }}
+      <span v-if="rootAuthor" class="mt-0.5 flex shrink-0 items-center" aria-hidden="true">
+        <AppAvatar :name="rootAuthor" size="sm" />
+      </span>
+      <span class="min-w-0 flex-1">
+        <span class="flex min-w-0 items-center gap-2">
+          <span
+            v-if="isDmCallThread"
+            class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-primary/40 text-primary"
+            role="img"
+            :aria-label="dmCallFlagLabel"
+          >
+            <component :is="DmCallFlagIcon" class="h-3 w-3" aria-hidden="true" />
+          </span>
+          <span class="min-w-0 flex-1 truncate text-[15px] font-semibold leading-snug text-foreground">{{ title }}</span>
+          <span
+            v-if="entry.has_unread"
+            :class="unreadCountClass"
+            :aria-label="`${entry.unread} unread`"
+          >{{ entry.unread }}</span>
         </span>
-      </div>
+        <span class="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span :class="channelTagClass">{{ channelLabel }}</span>
+          <span class="type-caption min-w-0 truncate text-muted-foreground">
+            <template v-if="rootAuthor">{{ rootAuthor }} · </template>{{ replyLabel }}<template v-if="recencyLabel"> · last active {{ recencyLabel }}</template>
+          </span>
+        </span>
+      </span>
     </button>
     <button
       v-if="entry.has_unread"
       type="button"
-      class="type-caption shrink-0 self-center rounded-md border border-border px-2 py-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:opacity-60"
+      :class="[markReadClass, 'shrink-0 self-center']"
       :disabled="props.markingRead"
       @click.stop="emit('markRead', entry)"
     >
       {{ props.markingRead ? "Marking..." : "Mark read" }}
     </button>
-  </div>
+  </article>
 </template>

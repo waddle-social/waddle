@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Phone, PhoneOff, Video } from "lucide-vue-next";
+import { Phone, PhoneOff, Video, X } from "lucide-vue-next";
+import { toast as toastRecipe } from "styled-system/recipes";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
 import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
+
+// Styled like every other toast (opaque ink, night-coloured in daylight).
+// Ringing out is live (ember border); "call ended" is a neutral notice.
+const cls = toastRecipe();
 
 const state = useStore($callState);
 const lastError = useStore($lastCallError);
@@ -88,63 +93,62 @@ function dismissEnded(): void {
 <template>
   <div
     v-if="state.phase === 'outgoing'"
-    class="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-popover p-4 shadow-2xl glass-surface"
+    :class="[cls.root, 'call-toast fixed bottom-6 right-6 z-50 w-80 max-w-[calc(100vw-2rem)] flex-col animate-slide-up']"
     role="dialog"
     aria-live="polite"
     aria-label="Outgoing call"
   >
-    <div class="flex items-center gap-3">
+    <div class="flex w-full items-center gap-3">
       <span
-        class="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary motion-safe:animate-pulse"
+        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-live/15 text-live motion-safe:animate-pulse"
       >
         <component :is="state.media.video ? Video : Phone" class="w-5 h-5" />
       </span>
       <div class="min-w-0 flex-1">
-        <div class="type-chat-title truncate">{{ peerLabel }}</div>
-        <div class="type-caption text-muted-foreground">{{ mediaLabel }} · {{ outgoingStatusLabel }}</div>
+        <div :class="[cls.title, 'truncate']">{{ peerLabel }}</div>
+        <div :class="cls.description">{{ mediaLabel }} · {{ outgoingStatusLabel }}</div>
       </div>
     </div>
     <div
       v-if="lastError"
-      class="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 type-caption text-destructive"
+      class="w-full rounded-md border border-destructive/40 bg-destructive/15 px-2 py-1 type-caption text-destructive-text"
       role="alert"
     >
       {{ lastError }}
     </div>
-    <div class="mt-3 flex items-center justify-end gap-2">
+    <div class="flex w-full items-center justify-end gap-2">
       <button
-        class="chat-action-button chat-action-button--secondary"
+        class="call-toast__secondary inline-flex h-7 items-center gap-1.5 rounded-full border border-current/30 px-2.5 text-[12px] font-bold hover:bg-white/10"
         type="button"
         @click="cancel"
       >
-        <PhoneOff class="w-4 h-4" />
-        <span class="type-control">Cancel</span>
+        <PhoneOff class="w-3.5 h-3.5" />
+        <span>Cancel</span>
       </button>
     </div>
   </div>
 
   <div
     v-else-if="state.phase === 'ended' && endedCopy"
-    class="fixed bottom-6 right-6 z-50 w-80 rounded-xl border border-border bg-popover p-4 shadow-2xl glass-surface"
+    :class="[cls.root, 'call-toast fixed bottom-6 right-6 z-50 w-80 max-w-[calc(100vw-2rem)] !items-center animate-slide-up']"
+    style="border-color: var(--border)"
     role="status"
     aria-live="polite"
     aria-label="Call ended"
   >
-    <div class="flex items-center gap-3">
-      <span class="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <PhoneOff class="w-5 h-5" />
-      </span>
-      <div class="min-w-0 flex-1">
-        <div class="type-chat-title truncate">{{ endedCopy }}</div>
-      </div>
-      <button
-        class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-        type="button"
-        aria-label="Dismiss"
-        @click="dismissEnded"
-      >
-        <span aria-hidden="true">×</span>
-      </button>
+    <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-current">
+      <PhoneOff class="w-5 h-5" />
+    </span>
+    <div class="min-w-0 flex-1">
+      <div :class="[cls.title, 'truncate']">{{ endedCopy }}</div>
     </div>
+    <button
+      :class="[cls.closeTrigger, 'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md']"
+      type="button"
+      aria-label="Dismiss"
+      @click="dismissEnded"
+    >
+      <X class="h-3.5 w-3.5" aria-hidden="true" />
+    </button>
   </div>
 </template>

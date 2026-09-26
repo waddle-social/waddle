@@ -11,16 +11,20 @@ describe("ChatHeader notification settings routing", () => {
     const { descriptor } = parse(source);
     const buttons = findElements(descriptor.template?.ast, "NotifyModeButton");
 
-    expect(buttons).toHaveLength(2);
-    const [roomButton, dmButton] = buttons;
+    // One pair for the wide toolbar, one pair (`variant="submenu"`) in
+    // the compact overflow menu; both must route identically.
+    expect(buttons).toHaveLength(4);
+    for (const [roomButton, dmButton] of [buttons.slice(0, 2), buttons.slice(2, 4)]) {
+      expect(directiveExp(roomButton, "if")).toBe("channel?.jid");
+      expect(bindExp(roomButton, "room-jid")).toBe("channel.jid");
+      expect(attributeValue(roomButton, "conversation-kind")).toBe("private-group");
 
-    expect(directiveExp(roomButton, "if")).toBe("channel?.jid");
-    expect(bindExp(roomButton, "room-jid")).toBe("channel.jid");
-    expect(attributeValue(roomButton, "conversation-kind")).toBe("private-group");
-
-    expect(directiveExp(dmButton, "else-if")).toBe("dmPeer?.peerJid");
-    expect(bindExp(dmButton, "room-jid")).toBe("dmPeer.peerJid");
-    expect(attributeValue(dmButton, "conversation-kind")).toBe("direct-chat");
+      expect(directiveExp(dmButton, "else-if")).toBe("dmPeer?.peerJid");
+      expect(bindExp(dmButton, "room-jid")).toBe("dmPeer.peerJid");
+      expect(attributeValue(dmButton, "conversation-kind")).toBe("direct-chat");
+    }
+    expect(attributeValue(buttons[2], "variant")).toBe("submenu");
+    expect(attributeValue(buttons[3], "variant")).toBe("submenu");
   });
 });
 

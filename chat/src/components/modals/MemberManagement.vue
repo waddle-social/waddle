@@ -146,7 +146,7 @@ function affiliationLabel(affiliation: EditableAffiliation): string {
             <option v-for="affiliation in affiliations" :key="affiliation" :value="affiliation">{{ affiliationLabel(affiliation) }}</option>
           </select>
           <button
-            class="chat-icon-button text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+            class="chat-icon-button text-muted-foreground hover:text-destructive-text hover:bg-destructive/10"
             type="button"
             :aria-label="`Remove ${member.username}`"
             @click="emit('removeMember', member)"

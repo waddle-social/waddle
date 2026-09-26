@@ -5,6 +5,7 @@ import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import ComposerAddMenu from "@/components/chat/ComposerAddMenu.vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import ComposerAttachmentGrid from "@/components/chat/ComposerAttachmentGrid.vue";
 import ComposerFormattingBar from "@/components/chat/ComposerFormattingBar.vue";
 import ComposerEmojiPopover from "@/components/chat/ComposerEmojiPopover.vue";
@@ -533,16 +534,17 @@ watch(isPreparingSend, (preparing) => {
           v-if="replyingTo.preview"
           class="italic truncate flex-1 text-muted-foreground/85"
         >{{ replyingTo.preview }}</span>
-        <button
-          type="button"
-          class="ml-auto h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          title="Cancel reply"
-          aria-label="Cancel reply"
-          :disabled="isPreparingSend"
-          @click="emit('cancelReply')"
-        >
-          <X class="w-3.5 h-3.5" />
-        </button>
+        <AppTooltip label="Cancel reply">
+          <button
+            type="button"
+            class="ml-auto h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            aria-label="Cancel reply"
+            :disabled="isPreparingSend"
+            @click="emit('cancelReply')"
+          >
+            <X class="w-3.5 h-3.5" />
+          </button>
+        </AppTooltip>
       </div>
 
       <div
@@ -562,17 +564,17 @@ watch(isPreparingSend, (preparing) => {
           <div class="type-emphasis truncate text-foreground">{{ linkPreview.title.value }}</div>
           <div class="truncate text-muted-foreground">{{ linkPreview.description.value }}</div>
         </div>
-        <button
-          v-if="linkPreview.canDismiss.value"
-          type="button"
-          class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          title="Remove preview"
-          aria-label="Remove preview"
-          :disabled="isPreparingSend"
-          @click="linkPreview.dismiss"
-        >
-          <X class="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
+        <AppTooltip v-if="linkPreview.canDismiss.value" label="Remove preview">
+          <button
+            type="button"
+            class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            aria-label="Remove preview"
+            :disabled="isPreparingSend"
+            @click="linkPreview.dismiss"
+          >
+            <X class="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </AppTooltip>
       </div>
 
       <div
@@ -704,80 +706,86 @@ watch(isPreparingSend, (preparing) => {
         @close="onAddMenuClose"
       />
       <div class="chat-composer-toolbar">
-        <button
-          :ref="setAddButtonRef"
-          type="button"
-          class="chat-composer-add"
-          :class="{ 'chat-composer-add--open': showAddMenu }"
-          title="Attach"
-          aria-label="Attach"
-          aria-haspopup="menu"
-          :aria-expanded="showAddMenu"
-          :disabled="disabled || isPreparingSend"
-          @click="toggleAddMenu"
-        >
-          <Plus class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          class="chat-composer-tool"
-          :class="{ 'chat-composer-tool--active': showFormatting }"
-          :title="showFormatting ? 'Hide formatting' : 'Show formatting'"
-          :aria-label="showFormatting ? 'Hide formatting' : 'Show formatting'"
-          :aria-pressed="showFormatting"
-          :disabled="disabled || isPreparingSend"
-          @click="toggleFormatting"
-        >
-          <CaseSensitive class="h-5 w-5" aria-hidden="true" />
-        </button>
-        <button
-          :ref="setEmojiButtonRef"
-          type="button"
-          class="chat-composer-tool"
-          :class="{ 'chat-composer-tool--active': showEmojiPicker }"
-          title="Emoji"
-          aria-label="Emoji"
-          aria-haspopup="dialog"
-          :aria-expanded="showEmojiPicker"
-          :disabled="disabled || isPreparingSend"
-          @click="toggleEmojiPicker"
-        >
-          <Smile class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          class="chat-composer-tool"
-          title="Mention someone"
-          aria-label="Mention someone"
-          :disabled="disabled || isPreparingSend"
-          @click="startMention"
-        >
-          <AtSign class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          class="chat-composer-tool"
-          title="Run a command"
-          aria-label="Run a command"
-          :disabled="disabled || isPreparingSend"
-          @click="startSlashCommand"
-        >
-          <SquareSlash class="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          class="chat-composer-send"
-          :class="{ 'chat-composer-send--armed': canSend }"
-          :disabled="!canSend"
-          :title="isSendBusy ? 'Sending message' : 'Send now'"
-          :aria-label="isSendBusy ? 'Sending message' : 'Send message'"
-          :aria-busy="isSendBusy"
-          @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
-        >
-          <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
-          <Loader2 v-else-if="isSendBusy" class="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" />
-          <SendHorizontal v-else class="h-4 w-4" aria-hidden="true" />
-        </button>
+        <AppTooltip label="Attach">
+          <button
+            :ref="setAddButtonRef"
+            type="button"
+            class="chat-composer-add"
+            :class="{ 'chat-composer-add--open': showAddMenu }"
+            aria-label="Attach"
+            aria-haspopup="menu"
+            :aria-expanded="showAddMenu"
+            :disabled="disabled || isPreparingSend"
+            @click="toggleAddMenu"
+          >
+            <Plus class="h-4 w-4" aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <AppTooltip :label="showFormatting ? 'Hide formatting' : 'Show formatting'">
+          <button
+            type="button"
+            class="chat-composer-tool"
+            :class="{ 'chat-composer-tool--active': showFormatting }"
+            :aria-label="showFormatting ? 'Hide formatting' : 'Show formatting'"
+            :aria-pressed="showFormatting"
+            :disabled="disabled || isPreparingSend"
+            @click="toggleFormatting"
+          >
+            <CaseSensitive class="h-5 w-5" aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <AppTooltip label="Emoji">
+          <button
+            :ref="setEmojiButtonRef"
+            type="button"
+            class="chat-composer-tool"
+            :class="{ 'chat-composer-tool--active': showEmojiPicker }"
+            aria-label="Emoji"
+            aria-haspopup="dialog"
+            :aria-expanded="showEmojiPicker"
+            :disabled="disabled || isPreparingSend"
+            @click="toggleEmojiPicker"
+          >
+            <Smile class="h-4 w-4" aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <AppTooltip label="Mention someone">
+          <button
+            type="button"
+            class="chat-composer-tool"
+            aria-label="Mention someone"
+            :disabled="disabled || isPreparingSend"
+            @click="startMention"
+          >
+            <AtSign class="h-4 w-4" aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <AppTooltip label="Run a command">
+          <button
+            type="button"
+            class="chat-composer-tool"
+            aria-label="Run a command"
+            :disabled="disabled || isPreparingSend"
+            @click="startSlashCommand"
+          >
+            <SquareSlash class="h-4 w-4" aria-hidden="true" />
+          </button>
+        </AppTooltip>
+        <AppTooltip :label="isSendBusy ? 'Sending message' : 'Send now'">
+          <button
+            type="button"
+            class="chat-composer-send"
+            :class="{ 'chat-composer-send--armed': canSend }"
+            :disabled="!canSend"
+            :aria-label="isSendBusy ? 'Sending message' : 'Send message'"
+            :aria-busy="isSendBusy"
+            @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
+          >
+            <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
+            <Loader2 v-else-if="isSendBusy" class="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" />
+            <SendHorizontal v-else class="h-4 w-4" aria-hidden="true" />
+          </button>
+        </AppTooltip>
       </div>
     </div>
     <EmojiPicker

@@ -49,7 +49,7 @@ watch(
       class="z-modal fixed inset-0 flex items-end sm:items-center justify-center animate-fade-in"
       role="presentation"
     >
-      <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="emit('close')" />
+      <div class="absolute inset-0 bg-background/60" @click="emit('close')" />
       <div
         role="dialog"
         aria-modal="true"
@@ -118,7 +118,7 @@ watch(
             </button>
             <button
               type="button"
-              class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg text-destructive hover:bg-destructive/10 active:bg-destructive/10 transition-colors text-left"
+              class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg text-destructive-text hover:bg-destructive/10 active:bg-destructive/10 transition-colors text-left"
               @click="emit('retract')"
             >
               <Trash2 class="w-5 h-5" aria-hidden="true" />

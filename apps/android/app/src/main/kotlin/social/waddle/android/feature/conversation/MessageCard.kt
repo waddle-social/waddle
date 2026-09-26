@@ -248,9 +248,9 @@ private fun StoredMessageCard(
             )
         }
         item.safetyScores?.let { scores ->
-            val severity = safetyScoreSeverity(scores) ?: return@let
+            val category = safetyScoreChipCategory(scores) ?: return@let
             var scoresOpen by remember { mutableStateOf(false) }
-            SafetyScoresChip(severity = severity, onClick = { scoresOpen = true })
+            SafetyScoresChip(category = category, onClick = { scoresOpen = true })
             if (scoresOpen) {
                 SafetyScoresSheet(scores = scores, onDismiss = { scoresOpen = false })
             }

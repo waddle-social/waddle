@@ -158,11 +158,11 @@ onMounted(focusPanel);
       <div v-if="state === 'loading'" class="type-caption flex h-full items-center justify-center text-muted-foreground">
         Loading…
       </div>
-      <div v-else-if="state === 'error'" class="chat-message-lane flex items-center gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-4 text-destructive">
+      <div v-else-if="state === 'error'" class="chat-message-lane flex items-center gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-4 text-destructive-text">
         <WifiOff class="h-4 w-4 shrink-0" />
         <span class="type-control">{{ detail }}</span>
       </div>
-      <div v-else-if="actionError" class="chat-message-lane flex items-center gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-4 text-destructive">
+      <div v-else-if="actionError" class="chat-message-lane flex items-center gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-4 text-destructive-text">
         <WifiOff class="h-4 w-4 shrink-0" />
         <span class="type-control">{{ actionError }}</span>
       </div>

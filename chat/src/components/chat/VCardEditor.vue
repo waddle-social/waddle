@@ -198,7 +198,7 @@ function feedbackClass(tone: FeedbackTone): string {
     case "success":
       return "text-emerald-700 dark:text-emerald-300";
     case "error":
-      return "text-destructive";
+      return "text-destructive-text";
     default:
       return "text-muted-foreground";
   }

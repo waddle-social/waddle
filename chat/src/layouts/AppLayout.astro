@@ -25,9 +25,8 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <meta name="apple-mobile-web-app-title" content="Waddle" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5f7" />
-    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d12" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0b1219" />
     <!-- Published here so the (bundled, static) Faro bootstrap script
          below can read the Worker-runtime `SERVER_BASE_URL` without
          hoisting it through Vite `define` — that would require the
@@ -39,9 +38,8 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <script is:inline>
       (function () {
         try {
-          var stored = localStorage.getItem("waddle:theme");
-          if (stored === "light" || stored === "dark") {
-            document.documentElement.setAttribute("data-theme", stored);
+          if (localStorage.getItem("waddle:theme") === "light") {
+            document.documentElement.setAttribute("data-theme", "light");
           }
         } catch (e) {}
       })();
@@ -73,40 +71,32 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <AppShell client:only="vue" transition:persist>
       <slot />
       <div slot="fallback" class="chat-app-shell chat-startup-shell" role="status" aria-live="polite">
-        <div class="chat-desktop-shell">
-          <div class="chat-desktop-rail-slot">
-            <div class="chat-startup-rail">
-              <div class="chat-startup-logo" aria-hidden="true">
-                <img src="/waddle-logo.svg" alt="" width="32" height="32" />
-              </div>
+        <div class="community-shell">
+          <header class="community-header">
+            <div class="community-header__brand" aria-hidden="true">
+              <img src="/waddle-logo.svg" alt="" width="30" height="30" class="community-header__logo" />
+              <span class="community-header__name">Waddle</span>
             </div>
-          </div>
-          <div class="chat-sidebar-slot">
-            <aside class="chat-sidebar-pane glass-panel">
-              <div class="chat-sidebar-header">
-                <span class="type-pane-title text-sidebar-foreground">Spaces</span>
-              </div>
-              <div class="chat-pane-scroll chat-sidebar-scroll">
-                <div class="chat-startup-sidebar-loading type-caption text-sidebar-muted">
-                  <div class="flex items-center justify-center gap-1" aria-hidden="true">
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
+          </header>
+          <div class="community-shell__body">
+            <aside class="community-shell__rail" aria-hidden="true">
+              <div class="people-rail">
+                <div class="people-rail__search">
+                  <div class="people-rail__input" aria-hidden="true"></div>
+                </div>
+                <div class="people-rail__scroll">
+                  <div class="chat-startup-sidebar-loading type-caption text-sidebar-muted">
+                    <div class="flex items-center justify-center gap-1" aria-hidden="true">
+                      <span class="typing-dot"></span>
+                      <span class="typing-dot"></span>
+                      <span class="typing-dot"></span>
+                    </div>
                   </div>
-                  <span class="sr-only">Loading Waddle</span>
                 </div>
               </div>
             </aside>
-          </div>
-          <main class="chat-workspace">
-            <section class="chat-content-pane">
-              <header class="chat-startup-header">
-                <div class="chat-startup-mobile-logo" aria-hidden="true">
-                  <img src="/waddle-logo.svg" alt="" width="28" height="28" />
-                </div>
-                <span class="type-pane-title">Waddle</span>
-              </header>
-              <div class="chat-pane-scroll chat-message-scroll chat-startup-main">
+            <main class="community-shell__main">
+              <div class="chat-pane-scroll community-startup__main">
                 <div class="type-caption flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground">
                   <div class="flex items-center justify-center gap-1.5" aria-hidden="true">
                     <span class="typing-dot"></span>
@@ -114,10 +104,11 @@ const serverBaseUrl = env.SERVER_BASE_URL;
                     <span class="typing-dot"></span>
                   </div>
                   <p class="text-muted-foreground/60">Checking session.</p>
+                  <span class="sr-only">Loading Waddle</span>
                 </div>
               </div>
-            </section>
-          </main>
+            </main>
+          </div>
         </div>
       </div>
     </AppShell>

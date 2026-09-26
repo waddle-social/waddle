@@ -101,7 +101,7 @@ anything. There are two separate values:
   `config.ci.cuenv.version` and cuenv then falls back to its own
   `CARGO_PKG_VERSION`.
 
-They agree at 0.55.0 today only because both were set together. Two
+They agree at 0.56.2 today only because both were set together. Two
 consequences:
 
 - Bumping `module.cue` alone does not move the CI pin, even after

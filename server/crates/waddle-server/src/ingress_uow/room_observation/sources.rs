@@ -3,9 +3,9 @@ use jid::BareJid;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use waddle_extensions::{
-    ConfiguredRoomObserver, DisplayText, MessageRevision, ObservationGeneration, OriginId,
-    PluginId, RoomMessageSource, RoomObservationScope, RoomObservationSubscription, Sha256Digest,
-    StanzaId, Timestamp,
+    ConfiguredRoomObserver, MessageRevision, ObservationGeneration, OriginId, PluginId,
+    RoomMessageSource, RoomObservationScope, RoomObservationSubscription, Sha256Digest, StanzaId,
+    Timestamp,
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey, IngressEffectKind, MessageKey};
 use waddle_xmpp::xep::xep0308;
@@ -16,6 +16,7 @@ use crate::db::{DatabaseDriver, Row};
 use crate::ingress_substrate::EffectReceiptKind;
 use crate::ingress_uow::{EffectReceiptRepository, IngressUowTransaction};
 
+use super::observation_body::observation_body;
 use super::{CapturedRoomSource, ObservationError};
 
 pub(super) struct StoredSource {
@@ -536,14 +537,15 @@ pub(super) async fn capture(
         (key, stored.source)
     };
 
-    if body.trim().is_empty() {
+    // Source identity hashes the accepted wire body above. Only the observer's
+    // durable input excludes a supported structured reply fallback; archive
+    // content and correction invalidation retain the complete source revision.
+    let Some(body) = observation_body(message, body) else {
         for subscription in &subscriptions {
             terminal_receipt(tx, subscription, key, "empty_body").await?;
         }
         return Ok(());
-    }
-
-    let body = DisplayText::new(body.to_string()).map_err(|_| ObservationError::Codec)?;
+    };
     for subscription in &subscriptions {
         let generation = i64::try_from(subscription.generation.get())
             .map_err(|_| ObservationError::GenerationOutOfRange)?;

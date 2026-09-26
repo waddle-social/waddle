@@ -15,18 +15,18 @@ defineProps<{
 </script>
 
 <template>
-  <div class="flex gap-2.5 px-2 py-2">
+  <div class="flex gap-2.5 rounded-[10px] px-2 py-2">
     <AppAvatar :name="message.author" size="sm" class="mt-0.5 flex-shrink-0" />
     <div class="min-w-0 flex-1">
       <div class="flex items-baseline justify-between gap-2">
-        <span class="type-field font-medium truncate">{{ message.author }}</span>
-        <span class="type-field-xs text-muted-foreground shrink-0">
+        <span class="type-control truncate font-semibold text-foreground">{{ message.author }}</span>
+        <span class="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
           {{ formatTimelineStamp(message.createdAt) }}
         </span>
       </div>
       <p
         v-if="message.isRetracted"
-        class="type-field-sm italic text-muted-foreground"
+        class="type-caption italic text-muted-foreground"
       >Message retracted</p>
       <MessageBody v-else :message="message" compact />
     </div>

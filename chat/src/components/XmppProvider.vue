@@ -13,6 +13,7 @@ import IncomingCallToast from "@/components/calls/IncomingCallToast.vue";
 import OutgoingCallToast from "@/components/calls/OutgoingCallToast.vue";
 import CallOverlay from "@/components/calls/CallOverlay.vue";
 import CallErrorToast from "@/components/calls/CallErrorToast.vue";
+import AppToaster from "@/components/ui/AppToaster.vue";
 
 const props = defineProps<{
   serverBaseUrl: string;
@@ -127,4 +128,6 @@ onUnmounted(() => {
   <!-- Renders only when phase is idle/ended; covers pre-transition
        call errors that the other three surfaces never see. -->
   <CallErrorToast />
+  <!-- App-wide notice stack (`toast()` from @/ui/toaster). -->
+  <AppToaster />
 </template>

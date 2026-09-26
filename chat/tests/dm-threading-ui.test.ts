@@ -50,12 +50,13 @@ describe("DM threading UI contract", () => {
   test("wires Add people clicks through desktop and mobile shells", () => {
     const dmPanel = readFileSync(new URL("../src/components/chat/DmPanel.vue", import.meta.url), "utf8");
     const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
-    const mobileDrawers = readFileSync(new URL("../src/components/chat/ChatMobileDrawers.vue", import.meta.url), "utf8");
+    const roomsPage = readFileSync(new URL("../src/components/community/pages/RoomsPage.vue", import.meta.url), "utf8");
 
     expect(dmPanel).toContain('@click.stop="emit(\'selectDm\', conversation.peerJid)"');
     expect(dmPanel).toContain('@click.stop="emit(\'addPeopleToDm\', conversation.peerJid)"');
-    expect(readyShell).toContain('@add-people-to-dm="handleAddPeopleToDm"');
-    expect(mobileDrawers).toContain('@add-people-to-dm="handleAddPeopleToDm"');
+    // DmPanel is hosted by the Rooms page inside the community shell.
+    expect(readyShell).toContain("<RoomsPage");
+    expect(roomsPage).toContain('@add-people-to-dm="handleAddPeopleToDm"');
   });
 
   test("seeded group-DM submits include the original direct-message peer", () => {

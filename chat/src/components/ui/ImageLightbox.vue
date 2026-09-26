@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, watch } from "vue";
 import { X, ChevronLeft, ChevronRight, Download } from "lucide-vue-next";
 import { safeAttachmentUrl } from "@/lib/attachment-url";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 
 interface LightboxImage {
   url: string;
@@ -71,53 +72,54 @@ onBeforeUnmount(() => {
       role="dialog"
       aria-modal="true"
     >
-      <div class="absolute inset-0 bg-background/85 backdrop-blur-md" @click="close" />
+      <button type="button" class="absolute inset-0 bg-background/85" aria-label="Close image" @click="close" />
 
       <div class="z-sticky absolute top-3 right-3 flex items-center gap-1">
-        <a
-          v-if="currentUrl"
-          :href="currentUrl"
-          :download="current.name ?? ''"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="chat-lightbox-control h-9 w-9"
-          title="Download"
-          aria-label="Download original"
-          @click.stop
-        >
-          <Download class="w-4 h-4" />
-        </a>
-        <button
-          class="chat-lightbox-control h-9 w-9"
-          type="button"
-          title="Close (Esc)"
-          aria-label="Close lightbox"
-          @click="close"
-        >
-          <X class="w-4 h-4" />
-        </button>
+        <AppTooltip v-if="currentUrl" label="Download" placement="bottom">
+          <a
+            :href="currentUrl"
+            :download="current.name ?? ''"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="chat-lightbox-control h-9 w-9"
+            aria-label="Download original"
+            @click.stop
+          >
+            <Download class="w-4 h-4" />
+          </a>
+        </AppTooltip>
+        <AppTooltip label="Close (Esc)" placement="bottom">
+          <button
+            class="chat-lightbox-control h-9 w-9"
+            type="button"
+            aria-label="Close lightbox"
+            @click="close"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </AppTooltip>
       </div>
 
-      <button
-        v-if="hasPrev"
-        class="chat-lightbox-control z-sticky absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10"
-        type="button"
-        title="Previous (←)"
-        aria-label="Previous image"
-        @click.stop="prev"
-      >
-        <ChevronLeft class="w-5 h-5" />
-      </button>
-      <button
-        v-if="hasNext"
-        class="chat-lightbox-control z-sticky absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10"
-        type="button"
-        title="Next (→)"
-        aria-label="Next image"
-        @click.stop="next"
-      >
-        <ChevronRight class="w-5 h-5" />
-      </button>
+      <AppTooltip v-if="hasPrev" label="Previous (←)" placement="right">
+        <button
+          class="chat-lightbox-control z-sticky absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10"
+          type="button"
+          aria-label="Previous image"
+          @click.stop="prev"
+        >
+          <ChevronLeft class="w-5 h-5" />
+        </button>
+      </AppTooltip>
+      <AppTooltip v-if="hasNext" label="Next (→)" placement="left">
+        <button
+          class="chat-lightbox-control z-sticky absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10"
+          type="button"
+          aria-label="Next image"
+          @click.stop="next"
+        >
+          <ChevronRight class="w-5 h-5" />
+        </button>
+      </AppTooltip>
 
       <div class="chat-lightbox-frame relative flex flex-col items-center justify-center" @click.stop>
         <img

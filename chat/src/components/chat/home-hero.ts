@@ -8,13 +8,23 @@ export function heroTimeOfDayFor(date: Date): HeroTimeOfDay {
   return "night";
 }
 
-export function heroGreetingFor(timeOfDay: HeroTimeOfDay): string {
+function heroGreetingBase(timeOfDay: HeroTimeOfDay): string {
   switch (timeOfDay) {
-    case "morning": return "Good morning.";
-    case "day":     return "Good afternoon.";
-    case "evening": return "Good evening.";
-    case "night":   return "Late one tonight.";
+    case "morning": return "Good morning";
+    case "day":     return "Good afternoon";
+    case "evening": return "Good evening";
+    case "night":   return "Late one tonight";
   }
+}
+
+/**
+ * "Good afternoon, mara." — the greeting names the person first when a
+ * name is known, and stays a plain sentence otherwise.
+ */
+export function heroGreetingFor(timeOfDay: HeroTimeOfDay, name?: string | null): string {
+  const base = heroGreetingBase(timeOfDay);
+  const trimmed = name?.trim();
+  return trimmed ? `${base}, ${trimmed}.` : `${base}.`;
 }
 
 export function heroQuietMessageFor(timeOfDay: HeroTimeOfDay): string {
@@ -26,12 +36,23 @@ export function heroQuietMessageFor(timeOfDay: HeroTimeOfDay): string {
   }
 }
 
-export function heroEyebrowFor(date: Date): string {
+function heroEyebrowFor(date: Date): string {
   return new Intl.DateTimeFormat(undefined, {
-    weekday: "long",
+    weekday: "short",
     month: "short",
     day: "numeric",
   }).format(date);
+}
+
+/**
+ * The Home kicker: "Fri 25 Sep · 3 around · 2 in a huddle". Every number
+ * is real — a segment is omitted rather than shown as zero.
+ */
+export function heroKickerFor(date: Date, aroundCount: number, inHuddleCount: number): string {
+  const parts = [heroEyebrowFor(date)];
+  if (aroundCount > 0) parts.push(`${aroundCount} around`);
+  if (inHuddleCount > 0) parts.push(`${inHuddleCount} in a huddle`);
+  return parts.join(" · ");
 }
 
 export interface HeroSummary {

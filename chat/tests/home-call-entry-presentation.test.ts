@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { CallActivityDockEntry } from "../src/lib/calls/call-activity-dock";
 import type { CallState } from "../src/lib/calls/types";
 import {
+  callEntriesInHuddleCount,
+  callEntryCardTone,
   callEntryDescription,
   callEntryDetail,
   callEntryEyebrow,
@@ -10,7 +12,6 @@ import {
   callEntryParticipantInitial,
   callEntryParticipantPreview,
   callEntryStatus,
-  callEntryToneClass,
   callEntryVisibleParticipantLabels,
   callEntryVisualTone,
   endCallEntryButtonText,
@@ -143,10 +144,30 @@ describe("isSameCallEntry", () => {
   });
 });
 
-describe("tone classes", () => {
-  test("each tone maps to its palette", () => {
-    expect(callEntryToneClass("warning")).toContain("border-warning/25");
-    expect(callEntryToneClass("primary")).toContain("border-primary/25");
-    expect(callEntryToneClass("success")).toContain("border-success/20");
+describe("card tones", () => {
+  test("each visual tone selects a card recipe variant", () => {
+    // Only a live huddle carries the ember border and glow (the `live`
+    // card); ringing and syncing calls are outlined in their state colour
+    // by the `warning` / `active` variants. The tone rides on the recipe
+    // because Panda's recipe layer beats any competing Tailwind utility.
+    expect(callEntryCardTone("warning")).toBe("warning");
+    expect(callEntryCardTone("primary")).toBe("active");
+    expect(callEntryCardTone("success")).toBe("live");
+  });
+});
+
+describe("callEntriesInHuddleCount", () => {
+  test("counts channel participants and accepted DM calls, never a ringing one", () => {
+    expect(callEntriesInHuddleCount([])).toBe(0);
+    expect(callEntriesInHuddleCount([channelEntry({ participantCount: 3 })])).toBe(3);
+    expect(callEntriesInHuddleCount([dmEntry({ state: "accepted" })])).toBe(1);
+    // An incoming or outgoing propose that nobody has answered has nobody in it.
+    expect(callEntriesInHuddleCount([dmEntry({ state: "ringing", direction: "incoming" })])).toBe(0);
+    expect(callEntriesInHuddleCount([dmEntry({ state: "ringing", direction: "outgoing" })])).toBe(0);
+    expect(callEntriesInHuddleCount([
+      channelEntry({ participantCount: 2 }),
+      dmEntry({ state: "accepted" }),
+      dmEntry({ key: "dm:carol@example.com:sid-2", peerJid: "carol@example.com", state: "ringing" }),
+    ])).toBe(3);
   });
 });

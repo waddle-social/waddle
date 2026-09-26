@@ -60,7 +60,7 @@ struct MessageSafetyScoresSheet: View {
         } else {
             ContentUnavailableView(
                 "No signals",
-                systemImage: MessageSafetyScoresButton.symbol,
+                systemImage: "tray",
                 description: Text("No category on this message reached the notice threshold.")
             )
         }
@@ -73,11 +73,15 @@ struct MessageSafetyScoresSheet: View {
 
 /// One category: title, percentage and a bar.
 struct MessageSafetyScoreRowView: View {
+    @Environment(\.colorScheme) private var colorScheme
     let row: SafetyScoreRow
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             HStack(alignment: .firstTextBaseline) {
+                Image(systemName: MessageSafetyScoreStyle.symbol(for: row.category))
+                    .foregroundStyle(MessageSafetyScoreStyle.color(for: row.category, scheme: colorScheme))
+                    .accessibilityHidden(true)
                 Text(row.title)
                 Spacer(minLength: Theme.Spacing.s)
                 Text(row.percentText)
@@ -85,7 +89,7 @@ struct MessageSafetyScoreRowView: View {
                     .foregroundStyle(.secondary)
             }
             ProgressView(value: row.probability)
-                .tint(row.severity.map(MessageSafetyScoresButton.tint(for:)) ?? Color.secondary)
+                .tint(MessageSafetyScoreStyle.color(for: row.category, scheme: colorScheme))
                 .accessibilityHidden(true)
         }
         .padding(.vertical, Theme.Spacing.xxs)
@@ -94,4 +98,32 @@ struct MessageSafetyScoreRowView: View {
         .accessibilityLabel(Text(row.title))
         .accessibilityValue(Text(row.percentText))
     }
+}
+
+private struct MessageSafetyScoresPreview: View {
+    private let scores = SafetyScores(modelVersion: "preview", scores: [
+        SafetyScore(category: .isQuestion, probability: SafetyProbability(0.95)!, taxonomyVersion: "v1"),
+        SafetyScore(category: .harassment, probability: SafetyProbability(0.81)!, taxonomyVersion: "v1"),
+        SafetyScore(category: .hateSpeech, probability: SafetyProbability(0.35)!, taxonomyVersion: "v1"),
+    ])
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            if let row = scores.markerRow {
+                MessageSafetyScoresButton(row: row) {}
+            }
+            ForEach(scores.notableRows) { MessageSafetyScoreRowView(row: $0) }
+        }
+        .padding()
+    }
+}
+
+#Preview("Question and harassment · Light") {
+    MessageSafetyScoresPreview()
+        .preferredColorScheme(.light)
+}
+
+#Preview("Question and harassment · Dark") {
+    MessageSafetyScoresPreview()
+        .preferredColorScheme(.dark)
 }

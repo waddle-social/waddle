@@ -173,59 +173,38 @@ export function callEntryParticipantInitial(label: string): string {
   return label.trim().charAt(0).toUpperCase() || "?";
 }
 
-export function callEntryToneClass(tone: CallEntryVisualTone): string {
+/** `card` recipe tone (panda.config.ts) for a Home call card. */
+export type CallEntryCardTone = "live" | "warning" | "active";
+
+/**
+ * Card tone for a Home call card. A live huddle is the only thing on Home
+ * allowed to glow (ember, the `live` card); a ringing call is outlined in
+ * amber (`warning`) and a syncing or outgoing one in teal (`active`), both
+ * without a glow. The tone selects a recipe variant rather than a Tailwind
+ * utility because Panda's recipe layer is declared after Tailwind's
+ * utilities layer and would win over any competing `border-*`/`text-*`.
+ */
+export function callEntryCardTone(tone: CallEntryVisualTone): CallEntryCardTone {
   switch (tone) {
     case "warning":
-      return "border-warning/25 bg-warning/10 hover:bg-warning/15";
+      return "warning";
     case "primary":
-      return "border-primary/25 bg-primary/8 hover:bg-primary/12";
+      return "active";
     case "success":
-      return "border-success/20 bg-success/10 hover:bg-success/15";
+      return "live";
   }
 }
 
-export function callEntryAccentClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "text-warning-foreground";
-    case "primary":
-      return "text-primary";
-    case "success":
-      return "text-success-foreground";
-  }
-}
-
-export function callEntryIconClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "border-warning/25 bg-background/90 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/90 text-primary";
-    case "success":
-      return "border-success/25 bg-background/90 text-success-foreground";
-  }
-}
-
-export function callEntryDotClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "bg-warning shadow-[0_0_6px_var(--warning)]";
-    case "primary":
-      return "bg-primary shadow-[0_0_6px_var(--primary)]";
-    case "success":
-      return "bg-success shadow-[0_0_6px_var(--success)]";
-  }
-}
-
-export function callEntryPillClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "border-warning/25 bg-background/70 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/70 text-primary";
-    case "success":
-      return "border-success/25 bg-background/70 text-success-foreground";
-  }
+/**
+ * People counted "in a huddle" on Home: every known participant of every
+ * live call. A DM call that is still ringing has nobody in it yet, so only
+ * accepted DM entries count (the people rail applies the same rule).
+ */
+export function callEntriesInHuddleCount(entries: readonly CallActivityDockEntry[]): number {
+  return entries.reduce((total, entry) => {
+    if (entry.kind === "channel") return total + entry.participantCount;
+    return total + (entry.state === "accepted" ? 1 : 0);
+  }, 0);
 }
 
 /**

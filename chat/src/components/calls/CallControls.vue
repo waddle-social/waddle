@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import {
   Check,
   LayoutGrid,
@@ -312,113 +313,118 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="call-controls">
-    <button
-      type="button"
-      class="chat-action-button"
-      :class="micEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
-      :aria-pressed="!micEnabled"
-      :title="micEnabled ? 'Mute' : 'Unmute'"
-      @click="emit('toggleMic')"
-    >
-      <component :is="micEnabled ? Mic : MicOff" class="w-4 h-4" />
-      <span class="type-control sr-only sm:not-sr-only">{{ micEnabled ? "Mute" : "Unmute" }}</span>
-    </button>
-    <button
-      type="button"
-      class="chat-action-button"
-      :class="camEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
-      :aria-pressed="!camEnabled"
-      :title="camEnabled ? 'Camera off' : 'Camera on'"
-      @click="emit('toggleCam')"
-    >
-      <component :is="camEnabled ? Video : VideoOff" class="w-4 h-4" />
-      <span class="type-control sr-only sm:not-sr-only">{{ camEnabled ? "Off" : "On" }}</span>
-    </button>
-    <button
-      v-if="screenShareSupported"
-      type="button"
-      class="chat-action-button"
-      :class="screenShareEnabled ? 'chat-action-button--primary' : 'chat-action-button--secondary'"
-      :aria-pressed="screenShareEnabled"
-      :title="screenShareEnabled ? 'Stop sharing' : 'Share screen'"
-      @click="emit('toggleScreenShare')"
-    >
-      <MonitorUp class="w-4 h-4" />
-      <span class="type-control sr-only sm:not-sr-only">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
-    </button>
+    <AppTooltip :label="micEnabled ? 'Mute' : 'Unmute'">
+      <button
+        type="button"
+        class="chat-action-button"
+        :class="micEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
+        :aria-pressed="!micEnabled"
+        @click="emit('toggleMic')"
+      >
+        <component :is="micEnabled ? Mic : MicOff" class="w-4 h-4" />
+        <span class="type-control sr-only sm:not-sr-only">{{ micEnabled ? "Mute" : "Unmute" }}</span>
+      </button>
+    </AppTooltip>
+    <AppTooltip :label="camEnabled ? 'Camera off' : 'Camera on'">
+      <button
+        type="button"
+        class="chat-action-button"
+        :class="camEnabled ? 'chat-action-button--secondary' : 'chat-action-button--primary'"
+        :aria-pressed="!camEnabled"
+        @click="emit('toggleCam')"
+      >
+        <component :is="camEnabled ? Video : VideoOff" class="w-4 h-4" />
+        <span class="type-control sr-only sm:not-sr-only">{{ camEnabled ? "Off" : "On" }}</span>
+      </button>
+    </AppTooltip>
+    <AppTooltip v-if="screenShareSupported" :label="screenShareEnabled ? 'Stop sharing' : 'Share screen'">
+      <button
+        type="button"
+        class="chat-action-button"
+        :class="screenShareEnabled ? 'chat-action-button--primary' : 'chat-action-button--secondary'"
+        :aria-pressed="screenShareEnabled"
+        @click="emit('toggleScreenShare')"
+      >
+        <MonitorUp class="w-4 h-4" />
+        <span class="type-control sr-only sm:not-sr-only">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
+      </button>
+    </AppTooltip>
 
     <!-- Gallery ⟷ Speaker view switcher. Sticky for the call; a pin or an
          incoming screen share still overrides the chosen layout's large tile.
          A radiogroup (single-choice) rather than two independent toggles. -->
     <div class="call-controls__view-switch" role="radiogroup" aria-label="Stage view">
-      <button
-        type="button"
-        role="radio"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': viewMode === 'gallery' }"
-        title="Gallery view"
-        aria-label="Gallery view"
-        :aria-checked="viewMode === 'gallery'"
-        :tabindex="viewMode === 'gallery' ? 0 : -1"
-        @click="emit('setViewMode', 'gallery')"
-        @keydown="onViewKeydown"
-      >
-        <LayoutGrid class="w-4 h-4" />
-      </button>
-      <button
-        type="button"
-        role="radio"
-        class="chat-icon-button chat-icon-button--md hover:bg-muted"
-        :class="{ 'bg-muted text-foreground': viewMode === 'speaker' }"
-        title="Speaker view"
-        aria-label="Speaker view"
-        :aria-checked="viewMode === 'speaker'"
-        :tabindex="viewMode === 'speaker' ? 0 : -1"
-        @click="emit('setViewMode', 'speaker')"
-        @keydown="onViewKeydown"
-      >
-        <SquareUser class="w-4 h-4" />
-      </button>
+      <AppTooltip label="Gallery view">
+        <button
+          type="button"
+          role="radio"
+          class="chat-icon-button chat-icon-button--md hover:bg-muted"
+          :class="{ 'bg-muted text-foreground': viewMode === 'gallery' }"
+          aria-label="Gallery view"
+          :aria-checked="viewMode === 'gallery'"
+          :tabindex="viewMode === 'gallery' ? 0 : -1"
+          @click="emit('setViewMode', 'gallery')"
+          @keydown="onViewKeydown"
+        >
+          <LayoutGrid class="w-4 h-4" />
+        </button>
+      </AppTooltip>
+      <AppTooltip label="Speaker view">
+        <button
+          type="button"
+          role="radio"
+          class="chat-icon-button chat-icon-button--md hover:bg-muted"
+          :class="{ 'bg-muted text-foreground': viewMode === 'speaker' }"
+          aria-label="Speaker view"
+          :aria-checked="viewMode === 'speaker'"
+          :tabindex="viewMode === 'speaker' ? 0 : -1"
+          @click="emit('setViewMode', 'speaker')"
+          @keydown="onViewKeydown"
+        >
+          <SquareUser class="w-4 h-4" />
+        </button>
+      </AppTooltip>
     </div>
 
     <span class="call-controls__divider" aria-hidden="true" />
 
-    <button
-      type="button"
-      class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      :title="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call' : 'Expand call'"
-      :aria-label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call to split view' : 'Expand call to fill the chat pane'"
-      @click="emit('toggleExpanded')"
-    >
-      <component :is="isExpanded ? Minimize2 : Maximize2" class="w-4 h-4" />
-    </button>
-    <button
-      v-if="isExpanded && !isImmersive"
-      type="button"
-      class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      title="Make call immersive"
-      aria-label="Make call immersive"
-      @click="emit('toggleImmersive')"
-    >
-      <Maximize2 class="w-4 h-4" />
-    </button>
-    <button
-      v-if="isImmersive"
-      type="button"
-      class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      :title="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
-      :aria-label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
-      @click="emit('toggleNativeFullscreen')"
-    >
-      <component :is="isNativeFullscreen ? Minimize2 : Maximize2" class="w-4 h-4" />
-    </button>
+    <AppTooltip :label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call' : 'Expand call'">
+      <button
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :aria-label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call to split view' : 'Expand call to fill the chat pane'"
+        @click="emit('toggleExpanded')"
+      >
+        <component :is="isExpanded ? Minimize2 : Maximize2" class="w-4 h-4" />
+      </button>
+    </AppTooltip>
+    <AppTooltip v-if="isExpanded && !isImmersive" label="Make call immersive">
+      <button
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        aria-label="Make call immersive"
+        @click="emit('toggleImmersive')"
+      >
+        <Maximize2 class="w-4 h-4" />
+      </button>
+    </AppTooltip>
+    <AppTooltip v-if="isImmersive" :label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'">
+      <button
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :aria-label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
+        @click="emit('toggleNativeFullscreen')"
+      >
+        <component :is="isNativeFullscreen ? Minimize2 : Maximize2" class="w-4 h-4" />
+      </button>
+    </AppTooltip>
     <div ref="reactionsWrapEl" class="call-controls__reactions">
+      <AppTooltip label="Reactions">
       <button
         ref="reactionsTriggerEl"
         type="button"
         class="chat-icon-button chat-icon-button--md hover:bg-muted"
         :class="{ 'bg-muted text-foreground': reactionsOpen }"
-        title="Reactions"
         aria-label="Reactions"
         aria-haspopup="menu"
         :aria-expanded="reactionsOpen"
@@ -427,6 +433,7 @@ onBeforeUnmount(() => {
       >
         <SmilePlus class="w-4 h-4" />
       </button>
+      </AppTooltip>
       <div
         v-show="reactionsOpen"
         ref="reactionsMenuEl"
@@ -447,64 +454,66 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </div>
-    <button
-      v-if="raisedHandAvailable"
-      type="button"
-      class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      :class="{ 'bg-muted text-foreground': raisedHandActive }"
-      :title="raisedHandActive ? 'Lower hand' : 'Raise hand'"
-      :aria-label="raisedHandActive ? 'Lower hand' : 'Raise hand'"
-      :aria-pressed="raisedHandActive ? 'true' : 'false'"
-      @click="emit('toggleRaisedHand')"
-    >
-      <Hand class="w-4 h-4" />
-    </button>
-    <button
-      type="button"
-      class="call-controls__participants chat-icon-button chat-icon-button--md hover:bg-muted"
-      :class="{ 'bg-muted text-foreground': participantsOpen }"
-      :title="participantsOpen ? 'Close participants' : 'Open participants'"
-      :aria-label="participantsOpen ? 'Close participants' : 'Open participants'"
-      :aria-pressed="participantsOpen"
-      :aria-expanded="participantsOpen"
-      @click="emit('toggleParticipants')"
-    >
-      <Users class="w-4 h-4" />
-      <span
-        v-if="participantCount > 0"
-        class="call-controls__count"
-        aria-hidden="true"
-      >{{ participantCount }}</span>
-    </button>
-    <button
-      type="button"
-      class="call-controls__chat chat-icon-button chat-icon-button--md hover:bg-muted"
-      :class="{ 'bg-muted text-foreground': chatOpen }"
-      :title="chatOpen ? 'Close chat' : 'Open chat'"
-      :aria-label="chatButtonLabel"
-      :aria-pressed="chatOpen"
-      :aria-expanded="chatOpen"
-      @click="emit('toggleChat')"
-    >
-      <MessageSquare class="w-4 h-4" />
-      <span
-        v-if="chatUnread > 0"
-        class="call-controls__unread"
-        aria-hidden="true"
-      >{{ chatUnread }}</span>
-    </button>
-    <button
-      v-if="pictureInPictureSupported"
-      type="button"
-      class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      :class="{ 'bg-muted text-foreground': pictureInPictureActive }"
-      :title="pictureInPictureActive ? 'Return to call' : 'Picture-in-Picture'"
-      :aria-label="pictureInPictureActive ? 'Return to call' : 'Open Picture-in-Picture'"
-      :aria-pressed="pictureInPictureActive"
-      @click="emit('togglePictureInPicture')"
-    >
-      <PictureInPicture2 class="w-4 h-4" />
-    </button>
+    <AppTooltip v-if="raisedHandAvailable" :label="raisedHandActive ? 'Lower hand' : 'Raise hand'">
+      <button
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': raisedHandActive }"
+        :aria-label="raisedHandActive ? 'Lower hand' : 'Raise hand'"
+        :aria-pressed="raisedHandActive ? 'true' : 'false'"
+        @click="emit('toggleRaisedHand')"
+      >
+        <Hand class="w-4 h-4" />
+      </button>
+    </AppTooltip>
+    <AppTooltip :label="participantsOpen ? 'Close participants' : 'Open participants'">
+      <button
+        type="button"
+        class="call-controls__participants chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': participantsOpen }"
+        :aria-label="participantsOpen ? 'Close participants' : 'Open participants'"
+        :aria-pressed="participantsOpen"
+        :aria-expanded="participantsOpen"
+        @click="emit('toggleParticipants')"
+      >
+        <Users class="w-4 h-4" />
+        <span
+          v-if="participantCount > 0"
+          class="call-controls__count"
+          aria-hidden="true"
+        >{{ participantCount }}</span>
+      </button>
+    </AppTooltip>
+    <AppTooltip :label="chatOpen ? 'Close chat' : 'Open chat'">
+      <button
+        type="button"
+        class="call-controls__chat chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': chatOpen }"
+        :aria-label="chatButtonLabel"
+        :aria-pressed="chatOpen"
+        :aria-expanded="chatOpen"
+        @click="emit('toggleChat')"
+      >
+        <MessageSquare class="w-4 h-4" />
+        <span
+          v-if="chatUnread > 0"
+          class="call-controls__unread"
+          aria-hidden="true"
+        >{{ chatUnread }}</span>
+      </button>
+    </AppTooltip>
+    <AppTooltip v-if="pictureInPictureSupported" :label="pictureInPictureActive ? 'Return to call' : 'Picture-in-Picture'">
+      <button
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': pictureInPictureActive }"
+        :aria-label="pictureInPictureActive ? 'Return to call' : 'Open Picture-in-Picture'"
+        :aria-pressed="pictureInPictureActive"
+        @click="emit('togglePictureInPicture')"
+      >
+        <PictureInPicture2 class="w-4 h-4" />
+      </button>
+    </AppTooltip>
     <div ref="moreWrapEl" class="call-controls__more">
       <button
         ref="moreTriggerEl"
@@ -552,15 +561,16 @@ onBeforeUnmount(() => {
 
     <span class="call-controls__divider" aria-hidden="true" />
 
-    <button
-      type="button"
-      class="chat-action-button chat-action-button--destructive"
-      title="Hang up"
-      @click="emit('hangup')"
-    >
-      <PhoneOff class="w-4 h-4" />
-      <span class="type-control sr-only sm:not-sr-only">Hang up</span>
-    </button>
+    <AppTooltip label="Hang up">
+      <button
+        type="button"
+        class="chat-action-button chat-action-button--destructive"
+        @click="emit('hangup')"
+      >
+        <PhoneOff class="w-4 h-4" />
+        <span class="type-control sr-only sm:not-sr-only">Hang up</span>
+      </button>
+    </AppTooltip>
   </div>
 </template>
 

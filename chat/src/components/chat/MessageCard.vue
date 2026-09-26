@@ -13,6 +13,7 @@ import {
   Trash2,
 } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import AppTooltip from "@/components/ui/AppTooltip.vue";
 import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 import MessageBody from "@/components/chat/MessageBody.vue";
 import MessageActionSheet from "@/components/chat/MessageActionSheet.vue";
@@ -38,7 +39,7 @@ import { resolveThreadActionTarget } from "@/lib/thread-action-target";
 import type { CallMedia } from "@/lib/calls/types";
 import { authorBadge as authorBadgeFor, authorBadgeTooltip as authorBadgeTooltipFor } from "./message-card-badges";
 import { eventBandsFor, rendersAsSystemBand } from "./message-system-band";
-import { visibleSafetyScores } from "./message-safety-scores";
+import { visibleQuestionScore, visibleSafetyScores } from "./message-safety-scores";
 import { formatThreadRecency } from "./message-thread-recency";
 import { useMessageActionSurfaces } from "./composables/use-message-action-surfaces";
 import { useMessageGestures } from "./composables/use-message-gestures";
@@ -107,7 +108,11 @@ const emit = defineEmits<{
 }>();
 
 const authorBadge = computed(() => authorBadgeFor(props.authority, props.hats));
-const safetyScores = computed(() => visibleSafetyScores(props.message));
+const safetyScores = computed(() => {
+  const scores = props.message.safetyScores;
+  if (!scores || props.message.isRetracted) return null;
+  return visibleSafetyScores(props.message) || visibleQuestionScore(props.message) ? scores : null;
+});
 const authorBadgeTooltip = computed(() => authorBadgeTooltipFor(props.authority, props.hats));
 
 const eventBands = computed(() => eventBandsFor(props.message.extensionAnnotations));
@@ -139,7 +144,7 @@ const deliveryStatusClass = computed(() => {
       return "text-warning/80";
     case "rejected":
     case "failed":
-      return "text-destructive/80";
+      return "text-destructive-text/80";
     default:
       return "text-muted-foreground/50";
   }
@@ -585,11 +590,11 @@ const swipe = gestures.swipe;
          primary-tinted left rail + italic preview text so "you are
          replying" and "this is a reply" speak one dialect. -->
     <div v-if="message.replyTo && !hideReplyChip" class="chat-message-fill">
+      <AppTooltip :label="message.replyTo.preview ? 'Show full quoted message and jump to it' : 'Jump to replied message'">
       <button
         type="button"
         class="type-caption flex min-h-7 max-w-full items-center gap-1.5 rounded-lg border-l-[3px] border-l-primary/55 bg-muted/35 px-2 text-left text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
         :aria-expanded="replyChipExpanded"
-        :title="message.replyTo.preview ? 'Show full quoted message and jump to it' : 'Jump to replied message'"
         @click="onReplyChipClick"
       >
         <CornerDownRight class="w-3 h-3 flex-shrink-0 text-primary/70" />
@@ -600,6 +605,7 @@ const swipe = gestures.swipe;
         >{{ message.replyTo.preview }}</span>
         <span v-else class="type-mono opacity-60">{{ message.replyTo.id.slice(0, 8) }}</span>
       </button>
+      </AppTooltip>
     </div>
 
     <!-- Edit mode -->
@@ -629,11 +635,10 @@ const swipe = gestures.swipe;
          triage threads at a glance — who's been talking, how many turns,
          how recently — without opening the panel. The structural "this is
          a thread" marker lives in the avatar gutter as the rail glyph. -->
+    <AppTooltip v-if="showThreadChip" :label="`Open thread (${threadReplyCountValue} ${threadReplyCountValue === 1 ? 'reply' : 'replies'})`">
     <button
-      v-if="showThreadChip"
       type="button"
       class="chat-thread-chip type-caption flex w-full items-center rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
-      :title="`Open thread (${threadReplyCountValue} ${threadReplyCountValue === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
       <span
@@ -661,6 +666,7 @@ const swipe = gestures.swipe;
       <span class="chat-thread-chip__count min-w-0 truncate">{{ threadReplyCountValue }} {{ threadReplyCountValue === 1 ? "reply" : "replies" }}</span>
       <span v-if="threadChipRecency" class="chat-thread-chip__recency">{{ threadChipRecency }}</span>
     </button>
+    </AppTooltip>
 
     <MessageReactionChips
       v-if="message.reactions && Object.keys(message.reactions).length > 0"
@@ -706,7 +712,6 @@ const swipe = gestures.swipe;
       type="button"
       class="chat-message-action-trigger z-sticky absolute top-1 right-1 hidden [@media(pointer:coarse)]:flex h-11 w-11 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted active:bg-muted transition-all duration-150"
       :class="sheetOpen ? 'opacity-100' : ''"
-      title="Message actions"
       aria-label="Message actions"
       :aria-expanded="sheetOpen"
       aria-haspopup="dialog"

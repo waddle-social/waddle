@@ -118,7 +118,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -168,7 +168,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -218,7 +218,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -268,7 +268,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -318,7 +318,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -368,7 +368,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -489,7 +489,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -551,7 +551,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -601,7 +601,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.55.0"
+        cuenv_version="0.56.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

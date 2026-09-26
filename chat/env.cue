@@ -141,6 +141,23 @@ schema.#Project & {
 			]
 		}
 
+		// Generates styled-system/ (Panda CSS tokens, recipes and types) from
+		// panda.config.ts. tsconfig.json includes its .d.ts files and
+		// astro.config.mjs aliases it, so typecheck, build and Knip need it.
+		pandaCodegen: schema.#Task & {
+			command: "bun"
+			args: ["run", "panda:codegen"]
+			inputs: [
+				"../package.json",
+				"../bun.lock",
+				"package.json",
+				"panda.config.ts",
+			]
+			outputs: [
+				"styled-system/**",
+			]
+		}
+
 		nativeTelemetryContract: schema.#Task & {
 			command: "bun"
 			args: ["test", "tests/native-telemetry-off.test.ts"]
@@ -151,7 +168,7 @@ schema.#Project & {
 		lint: schema.#Task & {
 			command: "bun"
 			args: ["run", "knip"]
-			dependsOn: [buildWasm, generateTypes]
+			dependsOn: [buildWasm, generateTypes, pandaCodegen]
 			inputs: [
 				"../package.json",
 				"../bun.lock",
@@ -159,6 +176,7 @@ schema.#Project & {
 				"knip.json",
 				"tsconfig.json",
 				"astro.config.mjs",
+				"panda.config.ts",
 				"src/**",
 				"scripts/**",
 				"tests/**",
@@ -204,13 +222,14 @@ schema.#Project & {
 		build: schema.#Task & {
 			command: "bash"
 			args: ["-c", "bun run generate-service-worker && bun run copy-background-assets && ./node_modules/.bin/astro check && ./node_modules/.bin/astro build"]
-			dependsOn: [buildWasm, generateTypes]
+			dependsOn: [buildWasm, generateTypes, pandaCodegen]
 			inputs: [
 				"../env.cue",
 				"../package.json",
 				"../bun.lock",
 				"package.json",
 				"astro.config.mjs",
+				"panda.config.ts",
 				"scripts/generate-service-worker.mjs",
 				"scripts/resolve-commit-sha.mjs",
 				"tsconfig.json",
