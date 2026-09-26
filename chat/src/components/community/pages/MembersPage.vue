@@ -180,13 +180,11 @@ function cardLabel(card: MemberCardModel): string {
           No contacts yet. Say hello in a room and people will show up here.
         </template>
       </div>
-      <div v-else class="community-grid" role="list">
+      <ul v-else class="community-grid">
+        <li v-for="card in visibleCards" :key="card.jid" class="contents">
         <button
-          v-for="card in visibleCards"
-          :key="card.jid"
           type="button"
           class="member-card"
-          role="listitem"
           :aria-pressed="selectedJid === card.jid"
           :aria-label="cardLabel(card)"
           @click="selectCard(card)"
@@ -214,7 +212,8 @@ function cardLabel(card: MemberCardModel): string {
             <span /><span /><span />
           </span>
         </button>
-      </div>
+        </li>
+      </ul>
     </div>
   </div>
 </template>

@@ -72,7 +72,7 @@ onBeforeUnmount(() => {
       role="dialog"
       aria-modal="true"
     >
-      <div class="absolute inset-0 bg-background/85" @click="close" />
+      <button type="button" class="absolute inset-0 bg-background/85" aria-label="Close image" @click="close" />
 
       <div class="z-sticky absolute top-3 right-3 flex items-center gap-1">
         <AppTooltip v-if="currentUrl" label="Download" placement="bottom">

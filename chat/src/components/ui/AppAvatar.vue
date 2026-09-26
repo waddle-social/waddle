@@ -85,18 +85,24 @@ const rootStyle = computed(() =>
   fixedSize.value ? { width: fixedSize.value, height: fixedSize.value } : undefined,
 );
 
+function ringClass(): string {
+  if (props.speaking) return SPEAKING_ROOT;
+  if (props.huddle) return HUDDLE_ROOT;
+  return "";
+}
+
 const rootClass = computed(() => [
   "app-avatar",
   cls.value.root,
-  props.speaking ? SPEAKING_ROOT : props.huddle ? HUDDLE_ROOT : "",
+  ringClass(),
   props.presence === "offline" ? "app-avatar--offline" : "",
 ]);
 
 // Name-derived tint so a person keeps the same fallback colour everywhere.
 const tint = computed(() => {
   let hash = 5381;
-  for (let i = 0; i < props.name.length; i++) hash = ((hash << 5) + hash + props.name.charCodeAt(i)) | 0;
-  return TINTS[Math.abs(hash) % TINTS.length];
+  for (const ch of props.name) hash = (Math.imul(hash, 33) + (ch.codePointAt(0) ?? 0)) >>> 0;
+  return TINTS[hash % TINTS.length];
 });
 
 const presenceShow = computed(() => {
