@@ -91,7 +91,8 @@
     <string name="safety_score_harassment">Harassment</string>
     <string name="safety_score_violence">Violence</string>
     <string name="safety_score_self_harm">Self-harm</string>
-    <string name="safety_score_spam_scam">Spam or scam</string>
+    <string name="safety_score_spam">Spam</string>
+    <string name="safety_score_scam">Scam</string>
     <string name="composer_send">Send</string>
     <string name="composer_slash_unknown">Unknown command %1$s</string>
     <string name="composer_slash_send_as_text">Send as plain text</string>

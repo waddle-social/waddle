@@ -10,7 +10,8 @@ extension SafetyCategory {
         case .harassment: return "Harassment"
         case .violence: return "Violence"
         case .selfHarm: return "Self-harm"
-        case .spamScam: return "Spam or scam"
+        case .spam: return "Spam"
+        case .scam: return "Scam"
         }
     }
 

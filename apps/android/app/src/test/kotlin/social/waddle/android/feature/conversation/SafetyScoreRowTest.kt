@@ -39,7 +39,7 @@ class SafetyScoreRowTest {
             safetyScoreSeverity(
                 scoresOf(
                     WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.5, "v"),
-                    WaddleSafetyScore(WaddleSafetyCategory.SPAM_SCAM, 0.49, "v"),
+                    WaddleSafetyScore(WaddleSafetyCategory.SCAM, 0.49, "v"),
                 ),
             ),
         )
@@ -48,7 +48,7 @@ class SafetyScoreRowTest {
             safetyScoreSeverity(
                 scoresOf(
                     WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.5, "v"),
-                    WaddleSafetyScore(WaddleSafetyCategory.SPAM_SCAM, 0.8, "v"),
+                    WaddleSafetyScore(WaddleSafetyCategory.SCAM, 0.8, "v"),
                 ),
             ),
         )
@@ -58,7 +58,7 @@ class SafetyScoreRowTest {
     fun `rows keep only notice-level categories in the fixed order regardless of wire order`() {
         val rows = safetyScoreRowsOf(
             scoresOf(
-                WaddleSafetyScore(WaddleSafetyCategory.SPAM_SCAM, 0.8, "safety-spam-scam-v1"),
+                WaddleSafetyScore(WaddleSafetyCategory.SCAM, 0.8, "safety-scam-v1"),
                 WaddleSafetyScore(WaddleSafetyCategory.SELF_HARM, 0.0, "safety-self-harm-v1"),
                 WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 0.92, "is-question-v1"),
                 WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.5, "safety-harassment-v1"),
@@ -70,7 +70,7 @@ class SafetyScoreRowTest {
             listOf(
                 WaddleSafetyCategory.IS_QUESTION,
                 WaddleSafetyCategory.HARASSMENT,
-                WaddleSafetyCategory.SPAM_SCAM,
+                WaddleSafetyCategory.SCAM,
             ),
             rows.map { it.category },
         )
@@ -103,7 +103,8 @@ class SafetyScoreRowTest {
 
         assertEquals(WaddleSafetyCategory.entries.size, labels.toSet().size)
         assertEquals(R.string.safety_score_self_harm, safetyScoreLabelRes(WaddleSafetyCategory.SELF_HARM))
-        assertEquals(R.string.safety_score_spam_scam, safetyScoreLabelRes(WaddleSafetyCategory.SPAM_SCAM))
+        assertEquals(R.string.safety_score_spam, safetyScoreLabelRes(WaddleSafetyCategory.SPAM))
+        assertEquals(R.string.safety_score_scam, safetyScoreLabelRes(WaddleSafetyCategory.SCAM))
     }
 
     @Test

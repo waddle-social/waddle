@@ -24,7 +24,8 @@ const CATEGORY_LABELS: Record<SafetyCategory, string> = {
   "safety:harassment": "Harassment",
   "safety:violence": "Violence",
   "safety:self_harm": "Self-harm",
-  "safety:spam_scam": "Spam or scam",
+  "safety:spam": "Spam",
+  "safety:scam": "Scam",
 };
 
 /** Probability at which a category is worth surfacing (amber). */

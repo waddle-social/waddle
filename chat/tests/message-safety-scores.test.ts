@@ -28,7 +28,7 @@ const QUIET: SafetyScores = {
   scores: [
     { category: "safety:self_harm", probability: 0, taxonomyVersion: "safety-self-harm-v1" },
     { category: "safety:hate_speech", probability: 0.003, taxonomyVersion: "safety-hate-speech-v1" },
-    { category: "safety:spam_scam", probability: 0.49, taxonomyVersion: "safety-spam-scam-v1" },
+    { category: "safety:scam", probability: 0.49, taxonomyVersion: "safety-scam-v1" },
     { category: "is_question", probability: 0.92, taxonomyVersion: "is-question-v1" },
   ],
 };
@@ -40,7 +40,7 @@ const NOTICE: SafetyScores = {
     { category: "safety:self_harm", probability: 0, taxonomyVersion: "safety-self-harm-v1" },
     { category: "safety:harassment", probability: 0.5, taxonomyVersion: "safety-harassment-v1" },
     { category: "safety:hate_speech", probability: 0.003, taxonomyVersion: "safety-hate-speech-v1" },
-    { category: "safety:spam_scam", probability: 0.49, taxonomyVersion: "safety-spam-scam-v1" },
+    { category: "safety:scam", probability: 0.49, taxonomyVersion: "safety-scam-v1" },
     { category: "is_question", probability: 0.92, taxonomyVersion: "is-question-v1" },
   ],
 };
@@ -49,7 +49,7 @@ const NOTICE: SafetyScores = {
 const ALERT: SafetyScores = {
   modelVersion: "typesafe/jev-1.13-20260917",
   scores: [
-    { category: "safety:spam_scam", probability: 0.8, taxonomyVersion: "safety-spam-scam-v1" },
+    { category: "safety:scam", probability: 0.8, taxonomyVersion: "safety-scam-v1" },
     { category: "safety:harassment", probability: 0.61, taxonomyVersion: "safety-harassment-v1" },
     { category: "safety:violence", probability: 0.12, taxonomyVersion: "safety-violence-v1" },
     { category: "is_question", probability: 0.1, taxonomyVersion: "is-question-v1" },
@@ -104,7 +104,7 @@ describe("safety-scores presentation helpers", () => {
       "is_question",
       "safety:hate_speech",
       "safety:self_harm",
-      "safety:spam_scam",
+      "safety:scam",
     ]);
   });
 
@@ -115,7 +115,7 @@ describe("safety-scores presentation helpers", () => {
     ]);
     expect(notableSafetyScores(ALERT).map((score) => score.category)).toEqual([
       "safety:harassment",
-      "safety:spam_scam",
+      "safety:scam",
     ]);
     expect(notableSafetyScores(QUIET)).toEqual([
       { category: "is_question", probability: 0.92, taxonomyVersion: "is-question-v1" },
@@ -134,7 +134,8 @@ describe("safety-scores presentation helpers", () => {
   test("labels every known category in plain language", () => {
     expect(safetyCategoryLabel("is_question")).toBe("Question");
     expect(safetyCategoryLabel("safety:self_harm")).toBe("Self-harm");
-    expect(safetyCategoryLabel("safety:spam_scam")).toBe("Spam or scam");
+    expect(safetyCategoryLabel("safety:spam")).toBe("Spam");
+    expect(safetyCategoryLabel("safety:scam")).toBe("Scam");
   });
 });
 
@@ -180,9 +181,10 @@ describe("MessageSafetyScores", () => {
     expect(html).toContain('aria-expanded="true"');
     expect(html).toContain('id="safety-scores-m-1"');
     const harassment = html.indexOf("Harassment");
-    const spam = html.indexOf("Spam or scam");
+    const scam = html.indexOf("Scam");
     expect(harassment).toBeGreaterThan(-1);
-    expect(spam).toBeGreaterThan(harassment);
+    expect(scam).toBeGreaterThan(harassment);
+    expect(html).not.toContain("Spam");
     expect(html).not.toContain("Violence");
     expect(html).not.toContain("Question");
     expect(html).toContain("61%");
@@ -190,7 +192,7 @@ describe("MessageSafetyScores", () => {
     expect(html).not.toContain("12%");
     expect(html).toContain("bg-amber-500/80");
     expect(html).toContain("bg-red-500/80");
-    expect(html).toContain('title="safety-spam-scam-v1"');
+    expect(html).toContain('title="safety-scam-v1"');
     expect(html).toContain("Model typesafe/jev-1.13-20260917");
   });
 });

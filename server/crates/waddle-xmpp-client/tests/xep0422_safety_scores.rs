@@ -34,7 +34,8 @@ const FULL_BATCH: &str = r#"<message xmlns='jabber:client' from='room@conference
       <score category='safety:harassment' probability='0.02' taxonomy-version='safety-harassment-v1'/>
       <score category='safety:violence' probability='0.0' taxonomy-version='safety-violence-v1'/>
       <score category='safety:self_harm' probability='0.0' taxonomy-version='safety-self-harm-v1'/>
-      <score category='safety:spam_scam' probability='0.04' taxonomy-version='safety-spam-scam-v1'/>
+      <score category='safety:spam' probability='0.04' taxonomy-version='safety-spam-v1'/>
+      <score category='safety:scam' probability='0.02' taxonomy-version='safety-scam-v1'/>
     </safety-scores>
   </apply-to>
 </message>"#;
@@ -124,7 +125,8 @@ fn parses_every_category_of_a_full_batch() {
             (SafetyCategory::Harassment, 0.02, "safety-harassment-v1"),
             (SafetyCategory::Violence, 0.0, "safety-violence-v1"),
             (SafetyCategory::SelfHarm, 0.0, "safety-self-harm-v1"),
-            (SafetyCategory::SpamScam, 0.04, "safety-spam-scam-v1"),
+            (SafetyCategory::Spam, 0.04, "safety-spam-v1"),
+            (SafetyCategory::Scam, 0.02, "safety-scam-v1"),
         ]
     );
 }
@@ -138,7 +140,8 @@ fn category_tokens_round_trip_the_server_judgment_names() {
         (SafetyCategory::Harassment, "safety:harassment"),
         (SafetyCategory::Violence, "safety:violence"),
         (SafetyCategory::SelfHarm, "safety:self_harm"),
-        (SafetyCategory::SpamScam, "safety:spam_scam"),
+        (SafetyCategory::Spam, "safety:spam"),
+        (SafetyCategory::Scam, "safety:scam"),
     ] {
         assert_eq!(category.as_wire(), token);
         assert_eq!(SafetyCategory::from_wire(token), Some(category));

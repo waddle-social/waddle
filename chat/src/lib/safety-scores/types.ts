@@ -1,6 +1,6 @@
 // Typed model of the `urn:waddle:safety-scores:1` XEP-0422 fastening: the
 // server's asynchronous per-message judgments (one community-enrichment
-// signal plus six content-safety categories), visible to every
+// signal plus seven content-safety categories), visible to every
 // participant. Measurement, not a moderation action.
 
 /** Every judgment category this client understands, in display order.
@@ -12,7 +12,8 @@ export const SAFETY_CATEGORIES = [
   "safety:harassment",
   "safety:violence",
   "safety:self_harm",
-  "safety:spam_scam",
+  "safety:spam",
+  "safety:scam",
 ] as const;
 
 export type SafetyCategory = (typeof SAFETY_CATEGORIES)[number];

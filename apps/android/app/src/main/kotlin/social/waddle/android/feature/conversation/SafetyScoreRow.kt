@@ -80,7 +80,8 @@ fun safetyScoreLabelRes(category: WaddleSafetyCategory): Int = when (category) {
     WaddleSafetyCategory.HARASSMENT -> R.string.safety_score_harassment
     WaddleSafetyCategory.VIOLENCE -> R.string.safety_score_violence
     WaddleSafetyCategory.SELF_HARM -> R.string.safety_score_self_harm
-    WaddleSafetyCategory.SPAM_SCAM -> R.string.safety_score_spam_scam
+    WaddleSafetyCategory.SPAM -> R.string.safety_score_spam
+    WaddleSafetyCategory.SCAM -> R.string.safety_score_scam
 }
 
 @StringRes
