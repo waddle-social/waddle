@@ -78,9 +78,10 @@
     </plurals>
     <!-- XEP-0422 urn:waddle:safety-scores:1 (automated message scores) -->
     <string name="safety_scores_chip">Scores</string>
-    <string name="safety_scores_chip_description">View automated scores for this message</string>
+    <string name="safety_scores_chip_notice">At least one automated score is 50 percent or higher; view them</string>
+    <string name="safety_scores_chip_alert">At least one automated score is 80 percent or higher; view them</string>
     <string name="safety_scores_title">Message scores</string>
-    <string name="safety_scores_explainer">Automated estimates, visible to everyone in this conversation. They are measurements, not moderation decisions.</string>
+    <string name="safety_scores_explainer">Automated estimates, visible to everyone in this conversation. Only categories at 50 percent or higher are listed. They are measurements, not moderation decisions.</string>
     <string name="safety_scores_model">Model: %1$s</string>
     <string name="safety_scores_percent">%1$d%%</string>
     <string name="safety_scores_taxonomy">Definition: %1$s</string>
@@ -90,6 +91,8 @@
     <string name="safety_score_harassment">Harassment</string>
     <string name="safety_score_violence">Violence</string>
     <string name="safety_score_self_harm">Self-harm</string>
+    <string name="safety_score_spam">Spam</string>
+    <string name="safety_score_scam">Scam</string>
     <string name="composer_send">Send</string>
     <string name="composer_slash_unknown">Unknown command %1$s</string>
     <string name="composer_slash_send_as_text">Send as plain text</string>

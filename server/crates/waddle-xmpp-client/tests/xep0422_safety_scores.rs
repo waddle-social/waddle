@@ -13,6 +13,12 @@ const APPLY: &str = "<apply-to xmlns='urn:xmpp:fasten:0' id='origin-1'>
     source-revision-id='room-1'>
     <score category='is_question' probability='0.92' taxonomy-version='q-v1'/>
     <score category='safety:hate_speech' probability='0.03' taxonomy-version='hate-v1'/>
+    <score category='safety:explicit' probability='0.01' taxonomy-version='safety-explicit-v1'/>
+    <score category='safety:harassment' probability='0.02' taxonomy-version='safety-harassment-v1'/>
+    <score category='safety:violence' probability='0.0' taxonomy-version='safety-violence-v1'/>
+    <score category='safety:self_harm' probability='0.0' taxonomy-version='safety-self-harm-v1'/>
+    <score category='safety:spam' probability='0.04' taxonomy-version='safety-spam-v1'/>
+    <score category='safety:scam' probability='0.02' taxonomy-version='safety-scam-v1'/>
   </safety-scores>
 </apply-to>";
 
@@ -42,7 +48,7 @@ fn parses_origin_room_identity_revision_and_scores() {
     assert_eq!(parsed.target_stanza_id.by.to_string(), ROOM);
     assert_eq!(parsed.source_revision_id.as_str(), "room-1");
     assert_eq!(parsed.scores.model_version.as_str(), "jev-1");
-    assert_eq!(parsed.scores.scores.len(), 2);
+    assert_eq!(parsed.scores.scores.len(), 8);
     assert_eq!(parsed.scores.scores[0].category, SafetyCategory::IsQuestion);
     assert_eq!(parsed.scores.scores[0].probability.value(), 0.92);
 }
@@ -122,6 +128,27 @@ fn shell_is_ignored_and_clear_is_not_a_result() {
 fn malformed_and_unknown_scores_are_skipped() {
     let apply = APPLY.replace("</safety-scores>", "<score category='future' probability='0.5' taxonomy-version='v1'/><score category='safety:explicit' probability='NaN' taxonomy-version='v1'/><score category='is_question' probability='0.1' taxonomy-version='duplicate'/></safety-scores>");
     let parsed = parse_room_safety_scores_child(&message(ROOM, "groupchat", &apply)).unwrap();
-    assert_eq!(parsed.scores.scores.len(), 2);
+    assert_eq!(parsed.scores.scores.len(), 8);
     assert_eq!(parsed.scores.scores[0].probability.value(), 0.92);
+}
+
+#[test]
+fn every_classification_round_trips_with_its_wire_category() {
+    let parsed = parse_room_safety_scores_child(&message(ROOM, "groupchat", APPLY)).unwrap();
+    let expected = [
+        (SafetyCategory::IsQuestion, "is_question"),
+        (SafetyCategory::HateSpeech, "safety:hate_speech"),
+        (SafetyCategory::Explicit, "safety:explicit"),
+        (SafetyCategory::Harassment, "safety:harassment"),
+        (SafetyCategory::Violence, "safety:violence"),
+        (SafetyCategory::SelfHarm, "safety:self_harm"),
+        (SafetyCategory::Spam, "safety:spam"),
+        (SafetyCategory::Scam, "safety:scam"),
+    ];
+    for (score, (category, token)) in parsed.scores.scores.iter().zip(expected) {
+        assert_eq!(score.category, category);
+        assert_eq!(category.as_wire(), token);
+        assert_eq!(SafetyCategory::from_wire(token), Some(category));
+    }
+    assert_eq!(SafetyCategory::from_wire("safety:future"), None);
 }

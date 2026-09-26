@@ -19,6 +19,9 @@ import social.waddle.client.ffi.WaddleSafetyScores
 /** XEP-0422 safety-score affordance and breakdown sheet on a MessageCard. */
 @RunWith(AndroidJUnit4::class)
 class MessageCardSafetyScoresTest {
+    private companion object {
+        const val NOTICE_DESCRIPTION = "At least one automated score is 50 percent or higher; view them"
+    }
 
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
@@ -27,7 +30,17 @@ class MessageCardSafetyScoresTest {
         modelVersion = "typesafe/jev-1.13-20260917",
         scores = listOf(
             WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 0.92, "is-question-v1"),
-            WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.02, "safety-harassment-v1"),
+            WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.62, "safety-harassment-v1"),
+            WaddleSafetyScore(WaddleSafetyCategory.VIOLENCE, 0.02, "safety-violence-v1"),
+        ),
+    )
+
+    /** Every safety category under the notice threshold: no chip, whatever the question signal says. */
+    private val quietScores = WaddleSafetyScores(
+        modelVersion = "typesafe/jev-1.13-20260917",
+        scores = listOf(
+            WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 0.92, "is-question-v1"),
+            WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.49, "safety-harassment-v1"),
         ),
     )
 
@@ -60,20 +73,29 @@ class MessageCardSafetyScoresTest {
     @Test
     fun noAffordanceWithoutScores() {
         setCard(safetyScores = null)
-        composeRule.onNodeWithContentDescription("View automated scores for this message").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription(NOTICE_DESCRIPTION).assertDoesNotExist()
+    }
+
+    @Test
+    fun noAffordanceBelowTheNoticeThreshold() {
+        setCard(safetyScores = quietScores)
+        composeRule.onNodeWithContentDescription(NOTICE_DESCRIPTION).assertDoesNotExist()
     }
 
     @Test
     fun affordanceOpensTheBreakdown() {
         setCard(safetyScores = scores)
-        composeRule.onNodeWithContentDescription("View automated scores for this message")
+        composeRule.onNodeWithContentDescription(NOTICE_DESCRIPTION)
             .assertExists()
             .performClick()
         composeRule.onNodeWithText("Message scores").assertExists()
         composeRule.onNodeWithText("Asks a question").assertExists()
         composeRule.onNodeWithText("92%").assertExists()
         composeRule.onNodeWithText("Harassment").assertExists()
-        composeRule.onNodeWithText("2%").assertExists()
+        composeRule.onNodeWithText("62%").assertExists()
+        // Below the notice threshold: hidden from the breakdown.
+        composeRule.onNodeWithText("Violence").assertDoesNotExist()
+        composeRule.onNodeWithText("2%").assertDoesNotExist()
         composeRule.onNodeWithText("Model: typesafe/jev-1.13-20260917").assertExists()
     }
 }

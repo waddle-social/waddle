@@ -14152,6 +14152,8 @@ public enum WaddleSafetyCategory: Equatable, Hashable {
     case harassment
     case violence
     case selfHarm
+    case spam
+    case scam
 
 
 
@@ -14185,6 +14187,10 @@ public struct FfiConverterTypeWaddleSafetyCategory: FfiConverterRustBuffer {
 
         case 6: return .selfHarm
 
+        case 7: return .spam
+
+        case 8: return .scam
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -14215,6 +14221,14 @@ public struct FfiConverterTypeWaddleSafetyCategory: FfiConverterRustBuffer {
 
         case .selfHarm:
             writeInt(&buf, Int32(6))
+
+
+        case .spam:
+            writeInt(&buf, Int32(7))
+
+
+        case .scam:
+            writeInt(&buf, Int32(8))
 
         }
     }

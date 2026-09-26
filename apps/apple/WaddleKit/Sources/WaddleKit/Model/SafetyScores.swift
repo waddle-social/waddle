@@ -10,6 +10,8 @@ public enum SafetyCategory: String, CaseIterable, Hashable, Sendable {
     case harassment = "safety:harassment"
     case violence = "safety:violence"
     case selfHarm = "safety:self_harm"
+    case spam = "safety:spam"
+    case scam = "safety:scam"
 }
 
 /// A probability in `0...1`.

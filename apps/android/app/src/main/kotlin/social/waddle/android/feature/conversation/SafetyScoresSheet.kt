@@ -17,11 +17,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -29,14 +31,25 @@ import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.client.ffi.WaddleSafetyScores
 
+/** Amber for a notice, the theme error colour (red) for an alert. */
+@Composable
+fun safetyScoreSeverityColor(severity: SafetyScoreSeverity): Color = when (severity) {
+    SafetyScoreSeverity.NOTICE -> NoticeAmber
+    SafetyScoreSeverity.ALERT -> MaterialTheme.colorScheme.error
+}
+
+private val NoticeAmber = Color(0xFFB45309)
+
 /**
- * Low-emphasis affordance under a message that carries XEP-0422 safety
- * scores. Neutral styling on purpose: the scores are measurements shown
- * to everyone, not a moderation verdict.
+ * Affordance under a message whose XEP-0422 safety scores crossed the
+ * notice threshold: amber for a notice, red for an alert, absent below.
+ * The scores are measurements shown to everyone, not a moderation
+ * verdict, so it stays small.
  */
 @Composable
-fun SafetyScoresChip(onClick: () -> Unit) {
-    val description = stringResource(R.string.safety_scores_chip_description)
+fun SafetyScoresChip(severity: SafetyScoreSeverity, onClick: () -> Unit) {
+    val description = stringResource(safetyScoreChipDescriptionRes(severity))
+    val tint = safetyScoreSeverityColor(severity)
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
@@ -52,20 +65,20 @@ fun SafetyScoresChip(onClick: () -> Unit) {
             Icon(
                 Icons.Outlined.Insights,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = tint,
                 modifier = Modifier.size(14.dp),
             )
             Text(
                 text = stringResource(R.string.safety_scores_chip),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = tint,
                 modifier = Modifier.padding(start = 4.dp),
             )
         }
     }
 }
 
-/** Per-category breakdown of one message's safety scores. */
+/** Breakdown of the categories at or above the notice threshold. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SafetyScoresSheet(
@@ -75,8 +88,8 @@ fun SafetyScoresSheet(
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             verticalArrangement = Arrangement.spacedBy(12.dp),
-            // Six categories plus copy can outgrow a short screen or large
-            // font scale; the sheet content must scroll.
+            // Several categories plus copy can outgrow a short screen or
+            // large font scale; the sheet content must scroll.
             modifier = Modifier
                 .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
@@ -118,6 +131,7 @@ private fun SafetyScoreLine(row: SafetyScoreRow) {
         }
         LinearProgressIndicator(
             progress = { row.fraction },
+            color = row.severity?.let { safetyScoreSeverityColor(it) } ?: ProgressIndicatorDefaults.linearColor,
             modifier = Modifier.fillMaxWidth(),
         )
         Text(

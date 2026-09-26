@@ -233,6 +233,8 @@ struct SafetyScoresPresentationTests {
             "safety:harassment",
             "safety:violence",
             "safety:self_harm",
+            "safety:spam",
+            "safety:scam",
         ])
     }
 
@@ -258,5 +260,49 @@ struct SafetyScoresPresentationTests {
         ])
         #expect(scores.rows.map(\.percentText) == ["92%", "<1%", "0%", "100%"])
         #expect(scores.spokenSummary == "Question 92%, Hate speech <1%, Sexually explicit 0%, Violence 100%")
+    }
+}
+
+@Suite("Safety scores severity")
+struct SafetyScoresSeverityTests {
+    @Test func aProbabilityIsANoticeFromHalfAndAnAlertFromFourFifths() {
+        #expect(SafetyScoreSeverity(probability: 0.49) == nil)
+        #expect(SafetyScoreSeverity(probability: 0.5) == .notice)
+        #expect(SafetyScoreSeverity(probability: 0.79) == .notice)
+        #expect(SafetyScoreSeverity(probability: 0.8) == .alert)
+        #expect(SafetyScoreSeverity(probability: 1.0) == .alert)
+        #expect(SafetyScoreSeverity.notice < SafetyScoreSeverity.alert)
+    }
+
+    @Test func theBatchSeverityFollowsTheHighestSafetyScoreOnly() {
+        #expect(firstBatch.severity == nil)
+        #expect(secondBatch.severity == .alert)
+        let notice = SafetyScores(modelVersion: "m1", scores: [score(.harassment, 0.5), score(.scam, 0.49)])
+        #expect(notice.severity == .notice)
+        // A near-certain question is a community signal, never a warning.
+        let question = SafetyScores(modelVersion: "m1", scores: [score(.isQuestion, 1.0), score(.violence, 0.1)])
+        #expect(question.severity == nil)
+    }
+
+    @Test func notableRowsKeepOnlyCategoriesAtTheNoticeThreshold() {
+        let scores = SafetyScores(modelVersion: "m1", scores: [
+            score(.scam, 0.8),
+            score(.isQuestion, 0.6),
+            score(.harassment, 0.5),
+            score(.violence, 0.49),
+            score(.hateSpeech, 0.0),
+        ])
+        #expect(scores.notableRows.map(\.category) == [.isQuestion, .harassment, .scam])
+        #expect(scores.notableSignalRows.map(\.category) == [.isQuestion])
+        #expect(scores.notableSafetyRows.map(\.category) == [.harassment, .scam])
+        #expect(scores.notableRows.map(\.severity) == [.notice, .notice, .alert])
+        #expect(scores.rows.count == 5)
+    }
+
+    @Test func spamAndScamAreSeparateSafetyCategories() {
+        #expect(SafetyCategory.spam.title == "Spam")
+        #expect(SafetyCategory.scam.title == "Scam")
+        #expect(SafetyCategory.spam.isSafety)
+        #expect(SafetyCategory.scam.isSafety)
     }
 }
