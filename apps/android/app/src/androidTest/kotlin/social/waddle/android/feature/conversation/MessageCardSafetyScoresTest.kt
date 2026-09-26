@@ -2,10 +2,12 @@ package social.waddle.android.feature.conversation
 
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -20,7 +22,7 @@ import social.waddle.client.ffi.WaddleSafetyScores
 @RunWith(AndroidJUnit4::class)
 class MessageCardSafetyScoresTest {
     private companion object {
-        const val NOTICE_DESCRIPTION = "At least one automated score is 50 percent or higher; view them"
+        const val HARASSMENT_DESCRIPTION = "Harassment score; view message scores"
     }
 
     @get:Rule
@@ -35,7 +37,7 @@ class MessageCardSafetyScoresTest {
         ),
     )
 
-    /** Every safety category under the notice threshold: no chip, whatever the question signal says. */
+    /** Every safety category under the visibility threshold: no chip, whatever the question signal says. */
     private val quietScores = WaddleSafetyScores(
         modelVersion = "typesafe/jev-1.13-20260917",
         scores = listOf(
@@ -73,27 +75,28 @@ class MessageCardSafetyScoresTest {
     @Test
     fun noAffordanceWithoutScores() {
         setCard(safetyScores = null)
-        composeRule.onNodeWithContentDescription(NOTICE_DESCRIPTION).assertDoesNotExist()
+        composeRule.onNodeWithContentDescription(HARASSMENT_DESCRIPTION).assertDoesNotExist()
     }
 
     @Test
     fun noAffordanceBelowTheNoticeThreshold() {
         setCard(safetyScores = quietScores)
-        composeRule.onNodeWithContentDescription(NOTICE_DESCRIPTION).assertDoesNotExist()
+        composeRule.onNodeWithContentDescription(HARASSMENT_DESCRIPTION).assertDoesNotExist()
     }
 
     @Test
     fun affordanceOpensTheBreakdown() {
         setCard(safetyScores = scores)
-        composeRule.onNodeWithContentDescription(NOTICE_DESCRIPTION)
+        composeRule.onNodeWithContentDescription(HARASSMENT_DESCRIPTION)
             .assertExists()
             .performClick()
         composeRule.onNodeWithText("Message scores").assertExists()
         composeRule.onNodeWithText("Asks a question").assertExists()
         composeRule.onNodeWithText("92%").assertExists()
-        composeRule.onNodeWithText("Harassment").assertExists()
+        // The chip and the breakdown both name this category.
+        assertEquals(2, composeRule.onAllNodesWithText("Harassment", useUnmergedTree = true).fetchSemanticsNodes().size)
         composeRule.onNodeWithText("62%").assertExists()
-        // Below the notice threshold: hidden from the breakdown.
+        // Below the visibility threshold: hidden from the breakdown.
         composeRule.onNodeWithText("Violence").assertDoesNotExist()
         composeRule.onNodeWithText("2%").assertDoesNotExist()
         composeRule.onNodeWithText("Model: typesafe/jev-1.13-20260917").assertExists()

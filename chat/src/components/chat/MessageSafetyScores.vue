@@ -1,22 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Gauge } from "lucide-vue-next";
 import type { SafetyScores } from "@/lib/safety-scores/types";
 import {
   formatSafetyProbability,
+  leadingSafetyScore,
   notableSafetyScores,
-  safetyCategoryLabel,
-  safetyProbabilityBarClass,
+  safetyCategoryPresentation,
+  safetyProbabilitySeverity,
   safetyProbabilityWidth,
-  safetyScoresSeverity,
-  safetyScoresToggleLabel,
-  safetySeverityTextClass,
 } from "@/components/chat/message-safety-scores";
 
 // Server judgments fastened to a message (XEP-0422,
 // `urn:waddle:safety-scores:1`). The parent only mounts this once a
-// content-safety category has crossed the notice threshold, so the chip is
-// always amber or red, never neutral. Collapsed by default to a quiet chip
+// content-safety category has crossed the notice threshold. Collapsed to a chip
 // in the reactions row; the breakdown expands inline, matching the reply
 // chip's disclosure idiom, so it works identically on touch and desktop.
 const props = defineProps<{
@@ -26,27 +22,30 @@ const props = defineProps<{
 
 const expanded = ref(false);
 const panelId = computed(() => `safety-scores-${props.messageId}`);
-const severity = computed(() => safetyScoresSeverity(props.scores) ?? "notice");
-const severityClass = computed(() => safetySeverityTextClass(severity.value));
-const toggleLabel = computed(() => safetyScoresToggleLabel(expanded.value, severity.value));
+const indicator = computed(() => {
+  const score = leadingSafetyScore(props.scores);
+  return score
+    ? { ...safetyCategoryPresentation(score.category), severity: safetyProbabilitySeverity(score.probability) }
+    : null;
+});
 const rows = computed(() => notableSafetyScores(props.scores));
 </script>
 
 <template>
-  <div class="chat-safety-scores flex flex-col items-start gap-1">
+  <div v-if="indicator" class="chat-safety-scores flex flex-col items-start gap-1">
     <button
       type="button"
       class="chat-safety-scores__toggle type-caption inline-flex h-6 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-muted/50"
-      :class="severityClass"
-      :data-severity="severity"
+      :class="indicator.textClass"
+      :data-severity="indicator.severity"
       :aria-expanded="expanded"
       :aria-controls="panelId"
-      :aria-label="toggleLabel"
-      :title="toggleLabel"
+      :aria-label="`${expanded ? 'Hide' : 'Show'} ${indicator.label} scores`"
+      :title="`${expanded ? 'Hide' : 'Show'} ${indicator.label} scores`"
       @click="expanded = !expanded"
     >
-      <Gauge class="h-3 w-3" aria-hidden="true" />
-      <span>Scores</span>
+      <component :is="indicator.icon" class="h-3 w-3" aria-hidden="true" />
+      <span>{{ indicator.label }}</span>
     </button>
     <div
       v-if="expanded"
@@ -59,13 +58,18 @@ const rows = computed(() => notableSafetyScores(props.scores));
           :key="score.category"
           class="grid grid-cols-[minmax(0,7.5rem)_1fr_2.5rem] items-center gap-2"
         >
-          <span class="type-meta truncate text-muted-foreground" :title="score.taxonomyVersion">
-            {{ safetyCategoryLabel(score.category) }}
+          <span
+            class="type-meta flex min-w-0 items-center gap-1"
+            :class="safetyCategoryPresentation(score.category).textClass"
+            :title="score.taxonomyVersion"
+          >
+            <component :is="safetyCategoryPresentation(score.category).icon" class="h-3 w-3 shrink-0" aria-hidden="true" />
+            <span class="truncate">{{ safetyCategoryPresentation(score.category).label }}</span>
           </span>
           <span class="h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
             <span
               class="block h-full rounded-full"
-              :class="safetyProbabilityBarClass(score.probability)"
+              :class="safetyCategoryPresentation(score.category).barClass"
               :style="{ width: safetyProbabilityWidth(score.probability) }"
             />
           </span>

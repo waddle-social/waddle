@@ -1,3 +1,14 @@
+import {
+  CircleHelp,
+  EyeOff,
+  HeartPulse,
+  Inbox,
+  MessageSquareWarning,
+  ShieldAlert,
+  UserRoundX,
+  Zap,
+} from "lucide-vue-next";
+import type { Component } from "vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import {
   isSafetyCategory,
@@ -7,65 +18,94 @@ import {
   type SafetyScores,
 } from "@/lib/safety-scores/types";
 
-// Presentation helpers for the per-message safety-scores disclosure. The
-// scores are measurement/annotation visible to every participant, never a
-// moderation verdict, so the copy stays neutral ("scores", not "flagged").
-//
-// The chip is quiet by design: it appears only once a content-safety
-// category is at least `SAFETY_NOTICE_THRESHOLD` (amber), and turns red at
-// `SAFETY_ALERT_THRESHOLD`. The `is_question` signal never raises it, and
-// the expanded breakdown lists only the categories at or above the notice
-// threshold, so a reader sees what tripped the chip and nothing else.
+// The scores annotate a message; they are not a moderation verdict. Colour
+// and icon identify the category, while probability controls visibility and
+// the length of its bar. light-dark() follows the app's color-scheme setting.
+// Question is an enrichment signal, not a warning.
+interface CategoryPresentation {
+  label: string;
+  icon: Component;
+  textClass: string;
+  barClass: string;
+}
 
-const CATEGORY_LABELS: Record<SafetyCategory, string> = {
-  is_question: "Question",
-  "safety:hate_speech": "Hate speech",
-  "safety:explicit": "Explicit content",
-  "safety:harassment": "Harassment",
-  "safety:violence": "Violence",
-  "safety:self_harm": "Self-harm",
-  "safety:spam": "Spam",
-  "safety:scam": "Scam",
-};
+const CATEGORY_PRESENTATION = {
+  is_question: {
+    label: "Question", icon: CircleHelp,
+    textClass: "text-[light-dark(#2563EB,#60A5FA)]",
+    barClass: "bg-[light-dark(#2563EB,#60A5FA)]",
+  },
+  "safety:hate_speech": {
+    label: "Hate speech", icon: UserRoundX,
+    textClass: "text-[light-dark(#DC2626,#F87171)]",
+    barClass: "bg-[light-dark(#DC2626,#F87171)]",
+  },
+  "safety:explicit": {
+    label: "Explicit content", icon: EyeOff,
+    textClass: "text-[light-dark(#7C3AED,#A78BFA)]",
+    barClass: "bg-[light-dark(#7C3AED,#A78BFA)]",
+  },
+  "safety:harassment": {
+    label: "Harassment", icon: MessageSquareWarning,
+    textClass: "text-[light-dark(#C2410C,#FB923C)]",
+    barClass: "bg-[light-dark(#C2410C,#FB923C)]",
+  },
+  "safety:violence": {
+    label: "Violence", icon: Zap,
+    textClass: "text-[light-dark(#BE123C,#FB7185)]",
+    barClass: "bg-[light-dark(#BE123C,#FB7185)]",
+  },
+  "safety:self_harm": {
+    label: "Self-harm", icon: HeartPulse,
+    textClass: "text-[light-dark(#0F766E,#2DD4BF)]",
+    barClass: "bg-[light-dark(#0F766E,#2DD4BF)]",
+  },
+  "safety:spam": {
+    label: "Spam", icon: Inbox,
+    textClass: "text-[light-dark(#475569,#CBD5E1)]",
+    barClass: "bg-[light-dark(#475569,#CBD5E1)]",
+  },
+  "safety:scam": {
+    label: "Scam", icon: ShieldAlert,
+    textClass: "text-[light-dark(#B45309,#FBBF24)]",
+    barClass: "bg-[light-dark(#B45309,#FBBF24)]",
+  },
+} satisfies Record<SafetyCategory, CategoryPresentation>;
 
-/** Probability at which a category is worth surfacing (amber). */
+/** Probability at which a category is worth surfacing. */
 const SAFETY_NOTICE_THRESHOLD = 0.5;
-/** Probability at which a category is alarming (red). */
+/** Probability at which a category is an alert. */
 const SAFETY_ALERT_THRESHOLD = 0.8;
 
 export type SafetySeverity = "notice" | "alert";
 
-/** Severity of one probability, or `null` below the notice threshold. */
 export function safetyProbabilitySeverity(probability: number): SafetySeverity | null {
   if (probability >= SAFETY_ALERT_THRESHOLD) return "alert";
   if (probability >= SAFETY_NOTICE_THRESHOLD) return "notice";
   return null;
 }
 
-/** The chip's severity: the highest content-safety probability in the
- * batch, ignoring `is_question`. `null` means nothing to show. */
-export function safetyScoresSeverity(scores: SafetyScores): SafetySeverity | null {
-  let highest: number | null = null;
-  for (const score of scores.scores) {
-    if (!isSafetyCategory(score.category)) continue;
-    if (highest === null || score.probability > highest) highest = score.probability;
-  }
-  return highest === null ? null : safetyProbabilitySeverity(highest);
+export function safetyCategoryPresentation(category: SafetyCategory): CategoryPresentation {
+  return CATEGORY_PRESENTATION[category];
 }
 
-/** Scores to surface on a row, or `null` when there is nothing to show
- * (no fastening, an empty batch, a retracted message, or no content-safety
- * category at the notice threshold). */
+/** Highest visible content-safety score. Canonical order resolves ties. */
+export function leadingSafetyScore(scores: SafetyScores): SafetyScore | null {
+  let leading: SafetyScore | null = null;
+  for (const score of orderedSafetyScores(scores)) {
+    if (!isSafetyCategory(score.category) || score.probability < SAFETY_NOTICE_THRESHOLD) continue;
+    if (!leading || score.probability > leading.probability) leading = score;
+  }
+  return leading;
+}
+
+/** Nothing is shown for a retracted message or without a visible safety score. */
 export function visibleSafetyScores(
   message: Pick<TimelineMessage, "safetyScores" | "isRetracted">,
 ): SafetyScores | null {
   const scores = message.safetyScores;
   if (!scores || scores.scores.length === 0 || message.isRetracted) return null;
-  return safetyScoresSeverity(scores) === null ? null : scores;
-}
-
-export function safetyCategoryLabel(category: SafetyCategory): string {
-  return CATEGORY_LABELS[category];
+  return leadingSafetyScore(scores) ? scores : null;
 }
 
 /** Scores in canonical category order, independent of wire order. */
@@ -75,45 +115,19 @@ export function orderedSafetyScores(scores: SafetyScores): SafetyScore[] {
   );
 }
 
-/** The breakdown's rows: every category at or above the notice threshold,
- * in canonical order. Anything below it is hidden. */
+/** The breakdown includes every category at or above the existing threshold. */
 export function notableSafetyScores(scores: SafetyScores): SafetyScore[] {
   return orderedSafetyScores(scores).filter(
     (score) => safetyProbabilitySeverity(score.probability) !== null,
   );
 }
 
-/** Whole-percent label; a non-zero probability below 0.5 % reads "<1%"
- * so it is never mistaken for an exact zero. */
 export function formatSafetyProbability(probability: number): string {
   const percent = Math.round(probability * 100);
   if (percent === 0 && probability > 0) return "<1%";
   return `${percent}%`;
 }
 
-/** CSS width for the probability bar (clamped defensively). */
 export function safetyProbabilityWidth(probability: number): string {
   return `${Math.min(100, Math.max(0, probability * 100))}%`;
-}
-
-/** Text colour for a severity: amber for a notice, red for an alert. */
-export function safetySeverityTextClass(severity: SafetySeverity): string {
-  return severity === "alert" ? "text-red-600 dark:text-red-400" : "text-amber-600 dark:text-amber-400";
-}
-
-/** Bar fill for a row's own severity; muted below the notice threshold. */
-export function safetyProbabilityBarClass(probability: number): string {
-  switch (safetyProbabilitySeverity(probability)) {
-    case "alert":
-      return "bg-red-500/80";
-    case "notice":
-      return "bg-amber-500/80";
-    default:
-      return "bg-muted-foreground/45";
-  }
-}
-
-export function safetyScoresToggleLabel(expanded: boolean, severity: SafetySeverity): string {
-  const noun = severity === "alert" ? "content alerts" : "content notices";
-  return expanded ? `Hide ${noun}` : `Show ${noun}`;
 }

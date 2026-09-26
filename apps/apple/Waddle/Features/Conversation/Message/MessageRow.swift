@@ -61,8 +61,8 @@ private struct MessageRowContent: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if let severity = item.safetyScores?.severity {
-                MessageSafetyScoresButton(severity: severity) {
+            if let row = item.safetyScores?.markerRow {
+                MessageSafetyScoresButton(row: row) {
                     actions.showSafetyScores(for: item)
                 }
             }

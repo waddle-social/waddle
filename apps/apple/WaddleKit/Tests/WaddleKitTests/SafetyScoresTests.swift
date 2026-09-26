@@ -324,4 +324,27 @@ struct SafetyScoresSeverityTests {
         #expect(SafetyCategory.spam.isSafety)
         #expect(SafetyCategory.scam.isSafety)
     }
+
+    @Test func markerRepresentsTheStrongestVisibleSafetyCategory() {
+        let scores = SafetyScores(modelVersion: "m1", scores: [
+            score(.harassment, 0.81),
+            score(.isQuestion, 0.95),
+            score(.scam, 0.72),
+            score(.hateSpeech, 0.49),
+        ])
+        #expect(scores.markerRow?.category == .harassment)
+        #expect(scores.markerRow?.percentText == "81%")
+
+        let questionOnly = SafetyScores(modelVersion: "m1", scores: [
+            score(.isQuestion, 0.99), score(.violence, 0.49),
+        ])
+        #expect(questionOnly.markerRow == nil)
+    }
+
+    @Test func markerTieUsesCanonicalCategoryOrderRegardlessOfWireOrder() {
+        let scores = SafetyScores(modelVersion: "m1", scores: [
+            score(.scam, 0.8), score(.harassment, 0.8), score(.hateSpeech, 0.8),
+        ])
+        #expect(scores.markerRow?.category == .hateSpeech)
+    }
 }

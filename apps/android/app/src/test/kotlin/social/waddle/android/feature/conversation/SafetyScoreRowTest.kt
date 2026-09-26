@@ -1,5 +1,15 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.GppBad
+import androidx.compose.material.icons.outlined.HelpOutline
+import androidx.compose.material.icons.outlined.Inbox
+import androidx.compose.material.icons.outlined.PersonOff
+import androidx.compose.material.icons.outlined.SmsFailed
+import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -13,39 +23,29 @@ class SafetyScoreRowTest {
         WaddleSafetyScores(modelVersion = "typesafe/jev-1.13-20260917", scores = scores.toList())
 
     @Test
-    fun `a probability is a notice from half and an alert from four fifths`() {
-        assertNull(safetyScoreSeverityOf(0.49))
-        assertEquals(SafetyScoreSeverity.NOTICE, safetyScoreSeverityOf(0.5))
-        assertEquals(SafetyScoreSeverity.NOTICE, safetyScoreSeverityOf(0.79))
-        assertEquals(SafetyScoreSeverity.ALERT, safetyScoreSeverityOf(0.8))
-        assertEquals(SafetyScoreSeverity.ALERT, safetyScoreSeverityOf(1.0))
-    }
-
-    @Test
-    fun `the chip severity follows the highest safety score only`() {
-        assertNull(safetyScoreSeverity(null))
-        assertNull(safetyScoreSeverity(scoresOf()))
+    fun `the chip shows the highest visible safety category and ignores questions`() {
+        assertNull(safetyScoreChipCategory(null))
+        assertNull(safetyScoreChipCategory(scoresOf()))
         assertNull(
-            safetyScoreSeverity(
+            safetyScoreChipCategory(
                 scoresOf(
                     WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.49, "v"),
-                    // A near-certain question is a community signal, never a warning.
                     WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 1.0, "v"),
                 ),
             ),
         )
         assertEquals(
-            SafetyScoreSeverity.NOTICE,
-            safetyScoreSeverity(
+            WaddleSafetyCategory.HARASSMENT,
+            safetyScoreChipCategory(
                 scoresOf(
                     WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.5, "v"),
-                    WaddleSafetyScore(WaddleSafetyCategory.SCAM, 0.49, "v"),
+                    WaddleSafetyScore(WaddleSafetyCategory.IS_QUESTION, 1.0, "v"),
                 ),
             ),
         )
         assertEquals(
-            SafetyScoreSeverity.ALERT,
-            safetyScoreSeverity(
+            WaddleSafetyCategory.SCAM,
+            safetyScoreChipCategory(
                 scoresOf(
                     WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.5, "v"),
                     WaddleSafetyScore(WaddleSafetyCategory.SCAM, 0.8, "v"),
@@ -55,7 +55,15 @@ class SafetyScoreRowTest {
     }
 
     @Test
-    fun `rows keep only notice-level categories in the fixed order regardless of wire order`() {
+    fun `chip ties use canonical category order regardless of wire order`() {
+        val harassment = WaddleSafetyScore(WaddleSafetyCategory.HARASSMENT, 0.8, "v")
+        val scam = WaddleSafetyScore(WaddleSafetyCategory.SCAM, 0.8, "v")
+        assertEquals(WaddleSafetyCategory.HARASSMENT, safetyScoreChipCategory(scoresOf(scam, harassment)))
+        assertEquals(WaddleSafetyCategory.HARASSMENT, safetyScoreChipCategory(scoresOf(harassment, scam)))
+    }
+
+    @Test
+    fun `rows keep only categories at or above half in fixed order regardless of wire order`() {
         val rows = safetyScoreRowsOf(
             scoresOf(
                 WaddleSafetyScore(WaddleSafetyCategory.SCAM, 0.8, "safety-scam-v1"),
@@ -78,10 +86,7 @@ class SafetyScoreRowTest {
             SafetyScoreRow(WaddleSafetyCategory.IS_QUESTION, 92, 0.92f, "is-question-v1"),
             rows.first(),
         )
-        assertEquals(
-            listOf(SafetyScoreSeverity.ALERT, SafetyScoreSeverity.NOTICE, SafetyScoreSeverity.ALERT),
-            rows.map { it.severity },
-        )
+        assertEquals(listOf(0.92f, 0.5f, 0.8f), rows.map { it.fraction })
     }
 
     @Test
@@ -108,8 +113,26 @@ class SafetyScoreRowTest {
     }
 
     @Test
-    fun `each severity has its own chip description`() {
-        assertEquals(R.string.safety_scores_chip_notice, safetyScoreChipDescriptionRes(SafetyScoreSeverity.NOTICE))
-        assertEquals(R.string.safety_scores_chip_alert, safetyScoreChipDescriptionRes(SafetyScoreSeverity.ALERT))
+    fun `every category has a distinct icon and its own light and dark colour`() {
+        val icons = mapOf(
+            WaddleSafetyCategory.IS_QUESTION to Icons.Outlined.HelpOutline,
+            WaddleSafetyCategory.HATE_SPEECH to Icons.Outlined.PersonOff,
+            WaddleSafetyCategory.EXPLICIT to Icons.Outlined.VisibilityOff,
+            WaddleSafetyCategory.HARASSMENT to Icons.Outlined.SmsFailed,
+            WaddleSafetyCategory.VIOLENCE to Icons.Outlined.Bolt,
+            WaddleSafetyCategory.SELF_HARM to Icons.Outlined.FavoriteBorder,
+            WaddleSafetyCategory.SPAM to Icons.Outlined.Inbox,
+            WaddleSafetyCategory.SCAM to Icons.Outlined.GppBad,
+        )
+        val styles = WaddleSafetyCategory.entries.map(::safetyScoreStyle)
+
+        assertEquals(WaddleSafetyCategory.entries.size, styles.map { it.icon }.toSet().size)
+        assertEquals(WaddleSafetyCategory.entries.size, styles.map { it.lightColor }.toSet().size)
+        assertEquals(WaddleSafetyCategory.entries.size, styles.map { it.darkColor }.toSet().size)
+        icons.forEach { (category, icon) -> assertEquals(icon, safetyScoreStyle(category).icon) }
+        assertEquals(Color(0xFF2563EB), safetyScoreStyle(WaddleSafetyCategory.IS_QUESTION).lightColor)
+        assertEquals(Color(0xFF60A5FA), safetyScoreStyle(WaddleSafetyCategory.IS_QUESTION).darkColor)
+        assertEquals(Color(0xFFC2410C), safetyScoreStyle(WaddleSafetyCategory.HARASSMENT).lightColor)
+        assertEquals(Color(0xFFFB923C), safetyScoreStyle(WaddleSafetyCategory.HARASSMENT).darkColor)
     }
 }
