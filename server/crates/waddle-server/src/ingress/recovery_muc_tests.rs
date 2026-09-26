@@ -675,6 +675,9 @@ async fn pass_with_row_deadline(
 #[path = "recovery_muc_pin_tests.rs"]
 mod pin;
 
+#[path = "recovery_muc_result_tests.rs"]
+mod result;
+
 #[path = "recovery_departed_tests.rs"]
 mod departed;
 

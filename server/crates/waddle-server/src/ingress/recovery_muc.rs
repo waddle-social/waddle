@@ -162,16 +162,21 @@ fn authorized_source<'a>(
             route_identity,
             ..
         } => {
-            // Pin intents retain room authority, while every system archive is
-            // correlated to this exact payload's recorded room stanza ID.
-            all_receipted(recorded, pending, |intent| {
-                matches!(intent,
+            // Pin broadcasts must wait for their recorded room mutation. Other
+            // room-authored messages (including extension results) have no Pin
+            // intent; their exact archived stanza is the required prerequisite.
+            recorded
+                .iter()
+                .filter(|intent| {
+                    matches!(intent,
                 IngressEffectIntent::Pin { room: saved, .. } if saved == room)
-            }) && all_receipted(recorded, pending, |intent| {
-                matches!(intent,
+                })
+                .all(|pin| !pending.contains(pin))
+                && all_receipted(recorded, pending, |intent| {
+                    matches!(intent,
                     IngressEffectIntent::SystemMessageArchive { archive, stanza_id, .. }
                     if archive == room && matches!(route_identity, EffectMessageIdentity::StanzaId(id) if id == stanza_id))
-            })
+                })
         }
         _ => false,
     };
