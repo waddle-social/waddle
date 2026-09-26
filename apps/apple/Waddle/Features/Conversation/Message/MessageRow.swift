@@ -74,7 +74,9 @@ private struct MessageRowContent: View {
         .background(background)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: actions.highlightedID == item.id)
         .contentShape(Rectangle())
+        #if os(iOS)
         .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+        #endif
         .onHover { isHovering = $0 }
         .contextMenu {
             MessageContextMenu(item: item, session: session, actions: actions, openThread: openThread)
