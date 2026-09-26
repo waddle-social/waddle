@@ -23,6 +23,8 @@ on:
     - chat/env.cue/**
     - chat/package.json
     - chat/package.json/**
+    - chat/panda.config.ts
+    - chat/panda.config.ts/**
     - chat/public/**
     - chat/schema/**
     - chat/scripts/build-xmpp-wasm.mjs
