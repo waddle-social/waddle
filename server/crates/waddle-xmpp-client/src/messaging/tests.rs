@@ -910,7 +910,7 @@ fn parse_message_ignores_reply_fallback_url_when_matching_xep0511_preview() {
              <og:title>Current</og:title>\
            </rdf:Description>\
          </message>",
-        fallback_text.encode_utf16().count()
+        fallback_text.chars().count()
     ));
     let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
         panic!("expected Message");
@@ -928,11 +928,9 @@ fn parse_message_strips_multiple_reply_fallback_ranges_before_matching_xep0511_p
     let visible_body = "see https://current.example.com/";
     let fallback_suffix = "\n&gt; more https://later.example.com/";
     let body = format!("{fallback_prefix}{visible_body}{fallback_suffix}");
-    let first_end = "> quoted https://quoted.example.com/\n"
-        .encode_utf16()
-        .count();
-    let second_start = first_end + visible_body.encode_utf16().count();
-    let second_end = second_start + "\n> more https://later.example.com/".encode_utf16().count();
+    let first_end = "> quoted https://quoted.example.com/\n".chars().count();
+    let second_start = first_end + visible_body.chars().count();
+    let second_end = second_start + "\n> more https://later.example.com/".chars().count();
     let e = el(&format!(
         "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
            <body>{body}</body>\

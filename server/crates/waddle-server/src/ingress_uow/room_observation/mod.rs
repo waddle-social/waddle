@@ -4,6 +4,7 @@
 //! revisions, leased work, receipts, and outbound publications share one
 //! commit boundary with the room archive and never depend on its GC lifetime.
 
+mod observation_body;
 mod publications;
 mod schema;
 mod sources;

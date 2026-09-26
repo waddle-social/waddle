@@ -69,6 +69,26 @@ request. Temporary failures use bounded backoff and a finite attempt budget;
 permanent failures and stale work receive terminal receipts. Completed or
 invalidated work no longer needs its body snapshot.
 
+### Reply text
+
+The archived message and its source body digest retain the complete accepted
+body. The observation work item contains the author's text after removing one
+valid XEP-0461 reply fallback range. XEP-0428 offsets are counted as Unicode code
+points under XEP-0426, before normalization or other text processing.
+
+Extraction requires a reply marker understood by the current clients, including
+a parseable reply-author JID, and exactly one reply-scoped fallback with one
+explicit, bounded body range. Malformed, out-of-bounds, whole-body,
+childless, duplicate, and multiple-range indications keep the complete body for
+classification, matching the limits of the current clients' reply rendering.
+Unknown fallback namespaces and unmarked quoted text also remain in the input.
+
+An explicit range that leaves no authored text produces an empty-body receipt
+without invoking the extension. Corrections still advance the source revision
+and invalidate older work and results, including when their authored text is
+empty. The source digest continues to bind results to the original accepted
+body, rather than the extracted observation text.
+
 ## XMPP contract
 
 Results use XEP-0422 `<apply-to id="original-origin-id">`. The custom

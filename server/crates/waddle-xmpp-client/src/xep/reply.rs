@@ -22,7 +22,7 @@ pub struct ReplyMarker {
 
 /// A character-offset range identifying the fallback text inside the body.
 /// Per the XEP-0426 character-position model referenced by XEP-0428, offsets
-/// count UTF-16 code units and `end` is exclusive.
+/// count Unicode code points and `end` is exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallbackRange {
     pub start: u32,
