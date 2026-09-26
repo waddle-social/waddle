@@ -1,61 +1,29 @@
-import SwiftUI
+import Foundation
 
-#if os(macOS)
-/// Converts between SwiftUI's `TextSelection` and the Unicode-scalar
+/// Converts between a text view's UTF-16 selection and the Unicode scalar
 /// offsets the WaddleKit formatting helpers use. Offsets never hold
 /// `String.Index` values across edits, so a selection always resolves
 /// against the text it is applied to.
-@available(macOS 15.0, *)
-enum ComposerTextSelection {
-    /// The field selection for `range`, clamped to `text`.
-    static func selection(for range: Range<Int>?, in text: String) -> TextSelection? {
-        guard let range else { return nil }
+enum ComposerUTF16Selection {
+    /// Scalar offsets of `range` in `text`; nil when `range` does not fall
+    /// on scalar boundaries of `text`.
+    static func scalarRange(of range: NSRange, in text: String) -> Range<Int>? {
+        guard range.location != NSNotFound, let bounds = Range(range, in: text) else { return nil }
+        let scalars = text.unicodeScalars
+        guard let lower = bounds.lowerBound.samePosition(in: scalars),
+              let upper = bounds.upperBound.samePosition(in: scalars)
+        else { return nil }
+        let start = scalars.distance(from: scalars.startIndex, to: lower)
+        let end = scalars.distance(from: scalars.startIndex, to: upper)
+        return start..<end
+    }
+
+    /// The UTF-16 range of scalar offsets `range`, clamped to `text`.
+    static func nsRange(for range: Range<Int>, in text: String) -> NSRange {
         let scalars = text.unicodeScalars
         let count = scalars.count
         let lower = scalars.index(scalars.startIndex, offsetBy: min(max(range.lowerBound, 0), count))
         let upper = scalars.index(scalars.startIndex, offsetBy: min(max(range.upperBound, 0), count))
-        guard lower < upper else { return TextSelection(insertionPoint: lower) }
-        return TextSelection(range: lower..<upper)
-    }
-
-    /// Scalar offsets of a single-range selection in `text`; nil for a
-    /// multi-range selection or for indices `text` does not hold. The
-    /// field reports its text and its selection separately, so a
-    /// selection can describe a string the caller has not received yet;
-    /// the caller resolves it again once the text arrives rather than
-    /// guessing an offset.
-    static func range(of selection: TextSelection, in text: String) -> Range<Int>? {
-        guard case let .selection(range) = selection.indices else { return nil }
-        guard let lower = offset(of: range.lowerBound, in: text),
-              let upper = offset(of: range.upperBound, in: text)
-        else { return nil }
-        return min(lower, upper)..<max(lower, upper)
-    }
-
-    private static func offset(of index: String.Index, in text: String) -> Int? {
-        guard index >= text.startIndex, index <= text.endIndex else { return nil }
-        let scalars = text.unicodeScalars
-        guard let aligned = index.samePosition(in: scalars) else { return nil }
-        return scalars.distance(from: scalars.startIndex, to: aligned)
-    }
-}
-
-#endif
-
-/// Whether the text field reports its selection on this system: always
-/// on iOS, whose field is a `UITextView`; from macOS 15 on the Mac. Where
-/// it does not, the composer keeps `selection` nil so edits apply at the
-/// end of the draft instead of at an offset the field never reported.
-enum ComposerSelectionSupport {
-    static var isAvailable: Bool {
-        #if os(iOS)
-        return true
-        #else
-        if #available(macOS 15.0, *) {
-            return true
-        } else {
-            return false
-        }
-        #endif
+        return NSRange(lower..<upper, in: text)
     }
 }

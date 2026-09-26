@@ -19,8 +19,8 @@ struct ConversationComposer: View {
     /// Whether the text field is being edited; the field keeps it in step
     /// with the system's focus.
     @State private var isFocused = false
-    /// Unicode-scalar selection in the draft; nil where the system does
-    /// not report one (macOS before 15).
+    /// Unicode-scalar selection in the draft; nil until the field reports
+    /// one.
     @State private var selection: Range<Int>?
     /// The draft `selection` was measured against: what the field itself
     /// last wrote, or the result of a formatting edit. Any other change to
@@ -348,9 +348,7 @@ struct ConversationComposer: View {
     private func apply(_ edit: ComposerTextEdit) {
         selectionBase = edit.text
         model.text = edit.text
-        if ComposerSelectionSupport.isAvailable {
-            selection = edit.selection
-        }
+        selection = edit.selection
         isFocused = true
     }
 
