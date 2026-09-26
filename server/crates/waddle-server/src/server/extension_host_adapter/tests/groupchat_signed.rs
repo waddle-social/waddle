@@ -8,11 +8,11 @@ use waddle_extensions::{
 
 async fn signed_manager() -> Arc<ExtensionManager> {
     // Extend the existing real component's manifest capability list. WIT enum
-    // indices are MessageEnrich=0, Launch=11, HostMessageSend=8.
+    // indices are MessageEnrich=1, Launch=12, HostMessageSend=9.
     let fixture = include_str!("../../../../../waddle-extensions/tests/fixtures/message_hook.wat");
     let old = "i32.const 40\n      i32.const 1\n      i32.store";
     assert_eq!(fixture.matches(old).count(), 1);
-    let fixture = fixture.replace(old, "i32.const 40\n      i32.const 3\n      i32.store\n      i32.const 561\n      i32.const 11\n      i32.store8\n      i32.const 562\n      i32.const 8\n      i32.store8");
+    let fixture = fixture.replace(old, "i32.const 40\n      i32.const 3\n      i32.store\n      i32.const 561\n      i32.const 12\n      i32.store8\n      i32.const 562\n      i32.const 9\n      i32.store8");
     let directory = tempfile::tempdir().expect("component directory");
     let path = directory.path().join("groupchat-launch.wat");
     std::fs::write(&path, fixture).expect("write manifest fixture");

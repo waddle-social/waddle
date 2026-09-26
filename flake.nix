@@ -738,6 +738,7 @@
           );
           waddle-server-extension-runtime = craneLib.cargoTest (
             baseArgs
+            // testRuntimeEnv
             // {
               pname = "waddle-server-extension-runtime";
               doInstallCargoArtifacts = false;

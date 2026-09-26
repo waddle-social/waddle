@@ -1238,7 +1238,14 @@ async fn create_websocket_state(
             warn!("skipping LiveKit ghost reconciliation: lineage attestation failed");
         }
     }
-    crate::room_observation::RoomObservationActors::start(&websocket_state).await?;
+    if lineage_attested {
+        crate::room_observation::RoomObservationActors::start(&websocket_state).await?;
+    } else {
+        // Observer configuration and recovery write through lineage-guarded
+        // transactions. Keep an unattested node alive for diagnostics without
+        // initializing the observer store or enabling observation admission.
+        warn!("skipping room observation startup: lineage attestation failed");
+    }
     Ok(websocket_state)
 }
 

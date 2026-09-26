@@ -5,23 +5,18 @@ use super::*;
 async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repeating_effects() {
     use crate::ingress::execute::test_hooks;
     use std::sync::Arc;
-    use waddle_extensions::{
-        observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
-        ExtensionManager, PluginId,
-    };
 
     let fixture = IngressFixture::sqlite().await;
     let mut state = shared_state(&fixture).await;
-    let observer = ObserverTestPlugin::new(
-        PluginId::new("fair-recheck-observer").expect("plugin id"),
-        ObserverTestBehavior::Success,
-    );
     Arc::get_mut(&mut state)
         .expect("unique state")
         .deps
         .protocol
         .extension_manager =
-        Arc::new(ExtensionManager::with_observer_test_plugins(vec![observer.clone()]).await);
+        crate::server::routes::interpret::tests::room_dispatch::room_observer_test_manager(
+            crate::server::routes::interpret::tests::room_dispatch::ObserverConfiguration::Observer,
+        )
+        .await;
     let room: jid::BareJid = "fair-recheck@muc.example.com".parse().expect("room");
     let sender = fixture.submission(None, "").sender;
     let persistent: jid::FullJid = "persistent@example.com/phone".parse().expect("persistent");
@@ -74,6 +69,18 @@ async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repea
         let mut submission = groupchat_submission(&fixture, &room, &sender, text, text);
         let message = submission.plan.sanitized_message.clone();
         plan_broadcast(&mut submission, &room, &message, &deps).await;
+        if text == "C" {
+            assert_eq!(
+                submission
+                    .plan
+                    .intents
+                    .iter()
+                    .filter(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }))
+                    .count(),
+                1,
+                "configured room observation must freeze one successor intent"
+            );
+        }
         // B pauses on later's accepted socket append. C must probe the persistent
         // target before later, after already completing an independent target.
         submission.plan.plan.sort_by_key(|planned| {
@@ -106,6 +113,18 @@ async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repea
     // pending. Later joined after A, so its distinct predecessor is B alone.
     let predecessor = &decisions[1];
     let successor = &decisions[2];
+    assert_eq!(
+        successor
+            .external
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                ExternalEffect::Room(effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })
+            ))
+            .count(),
+        1,
+        "the committed successor retains one frozen observer effect"
+    );
     let append = test_hooks::pause_after_delivery_append(
         predecessor.message_key.expect("B key"),
         later.clone(),
@@ -195,13 +214,20 @@ async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repea
         "rechecks never repeat accepted socket writes"
     );
     assert_eq!(
-        observer
-            .invocations()
+        report
+            .outcomes
             .iter()
-            .filter(|invocation| invocation.body.as_str() == "C")
+            .filter(|(effect, outcome)| {
+                matches!(
+                    effect,
+                    ExternalEffect::Room(
+                        effects::room::ExternalRoomEffect::ObserveRoomMessage { .. }
+                    )
+                ) && *outcome == ExternalOutcome::AwaitingPredecessor
+            })
             .count(),
         1,
-        "rechecks never rerun a completed observer"
+        "rechecks schedule the frozen observer obligation once"
     );
     let mut tx = fixture
         .uow

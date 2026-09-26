@@ -339,7 +339,7 @@ async fn sqlite_unenrolled_database_stays_unready() {
     );
     let mut server = spawn_server(vec![
         ("WADDLE_DB_DRIVER".into(), "sqlite".into()),
-        ("WADDLE_DATABASE_URL".into(), database_url),
+        ("WADDLE_DATABASE_URL".into(), database_url.clone()),
         (
             "WADDLE_DEPLOYMENT_UUID".into(),
             uuid::Uuid::new_v4().to_string(),
@@ -350,6 +350,20 @@ async fn sqlite_unenrolled_database_stays_unready() {
     wait_for_lineage_failure(&server, "global", "missing_lineage").await;
     assert!(!server.wait_for_exit(Duration::from_secs(1)).await);
     assert_liveness(&server).await;
+    let database = sqlx::SqlitePool::connect(&database_url)
+        .await
+        .expect("open unattested SQLite database for inspection");
+    let observer_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'extension_room_observers'",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("inspect observer schema");
+    assert_eq!(
+        observer_tables, 0,
+        "unattested startup must not initialize observers"
+    );
+    database.close().await;
 }
 
 #[tokio::test]
@@ -372,6 +386,16 @@ async fn unenrolled_database_stays_unready() {
     wait_for_lineage_failure(&server, "global", "missing_lineage").await;
     assert!(!server.wait_for_exit(Duration::from_secs(1)).await);
     assert_liveness(&server).await;
+    let observer_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'extension_room_observers'",
+    )
+    .fetch_one(&fixture.primary_admin)
+    .await
+    .expect("inspect observer schema");
+    assert_eq!(
+        observer_tables, 0,
+        "unattested startup must not initialize observers"
+    );
 
     drop(server);
     fixture.cleanup().await;
