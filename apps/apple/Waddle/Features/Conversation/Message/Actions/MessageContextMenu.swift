@@ -54,11 +54,14 @@ struct MessageContextMenu: View {
             if item.conversation.isRoom {
                 pinButton
             }
-            if item.safetyScores?.severity != nil {
+            if MessageSafetyScoresButton.isVisible(for: item.safetyScores) {
                 Button {
                     actions.showSafetyScores(for: item)
                 } label: {
-                    Label(MessageSafetyScoresButton.title + "…", systemImage: MessageSafetyScoresButton.symbol)
+                    Label(
+                        MessageSafetyScoresButton.title + "…",
+                        systemImage: MessageSafetyScoresButton.symbol(for: item.safetyScores)
+                    )
                 }
             }
             ownActions
@@ -130,7 +133,7 @@ struct MessageAccessibilityActions: ViewModifier {
             if replyCount > 0 {
                 Button("Open thread", action: openThread)
             }
-            if item.safetyScores?.severity != nil {
+            if MessageSafetyScoresButton.isVisible(for: item.safetyScores) {
                 Button("Show \(MessageSafetyScoresButton.title.lowercased())") { actions.showSafetyScores(for: item) }
             }
             if let file = item.message.sharedFiles.first, file.encrypted == nil {

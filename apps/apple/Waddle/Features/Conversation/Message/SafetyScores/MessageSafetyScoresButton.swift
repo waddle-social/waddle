@@ -8,9 +8,25 @@ import WaddleKit
 struct MessageSafetyScoresButton: View {
     static let title = "Content signals"
     static let symbol = "gauge.with.dots.needle.33percent"
+    static let questionSymbol = "questionmark.bubble"
 
-    let severity: SafetyScoreSeverity
+    let severity: SafetyScoreSeverity?
+    let hasQuestionSignal: Bool
     let action: () -> Void
+
+    static func isVisible(for scores: SafetyScores?) -> Bool {
+        guard let scores else { return false }
+        return !scores.notableRows.isEmpty
+    }
+
+    static func hasQuestionSignal(_ scores: SafetyScores?) -> Bool {
+        scores?.notableSignalRows.contains { $0.category == .isQuestion } == true
+    }
+
+    static func symbol(for scores: SafetyScores?) -> String {
+        guard scores?.severity == nil, hasQuestionSignal(scores) else { return symbol }
+        return questionSymbol
+    }
 
     static func tint(for severity: SafetyScoreSeverity) -> Color {
         switch severity {
@@ -21,9 +37,9 @@ struct MessageSafetyScoresButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: Self.symbol)
+            Image(systemName: severity == nil && hasQuestionSignal ? Self.questionSymbol : Self.symbol)
                 .font(.caption2)
-                .foregroundStyle(Self.tint(for: severity))
+                .foregroundStyle(markerTint)
                 .padding(Theme.Spacing.xs)
                 .contentShape(Rectangle())
         }
@@ -32,5 +48,10 @@ struct MessageSafetyScoresButton: View {
         // The row is one combined accessibility element; VoiceOver reaches
         // the breakdown through the row's custom action instead.
         .accessibilityHidden(true)
+    }
+
+    private var markerTint: Color {
+        if let severity { return Self.tint(for: severity) }
+        return hasQuestionSignal ? .accentColor : .secondary
     }
 }

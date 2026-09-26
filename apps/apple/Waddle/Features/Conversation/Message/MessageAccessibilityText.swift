@@ -17,6 +17,9 @@ enum MessageAccessibilityText {
         if replyCount > 0 {
             parts.append(replyCount == 1 ? "1 reply" : "\(replyCount) replies")
         }
+        if item.safetyScores?.notableSignalRows.contains(where: { $0.category == .isQuestion }) == true {
+            parts.append("Question signal")
+        }
         switch item.safetyScores?.severity {
         case .alert: parts.append("Content alert")
         case .notice: parts.append("Content notice")
