@@ -39,7 +39,7 @@ import { resolveThreadActionTarget } from "@/lib/thread-action-target";
 import type { CallMedia } from "@/lib/calls/types";
 import { authorBadge as authorBadgeFor, authorBadgeTooltip as authorBadgeTooltipFor } from "./message-card-badges";
 import { eventBandsFor, rendersAsSystemBand } from "./message-system-band";
-import { visibleSafetyScores } from "./message-safety-scores";
+import { visibleQuestionScore, visibleSafetyScores } from "./message-safety-scores";
 import { formatThreadRecency } from "./message-thread-recency";
 import { useMessageActionSurfaces } from "./composables/use-message-action-surfaces";
 import { useMessageGestures } from "./composables/use-message-gestures";
@@ -108,7 +108,11 @@ const emit = defineEmits<{
 }>();
 
 const authorBadge = computed(() => authorBadgeFor(props.authority, props.hats));
-const safetyScores = computed(() => visibleSafetyScores(props.message));
+const safetyScores = computed(() => {
+  const scores = props.message.safetyScores;
+  if (!scores || props.message.isRetracted) return null;
+  return visibleSafetyScores(props.message) || visibleQuestionScore(props.message) ? scores : null;
+});
 const authorBadgeTooltip = computed(() => authorBadgeTooltipFor(props.authority, props.hats));
 
 const eventBands = computed(() => eventBandsFor(props.message.extensionAnnotations));
