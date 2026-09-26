@@ -190,7 +190,7 @@ function handleLogin(providerId?: string) {
         <div class="flex flex-col gap-2.5 px-6 pb-6">
           <p
             v-if="errorMessage"
-            class="type-control rounded-[10px] border border-destructive/40 px-4 py-2.5 text-destructive"
+            class="type-control rounded-[10px] border border-destructive/40 px-4 py-2.5 text-destructive-text"
             role="alert"
           >
             {{ errorMessage }}

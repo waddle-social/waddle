@@ -121,7 +121,7 @@ function feedbackClass(tone: FeedbackTone): string {
     case "success":
       return "text-emerald-700 dark:text-emerald-300";
     case "error":
-      return "text-destructive";
+      return "text-destructive-text";
     default:
       return "text-muted-foreground";
   }
@@ -515,7 +515,7 @@ async function clearTuneStatus() {
                       {{ option.label }}
                     </option>
                   </select>
-                  <p v-if="activityErrors.general" class="type-caption text-destructive">
+                  <p v-if="activityErrors.general" class="type-caption text-destructive-text">
                     {{ activityErrors.general }}
                   </p>
                 </label>
@@ -531,7 +531,7 @@ async function clearTuneStatus() {
                   />
                   <p
                     class="type-caption"
-                    :class="activityErrors.specific ? 'text-destructive' : 'text-muted-foreground'"
+                    :class="activityErrors.specific ? 'text-destructive-text' : 'text-muted-foreground'"
                   >
                     {{ activityErrors.specific ?? activitySpecificHint }}
                   </p>
@@ -641,7 +641,7 @@ async function clearTuneStatus() {
                   />
                   <p
                     class="type-caption"
-                    :class="tuneErrors.length ? 'text-destructive' : 'text-muted-foreground'"
+                    :class="tuneErrors.length ? 'text-destructive-text' : 'text-muted-foreground'"
                   >
                     {{ tuneErrors.length ?? "Optional. Use whole seconds." }}
                   </p>
@@ -658,7 +658,7 @@ async function clearTuneStatus() {
                   />
                   <p
                     class="type-caption"
-                    :class="tuneErrors.rating ? 'text-destructive' : 'text-muted-foreground'"
+                    :class="tuneErrors.rating ? 'text-destructive-text' : 'text-muted-foreground'"
                   >
                     {{ tuneErrors.rating ?? "Optional. Whole numbers from 1 to 10." }}
                   </p>
@@ -675,7 +675,7 @@ async function clearTuneStatus() {
                   />
                   <p
                     class="type-caption"
-                    :class="tuneErrors.uri ? 'text-destructive' : 'text-muted-foreground'"
+                    :class="tuneErrors.uri ? 'text-destructive-text' : 'text-muted-foreground'"
                   >
                     {{ tuneErrors.uri ?? "Optional. Use a full URL or URI." }}
                   </p>

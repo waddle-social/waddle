@@ -654,7 +654,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
             <AppTooltip v-if="canEndCallActivity(row.activity)" :label="endCallActivityLabel(row)">
               <button
                 type="button"
-                class="chat-icon-button shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                class="chat-icon-button shrink-0 text-destructive-text hover:bg-destructive/10 hover:text-destructive-text"
                 :aria-label="endCallActivityLabel(row)"
                 @click="endCallActivity(row.activity)"
               >

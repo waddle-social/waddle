@@ -2,7 +2,7 @@
 import { Toast, Toaster } from "@ark-ui/vue/toast";
 import { X } from "lucide-vue-next";
 import { toast as toastRecipe } from "styled-system/recipes";
-import { toaster } from "@/ui/toaster";
+import { toaster, type ToastMeta } from "@/ui/toaster";
 
 /**
  * Renders the app-wide toast stack from `@/ui/toaster`. Mount it once,
@@ -17,14 +17,15 @@ const TONE_BORDER: Record<string, string> = {
   neutral: "var(--border)",
 };
 
-function borderFor(type: string | undefined): string {
-  return TONE_BORDER[type ?? "neutral"] ?? TONE_BORDER.neutral!;
+function borderFor(meta: Record<string, unknown> | undefined): string {
+  const tone = (meta as Partial<ToastMeta> | undefined)?.tone;
+  return TONE_BORDER[tone ?? "neutral"] ?? TONE_BORDER.neutral!;
 }
 </script>
 
 <template>
   <Toaster :toaster="toaster" v-slot="item">
-    <Toast.Root :class="[cls.root, 'app-toast']" :style="{ borderColor: borderFor(item.type) }">
+    <Toast.Root :class="[cls.root, 'app-toast']" :style="{ borderColor: borderFor(item.meta) }">
       <div class="flex min-w-0 flex-1 flex-col gap-1">
         <Toast.Title :class="cls.title">{{ item.title }}</Toast.Title>
         <Toast.Description v-if="item.description" :class="cls.description">{{ item.description }}</Toast.Description>

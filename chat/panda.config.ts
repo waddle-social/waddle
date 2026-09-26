@@ -198,7 +198,7 @@ const avatar = defineSlotRecipe({
 
 const card = defineSlotRecipe({
   className: "card",
-  description: "Room, event and question cards. `live` gets the ember border and glow.",
+  description: "Room, event and question cards. `live` gets the ember border and glow; `warning` (a ringing call) and `active` (a syncing one) are outlined in their state colour without a glow.",
   slots: ["root", "kicker", "title", "body", "footer"],
   base: {
     root: { display: "flex", flexDirection: "column", gap: "2.5", p: "4", borderRadius: "card", bg: "surface", borderWidth: "1px", borderColor: "border" },
@@ -210,7 +210,8 @@ const card = defineSlotRecipe({
   variants: {
     tone: {
       live: { root: { borderColor: "live", boxShadow: "0 0 28px -10px token(colors.glow.live)" }, kicker: { color: "live.text" } },
-      active: { kicker: { color: "action.text" } },
+      active: { root: { borderColor: "action/40" }, kicker: { color: "action.text" } },
+      warning: { root: { borderColor: "warning/40" }, kicker: { color: "warning.text" } },
       quiet: {},
     },
   },
@@ -279,7 +280,7 @@ export default defineConfig({
           gold: { 900: { value: "#3d3320" }, 700: { value: "#8a5a0a" }, 500: { value: "#e9b44c" }, 100: { value: "#fdf3dc" } },
           moss: { 700: { value: "#2f6b3f" }, 300: { value: "#7fc98f" } },
           green: { 500: { value: "#3ddc84" }, 700: { value: "#1f9d55" } },
-          amber: { 500: { value: "#f2b036" }, 700: { value: "#d97706" } },
+          amber: { 500: { value: "#f2b036" }, 700: { value: "#d97706" }, 800: { value: "#8a4d06" } },
           red: { 700: { value: "#b8353d" }, 500: { value: "#d1434b" }, 300: { value: "#ff8b90" } },
           avatarTints: { 1: { value: "#d6f3ef" }, 2: { value: "#ffe3cd" }, 3: { value: "#e3e8f7" }, 4: { value: "#c9d4dc" } },
         },
@@ -361,6 +362,10 @@ export default defineConfig({
             DEFAULT: { value: { _dark: "{colors.moss.300}", _light: "{colors.moss.700}" } },
             fg: { value: { _dark: "{colors.ink.900}", _light: "{colors.ink.0}" } },
             text: { value: { _dark: "{colors.moss.300}", _light: "{colors.moss.700}" } },
+          },
+          warning: {
+            DEFAULT: { value: { _dark: "{colors.amber.500}", _light: "{colors.amber.700}" } },
+            text: { value: { _dark: "{colors.amber.500}", _light: "{colors.amber.800}" } },
           },
           danger: {
             DEFAULT: { value: "{colors.red.500}" },

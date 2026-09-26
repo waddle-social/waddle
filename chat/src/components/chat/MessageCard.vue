@@ -140,7 +140,7 @@ const deliveryStatusClass = computed(() => {
       return "text-warning/80";
     case "rejected":
     case "failed":
-      return "text-destructive/80";
+      return "text-destructive-text/80";
     default:
       return "text-muted-foreground/50";
   }

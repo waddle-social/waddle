@@ -25,8 +25,11 @@
   --muted-foreground: light-dark(#4a5966, #9fb0bd);
   --accent: var(--primary);
   --accent-foreground: var(--primary-foreground);
+  /* `--destructive` is the fill (white on it is 4.55:1); readable error
+   * copy uses `--destructive-text`, the Panda `danger.text` pair. */
   --destructive: #d1434b;
   --destructive-foreground: #ffffff;
+  --destructive-text: light-dark(#b8353d, #ff8b90);
   --border: light-dark(#d9e2e6, #26384a);
   --input: light-dark(#d9e2e6, #26384a);
   --ring: var(--primary);
@@ -189,6 +192,7 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-text: var(--destructive-text);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);

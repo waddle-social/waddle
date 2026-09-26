@@ -513,7 +513,7 @@ watch(
               <button
                 v-if="canLeaveRetainedGroupCall(row.roomJid)"
                 type="button"
-                class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive hover:bg-destructive/10"
+                class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive-text hover:bg-destructive/10"
                 :title="leaveRefreshedGroupCallLabel(row)"
                 :aria-label="leaveRefreshedGroupCallLabel(row)"
                 @click="leaveRefreshedGroupCall(row)"
@@ -790,7 +790,7 @@ watch(
                 <button
                   v-if="canLeaveChannelCall(channel)"
                   type="button"
-                  class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive hover:bg-destructive/10"
+                  class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive-text hover:bg-destructive/10"
                   :title="leaveChannelCallLabel(channel)"
                   :aria-label="leaveChannelCallLabel(channel)"
                   @click="leaveChannelCall(channel)"

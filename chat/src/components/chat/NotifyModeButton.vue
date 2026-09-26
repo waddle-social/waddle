@@ -231,7 +231,7 @@ async function toggleRichPayload() {
         :value="mode"
         :disabled="busy"
         :close-on-select="false"
-        :class="[menuClasses.item, 'flex-col !items-start gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
+        :class="[menuClasses.item, 'flex-col !items-start !gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
         style="height: auto"
       >
         <div class="flex w-full items-center justify-between gap-2">
@@ -249,7 +249,7 @@ async function toggleRichPayload() {
       :checked="richOptIn"
       :disabled="busy"
       :close-on-select="false"
-      :class="[menuClasses.item, 'flex-col !items-start gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
+      :class="[menuClasses.item, 'flex-col !items-start !gap-0.5 py-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50']"
       style="height: auto"
     >
       <div class="flex w-full items-center justify-between gap-2">
@@ -264,7 +264,7 @@ async function toggleRichPayload() {
 
     <p
       v-if="errorMessage"
-      class="type-meta mt-1 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive"
+      class="type-meta mt-1 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive-text"
       role="alert"
       aria-live="assertive"
     >{{ errorMessage }}</p>

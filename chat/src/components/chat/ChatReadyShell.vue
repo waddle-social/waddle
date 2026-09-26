@@ -61,7 +61,7 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { isEventUpcomingOrOngoing, sortEventsUpcomingFirst, type CommunityEvent, type FeedPostInput, type StoryPostInput } from "@/lib/xmpp-client";
 import { eventBounds } from "@/lib/xmpp/event-calendar";
-import { presenceFromShow, type MemberCardModel } from "@/shell/controllers/use-people-rail";
+import { splitKnownPeople, type MemberCardModel } from "@/shell/controllers/use-people-rail";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import { setManualActivity } from "@/presence/self-activity";
 import { $ownNotificationsSuppressed } from "@/presence/presence-store";
@@ -330,12 +330,13 @@ const hasCallContext = computed(() => {
   if (Object.values(callParticipantCounts.value).some((count) => count > 0)) return true;
   return Object.keys(dmCallActivitiesStore.value).length > 0;
 });
-/** Home / Rooms / Members always get a context column; a conversation
- * only when there is call activity to show in it. */
+/** Home / Rooms / Members always get a context column; every other page
+ * gets one whenever there is call activity, so the in-call controls
+ * (CurrentCallPanel / CallActivityDock) never depend on the page. */
 const contextColumnVisible = computed(() => {
+  if (hasCallContext.value) return true;
   const page = ui.activePage.value;
-  if (page === "dashboard" || page === "rooms" || page === "members") return true;
-  return conversationPageActive.value && hasCallContext.value;
+  return page === "dashboard" || page === "rooms" || page === "members";
 });
 const nextEvent = computed<CommunityEvent | null>(() => {
   const first = sortEventsUpcomingFirst(communityEvents.events.value)[0];
@@ -350,31 +351,13 @@ const nextEventWhen = computed(() => {
     ? date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
     : date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 });
-/** Contacts and DM peers who are available or busy right now, one per
- * bare JID. Honest "around now" for the Home context column — nobody
- * has a join date, so there is no "new this week". */
-const aroundNow = computed(() => {
-  const seen = new Set<string>();
-  const people: { jid: string; name: string; avatarUrl: string | null; presence: "online" | "dnd" }[] = [];
-  for (const conversation of dmConversations.conversations.value) {
-    if (conversation.mucPm) continue;
-    const presence = presenceFromShow(conversation.presenceShow);
-    if (presence !== "online" && presence !== "dnd") continue;
-    const jid = barePeerJid(conversation.peerJid).toLowerCase();
-    if (seen.has(jid)) continue;
-    seen.add(jid);
-    people.push({ jid, name: conversation.peerUsername || jid, avatarUrl: conversation.peerAvatarUrl ?? null, presence });
-  }
-  for (const contact of rosterContacts.contacts.value) {
-    const presence = presenceFromShow(contact.presenceShow);
-    if (presence !== "online" && presence !== "dnd") continue;
-    const jid = barePeerJid(contact.jid).toLowerCase();
-    if (seen.has(jid)) continue;
-    seen.add(jid);
-    people.push({ jid, name: contact.name || contact.username || jid, avatarUrl: null, presence });
-  }
-  return people;
-});
+/** Contacts and DM peers who are around right now, one per bare JID,
+ * from the same rule and sources as the Home hero and the people rail.
+ * Honest "around now" for the Home context column — nobody has a join
+ * date, so there is no "new this week". */
+const aroundNow = computed(() =>
+  splitKnownPeople(rosterContacts.contacts.value, dmConversations.conversations.value).around,
+);
 /** Member picked on the Members page; MembersPage emits null on unmount. */
 const selectedMember = ref<MemberCardModel | null>(null);
 function onSelectMember(member: MemberCardModel | null) {

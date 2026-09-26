@@ -118,7 +118,7 @@ watch(
             </button>
             <button
               type="button"
-              class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg text-destructive hover:bg-destructive/10 active:bg-destructive/10 transition-colors text-left"
+              class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg text-destructive-text hover:bg-destructive/10 active:bg-destructive/10 transition-colors text-left"
               @click="emit('retract')"
             >
               <Trash2 class="w-5 h-5" aria-hidden="true" />

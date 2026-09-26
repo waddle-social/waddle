@@ -129,7 +129,7 @@ const pickerButtonEl = ref<HTMLButtonElement | null>(null);
       <AppTooltip label="Delete message">
         <button
           type="button"
-          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+          class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive-text hover:bg-destructive/10"
           aria-label="Delete message"
           @click="emit('retract')"
         >

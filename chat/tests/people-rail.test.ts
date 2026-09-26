@@ -4,7 +4,9 @@ import {
   buildMemberCards,
   buildPeopleRail,
   filterPeople,
+  isAroundPresence,
   presenceFromShow,
+  splitKnownPeople,
   usePeopleRail,
   type PeopleRailSources,
 } from "../src/shell/controllers/use-people-rail";
@@ -231,6 +233,55 @@ describe("buildMemberCards", () => {
       ["amy@example.com", "amy", null, "speaking"],
       ["bob@example.com", "Bobby", null, "away"],
     ]);
+  });
+});
+
+describe("one rule for around", () => {
+  test("isAroundPresence: available or dnd, never away, offline or unknown", () => {
+    expect(isAroundPresence("online")).toBe(true);
+    expect(isAroundPresence("dnd")).toBe(true);
+    expect(isAroundPresence("away")).toBe(false);
+    expect(isAroundPresence("offline")).toBe(false);
+    expect(isAroundPresence(undefined)).toBe(false);
+    // xa maps to away, so an extended-away contact is not around either.
+    expect(isAroundPresence(presenceFromShow("xa"))).toBe(false);
+  });
+
+  test("splitKnownPeople merges roster and DM peers by bare JID with the rail's rule", () => {
+    const { around, awayAndOffline } = splitKnownPeople(
+      [
+        contact("bob@example.com", "available", "Bob B"),
+        contact("carol@example.com", "away"),
+        contact("dan@example.com", "dnd"),
+        contact("eve@example.com"),
+      ],
+      [
+        conversation("BOB@example.com/phone", "dnd", { peerAvatarUrl: "https://cdn.example/bob.png" }),
+        conversation("amy@example.com", "available"),
+        conversation("fay@example.com", "xa"),
+        conversation("room@conference.example.com/nick", "available", { mucPm: true }),
+      ],
+    );
+
+    // A DM peer who is not on the roster counts; the conversation's
+    // presence and avatar win over the roster's, the roster name wins.
+    expect(around.map((p) => [p.jid, p.name, p.presence, p.presenceShow, p.avatarUrl])).toEqual([
+      ["amy@example.com", "amy", "online", "available", null],
+      ["bob@example.com", "Bob B", "dnd", "dnd", "https://cdn.example/bob.png"],
+      ["dan@example.com", "dan", "dnd", "dnd", null],
+    ]);
+    expect(awayAndOffline.map((p) => [p.jid, p.presence])).toEqual([
+      ["carol@example.com", "away"],
+      ["fay@example.com", "away"],
+      ["eve@example.com", undefined],
+    ]);
+    // The rail groups the same people the same way.
+    const rail = buildPeopleRail(sources({
+      contacts: [contact("bob@example.com", "available", "Bob B"), contact("carol@example.com", "away")],
+      conversations: [conversation("amy@example.com", "available")],
+    }));
+    expect(rail.around.map((p) => p.jid)).toEqual(around.map((p) => p.jid).filter((jid) => jid !== "dan@example.com"));
+    expect(rail.awayAndOffline.map((p) => p.jid)).toEqual(["carol@example.com"]);
   });
 });
 

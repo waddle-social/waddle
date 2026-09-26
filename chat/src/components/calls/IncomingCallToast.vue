@@ -119,7 +119,7 @@ async function decline(): Promise<void> {
     </div>
     <div
       v-if="lastError"
-      class="w-full rounded-md border border-destructive/40 bg-destructive/15 px-2 py-1 type-caption text-destructive"
+      class="w-full rounded-md border border-destructive/40 bg-destructive/15 px-2 py-1 type-caption text-destructive-text"
       role="alert"
     >
       {{ lastError }}

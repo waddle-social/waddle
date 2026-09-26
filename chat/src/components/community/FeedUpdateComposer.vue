@@ -158,7 +158,7 @@ function feedbackClass(tone: FeedbackTone): string {
     case "success":
       return "text-moss";
     case "error":
-      return "text-destructive";
+      return "text-destructive-text";
     default:
       return "text-muted-foreground";
   }
@@ -402,7 +402,7 @@ async function publishProfile() {
         aria-label="Feed post body"
       />
       <div class="flex items-center justify-between gap-2">
-        <span class="type-caption" :class="composerOver ? 'text-destructive' : 'text-muted-foreground'">
+        <span class="type-caption" :class="composerOver ? 'text-destructive-text' : 'text-muted-foreground'">
           {{ composerBody.length }} / {{ COMPOSER_MAX }}
         </span>
         <button
@@ -470,7 +470,7 @@ async function publishProfile() {
               {{ formatPepKeyword(general) }}
             </option>
           </select>
-          <span v-if="activityErrors.general" class="type-caption text-destructive">{{ activityErrors.general }}</span>
+          <span v-if="activityErrors.general" class="type-caption text-destructive-text">{{ activityErrors.general }}</span>
         </label>
         <label class="grid gap-1.5">
           <span :class="fieldLabelClass">Specific</span>
@@ -482,7 +482,7 @@ async function publishProfile() {
             placeholder="Optional detail"
             type="text"
           />
-          <span v-if="activityErrors.specific" class="type-caption text-destructive">{{ activityErrors.specific }}</span>
+          <span v-if="activityErrors.specific" class="type-caption text-destructive-text">{{ activityErrors.specific }}</span>
         </label>
       </div>
       <label class="grid gap-1.5">
@@ -549,7 +549,7 @@ async function publishProfile() {
             maxlength="240"
             type="text"
           />
-          <span v-if="tuneErrors.uri" class="type-caption text-destructive">{{ tuneErrors.uri }}</span>
+          <span v-if="tuneErrors.uri" class="type-caption text-destructive-text">{{ tuneErrors.uri }}</span>
         </label>
         <label class="grid gap-1.5">
           <span :class="fieldLabelClass">Length</span>
@@ -560,7 +560,7 @@ async function publishProfile() {
             inputmode="numeric"
             type="text"
           />
-          <span v-if="tuneErrors.length" class="type-caption text-destructive">{{ tuneErrors.length }}</span>
+          <span v-if="tuneErrors.length" class="type-caption text-destructive-text">{{ tuneErrors.length }}</span>
         </label>
         <label class="grid gap-1.5">
           <span :class="fieldLabelClass">Rating</span>
@@ -571,10 +571,10 @@ async function publishProfile() {
             inputmode="numeric"
             type="text"
           />
-          <span v-if="tuneErrors.rating" class="type-caption text-destructive">{{ tuneErrors.rating }}</span>
+          <span v-if="tuneErrors.rating" class="type-caption text-destructive-text">{{ tuneErrors.rating }}</span>
         </label>
       </div>
-      <p v-if="tuneErrors.form" class="type-caption text-destructive">{{ tuneErrors.form }}</p>
+      <p v-if="tuneErrors.form" class="type-caption text-destructive-text">{{ tuneErrors.form }}</p>
       <div class="flex justify-end">
         <button
           type="submit"
@@ -663,7 +663,7 @@ async function publishProfile() {
     <p v-if="composerFeedback" class="type-caption" :class="feedbackClass(composerFeedback.tone)" role="status">
       {{ composerFeedback.message }}
     </p>
-    <p v-if="composerMode === 'story' && storyComposerError" class="type-caption text-destructive" role="status">
+    <p v-if="composerMode === 'story' && storyComposerError" class="type-caption text-destructive-text" role="status">
       {{ storyComposerError }}
     </p>
   </section>

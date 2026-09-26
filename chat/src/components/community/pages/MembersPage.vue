@@ -3,11 +3,13 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Menu } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import AppDialog from "@/components/ui/AppDialog.vue";
+import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
 import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useInCallOverlays } from "@/presence/in-call-overlay-store";
 import { barePeerJid } from "@/lib/xmpp/jid";
-import { buildMemberCards, type MemberCardModel } from "@/shell/controllers/use-people-rail";
+import { buildMemberCards, isAroundPresence, type MemberCardModel } from "@/shell/controllers/use-people-rail";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 
 const props = defineProps<{
@@ -21,7 +23,8 @@ const emit = defineEmits<{
 }>();
 
 const {
-  waddles,
+  connectionStore,
+  xmppClient,
   messaging,
   rosterContacts,
   dmConversations,
@@ -31,6 +34,7 @@ const {
   avatarUrlByAuthor,
   activeChannelRoomJid,
   activeRoomChannel,
+  handleOpenDm,
 } = props.controller;
 
 const participantsStore = useStore($mucCallParticipants);
@@ -75,18 +79,23 @@ const cards = computed<MemberCardModel[]>(() =>
   }),
 );
 
+// Same rule as the Home hero and the people rail: in a huddle, available
+// or do-not-disturb is here; away and offline are not.
 function isHere(card: MemberCardModel): boolean {
   return card.status === "speaking"
     || card.status === "in-huddle"
-    || (card.presence !== undefined && card.presence !== "offline");
+    || isAroundPresence(card.presence);
 }
 
 const hereCards = computed(() => cards.value.filter(isHere));
 const visibleCards = computed(() => (filter.value === "here" ? hereCards.value : cards.value));
 
-const memberCount = computed(() => {
-  if (!roomActive.value) return rosterContacts.contacts.value.length;
-  return displayedMemberState.value === "ready" ? waddles.members.value.length : cards.value.length;
+/** The headline counts what the grid shows: room members with a room
+ * focused, otherwise everyone known by JID (roster and DM peers). */
+const headline = computed(() => {
+  const count = cards.value.length;
+  if (roomActive.value) return `${count} member${count === 1 ? "" : "s"}`;
+  return `${count} ${count === 1 ? "person" : "people"}`;
 });
 
 const kicker = computed(() => {
@@ -109,8 +118,39 @@ onBeforeUnmount(() => {
   emit("selectMember", null);
 });
 
+/** Below the lg breakpoint the shell's context column, where the desktop
+ * profile lives, is `display: none` (community.css), so the profile opens
+ * as a dialog there instead. Checked at selection time, not tracked. */
+const profileDialogOpen = ref(false);
+
+function contextColumnPresent(): boolean {
+  return typeof window !== "undefined" && window.matchMedia("(min-width: 64rem)").matches;
+}
+
+const selectedIsSelf = computed(() => {
+  const session = connectionStore.session;
+  const card = selectedCard.value;
+  return !!session && !!card && barePeerJid(session.jid).toLowerCase() === card.jid;
+});
+
 function selectCard(card: MemberCardModel) {
-  selectedJid.value = selectedJid.value === card.jid ? null : card.jid;
+  const next = selectedJid.value === card.jid ? null : card.jid;
+  selectedJid.value = next;
+  profileDialogOpen.value = next !== null && !contextColumnPresent();
+}
+
+function closeProfileDialog() {
+  profileDialogOpen.value = false;
+  selectedJid.value = null;
+}
+
+watch(profileDialogOpen, (open) => {
+  if (!open) selectedJid.value = null;
+});
+
+function messageFromProfile(jid: string) {
+  closeProfileDialog();
+  handleOpenDm(jid);
 }
 
 function ringClass(card: MemberCardModel): string {
@@ -142,7 +182,7 @@ function cardLabel(card: MemberCardModel): string {
         </button>
         <div class="community-page__heading">
           <span class="community-kicker">{{ kicker }}</span>
-          <h1 class="community-page__title">{{ memberCount }} member{{ memberCount === 1 ? "" : "s" }}</h1>
+          <h1 class="community-page__title">{{ headline }}</h1>
           <p class="community-page__lead">
             {{ hereCards.length }} here now. Pick someone to see their profile.
           </p>
@@ -215,5 +255,18 @@ function cardLabel(card: MemberCardModel): string {
         </li>
       </ul>
     </div>
+
+    <AppDialog v-model:open="profileDialogOpen">
+      <div class="chat-pane-scroll min-h-0 flex-1 p-4">
+        <MemberProfileCard
+          v-if="selectedCard"
+          :member="selectedCard"
+          :xmpp-client="xmppClient"
+          :is-self="selectedIsSelf"
+          @message="messageFromProfile"
+          @close="closeProfileDialog"
+        />
+      </div>
+    </AppDialog>
   </div>
 </template>

@@ -80,7 +80,7 @@ async function refreshUnread() {
         Loading unread…
       </div>
 
-      <div v-else-if="error && !hasGroups" class="type-caption text-destructive">
+      <div v-else-if="error && !hasGroups" class="type-caption text-destructive-text">
         Couldn't load unread: {{ error }}
       </div>
 

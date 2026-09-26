@@ -31,15 +31,38 @@ export interface ToastOptions {
   id?: string;
 }
 
-/** Show a toast and return its id. Re-using an `id` updates that toast. */
+/** Waddle tone carried on the toast; `AppToaster.vue` reads it back. */
+export interface ToastMeta {
+  tone: ToastTone;
+}
+
+/**
+ * zag's toast store only knows error/warning/loading/success/info and
+ * looks the queue priority up by `type`, so a Waddle tone must never be
+ * the `type`: `danger` rides on `error`, everything else on `info`, and
+ * the tone itself travels in `meta`.
+ */
+function zagTypeFor(tone: ToastTone): "error" | "info" {
+  return tone === "danger" ? "error" : "info";
+}
+
+/**
+ * Show a toast and return its id. Re-using an `id` updates that toast.
+ * Only set fields are passed on: zag spreads the payload over its
+ * defaults, so an explicit `undefined` would erase the generated id or
+ * the default duration.
+ */
 export function toast(options: ToastOptions): string {
+  const tone = options.tone ?? "neutral";
+  const meta: ToastMeta = { tone };
   const data = {
-    id: options.id,
     title: options.title,
-    description: options.description,
-    action: options.action,
-    duration: options.duration,
-    type: options.tone ?? "neutral",
+    type: zagTypeFor(tone),
+    meta,
+    ...(options.id !== undefined ? { id: options.id } : {}),
+    ...(options.description !== undefined ? { description: options.description } : {}),
+    ...(options.action !== undefined ? { action: options.action } : {}),
+    ...(options.duration !== undefined ? { duration: options.duration } : {}),
   };
   if (options.id && toaster.isVisible(options.id)) {
     return toaster.update(options.id, data);

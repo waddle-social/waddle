@@ -183,7 +183,7 @@ onMounted(() => {
       Loading discussions…
     </div>
 
-    <div v-else-if="error && !hasEntries" class="type-caption text-destructive">
+    <div v-else-if="error && !hasEntries" class="type-caption text-destructive-text">
       Couldn't load discussions: {{ error }}
     </div>
 
@@ -218,7 +218,7 @@ onMounted(() => {
         </p>
       </div>
 
-      <div v-if="error && hasEntries" class="type-caption text-destructive">
+      <div v-if="error && hasEntries" class="type-caption text-destructive-text">
         Couldn't refresh discussions: {{ error }}
       </div>
 

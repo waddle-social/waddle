@@ -842,7 +842,7 @@ function dayDividerLabel(createdAt: string): string {
     <!-- Error banner -->
     <div
       v-if="actionError && !channelAccessRequired"
-      class="type-control bg-destructive/10 border-b border-destructive/20 text-destructive animate-fade-in"
+      class="type-control bg-destructive/10 border-b border-destructive/20 text-destructive-text animate-fade-in"
       role="alert"
       aria-live="assertive"
       aria-atomic="true"
@@ -852,7 +852,7 @@ function dayDividerLabel(createdAt: string): string {
         <button
           v-if="errorActionLabel"
           type="button"
-          class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-destructive/25 bg-background/80 px-3 text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/30"
+          class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-destructive/25 bg-background/80 px-3 text-destructive-text transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/30"
           @click="emit('retryLoad')"
         >
           <RefreshCw class="h-3.5 w-3.5" />
@@ -977,7 +977,7 @@ function dayDividerLabel(createdAt: string): string {
 
       <div v-else-if="errorActionLabel" class="chat-empty-state">
         <div class="w-12 h-12 rounded-lg bg-destructive/10 flex items-center justify-center">
-          <AlertCircle class="w-5 h-5 text-destructive" />
+          <AlertCircle class="w-5 h-5 text-destructive-text" />
         </div>
         <div class="chat-field-stack">
           <p class="type-empty-title">

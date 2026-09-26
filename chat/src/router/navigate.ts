@@ -82,3 +82,17 @@ export function navigate(match: RouteMatch, opts?: NavigateOptions): void {
   }
   currentMatch.value = match;
 }
+
+/**
+ * Settles a per-route Astro island onto the router's match at setup.
+ * Astro routes by path shape (`/dm/[peerJid]` accepts any segment) while
+ * the router matches by content (`dm` rejects a bare username or a
+ * resource without `?scope=occupant`), so an island can mount on a URL
+ * whose match already fell back to `home`. Rather than assert and blank
+ * the page, put the URL where the match is: replace the history entry
+ * with the match's canonical href and let the shell render that page.
+ */
+export function settleIslandMatch(routeId: RouteMatch["id"]): void {
+  if (currentMatch.value.id === routeId) return;
+  navigate(currentMatch.value, { replace: true });
+}

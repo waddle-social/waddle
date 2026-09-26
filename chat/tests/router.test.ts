@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { buildHref, matchLocation, navigate, type RouteMatch } from "../src/router";
+import { buildHref, matchLocation, navigate, settleIslandMatch, type RouteMatch } from "../src/router";
+import { currentMatch } from "../src/router/use-route-match";
 
 describe("matchLocation", () => {
   test("returns home for '/'", () => {
@@ -362,6 +363,35 @@ describe("navigate", () => {
     navigate({ id: "threads" }, { replace: true });
     expect(pushed).toHaveLength(0);
     expect(replaced).toHaveLength(1);
+  });
+
+  test("settleIslandMatch leaves a matching island alone", () => {
+    const w = (globalThis as unknown as { window: { location: { pathname: string } } }).window;
+    w.location.pathname = "/dm/alice%40example.com";
+    currentMatch.value = matchLocation(w.location.pathname, "");
+
+    settleIslandMatch("dm");
+
+    expect(replaced).toHaveLength(0);
+    expect(pushed).toHaveLength(0);
+    expect(currentMatch.value.id).toBe("dm");
+  });
+
+  test("settleIslandMatch replaces a URL the route parser rejected with the match's href", () => {
+    // Astro routes `/dm/alice` to the dm page island, but the router
+    // needs a full address so the match fell back to home: the island
+    // must not throw, it moves the URL to where the match is.
+    const w = (globalThis as unknown as { window: { location: { pathname: string } } }).window;
+    w.location.pathname = "/dm/alice";
+    currentMatch.value = matchLocation(w.location.pathname, "");
+    expect(currentMatch.value).toEqual({ id: "home" });
+
+    settleIslandMatch("dm");
+
+    expect(pushed).toHaveLength(0);
+    expect(replaced).toEqual([{ state: { waddleRouteId: "home" }, url: "/" }]);
+    expect(w.location.pathname).toBe("/");
+    expect(currentMatch.value).toEqual({ id: "home" });
   });
 
   test("stories compatibility route can canonicalize to feed with replaceState", () => {

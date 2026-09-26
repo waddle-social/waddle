@@ -7,7 +7,8 @@
   --community-header-height: 3.75rem;
   --community-rail-width: 17.5rem;
   --community-context-width: 20rem;
-  --community-tabbar-height: calc(4rem + env(safe-area-inset-bottom, 1.25rem));
+  /* No safe-area term: `body` already pads the bottom inset (tokens.css). */
+  --community-tabbar-height: 4rem;
   --community-pill-height: 2.25rem;
   display: flex;
   min-width: 0;
@@ -203,7 +204,6 @@
   align-items: stretch;
   border-top: 1px solid var(--border);
   background: var(--sidebar);
-  padding-bottom: env(safe-area-inset-bottom, 1.25rem);
 }
 
 .community-tabbar__tab {

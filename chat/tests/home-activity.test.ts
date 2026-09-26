@@ -263,6 +263,37 @@ async function renderHomeDashboard(props: Record<string, unknown>) {
 }
 
 describe("HomeDashboard activity rendering", () => {
+  test("hero, summary and the Around section count the same people by one rule", async () => {
+    const html = await renderHomeDashboard({
+      spaces: [],
+      channels: [],
+      contacts: [
+        { jid: "bob@example.com", username: "bob", name: "Bob B", subscription: "both", groups: [], presenceShow: "available" },
+        // Auto-away is routine; away is not around anywhere on Home.
+        { jid: "carol@example.com", username: "carol", subscription: "both", groups: [], presenceShow: "away" },
+      ],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set(),
+      // A DM peer who is not on the roster still counts as around.
+      dmConversations: [
+        { peerJid: "amy@example.com", peerUsername: "amy", unreadCount: 0, presenceShow: "available" },
+      ],
+    });
+
+    // SSR leaves fragment markers inside the heading; compare text only.
+    const text = html.replace(/<!--[^>]*-->/g, "");
+    expect(text).toContain("2 around");
+    expect(text).not.toContain("in a huddle");
+    expect(text).toContain("<strong>2</strong> friends online");
+    expect(text).toContain("Around · 2");
+    expect(html).toContain('aria-label="amy, available, open direct message"');
+    expect(html).toContain('aria-label="Bob B, available, open direct message"');
+    expect(html).toContain("Away and offline · 1");
+    expect(html).toContain('aria-label="carol, away, open direct message"');
+    expect(html).not.toContain("Nobody is around right now");
+  });
+
   test("renders happening-now rooms, needs-someone rows, and direct messages", async () => {
     const html = await renderHomeDashboard({
       spaces: [
@@ -356,7 +387,7 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).not.toContain("Empty");
     expect(html).toContain('src="/waddle-logo.svg"');
     expect(html).toContain("No direct messages yet.");
-    expect(html).toContain("No roster contacts yet.");
+    expect(html).toContain("No contacts yet.");
     expect(html).not.toContain("Browse channels");
   });
 

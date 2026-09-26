@@ -99,6 +99,78 @@ export function presenceFromShow(show: PresenceShow): OccupantPresence | undefin
   }
 }
 
+/**
+ * The one rule for "around": available or do-not-disturb. Away, extended
+ * away, offline and unknown are not. The Home hero, the Home "Around"
+ * section, the context column, the people rail and the Members "Here
+ * now" filter all use it so one screen never disagrees with itself.
+ */
+export function isAroundPresence(presence: OccupantPresence | undefined): boolean {
+  return presence === "online" || presence === "dnd";
+}
+
+interface KnownPerson {
+  /** Bare JID — the dedupe key across roster and DM peers. */
+  jid: string;
+  name: string;
+  avatarUrl: string | null;
+  presence: OccupantPresence | undefined;
+  /** The raw 1:1 show, for copy such as `dmPresenceLabel`. */
+  presenceShow: PresenceShow;
+}
+
+export interface KnownPeopleGroups {
+  around: KnownPerson[];
+  awayAndOffline: KnownPerson[];
+}
+
+/**
+ * Roster contacts and DM peers merged by bare JID (MUC private messages
+ * excluded, since a nick is not a person we know by JID), split by
+ * `isAroundPresence`. A DM conversation's presence wins over the roster's,
+ * a roster name over a DM username, matching the people rail.
+ */
+export function splitKnownPeople(
+  contacts: readonly RosterContact[],
+  conversations: readonly DmConversation[],
+): KnownPeopleGroups {
+  const contactByJid = new Map<string, RosterContact>();
+  for (const contact of contacts) contactByJid.set(bare(contact.jid), contact);
+  const conversationByJid = new Map<string, DmConversation>();
+  for (const conversation of conversations) {
+    if (conversation.mucPm) continue;
+    conversationByJid.set(bare(conversation.peerJid), conversation);
+  }
+  const around: KnownPerson[] = [];
+  const awayAndOffline: KnownPerson[] = [];
+  for (const jid of new Set<string>([...contactByJid.keys(), ...conversationByJid.keys()])) {
+    if (!jid) continue;
+    const contact = contactByJid.get(jid);
+    const conversation = conversationByJid.get(jid);
+    const presenceShow = conversation?.presenceShow ?? contact?.presenceShow;
+    const person: KnownPerson = {
+      jid,
+      name: contact?.name || conversation?.peerUsername || contact?.username || jid,
+      avatarUrl: conversation?.peerAvatarUrl ?? null,
+      presence: presenceFromShow(presenceShow),
+      presenceShow,
+    };
+    if (isAroundPresence(person.presence)) around.push(person);
+    else awayAndOffline.push(person);
+  }
+  around.sort(compareKnownPeople);
+  awayAndOffline.sort(compareKnownPeople);
+  return { around, awayAndOffline };
+}
+
+function compareKnownPeople(a: KnownPerson, b: KnownPerson): number {
+  return (
+    STATUS_ORDER[statusFromPresence(a.presence)] - STATUS_ORDER[statusFromPresence(b.presence)]
+    || a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    || a.jid.localeCompare(b.jid)
+  );
+}
+
 function statusFromPresence(presence: OccupantPresence | undefined): PeopleRailStatus {
   switch (presence) {
     case "online":
@@ -276,7 +348,7 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
       statusText: statusText(status),
       inCall: sources.peerInCall(jid),
     };
-    if (status === "available" || status === "dnd") around.push(person);
+    if (isAroundPresence(presence)) around.push(person);
     else awayAndOffline.push(person);
   }
   around.sort(comparePeople);

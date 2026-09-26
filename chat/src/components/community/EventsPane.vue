@@ -798,7 +798,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
       <!-- Error -->
       <div
         v-if="error"
-        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive"
+        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
       >
         Couldn't load events: {{ error }}
       </div>
@@ -894,7 +894,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         <RecurrencePicker v-model="rrule" />
         <p
           v-if="visibleComposerError"
-          class="type-caption inline-flex items-center gap-1 text-destructive"
+          class="type-caption inline-flex items-center gap-1 text-destructive-text"
           role="alert"
         >
           <Clock3 class="h-3.5 w-3.5" aria-hidden="true" />
@@ -950,7 +950,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                   </button>
                   <button
                     type="button"
-                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive-text"
                     aria-label="Cancel event"
                     @click="onCancelEvent(event)"
                   >
@@ -1190,7 +1190,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                 </button>
                 <button
                   type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive-text"
                   aria-label="Cancel event"
                   @click="onCancelEvent(event)"
                 >
@@ -1283,7 +1283,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           </button>
           <button
             type="button"
-            :class="[dangerButtonClass, 'justify-between']"
+            :class="[dangerButtonClass, '!justify-between']"
             @click="confirmCancelSeries"
           >
             <span>The entire series</span>

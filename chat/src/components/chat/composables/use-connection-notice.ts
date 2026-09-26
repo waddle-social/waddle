@@ -92,8 +92,8 @@ export function useConnectionNotice(input: {
         // reconnecting tone without escalating to a banner.
         return {
           banner: "bg-destructive/10 text-foreground",
-          iconWrap: "border-destructive/15 bg-background/60 text-destructive/80",
-          chip: "chat-connection-chip-glow--destructive border-destructive/35 bg-destructive/10 text-destructive/90",
+          iconWrap: "border-destructive/15 bg-background/60 text-destructive-text/80",
+          chip: "chat-connection-chip-glow--destructive border-destructive/35 bg-destructive/10 text-destructive-text/90",
           body: "text-foreground/80",
         };
       case "reconnected":

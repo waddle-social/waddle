@@ -376,13 +376,13 @@ function selectStoryReaction(emoji: string) {
 
       <div
         v-if="error"
-        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive"
+        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
       >
         Couldn't load the feed: {{ error }}
       </div>
       <div
         v-if="storiesError"
-        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive"
+        class="rounded-[10px] border border-destructive/40 px-3 py-2 text-sm text-destructive-text"
       >
         Couldn't load stories: {{ storiesError }}
       </div>

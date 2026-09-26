@@ -76,7 +76,7 @@ const emit = defineEmits<{
       </div>
       <button
         type="button"
-        class="absolute top-1 right-1 h-6 w-6 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
+        class="absolute top-1 right-1 h-6 w-6 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive-text border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
         :title="`Remove ${att.name}`"
         :aria-label="`Remove attachment ${att.name}`"
         @click="emit('remove', att.id)"

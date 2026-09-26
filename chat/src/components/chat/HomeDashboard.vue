@@ -14,7 +14,6 @@ import {
 } from "lucide-vue-next";
 import { button, card, count, kicker } from "styled-system/recipes";
 import type { ChannelSummary } from "@/lib/chat-types";
-import type { RosterContact } from "@/lib/xmpp/types";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { isForumChannel } from "@/lib/channel-types";
@@ -27,14 +26,14 @@ import {
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
 import {
-  callEntryAccentClass as accentClassForTone,
+  callEntriesInHuddleCount,
   callEntryActionLabel as callEntryActionLabelFor,
+  callEntryCardTone,
   callEntryDescription as callEntryDescriptionFor,
   callEntryDetail as callEntryDetailFor,
   callEntryEyebrow as callEntryEyebrowFor,
   callEntryLabel as callEntryLabelFor,
   callEntryParticipantPreview,
-  callEntryToneClass as toneClassForTone,
   callEntryVisibleParticipantLabels,
   callEntryVisualTone,
   canLeaveRetainedChannelCallEntry as canLeaveRetainedChannelCallEntryFor,
@@ -62,6 +61,7 @@ import {
   callParticipantCountForChannel,
 } from "@/lib/calls/muc-call-indicators";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { splitKnownPeople } from "@/shell/controllers/use-people-rail";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { formatTimelineStamp } from "@/channels/timeline";
@@ -96,6 +96,8 @@ const emit = defineEmits<{
 
 // Recipe classes (Panda). Computed once; the variants are static.
 const liveCard = card({ tone: "live" });
+const warningCard = card({ tone: "warning" });
+const actionCard = card({ tone: "active" });
 const roomCard = card({ tone: "quiet" });
 const kickerClass = kicker();
 const liveKickerClass = kicker({ tone: "live" });
@@ -194,39 +196,16 @@ const activityByChannelId = computed(() =>
 );
 
 /** People counted "in a huddle": every known participant of every live call. */
-const inHuddleCount = computed(() =>
-  activeCallEntries.value.reduce((total, entry) =>
-    total + (entry.kind === "channel" ? entry.participantCount : 1), 0),
-);
+const inHuddleCount = computed(() => callEntriesInHuddleCount(activeCallEntries.value));
 
-/** Distinct people who are around: online roster contacts plus online DM peers. */
-const aroundJids = computed(() => {
-  const jids = new Set<string>();
-  for (const contact of props.contacts) {
-    if (contact.presenceShow && contact.presenceShow !== "offline") {
-      jids.add(barePeerJid(contact.jid).toLowerCase());
-    }
-  }
-  for (const dm of directMessages.value) {
-    if (dm.presenceShow === "available") jids.add(barePeerJid(dm.peerJid).toLowerCase());
-  }
-  return jids;
-});
+/** Roster contacts and DM peers, one per bare JID, split by the same
+ * "around" rule as the people rail and the context column, so the hero
+ * kicker, the summary line and the "Around" section below all agree. */
+const knownPeople = computed(() => splitKnownPeople(props.contacts, props.dmConversations ?? []));
+const aroundPeople = computed(() => knownPeople.value.around);
+const awayPeople = computed(() => knownPeople.value.awayAndOffline);
 
-const heroKicker = computed(() => heroKickerFor(now.value, aroundJids.value.size, inHuddleCount.value));
-
-function contactLabel(contact: RosterContact): string {
-  return contact.name || contact.username || contact.jid;
-}
-
-// Same rule as the people rail: available (and chat) or do-not-disturb
-// count as around; away and extended-away sit with offline.
-function contactIsAround(contact: RosterContact): boolean {
-  return contact.presenceShow === "available" || contact.presenceShow === "dnd";
-}
-
-const aroundContacts = computed(() => props.contacts.filter(contactIsAround));
-const awayContacts = computed(() => props.contacts.filter((contact) => !contactIsAround(contact)));
+const heroKicker = computed(() => heroKickerFor(now.value, aroundPeople.value.length, inHuddleCount.value));
 
 function selectCallEntry(entry: CallActivityDockEntry) {
   const selection = callActivityDockSelection(entry, callState.value, props.selfFullJid ?? null);
@@ -581,12 +560,17 @@ function callEntryIsLive(entry: CallActivityDockEntry): boolean {
   return callEntryTone(entry) === "success";
 }
 
-function callEntryToneClass(entry: CallActivityDockEntry): string {
-  return toneClassForTone(callEntryTone(entry));
-}
-
-function callEntryAccentClass(entry: CallActivityDockEntry): string {
-  return accentClassForTone(callEntryTone(entry));
+/** Recipe classes for a call card: the tone lives on the recipe, not on
+ * a competing Tailwind utility (see `callEntryCardTone`). */
+function callEntryCard(entry: CallActivityDockEntry): { root: string; kicker: string } {
+  switch (callEntryCardTone(callEntryTone(entry))) {
+    case "live":
+      return liveCard;
+    case "warning":
+      return warningCard;
+    case "active":
+      return actionCard;
+  }
 }
 
 function callEntryActionLabel(entry: CallActivityDockEntry): string {
@@ -613,7 +597,7 @@ const heroSummary = computed<HeroSummary>(() => {
     totalThreadUnread,
     dmUnread,
     activeCalls: activeCallSummaryCount.value,
-    onlineFriends: aroundJids.value.size,
+    onlineFriends: aroundPeople.value.length,
     hasUnread: totalUnread + totalMentions + totalThreadUnread + dmUnread > 0,
   };
 });
@@ -737,9 +721,9 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
           <article
             v-for="entry in activeCallEntries"
             :key="entry.key"
-            :class="[callEntryIsLive(entry) ? liveCard.root : roomCard.root, 'min-w-0', callEntryToneClass(entry)]"
+            :class="[callEntryCard(entry).root, 'min-w-0']"
           >
-            <span :class="[liveCard.kicker, 'flex items-center gap-1.5', callEntryAccentClass(entry)]">
+            <span :class="[callEntryCard(entry).kicker, 'flex items-center gap-1.5']">
               <Video v-if="entry.kind === 'channel' && entry.media.video" class="h-3.5 w-3.5" aria-hidden="true" />
               <PhoneCall v-else-if="entry.kind === 'channel'" class="h-3.5 w-3.5" aria-hidden="true" />
               <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" aria-hidden="true" />
@@ -801,7 +785,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
             :key="channel.id"
             :class="[roomCard.root, 'min-w-0']"
           >
-            <span :class="[roomCard.kicker, channelActivity(channel).hasActivity ? 'text-live-text' : '']">
+            <span :class="channelActivity(channel).hasActivity ? liveCard.kicker : roomCard.kicker">
               {{ channelCardKicker(channel) }}
             </span>
             <h3 :class="[roomCard.title, 'flex min-w-0 items-center gap-1.5']">
@@ -867,7 +851,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
               >{{ channelActivityPreview(channelActivity(channel)) }}</span>
               <span class="type-meta block text-live-text">{{ needsSomeoneLabel(channel) }}</span>
             </span>
-            <span :class="[openPillClass, 'shrink-0 rounded-full']" aria-hidden="true">Open</span>
+            <span :class="[openPillClass, 'shrink-0 !rounded-full']" aria-hidden="true">Open</span>
           </button>
         </div>
       </section>
@@ -940,21 +924,21 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
 
       <section class="grid gap-3" aria-label="Around">
         <h2 :class="kickerClass">
-          Around<template v-if="aroundContacts.length > 0"> · {{ aroundContacts.length }}</template>
+          Around<template v-if="aroundPeople.length > 0"> · {{ aroundPeople.length }}</template>
         </h2>
         <div class="grid gap-2 md:grid-cols-2">
           <button
-            v-for="contact in aroundContacts"
-            :key="contact.jid"
+            v-for="person in aroundPeople"
+            :key="person.jid"
             class="flex min-w-0 items-center gap-3 rounded-xl border border-border bg-card px-4 py-2.5 text-left transition-colors hover:bg-muted"
             type="button"
-            :aria-label="`${contactLabel(contact)}, ${dmPresenceLabel(contact.presenceShow)}, open direct message`"
-            @click="emit('selectContact', contact.jid)"
+            :aria-label="`${person.name}, ${dmPresenceLabel(person.presenceShow)}, open direct message`"
+            @click="emit('selectContact', person.jid)"
           >
-            <AppAvatar :name="contactLabel(contact)" size="md" :presence="contact.presenceShow" :in-call="peerInCall(contact.jid)" />
+            <AppAvatar :name="person.name" :src="person.avatarUrl" size="md" :presence="person.presence" :in-call="peerInCall(person.jid)" />
             <span class="min-w-0 flex-1">
-              <span class="type-control block truncate text-foreground">{{ contactLabel(contact) }}</span>
-              <span class="type-meta block truncate text-muted-foreground">{{ dmPresenceLabel(contact.presenceShow) }}</span>
+              <span class="type-control block truncate text-foreground">{{ person.name }}</span>
+              <span class="type-meta block truncate text-muted-foreground">{{ dmPresenceLabel(person.presenceShow) }}</span>
             </span>
           </button>
           <template v-if="isLoading && contacts.length === 0">
@@ -971,28 +955,28 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
               </div>
             </div>
           </template>
-          <p v-else-if="contacts.length === 0" class="type-caption rounded-xl border border-dashed border-border px-4 py-6 text-muted-foreground md:col-span-2">
-            No roster contacts yet.
+          <p v-else-if="aroundPeople.length === 0 && awayPeople.length === 0" class="type-caption rounded-xl border border-dashed border-border px-4 py-6 text-muted-foreground md:col-span-2">
+            No contacts yet.
           </p>
-          <p v-else-if="aroundContacts.length === 0" class="type-caption rounded-xl border border-dashed border-border px-4 py-6 text-muted-foreground md:col-span-2">
+          <p v-else-if="aroundPeople.length === 0" class="type-caption rounded-xl border border-dashed border-border px-4 py-6 text-muted-foreground md:col-span-2">
             Nobody is around right now. Be the one who is here first.
           </p>
         </div>
-        <template v-if="awayContacts.length > 0">
-          <h3 :class="kickerClass">Away and offline · {{ awayContacts.length }}</h3>
+        <template v-if="awayPeople.length > 0">
+          <h3 :class="kickerClass">Away and offline · {{ awayPeople.length }}</h3>
           <div class="grid gap-2 md:grid-cols-2">
             <button
-              v-for="contact in awayContacts"
-              :key="contact.jid"
+              v-for="person in awayPeople"
+              :key="person.jid"
               class="flex min-w-0 items-center gap-3 rounded-xl border border-border/60 px-4 py-2.5 text-left text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               type="button"
-              :aria-label="`${contactLabel(contact)}, ${dmPresenceLabel(contact.presenceShow)}, open direct message`"
-              @click="emit('selectContact', contact.jid)"
+              :aria-label="`${person.name}, ${dmPresenceLabel(person.presenceShow)}, open direct message`"
+              @click="emit('selectContact', person.jid)"
             >
-              <AppAvatar :name="contactLabel(contact)" size="sm" :presence="contact.presenceShow" />
+              <AppAvatar :name="person.name" :src="person.avatarUrl" size="sm" :presence="person.presence" />
               <span class="min-w-0 flex-1">
-                <span class="type-control block truncate">{{ contactLabel(contact) }}</span>
-                <span class="type-meta block truncate">{{ dmPresenceLabel(contact.presenceShow) }}</span>
+                <span class="type-control block truncate">{{ person.name }}</span>
+                <span class="type-meta block truncate">{{ dmPresenceLabel(person.presenceShow) }}</span>
               </span>
             </button>
           </div>

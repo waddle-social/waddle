@@ -37,7 +37,7 @@ const visible = computed(() => {
     aria-live="assertive"
     aria-label="Call error"
   >
-    <AlertCircle class="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden="true" />
+    <AlertCircle class="mt-0.5 h-4 w-4 shrink-0 text-destructive-text" aria-hidden="true" />
     <div :class="[cls.description, 'min-w-0 flex-1']">{{ lastError }}</div>
     <button
       :class="[cls.closeTrigger, 'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md']"

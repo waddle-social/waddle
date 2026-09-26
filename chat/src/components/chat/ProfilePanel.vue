@@ -194,7 +194,7 @@ watch(
               <span>{{ messageSoundsEnabled !== false ? "Message sounds on" : "Message sounds off" }}</span>
             </button>
             <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive-text"
               type="button"
               @click="handleLogout"
             >
@@ -264,7 +264,7 @@ watch(
               <span>{{ messageSoundsEnabled !== false ? "Message sounds on" : "Message sounds off" }}</span>
             </button>
             <button
-              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+              class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive-text"
               type="button"
               @click="handleLogout"
             >

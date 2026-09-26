@@ -392,7 +392,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <p v-if="errorMessage" class="rounded-[10px] border border-destructive/40 px-3 py-2 text-[13px] text-destructive">
+    <p v-if="errorMessage" class="rounded-[10px] border border-destructive/40 px-3 py-2 text-[13px] text-destructive-text">
       {{ errorMessage }}
     </p>
 

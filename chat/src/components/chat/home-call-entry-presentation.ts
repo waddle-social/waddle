@@ -173,32 +173,38 @@ export function callEntryParticipantInitial(label: string): string {
   return label.trim().charAt(0).toUpperCase() || "?";
 }
 
+/** `card` recipe tone (panda.config.ts) for a Home call card. */
+export type CallEntryCardTone = "live" | "warning" | "active";
+
 /**
- * Card border for a Home call card. A live huddle is the only thing on
- * Home allowed to glow (ember); a ringing or syncing call is outlined in
- * the amber/teal of its state without a glow.
+ * Card tone for a Home call card. A live huddle is the only thing on Home
+ * allowed to glow (ember, the `live` card); a ringing call is outlined in
+ * amber (`warning`) and a syncing or outgoing one in teal (`active`), both
+ * without a glow. The tone selects a recipe variant rather than a Tailwind
+ * utility because Panda's recipe layer is declared after Tailwind's
+ * utilities layer and would win over any competing `border-*`/`text-*`.
  */
-export function callEntryToneClass(tone: CallEntryVisualTone): string {
+export function callEntryCardTone(tone: CallEntryVisualTone): CallEntryCardTone {
   switch (tone) {
     case "warning":
-      return "border-warning/40";
+      return "warning";
     case "primary":
-      return "border-primary/40";
+      return "active";
     case "success":
-      return "border-live shadow-[0_0_28px_-10px_var(--glow-live)]";
+      return "live";
   }
 }
 
-/** Kicker colour for a Home call card: ember for live, state colour otherwise. */
-export function callEntryAccentClass(tone: CallEntryVisualTone): string {
-  switch (tone) {
-    case "warning":
-      return "text-warning-foreground";
-    case "primary":
-      return "text-primary";
-    case "success":
-      return "text-live-text";
-  }
+/**
+ * People counted "in a huddle" on Home: every known participant of every
+ * live call. A DM call that is still ringing has nobody in it yet, so only
+ * accepted DM entries count (the people rail applies the same rule).
+ */
+export function callEntriesInHuddleCount(entries: readonly CallActivityDockEntry[]): number {
+  return entries.reduce((total, entry) => {
+    if (entry.kind === "channel") return total + entry.participantCount;
+    return total + (entry.state === "accepted" ? 1 : 0);
+  }, 0);
 }
 
 /**
