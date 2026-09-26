@@ -82,10 +82,9 @@ async fn resolve_user_actor(
         })
 }
 
-/// Every registered resource, including closed sockets still completing cleanup.
-/// Teardown and ownership checks need this complete inventory, while routing
-/// uses [`get_resources_for_user`]. An unanswered actor returns an error; a
-/// bare JID with no actor at all is an authoritative `Ok(vec![])`.
+/// [`get_resources_for_user`] without the degradation: an actor that does not
+/// answer is reported as [`ResourceLookupError`] rather than as an empty
+/// selection. A bare JID with no actor at all is an authoritative `Ok(vec![])`.
 pub async fn try_get_resources_for_user(
     user_registry: &ActorRef<UserRegistryActor>,
     bare_jid: &BareJid,
@@ -124,20 +123,29 @@ pub async fn routing_resources_for_user(
         .map_err(|_| ResourceLookupError::UserActorUnavailable)
 }
 
-/// Every resource of `bare_jid` still accepting outbound frames, sourced from
-/// the authoritative actor tree. No presence filter: a bound resource remains
-/// a routing fallback before its first available presence.
+/// Every currently-connected resource of `bare_jid`, sourced from the
+/// authoritative actor tree. Mirrors the retired DashMap
+/// `get_resources_for_user` exactly: no presence filter, every registered
+/// resource.
 pub async fn get_resources_for_user(
     user_registry: &ActorRef<UserRegistryActor>,
     bare_jid: &BareJid,
 ) -> Vec<FullJid> {
-    match routing_resources_for_user(user_registry, bare_jid).await {
-        Ok(resources) => resources.into_iter().map(|resource| resource.jid).collect(),
+    let Some(user_actor) = resolve_user_actor(user_registry, bare_jid).await else {
+        return Vec::new();
+    };
+    match user_actor
+        .ask(GetResources)
+        .mailbox_timeout(SELECTION_ASK_TIMEOUT)
+        .reply_timeout(SELECTION_ASK_TIMEOUT)
+        .await
+    {
+        Ok(resources) => resources,
         Err(error) => {
             warn!(
                 bare_jid = %bare_jid,
                 %error,
-                "actor selection: routing snapshot failed; degrading to no local resources"
+                "actor selection: GetResources failed; degrading to no local resources"
             );
             Vec::new()
         }

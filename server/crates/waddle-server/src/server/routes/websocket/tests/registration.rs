@@ -62,9 +62,6 @@ use waddle_xmpp::{
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 
-#[path = "close_admission.rs"]
-mod close_admission;
-
 #[cfg(feature = "clustering")]
 #[path = "registration_owner_local.rs"]
 mod owner_local;
@@ -728,7 +725,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
     conn.authenticated_session = Some(session);
-    let (tx, mut outbound_rx) = mpsc::channel(4);
+    let (tx, _rx) = mpsc::channel(4);
     let mut pending_tx = Some(tx);
     if resume_first {
         let frame = element_to_xml(
@@ -760,7 +757,6 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             &state,
             &mut conn,
             RegistrationChannels {
-                outbound_rx: &mut outbound_rx,
                 pending_tx: &mut pending_tx,
                 force_detach_rx: &mut force_detach_rx,
             },
@@ -796,10 +792,6 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
         assert!(
             stayed_open,
             "failed resume must leave the authenticated socket open"
-        );
-        assert!(
-            !outbound_rx.is_closed(),
-            "failed SM resume keeps delivery admission for a fresh bind"
         );
         let failed: Element = {
             let wire = captured.lock().expect("captured frames");

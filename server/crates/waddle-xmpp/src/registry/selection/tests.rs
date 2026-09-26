@@ -21,11 +21,8 @@ async fn spawn_registry() -> ActorRef<UserRegistryActor> {
 /// Register a resource through the SAME `RegisterUserResource` path
 /// production dual-registration uses, so `GetUser` resolves it exactly like
 /// a live connection would.
-async fn register(
-    registry: &ActorRef<UserRegistryActor>,
-    jid: FullJid,
-) -> mpsc::Receiver<crate::registry::connection_registry::OutboundStanza> {
-    let (tx, rx) = mpsc::channel(16);
+async fn register(registry: &ActorRef<UserRegistryActor>, jid: FullJid) {
+    let (tx, _rx) = mpsc::channel(16);
     registry
         .ask(RegisterUserResource {
             jid,
@@ -33,7 +30,6 @@ async fn register(
         })
         .await
         .expect("register");
-    rx
 }
 
 async fn make_available(registry: &ActorRef<UserRegistryActor>, jid: FullJid, priority: i8) {
@@ -59,52 +55,12 @@ async fn get_resources_for_user_returns_every_registered_resource() {
     let registry = spawn_registry().await;
     let phone = full("alice", "phone");
     let laptop = full("alice", "laptop");
-    let _phone_rx = register(&registry, phone.clone()).await;
-    let _laptop_rx = register(&registry, laptop.clone()).await;
+    register(&registry, phone.clone()).await;
+    register(&registry, laptop.clone()).await;
 
     let mut resources = get_resources_for_user(&registry, &bare("alice")).await;
     resources.sort_by_key(|j| j.to_string());
     assert_eq!(resources, vec![laptop, phone]);
-}
-
-#[tokio::test]
-async fn routing_fallback_excludes_closed_receivers_but_cleanup_inventory_retains_them() {
-    let registry = spawn_registry().await;
-    let closing = full("alice", "closing");
-    let available = full("alice", "available");
-    let bound = full("alice", "bound");
-    let mut closing_rx = register(&registry, closing.clone()).await;
-    let mut available_rx = register(&registry, available.clone()).await;
-    let mut bound_rx = register(&registry, bound.clone()).await;
-    make_available(&registry, closing.clone(), 10).await;
-    make_available(&registry, available.clone(), 5).await;
-    closing_rx.close();
-
-    let mut routing = get_resources_for_user(&registry, &bare("alice")).await;
-    routing.sort();
-    assert_eq!(
-        routing,
-        vec![available.clone(), bound.clone()],
-        "routing fallback retains open resources even before their first presence"
-    );
-    let mut registered = try_get_resources_for_user(&registry, &bare("alice"))
-        .await
-        .expect("cleanup inventory");
-    registered.sort();
-    assert_eq!(registered, vec![available, bound, closing]);
-
-    available_rx.close();
-    bound_rx.close();
-    assert!(get_resources_for_user(&registry, &bare("alice"))
-        .await
-        .is_empty());
-    assert_eq!(
-        try_get_resources_for_user(&registry, &bare("alice"))
-            .await
-            .expect("unfinished cleanup inventory")
-            .len(),
-        3
-    );
 }
 
 #[tokio::test]
@@ -122,8 +78,8 @@ async fn select_routable_prefers_top_priority_and_excludes_lower_positive() {
     let registry = spawn_registry().await;
     let phone = full("alice", "phone");
     let laptop = full("alice", "laptop");
-    let _phone_rx = register(&registry, phone.clone()).await;
-    let _laptop_rx = register(&registry, laptop.clone()).await;
+    register(&registry, phone.clone()).await;
+    register(&registry, laptop.clone()).await;
     make_available(&registry, phone.clone(), 5).await;
     make_available(&registry, laptop.clone(), 3).await;
 
@@ -139,8 +95,8 @@ async fn select_routable_ties_at_top_priority_route_to_all() {
     let registry = spawn_registry().await;
     let phone = full("alice", "phone");
     let laptop = full("alice", "laptop");
-    let _phone_rx = register(&registry, phone.clone()).await;
-    let _laptop_rx = register(&registry, laptop.clone()).await;
+    register(&registry, phone.clone()).await;
+    register(&registry, laptop.clone()).await;
     make_available(&registry, phone.clone(), 5).await;
     make_available(&registry, laptop.clone(), 5).await;
 
@@ -154,8 +110,8 @@ async fn select_routable_excludes_negative_priority_resource() {
     let registry = spawn_registry().await;
     let phone = full("alice", "phone");
     let bot = full("alice", "bot");
-    let _phone_rx = register(&registry, phone.clone()).await;
-    let _bot_rx = register(&registry, bot.clone()).await;
+    register(&registry, phone.clone()).await;
+    register(&registry, bot.clone()).await;
     make_available(&registry, phone.clone(), 1).await;
     make_available(&registry, bot.clone(), -1).await;
 
@@ -170,7 +126,7 @@ async fn select_routable_excludes_negative_priority_resource() {
 async fn select_routable_empty_when_only_negative_priority() {
     let registry = spawn_registry().await;
     let bot = full("alice", "bot");
-    let _bot_rx = register(&registry, bot.clone()).await;
+    register(&registry, bot.clone()).await;
     make_available(&registry, bot, -1).await;
 
     assert!(
