@@ -15,7 +15,7 @@ async fn signed_manager() -> Arc<ExtensionManager> {
     let path = std::path::Path::new(
         &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
     )
-    .join("../../../../../waddle-extensions/tests/fixtures/message_hook.wasm");
+    .join("../waddle-extensions/tests/fixtures/message_hook.wasm");
     let manager = ExtensionManager::from_config(ExtensionConfig {
         enabled: true,
         modules: vec![ExtensionModuleConfig {
