@@ -1,17 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, Video } from "lucide-vue-next";
-import {
-  $callState,
-  type RawIqSender,
-} from "@/lib/calls/call-store";
-import { startMucCallAction, canResumeMucCallActivity } from "@/lib/calls/muc-call-actions";
+import { $callState } from "@/lib/calls/call-store";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
-import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
-import { connectionStore } from "@/lib/connection-store";
-import type { CallMedia } from "@/lib/calls/types";
-import { jidDomain } from "@/lib/xmpp/jid";
+import { useMucCallStart } from "@/lib/calls/use-call-start";
 import CallActivePill from "./CallActivePill.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 
@@ -34,13 +27,15 @@ const props = withDefaults(defineProps<{
 });
 
 const state = useStore($callState);
-const starting = ref(false);
-const roomCall = useRoomHasActiveCall(() => props.roomJid);
+const {
+  canStart: showStartControls,
+  busy: callBusy,
+  start: startCall,
+  roomCall,
+} = useMucCallStart(() => props.roomJid, {
+  hideWhenActiveCall: () => props.hideStartControlsWhenActiveCall,
+});
 const inCall = computed(() => state.value.phase !== "idle" && state.value.phase !== "ended");
-const callBusy = computed(() => inCall.value || starting.value);
-const showStartControls = computed(() =>
-  !(props.hideStartControlsWhenActiveCall && roomCall.hasActiveCall.value)
-);
 const normalizedRoomJid = computed(() => normalizeMucCallRoomJid(props.roomJid));
 const callInThisRoom = computed(() => {
   const current = state.value;
@@ -51,61 +46,6 @@ const callInThisRoom = computed(() => {
 const busyWithOtherCall = computed(() => inCall.value && !callInThisRoom.value);
 
 const pillDisabled = computed(() => callBusy.value || busyWithOtherCall.value || callInThisRoom.value);
-
-function getSender(): RawIqSender | null {
-  // BrowserXmppClient stores the wasm client as `xmpp`; we cast
-  // through unknown because the field is private on the class.
-  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
-  return (client?.xmpp as RawIqSender | undefined) ?? null;
-}
-
-function getClientJoiner(): ((roomJid: string) => Promise<void>) | null {
-  const client = connectionStore.client as unknown as {
-    ensureJoined?: (roomJid: string) => Promise<void>;
-  } | null;
-  return client?.ensureJoined?.bind(client) ?? null;
-}
-
-function getSelfFullJid(): string | undefined {
-  return connectionStore.selfFullJid ??
-    (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
-}
-
-function getExpectedMixerJid(): string | undefined {
-  const accountJid = connectionStore.session?.jid;
-  return accountJid ? `calls.${jidDomain(accountJid)}` : undefined;
-}
-
-async function startCall(media: CallMedia): Promise<void> {
-  // Group call: the SFU mixer (`calls.<server-domain>`) mints
-  // the room-scoped LiveKit token via a XEP-0272 Muji-bearing
-  // Jingle session-initiate, publishes active Muji presence, then
-  // flips the store to `active` so the overlay's LiveKit connect
-  // only starts after the room-visible call indicator is valid.
-  // Our MUC nick is the session username — that's also what
-  // `joinRoom` registered when this user entered the channel.
-  await startMucCallAction({
-    roomJid: props.roomJid,
-    media,
-    isBusy: () => callBusy.value,
-    setStarting: (next) => {
-      starting.value = next;
-    },
-    getSender,
-    getSelfNick: () => connectionStore.session?.username ?? undefined,
-    getSelfFullJid,
-    getExpectedMixerJid,
-    ensureJoined: async () => {
-      await getClientJoiner()?.(props.roomJid);
-    },
-    tryResumeFirst:
-      roomCall.localResourceInCall.value ||
-      canResumeMucCallActivity({
-        roomJid: props.roomJid,
-        selfFullJid: getSelfFullJid() ?? null,
-      }),
-  });
-}
 
 function joinExistingCall(): void {
   void startCall(roomCall.media.value);

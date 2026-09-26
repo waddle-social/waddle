@@ -1377,11 +1377,13 @@ describe("CallActivityDock rendering", () => {
     const chatHeader = readFileSync(new URL("../src/components/chat/ChatHeader.vue", import.meta.url), "utf8");
     const callButton = readFileSync(new URL("../src/components/calls/CallButton.vue", import.meta.url), "utf8");
     const mucCallButton = readFileSync(new URL("../src/components/calls/MucCallButton.vue", import.meta.url), "utf8");
+    const callStart = readFileSync(new URL("../src/lib/calls/use-call-start.ts", import.meta.url), "utf8");
     const conversationBanner = readFileSync(new URL("../src/components/calls/ConversationCallBanner.vue", import.meta.url), "utf8");
 
-    expect(mucCallButton).toContain("canResumeMucCallActivity");
-    expect(mucCallButton).toContain("tryResumeFirst:");
-    expect(mucCallButton).toContain("roomCall.localResourceInCall.value");
+    expect(mucCallButton).toContain("useMucCallStart");
+    expect(callStart).toContain("canResumeMucCallActivity");
+    expect(callStart).toContain("tryResumeFirst:");
+    expect(callStart).toContain("roomCall.localResourceInCall.value");
 
     expect(readyShell).toContain("import CallActivityDock");
     expect(readyShell).toContain("import CurrentCallPanel");
@@ -1456,8 +1458,9 @@ describe("CallActivityDock rendering", () => {
     expect(callButton).toContain("v-if=\"showPeerCallActivity\"");
     expect(mucCallButton).toContain("showActivePill?: boolean");
     expect(mucCallButton).toContain("hideStartControlsWhenActiveCall?: boolean");
-    expect(mucCallButton).toContain("const roomCall = useRoomHasActiveCall(() => props.roomJid)");
-    expect(mucCallButton).toContain("props.hideStartControlsWhenActiveCall && roomCall.hasActiveCall.value");
+    expect(mucCallButton).toContain("hideWhenActiveCall: () => props.hideStartControlsWhenActiveCall");
+    expect(callStart).toContain("const roomCall = useRoomHasActiveCall(roomJid)");
+    expect(callStart).toContain("options.hideWhenActiveCall?.() && roomCall.hasActiveCall.value");
     expect(mucCallButton).toContain("v-if=\"showActivePill !== false\"");
     expect(conversationBanner).toContain("canEndRecoveredDmCallActivity");
     expect(conversationBanner).not.toContain("function isBusy");

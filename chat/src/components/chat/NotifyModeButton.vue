@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { Menu } from "@ark-ui/vue/menu";
-import { AtSign, Bell, BellOff, Check } from "lucide-vue-next";
+import { AtSign, Bell, BellOff, Check, ChevronRight } from "lucide-vue-next";
 import AppMenu from "@/components/ui/AppMenu.vue";
-import { menuClasses } from "@/ui/menu-classes";
+import { menuClasses, menuItemHintClass, menuItemIconClass, menuItemStackClass } from "@/ui/menu-classes";
 import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
 import {
   effectiveNotifyMode,
@@ -29,6 +29,10 @@ import {
  * * The trigger is disabled (`aria-disabled`) while no client is wired
  *   or the store is still hydrating, so clicks don't open a menu
  *   that can't act.
+ *
+ * `variant="submenu"` renders the trigger as a row inside a parent
+ * `AppMenu` (the compact header's overflow menu) instead of an icon
+ * button; the picker itself is identical.
  */
 const props = defineProps<{
   /** Bare JID of the room whose XEP-0402 bookmark carries the
@@ -45,6 +49,7 @@ const props = defineProps<{
    * module-level singleton so unrelated test fixtures and (future)
    * multi-account UIs can hold independent state. */
   store: NotifySettingsStore;
+  variant?: "icon" | "submenu";
 }>();
 
 const open = ref(false);
@@ -91,11 +96,12 @@ const nodeMismatchMessage = computed(() =>
     : "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.",
 );
 
-const buttonTitle = computed(() => {
-  if (props.client === null) return "Notifications: connecting…";
-  if (props.store.hydrating.value) return "Notifications: syncing…";
-  return `Notifications: ${NOTIFY_MODE_LABEL[currentMode.value]}`;
+const statusLabel = computed(() => {
+  if (props.client === null) return "connecting…";
+  if (props.store.hydrating.value) return "syncing…";
+  return NOTIFY_MODE_LABEL[currentMode.value];
 });
+const buttonTitle = computed(() => `Notifications: ${statusLabel.value}`);
 
 function onOpenChange(next: boolean) {
   if (disabled.value && next) return;
@@ -203,6 +209,7 @@ async function toggleRichPayload() {
     v-if="roomJid"
     :open="open"
     :tooltip="buttonTitle"
+    :submenu="variant === 'submenu'"
     placement="bottom-end"
     aria-label="Notification mode"
     content-class="w-64 max-w-[calc(100vw-1rem)]"
@@ -210,7 +217,21 @@ async function toggleRichPayload() {
     @select="onSelect"
   >
     <template #trigger>
+      <div
+        v-if="variant === 'submenu'"
+        :class="[menuClasses.item, 'py-2', disabled ? 'cursor-not-allowed opacity-50' : '']"
+        style="height: auto"
+        :aria-disabled="disabled"
+      >
+        <span :class="menuItemIconClass" aria-hidden="true"><component :is="icon" class="h-4 w-4" /></span>
+        <span :class="[menuItemStackClass, 'flex-1']">
+          <span class="type-control text-foreground">Notifications</span>
+          <span :class="menuItemHintClass">{{ statusLabel }}</span>
+        </span>
+        <ChevronRight class="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+      </div>
       <button
+        v-else
         class="chat-icon-button chat-icon-button--md"
         :class="disabled
           ? 'opacity-50 cursor-not-allowed text-muted-foreground'

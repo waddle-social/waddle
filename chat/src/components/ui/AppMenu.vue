@@ -30,6 +30,10 @@ type MenuPlacement =
  * `tooltip` adds an `AppTooltip` on the trigger that shares the trigger's
  * id with the menu. The content is portalled to `<body>` and lazily
  * mounted.
+ *
+ * `submenu` nests this menu inside a parent `AppMenu`'s content: the
+ * `trigger` slot becomes a `Menu.TriggerItem` row of the parent, and Ark
+ * links the two menus for keyboard navigation and dismissal.
  */
 const props = withDefaults(
   defineProps<{
@@ -38,10 +42,11 @@ const props = withDefaults(
     ariaLabel?: string;
     closeOnSelect?: boolean;
     tooltip?: string;
+    submenu?: boolean;
     /** Extra classes for the content surface (width, etc.). */
     contentClass?: string;
   }>(),
-  { open: undefined, placement: "bottom-end", ariaLabel: undefined, closeOnSelect: true, tooltip: "", contentClass: "" },
+  { open: undefined, placement: "bottom-end", ariaLabel: undefined, closeOnSelect: true, tooltip: "", submenu: false, contentClass: "" },
 );
 
 const emit = defineEmits<{
@@ -51,7 +56,9 @@ const emit = defineEmits<{
 
 const triggerId = useId();
 const ids = { trigger: triggerId };
-const positioning = computed(() => ({ placement: props.placement, gutter: 6 }));
+// Zag pins a submenu's placement beside its trigger row; `overlap` lets
+// it slide over the parent menu instead of off a narrow viewport.
+const positioning = computed(() => ({ placement: props.placement, gutter: 6, overlap: props.submenu }));
 
 function onOpenChange(details: MenuOpenChangeDetails) {
   emit("update:open", details.open);
@@ -65,7 +72,7 @@ function onSelect(details: MenuSelectionDetails) {
 <template>
   <Menu.Root
     :open="open"
-    :ids="ids"
+    :ids="submenu ? undefined : ids"
     :positioning="positioning"
     :close-on-select="closeOnSelect"
     lazy-mount
@@ -73,7 +80,10 @@ function onSelect(details: MenuSelectionDetails) {
     @open-change="onOpenChange"
     @select="onSelect"
   >
-    <AppTooltip :label="tooltip" :trigger-id="triggerId">
+    <Menu.TriggerItem v-if="submenu" as-child>
+      <slot name="trigger" />
+    </Menu.TriggerItem>
+    <AppTooltip v-else :label="tooltip" :trigger-id="triggerId">
       <Menu.Trigger as-child>
         <slot name="trigger" />
       </Menu.Trigger>

@@ -209,12 +209,20 @@
   min-height: var(--chat-header-height);
 }
 
+/* The kind icon (#, forum, DM) only shows from `lg`; below that the
+ * title takes the full column so a narrow header keeps the name legible. */
 .chat-pane-title-group {
   display: grid;
   min-width: 0;
-  grid-template-columns: var(--control-md) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   column-gap: var(--space-sm);
   align-items: center;
+}
+
+@media (min-width: 64rem) {
+  .chat-pane-title-group {
+    grid-template-columns: var(--control-md) minmax(0, 1fr);
+  }
 }
 
 .chat-pane-title-icon {

@@ -10,10 +10,10 @@ import {
   refreshDmCallActivityAffordances,
   useDmCallActivity,
 } from "@/lib/calls/dm-call-activity";
-import { answerIncomingDmCallActivity, resumeDmCallActivity, startDmCallAction } from "@/lib/calls/dm-call-actions";
+import { answerIncomingDmCallActivity, resumeDmCallActivity } from "@/lib/calls/dm-call-actions";
+import { useDmCallStart } from "@/lib/calls/use-call-start";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
-import type { CallMedia } from "@/lib/calls/types";
 
 const props = withDefaults(defineProps<{
   /** Peer's bare JID — the `<propose/>` per XEP-0353 §0.2 is
@@ -36,13 +36,14 @@ const { activity: peerCallActivity } = useDmCallActivity(() => props.peerBareJid
  *  caller can't start a parallel call while one is ringing or
  *  active. Hydrated peer activity only becomes a reconnect affordance
  *  when the archived LiveKit credentials still belong to this resource. */
-const inCall = computed(
-  () => state.value.phase !== "idle" && state.value.phase !== "ended",
-);
+const {
+  canStart: showStartControls,
+  busy: inCall,
+  start: startCall,
+} = useDmCallStart(() => props.peerBareJid);
 
 const hasPeerCallActivity = computed(() => !!peerCallActivity.value);
 const showPeerCallActivity = computed(() => props.showActivityControls !== false && hasPeerCallActivity.value);
-const showStartControls = computed(() => !hasPeerCallActivity.value);
 const voiceLabel = computed(() => "Start voice call");
 const videoLabel = computed(() => "Start video call");
 const peerActivityAction = computed(() => {
@@ -96,15 +97,6 @@ function getSender(): CallWireSender | null {
 function getInitiator(): string | undefined {
   return connectionStore.selfFullJid ??
     (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
-}
-
-async function startCall(media: CallMedia): Promise<void> {
-  await startDmCallAction({
-    peerBareJid: props.peerBareJid,
-    media,
-    getSender,
-    getInitiator,
-  });
 }
 
 async function handlePeerCallActivity(): Promise<void> {
