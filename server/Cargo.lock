@@ -1122,6 +1122,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "community-safety-judge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.57.1",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

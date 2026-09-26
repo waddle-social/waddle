@@ -12,6 +12,7 @@ members = [
     "crates/waddle-xmpp-client-wasm",
     "crates/waddle-ws-test-support",
     "extensions/ai-chatbot",
+    "extensions/community-safety-judge",
     "extensions/decision-polls",
     "extensions/github",
     "extensions/link-board",
