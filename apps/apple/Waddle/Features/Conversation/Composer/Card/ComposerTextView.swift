@@ -372,7 +372,7 @@ struct ComposerTextView: NSViewRepresentable {
             self.parent = parent
         }
 
-        func undoManager(for view: NSTextView) -> UndoManager? {
+        func undoManager(for _: NSTextView) -> UndoManager? {
             undoHistory
         }
 
@@ -441,8 +441,8 @@ struct ComposerTextView: NSViewRepresentable {
 /// The text view behind the Mac `ComposerTextView`, on TextKit 1 so
 /// `ComposerTextMeasure` sizes the field with the same layout.
 final class ComposerNSTextView: NSTextView {
-    var onPasteAttachments: () -> Void = {}
-    var onFocusChange: (Bool) -> Void = { _ in }
+    var onPasteAttachments: (() -> Void)?
+    var onFocusChange: ((Bool) -> Void)?
     /// A text view does not retain the storage behind a container it is
     /// given.
     private let storage: NSTextStorage
@@ -459,7 +459,7 @@ final class ComposerNSTextView: NSTextView {
         super.init(frame: .zero, textContainer: container)
     }
 
-    required init?(coder: NSCoder) {
+    required init?(coder _: NSCoder) {
         fatalError("ComposerNSTextView is created in code")
     }
 
@@ -480,7 +480,7 @@ final class ComposerNSTextView: NSTextView {
 
     override func paste(_ sender: Any?) {
         if ComposerPasteboard.holdsAttachments {
-            onPasteAttachments()
+            onPasteAttachments?()
         } else {
             super.paste(sender)
         }
@@ -488,13 +488,13 @@ final class ComposerNSTextView: NSTextView {
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
-        if became { onFocusChange(true) }
+        if became { onFocusChange?(true) }
         return became
     }
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
-        if resigned { onFocusChange(false) }
+        if resigned { onFocusChange?(false) }
         return resigned
     }
 }
