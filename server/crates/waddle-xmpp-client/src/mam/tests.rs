@@ -532,6 +532,44 @@ fn room_search_history_targets_room_archive_with_fulltext() {
 }
 
 #[test]
+fn room_thread_history_targets_room_archive_with_thread_filter() {
+    let iq = build_room_thread_history_iq(
+        "iq-1",
+        "query-1",
+        30,
+        "room@muc.example.com",
+        "thread-42",
+        None,
+    );
+
+    assert_eq!(iq.attr("to"), Some("room@muc.example.com"));
+    assert_eq!(
+        mam_form_value(&iq, WADDLE_MAM_THREAD_FIELD).as_deref(),
+        Some("thread-42")
+    );
+    // No cursor = newest page (XEP-0059 §2.5 empty `<before/>`).
+    assert_eq!(rsm_before(&iq).as_deref(), Some(""));
+    assert!(
+        mam_form_value(&iq, "with").is_none(),
+        "a room thread query must not carry a with filter"
+    );
+}
+
+#[test]
+fn room_thread_history_pages_older_from_cursor() {
+    let iq = build_room_thread_history_iq(
+        "iq-1",
+        "query-1",
+        30,
+        "room@muc.example.com",
+        "thread-42",
+        Some("mam-7"),
+    );
+
+    assert_eq!(rsm_before(&iq).as_deref(), Some("mam-7"));
+}
+
+#[test]
 fn dm_search_history_targets_account_archive_and_filters_peer() {
     let iq = build_dm_search_history_iq(
         "iq-1",
@@ -715,7 +753,7 @@ mod query {
     use crate::command::XmppCommand;
     use crate::event::ClientEvent;
     use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
-    use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS};
+    use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, WADDLE_MAM_THREAD_FIELD};
 
     fn make_handle() -> (
         ClientHandle,
@@ -1043,6 +1081,29 @@ mod query {
             before.as_deref(),
             Some(""),
             "search must request the newest page via an empty <before/>"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_room_history_by_thread_sends_thread_filter_to_room_archive() {
+        let (handle, cmd_rx, _evt_tx) = make_handle();
+        let stanza_rx = spawn_fin_responder(cmd_rx);
+
+        let page = timeout(
+            Duration::from_secs(2),
+            handle.fetch_room_history_by_thread("room@muc.example.com", "thread-42", 30, None),
+        )
+        .await
+        .expect("thread fetch must resolve once <fin/> arrives")
+        .expect("fetch_room_history_by_thread succeeds");
+
+        assert!(page.is_complete);
+
+        let stanza = stanza_rx.await.expect("driver captured the IQ");
+        assert_eq!(stanza.attr("to"), Some("room@muc.example.com"));
+        assert_eq!(
+            form_field_value(&stanza, WADDLE_MAM_THREAD_FIELD).as_deref(),
+            Some("thread-42")
         );
     }
 

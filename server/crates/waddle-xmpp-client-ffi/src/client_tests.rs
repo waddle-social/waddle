@@ -176,6 +176,28 @@ async fn search_room_history_returns_empty_page_when_not_connected() {
 }
 
 #[tokio::test]
+async fn fetch_room_thread_history_returns_empty_page_when_not_connected() {
+    let listener = Arc::new(RecordingListener::default());
+    let client = test_client((*listener).clone());
+
+    let page = client
+        .fetch_room_thread_history(
+            "room@muc.waddle.test".to_string(),
+            "thread-1".to_string(),
+            25,
+            None,
+        )
+        .await;
+
+    // The incomplete, cursor-less empty page is the shape the Apple port
+    // reads as a failed query rather than an empty thread.
+    assert!(page.messages.is_empty());
+    assert!(page.first_id.is_none());
+    assert!(!page.is_complete);
+    assert_eq!(listener.errors(), vec!["Not connected"]);
+}
+
+#[tokio::test]
 async fn search_dm_history_returns_empty_page_when_not_connected() {
     let listener = Arc::new(RecordingListener::default());
     let client = test_client((*listener).clone());

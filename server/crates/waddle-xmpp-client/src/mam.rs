@@ -137,6 +137,17 @@ pub trait MamExt {
         before: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 
+    /// Fetch one room thread's archived replies: the room archive filtered
+    /// by the Waddle MAM thread field. `before = None` requests the newest
+    /// page, like [`MamExt::fetch_room_history`].
+    fn fetch_room_history_by_thread<'a>(
+        &'a self,
+        room_jid: &'a str,
+        thread_id: &'a str,
+        max: u32,
+        before: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
+
     /// Full-text search of a MUC room archive via the XEP-0313 extended
     /// form field `{urn:xmpp:fulltext:0}fulltext` (Clark notation per
     /// XEP-0068). Returns the newest matching page first.
@@ -184,6 +195,20 @@ impl MamExt for ClientHandle {
         let iq_id = Uuid::new_v4().to_string();
 
         let iq = build_mam_iq(&iq_id, &query_id, max, before, Some(peer_jid), None);
+        run_mam_query(self, iq, &query_id).await
+    }
+
+    async fn fetch_room_history_by_thread(
+        &self,
+        room_jid: &str,
+        thread_id: &str,
+        max: u32,
+        before: Option<&str>,
+    ) -> ClientResult<MamPage> {
+        let query_id = Uuid::new_v4().to_string();
+        let iq_id = Uuid::new_v4().to_string();
+
+        let iq = build_room_thread_history_iq(&iq_id, &query_id, max, room_jid, thread_id, before);
         run_mam_query(self, iq, &query_id).await
     }
 
@@ -410,6 +435,25 @@ pub fn build_mam_iq(
         builder = builder.to_jid(value);
     }
     builder.build()
+}
+
+/// Build a thread-filtered room-archive query IQ: targets the room archive
+/// (`to=room`) with the Waddle MAM thread field. A missing cursor becomes an
+/// empty `<before/>`, which XEP-0059 §2.5 reads as "the last page", so the
+/// newest replies come back first; omitting it would return the oldest page.
+pub fn build_room_thread_history_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    room_jid: &str,
+    thread_id: &str,
+    before: Option<&str>,
+) -> Element {
+    MamIqBuilder::new(iq_id, query_id, max)
+        .to_jid(room_jid)
+        .thread_id(thread_id)
+        .before(before.unwrap_or(""))
+        .build()
 }
 
 /// Build a full-text room-archive search IQ: targets the room archive

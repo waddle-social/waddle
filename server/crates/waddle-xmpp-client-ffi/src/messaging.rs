@@ -38,6 +38,33 @@ impl WaddleClient {
         }
     }
 
+    /// One room thread's archived replies, newest page first (`before_id =
+    /// None`) or older from an RSM cursor. Filters the room archive with the
+    /// Waddle MAM thread field; an empty page plus an `Error` event on
+    /// failure, mirroring `fetch_room_history`.
+    pub async fn fetch_room_thread_history(
+        &self,
+        room_jid: String,
+        thread_id: String,
+        max_messages: u32,
+        before_id: Option<String>,
+    ) -> WaddleMamPage {
+        let Some(handle) = self.clone_handle().await else {
+            return empty_mam_page();
+        };
+
+        match handle
+            .fetch_room_history_by_thread(&room_jid, &thread_id, max_messages, before_id.as_deref())
+            .await
+        {
+            Ok(page) => mam_page_to_ffi(page),
+            Err(e) => {
+                self.emit_error(format!("fetch_room_thread_history failed: {e}"));
+                empty_mam_page()
+            }
+        }
+    }
+
     pub async fn fetch_dm_history(
         &self,
         peer_jid: String,
