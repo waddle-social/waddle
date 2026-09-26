@@ -36,6 +36,14 @@ extension SessionCoordinator {
     /// and get no read markers until the app is active again.
     public func setAppActive(_ active: Bool) async {
         isAppActive = active
+        if let thread = visibleThread {
+            if active {
+                unread.setActiveThread(thread)
+                await markThreadReadIfVisible(thread)
+            } else {
+                unread.clearActiveThread(ifMatches: thread)
+            }
+        }
         guard let visible = visibleConversation else { return }
         if active {
             unread.setActive(visible)
@@ -43,6 +51,42 @@ extension SessionCoordinator {
         } else {
             unread.clearActive(ifMatches: visible)
         }
+    }
+
+    /// Called when a room thread comes on screen: joins the room (a thread
+    /// opened from Activity skips the room screen), marks the thread read
+    /// and loads its newest replies.
+    public func openThread(_ thread: ThreadKey) async {
+        visibleThread = thread
+        unread.setActiveThread(isAppActive ? thread : nil)
+        await ensureJoined(thread.room)
+        await markThreadReadIfVisible(thread)
+        await loadThreadHistory(thread)
+    }
+
+    /// Called when a room thread leaves the screen.
+    public func closeThread(_ thread: ThreadKey) {
+        if visibleThread == thread {
+            visibleThread = nil
+        }
+        unread.clearActiveThread(ifMatches: thread)
+    }
+
+    /// Fetches the thread's newest replies (and its root, which the thread
+    /// filter includes) into `threadHistory`. A failed fetch keeps what was
+    /// loaded before.
+    public func loadThreadHistory(_ thread: ThreadKey) async {
+        let epoch = connectionEpoch
+        guard connection == .online,
+              let page = try? await port.fetchThreadHistory(
+                  in: thread.room,
+                  threadID: thread.threadID,
+                  before: nil,
+                  max: Self.historyPageSize
+              ),
+              epoch == connectionEpoch
+        else { return }
+        threadHistory.store(ThreadHistory.build(from: page, thread: thread, account: account), for: thread)
     }
 
     /// Fetches the newest page and merges it. A failed fetch leaves the

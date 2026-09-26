@@ -17,6 +17,10 @@ final class FakePort: XmppPort {
     var chatStates: [(ChatState, ConversationID)] = []
     var joined: [BareJID] = []
     var inboxReads: [BareJID] = []
+    /// Every `<mark-read/>` with its thread, in order.
+    var inboxReadRequests: [(partner: BareJID, threadID: String?)] = []
+    var failingInboxReads = 0
+    var failsInboxFetch = false
     var topology: Topology = .empty
     var inbox: [InboxEntry] = []
     var cursors: [DisplayedCursor] = []
@@ -121,6 +125,17 @@ final class FakePort: XmppPort {
         return historyPages.removeFirst()
     }
 
+    /// Thread pages by thread id; a missing entry is an empty, complete page.
+    var threadPages: [String: ArchivePage] = [:]
+    var failingThreads: Set<String> = []
+    var threadRequests: [(room: BareJID, threadID: String, max: Int)] = []
+
+    func fetchThreadHistory(in room: BareJID, threadID: String, before cursor: String?, max: Int) async throws -> ArchivePage {
+        threadRequests.append((room, threadID, max))
+        if failingThreads.contains(threadID) { throw PortError.failed }
+        return threadPages[threadID] ?? ArchivePage(messages: [], first: nil, isComplete: true)
+    }
+
     func searchHistory(of conversation: ConversationID, query: String, max: Int) async throws -> ArchivePage {
         ArchivePage(messages: [], first: nil, isComplete: true)
     }
@@ -138,9 +153,17 @@ final class FakePort: XmppPort {
     func supportsDisplayedCursorPublish() async -> Bool { true }
     func fetchDisplayedCursors() async throws -> [DisplayedCursor] { cursors }
     func subscribeDisplayedCursors() async -> Bool { true }
-    func fetchInbox() async throws -> [InboxEntry] { inbox }
+    func fetchInbox() async throws -> [InboxEntry] {
+        if failsInboxFetch { throw PortError.failed }
+        return inbox
+    }
 
     func markInboxRead(partner: BareJID, threadID: String?) async throws {
+        inboxReadRequests.append((partner, threadID))
+        if failingInboxReads > 0 {
+            failingInboxReads -= 1
+            throw PortError.rejected
+        }
         inboxReads.append(partner)
     }
 

@@ -42,29 +42,26 @@ public final class InboxStore {
         entries[Key(partner: partner, threadID: threadID)]
     }
 
-    /// Room-thread entries (Activity surface).
-    public var threadEntries: [InboxEntry] {
-        entries.values.filter { $0.threadID != nil }
-    }
-
-    /// Local read: zero unread and arm the barrier.
-    public func markRead(_ partner: BareJID, threadID: String? = nil) {
+    /// Local read: zero unread and arm the barrier. Returns the newest
+    /// stanza id the read covers, so a read replayed later can check that
+    /// nothing newer arrived in between.
+    @discardableResult
+    public func markRead(_ partner: BareJID, threadID: String? = nil) -> String? {
         let key = Key(partner: partner, threadID: threadID)
-        guard let existing = entries[key] else { return }
+        guard let existing = entries[key] else { return nil }
         if let id = existing.lastStanzaID {
             barriers[key] = id
         }
         if existing.unread != 0 {
-            entries[key] = InboxEntry(
-                partner: existing.partner,
-                kind: existing.kind,
-                lastStanzaID: existing.lastStanzaID,
-                lastUpdated: existing.lastUpdated,
-                unread: 0,
-                preview: existing.preview,
-                threadID: existing.threadID
-            )
+            entries[key] = existing.withUnread(0)
         }
+        return existing.lastStanzaID
+    }
+
+    /// Drops the read-clear barrier after the server did not take the read,
+    /// so the next hydrate or push shows the server's count again.
+    public func forgetBarrier(_ partner: BareJID, threadID: String? = nil) {
+        barriers[Key(partner: partner, threadID: threadID)] = nil
     }
 
     /// Whether the server inbox already counted one of `ids` as the
@@ -97,15 +94,7 @@ public final class InboxStore {
             return incoming
         }
         guard incoming.unread != 0 else { return incoming }
-        return InboxEntry(
-            partner: incoming.partner,
-            kind: incoming.kind,
-            lastStanzaID: incoming.lastStanzaID,
-            lastUpdated: incoming.lastUpdated,
-            unread: 0,
-            preview: incoming.preview,
-            threadID: incoming.threadID
-        )
+        return incoming.withUnread(0)
     }
 
     private func rememberAccounted(_ entry: InboxEntry) {

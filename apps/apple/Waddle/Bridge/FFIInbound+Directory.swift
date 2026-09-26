@@ -65,7 +65,8 @@ extension FFIInbound {
             lastUpdated: entry.lastUpdated,
             unread: Int(entry.unread),
             preview: entry.preview,
-            threadID: entry.threadId
+            threadID: entry.threadId,
+            threadTitle: entry.threadTitle
         )
     }
 

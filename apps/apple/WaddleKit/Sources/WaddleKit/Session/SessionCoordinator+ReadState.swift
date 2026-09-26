@@ -1,5 +1,10 @@
 import Foundation
 
+/// A read parked offline, with the newest stanza id it covered.
+struct PendingInboxRead {
+    let covered: String?
+}
+
 /// The ids one displayed dispatch needs.
 struct DisplayedTarget: Equatable {
     /// XEP-0333 `<displayed id=…/>`: the room-assigned stanza id in a room,
@@ -13,12 +18,48 @@ struct DisplayedTarget: Equatable {
     let markerRequested: Bool
 }
 
+/// One server inbox read: a conversation's row, or one room thread's row.
+struct InboxReadKey: Hashable {
+    let partner: BareJID
+    let threadID: String?
+}
+
 extension SessionCoordinator {
     /// XEP-0430 hydrate, oldest first so the most recent DM ends on top.
-    func hydrateInbox() async {
-        guard let entries = try? await port.fetchInbox() else { return }
+    /// Returns false when the fetch failed. Reads parked while offline are
+    /// replayed only after a hydrate, against the fresh server state.
+    @discardableResult
+    func hydrateInbox() async -> Bool {
+        let epoch = connectionEpoch
+        guard let entries = try? await port.fetchInbox() else { return false }
+        guard epoch == connectionEpoch else { return false }
         for entry in entries.sorted(by: { ($0.lastUpdated ?? .min) < ($1.lastUpdated ?? .min) }) {
             applyInbox(entry)
+        }
+        await drainPendingInboxReads()
+        return true
+    }
+
+    /// Re-fetches the server inbox (pull to refresh).
+    public func refreshInbox() async {
+        guard connection == .online else { return }
+        await hydrateInbox()
+    }
+
+    /// Retries a failed hydrate off the ready pipeline, so sends are not
+    /// held behind it: after 2 s, then 8 s, abandoned if the stream changes.
+    func scheduleInboxHydrate(delays: [TimeInterval] = [2, 8]) {
+        guard inboxHydrateTask == nil else { return }
+        let epoch = connectionEpoch
+        inboxHydrateTask = Task { [weak self] in
+            for delay in delays {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                // Cancelled only by `clearStores`, which also resets the slot.
+                guard let self, !Task.isCancelled else { return }
+                guard epoch == self.connectionEpoch, self.connection == .online else { break }
+                if await self.hydrateInbox() { break }
+            }
+            self?.inboxHydrateTask = nil
         }
     }
 
@@ -64,13 +105,68 @@ extension SessionCoordinator {
         unread.set(remaining, for: conversation)
     }
 
-    /// Marks the newest visible message of `conversation` as read: clears
-    /// the badge, sends the XEP-0333 marker (when read receipts are on and
-    /// the XEP allows it), publishes the XEP-0490 cursor, and tells the
-    /// inbox. Offline reads are parked and replayed on the next session.
+    /// Marks `conversation` read: clears the badge, tells the server inbox
+    /// (whenever it or the local badge still counts anything, since thread
+    /// replies and reactions bump the server row without a new feed row to
+    /// mark), and sends the XEP-0333 marker and XEP-0490 cursor for the
+    /// newest visible message. Offline, both are parked for the next
+    /// session.
     public func markDisplayed(_ conversation: ConversationID) async {
+        let serverCounts = (inbox.entry(for: conversation.jid)?.unread ?? 0) > 0
+        let needsServerRead = serverCounts || unread.count(for: conversation) > 0
         unread.clear(conversation)
-        inbox.markRead(conversation.jid)
+        let covered = inbox.markRead(conversation.jid)
+        if needsServerRead {
+            await sendInboxRead(InboxReadKey(partner: conversation.jid, threadID: nil), covering: covered)
+        }
+        await dispatchDisplayed(conversation)
+    }
+
+    /// Marks one room thread read on the server inbox's thread row.
+    public func markThreadRead(_ thread: ThreadKey) async {
+        let serverCounts = (inbox.entry(for: thread.room, threadID: thread.threadID)?.unread ?? 0) > 0
+        let needsServerRead = serverCounts || unread.threadCount(for: thread) > 0
+        unread.clearThread(thread)
+        let covered = inbox.markRead(thread.room, threadID: thread.threadID)
+        if needsServerRead {
+            await sendInboxRead(InboxReadKey(partner: thread.room, threadID: thread.threadID), covering: covered)
+        }
+    }
+
+    /// The Waddle `<mark-read/>` IQ. It clears the whole row, so a read
+    /// parked offline records the newest stanza id it covered and is sent
+    /// later only if nothing newer arrived. A rejected read drops the
+    /// barrier and re-fetches the inbox, so the badge shows the server's
+    /// count instead of a local zero the server never took.
+    func sendInboxRead(_ key: InboxReadKey, covering covered: String?) async {
+        guard connection == .online else {
+            pendingInboxReads[key] = PendingInboxRead(covered: covered)
+            return
+        }
+        let epoch = connectionEpoch
+        do {
+            try await port.markInboxRead(partner: key.partner, threadID: key.threadID)
+        } catch {
+            guard epoch == connectionEpoch else { return }
+            inbox.forgetBarrier(key.partner, threadID: key.threadID)
+            scheduleInboxHydrate(delays: [0])
+        }
+    }
+
+    func drainPendingInboxReads() async {
+        let pending = pendingInboxReads
+        pendingInboxReads.removeAll()
+        for (key, read) in pending {
+            guard let current = inbox.entry(for: key.partner, threadID: key.threadID),
+                  current.lastStanzaID == read.covered
+            else { continue }
+            await sendInboxRead(key, covering: read.covered)
+        }
+    }
+
+    /// XEP-0333 marker and XEP-0490 cursor for the newest visible message,
+    /// skipped when the cursor already names it.
+    func dispatchDisplayed(_ conversation: ConversationID) async {
         guard let target = newestDisplayedTarget(in: conversation) else { return }
         let before = readCursors.cursor(conversation)
         guard before != target.markerID else { return }
@@ -85,7 +181,6 @@ extension SessionCoordinator {
         if let cursor = target.cursor, await supportsCursorPublish() {
             succeeded = await port.publishDisplayedCursor(cursor) && succeeded
         }
-        try? await port.markInboxRead(partner: conversation.jid, threadID: nil)
         if succeeded {
             readCursors.advance(conversation, from: before, to: target.markerID)
         }
@@ -102,20 +197,31 @@ extension SessionCoordinator {
         await markDisplayed(conversation)
     }
 
+    /// Markers parked while offline. Their inbox reads replay separately,
+    /// bounded, after the next hydrate.
     func drainPendingDisplayed() async {
         let pending = pendingDisplayed
         pendingDisplayed.removeAll()
         for conversation in pending {
-            await markDisplayed(conversation)
+            await dispatchDisplayed(conversation)
         }
     }
 
+    /// Marks the thread read only if it is still on screen in an active app.
+    func markThreadReadIfVisible(_ thread: ThreadKey) async {
+        guard isAppActive, visibleThread == thread, unread.activeThread == thread else { return }
+        await markThreadRead(thread)
+    }
+
     /// Only feed-visible rows count: a thread reply never opened must not
-    /// advance the cursor.
+    /// advance the cursor. An archived row counts only once the newest page
+    /// is loaded, so a cursor never moves back to a row that merely happens
+    /// to be the newest one loaded.
     func newestDisplayedTarget(in conversation: ConversationID) -> DisplayedTarget? {
         let items = timelines.timeline(for: conversation).items
         guard let item = items.last(where: { !$0.isMine && $0.tombstone == nil && $0.isFeedVisible && !$0.isLocalEcho })
         else { return nil }
+        guard item.message.isLive || history.state(of: conversation).hasLoadedLatest else { return nil }
         let identity = item.identity
         if conversation.isRoom {
             guard let id = identity.stanzaID(assignedBy: conversation.jid) else { return nil }
