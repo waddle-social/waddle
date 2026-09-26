@@ -87,10 +87,14 @@ async fn resource_presence_local_reports_a_registered_remote_mirror_present() {
     let bridge = bridge_owning_target(services).await;
     assert_eq!(
         bridge
-            .register_remote_user_resource_on_owner(remote_registration_request(
-                target.clone(),
-                NodeId::new("socket-node".to_string()),
-            ))
+            .register_remote_user_resource_on_owner(
+                remote_registration_request(
+                    &bridge,
+                    target.clone(),
+                    NodeId::new("socket-node".to_string()),
+                )
+                .await
+            )
             .await
             .status,
         RelayRemoteResourceRegistrationStatus::Registered,

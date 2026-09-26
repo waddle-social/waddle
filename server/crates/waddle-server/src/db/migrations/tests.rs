@@ -37,7 +37,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema). `current_version` reads
     // the ledger max, which the waddle namespace (V1020) still dominates
-    // after global V0012.
+    // after global V0013.
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(version, Some(1020));
 }
@@ -246,7 +246,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     assert_eq!(
         applied,
         vec![
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
@@ -2228,7 +2228,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     assert_eq!(
         applied,
         vec![
-            6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+            6, 7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
             1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
@@ -2305,8 +2305,8 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+            1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
 
@@ -2426,7 +2426,7 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![8, 9, 10, 11, 12]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13]);
 
     let conn = db.guard().await.unwrap();
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -2491,7 +2491,7 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![10, 11, 12]);
+    assert_eq!(applied, vec![10, 11, 12, 13]);
 
     let conn = db.guard().await.unwrap();
     for table in [
@@ -2682,7 +2682,7 @@ async fn sqlite_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12]
+        vec![12, 13]
     );
 
     let conn = db.guard().await.expect("database guard");
@@ -2753,7 +2753,7 @@ async fn postgres_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12]
+        vec![12, 13]
     );
     assert_postgres_column_type(&db, "sessions", "auth_context_id", "text").await;
 
@@ -2815,8 +2815,8 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+            1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
 
@@ -2961,7 +2961,7 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![8, 9, 10, 11, 12]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13]);
 
     let conn = db.guard().await.expect("postgres guard");
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {

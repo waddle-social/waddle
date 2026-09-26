@@ -781,35 +781,50 @@ impl JingleHandler {
                 "Muji join was not authorized: no MUC membership decision accompanied this request",
             );
         };
-        if let Err(reason) = rewrite_contents_transport(
-            &mut jingle.contents,
-            &call_id,
-            &correlation,
-            &identity,
-            capabilities,
-            &*self.sfu,
-        ) {
-            attempt.failed(reason.setup_failure_reason());
-            return reason.into_error_reply(iq, &jingle.sid, &mixer_jid);
-        }
         let Some(occupant_session) = ctx.occupant_session else {
             attempt.failed(CallSetupFailureReason::MembershipCheckFailed);
             return error_reply(iq, DefinedCondition::InternalServerError, "internal error");
         };
-        // Register and bind to this session-initiate's Jingle sid in
-        // one atomic registry operation (#1608): a later terminate
-        // carrying a DIFFERENT sid is a stale leftover from a previous
-        // call in the same room and must not tear this session down. A
-        // rejoin re-registers and rebinds atomically, so the stored
-        // binding always names the newest session with no window in
-        // which a concurrent stale terminate could observe the new
-        // registration unbound.
-        self.sfu.register_call_participant_with_session(
+        let Some(expected) = ctx.participant_registration else {
+            attempt.failed(CallSetupFailureReason::MembershipCheckFailed);
+            return error_reply(
+                iq,
+                DefinedCondition::InternalServerError,
+                "missing SFU authorization context",
+            );
+        };
+        for content in &jingle.contents {
+            if let Err(reason) = validate_transport_placeholder(content) {
+                attempt.failed(reason.setup_failure_reason());
+                return reason.into_error_reply(iq, &jingle.sid, &mixer_jid);
+            }
+        }
+        match self.sfu.issue_join_token_with_session(
             &call_id,
             &identity,
+            capabilities,
             &session,
             occupant_session,
-        );
+            expected,
+        ) {
+            Ok(Some(token)) => {
+                record_sfu_token_minted(&call_id, &correlation, &identity);
+                apply_issued_transport(&mut jingle.contents, token);
+            }
+            Ok(None) => {
+                attempt.failed(CallSetupFailureReason::MembershipCheckFailed);
+                return error_reply(
+                    iq,
+                    DefinedCondition::Forbidden,
+                    "occupant session changed during authorization; please retry",
+                );
+            }
+            Err(error) => {
+                record_sfu_token_mint_failure(&call_id, &correlation, &identity, &error);
+                attempt.failed(RewriteError::SfuFailed.setup_failure_reason());
+                return RewriteError::SfuFailed.into_error_reply(iq, &jingle.sid, &mixer_jid);
+            }
+        }
 
         // XEP-0166 §6.3 ack: respond to the session-initiate IQ
         // with an EMPTY IQ result IMMEDIATELY. The session-accept
@@ -1387,6 +1402,11 @@ fn rewrite_contents_transport(
             return Err(RewriteError::SfuFailed);
         }
     };
+    apply_issued_transport(contents, token);
+    Ok(())
+}
+
+fn apply_issued_transport(contents: &mut [Content], token: waddle_sfu::JoinToken) {
     let issued = WaddleLiveKitTransport::Issued(IssuedTransport {
         url: token.url,
         room: token.room,
@@ -1397,7 +1417,6 @@ fn rewrite_contents_transport(
     for content in contents.iter_mut() {
         content.transport = Some(Transport::Unknown(issued_elem.clone()));
     }
-    Ok(())
 }
 
 fn record_sfu_token_minted(call_id: &CallId, correlation: &CallCorrelationId, identity: &Identity) {
@@ -1586,6 +1605,9 @@ mod tests {
         // voiced occupant; tests for the fail-closed path override
         // `media_capabilities` explicitly.
         StanzaContext {
+            participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation {
+                occupant: None,
+            }),
             domain: "waddle.test",
             full_jid: jid,
             occupant_session: Some(waddle_xmpp_core::OccupancySessionGeneration::mint()),

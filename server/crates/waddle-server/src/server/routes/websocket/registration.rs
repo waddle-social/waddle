@@ -12,6 +12,125 @@ use super::{
 /// an otherwise-valid XEP-0198 resume into a terminal session-init failure.
 const RESUME_REGISTRATION_BUSY_ATTEMPTS: usize = 3;
 
+const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn prepare_socket_bind(
+    state: &WebSocketState,
+    jid: &FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+    resumed: bool,
+) -> Option<waddle_xmpp::registry::ConnectionBindGuard> {
+    use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachRequest, SocketCleanupState};
+    let registry = &state.deps.protocol.connection_registry;
+    let mut guard = registry.lock_bind(jid).await;
+    let db = state.deps.app_state.db_pool.global();
+    if resumed {
+        if !crate::occupancy_authority::is_current(db, jid, generation)
+            .await
+            .ok()?
+        {
+            return None;
+        }
+    } else {
+        // Revoke stale asynchronous room joins before awaiting their cleanup.
+        if let Some(displaced) = crate::occupancy_authority::publish(db, jid, generation)
+            .await
+            .ok()?
+        {
+            guard.retain_retirement(displaced);
+        }
+    }
+    if let Some(incumbent) = guard.incumbent() {
+        if resumed && incumbent.generation != generation {
+            return None;
+        }
+        if incumbent.state() == SocketCleanupState::Running {
+            let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+            let _ = incumbent
+                .entry
+                .force_detach_sender()
+                .try_send(ForceDetachRequest {
+                    origin: if resumed {
+                        ForceDetachOrigin::CrossNodeResume
+                    } else {
+                        ForceDetachOrigin::FreshBindReplacement
+                    },
+                    requester_bare_jid: jid.to_bare(),
+                    ack,
+                });
+            // Neither a closed channel nor a missing route proves cleanup.
+            incumbent.wait_stopped().await;
+        }
+        if !resumed {
+            guard.retain_retirement(incumbent.generation);
+        }
+    }
+    #[cfg(feature = "clustering")]
+    if !resumed {
+        if let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        {
+            if !bridge
+                .retire_remote_incumbent_before_local_bind(jid, generation)
+                .await
+            {
+                return None;
+            }
+        }
+    }
+    if !resumed {
+        for displaced in guard.pending_retirements() {
+            let removed = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .invalidate_sessions_for_generation(jid, displaced)
+                .await
+                .ok()?;
+            // Enter promotion's cancellation-safe custody guard before any
+            // other await. Never accumulate handed-off batches across another
+            // generation's storage operation.
+            crate::sm_promotion::promote_displaced_sessions(
+                removed.clone(),
+                crate::sm_promotion::DisplacedPromotionDeps {
+                    sm_registry: &state.deps.protocol.sm_session_registry,
+                    connection_registry: registry,
+                    user_registry: &state.deps.protocol.user_registry,
+                    pending_storage: &state.deps.protocol.pending_delivery_storage,
+                    blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                    server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                },
+            )
+            .await;
+            for detached in removed {
+                super::cleanup::cleanup_invalidated_detached_session(state, detached, None).await;
+            }
+        }
+    }
+    for pending in guard.pending_retirements() {
+        if resumed && pending == generation {
+            return None;
+        }
+        if !super::cleanup::retire_occupancy_before_bind(state, jid, pending).await {
+            return None;
+        }
+        guard.complete_retirement(pending);
+    }
+    if !crate::occupancy_authority::is_current(db, jid, generation)
+        .await
+        .ok()?
+    {
+        return None;
+    }
+    // A remote-resource mirror may occupy this route without a local socket
+    // lifecycle. Its owner registration is separately generation-fenced.
+    Some(guard)
+}
+
 fn resume_registration_busy_backoff(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_millis(50 * (attempt as u64 + 1))
 }
@@ -317,6 +436,48 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         return RegistrationAfterFrame::AuthorityRevoked;
     }
 
+    let prepared = tokio::select! {
+        _ = shutdown.cancelled() => return RegistrationAfterFrame::AuthorityRevoked,
+        prepared = tokio::time::timeout(
+            BIND_RETIREMENT_TIMEOUT,
+            prepare_socket_bind(state, &jid, conn.occupancy_session, resumed),
+        ) => prepared,
+    };
+    let Ok(Some(mut bind_guard)) = prepared else {
+        record_session_init_failure(
+            waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
+            &jid,
+            conn.sm_state.stream_id.as_deref(),
+            Some(
+                "incumbent occupancy retirement or bind authority could not be confirmed"
+                    .to_owned(),
+            ),
+        );
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    };
+    if !registration_authoritative(permit, shutdown) {
+        return RegistrationAfterFrame::AuthorityRevoked;
+    }
+
+    let publication = tokio::select! {
+        _ = shutdown.cancelled() => return RegistrationAfterFrame::AuthorityRevoked,
+        result = tokio::time::timeout(
+            BIND_RETIREMENT_TIMEOUT,
+            crate::occupancy_authority::acquire_current(
+                state.deps.app_state.db_pool.global(), &jid, conn.occupancy_session,
+            ),
+        ) => result,
+    };
+    let Ok(Ok(Some(publication_guard))) = publication else {
+        record_session_init_failure(
+            waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
+            &jid,
+            conn.sm_state.stream_id.as_deref(),
+            Some("occupancy authority changed before registration publication".to_owned()),
+        );
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    };
+
     conn.ensure_state_machine(
         domain,
         &state.deps.protocol.dispatcher,
@@ -341,6 +502,14 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             conn.blocklist_interested,
         );
     conn.registry_owner = Some(owner.clone());
+    if let Some(entry) = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &owner)
+    {
+        conn.socket_lifecycle = Some(bind_guard.publish(entry, conn.occupancy_session));
+    }
     // Publish the occupancy generation (#1703) owner-gated, like the SM
     // stream id below.
     let _ = state
@@ -468,13 +637,24 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         }
     }
 
+    // Actor registration uses the control-plane claim pool. Release the
+    // main-pool authority lock before SM finalization performs its own writes.
+    drop(publication_guard);
     let sm_report = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
     #[cfg(test)]
     if let Some((reached, release)) = conn.post_sm_finalization_test_hook.take() {
         reached.notify_one();
         release.notified().await;
     }
-    if !registration_authoritative(permit, shutdown) {
+    let generation_current = conn.phase.bound_jid().is_none()
+        || crate::occupancy_authority::is_current(
+            state.deps.app_state.db_pool.global(),
+            &jid,
+            conn.occupancy_session,
+        )
+        .await
+        .unwrap_or(false);
+    if !registration_authoritative(permit, shutdown) || !generation_current {
         // `complete_pending_resume_claim` persist-deletes the detached
         // snapshot after restoring it into `conn.sm_state`. Clearing the
         // registry owner here would make outer shutdown cleanup skip detach

@@ -88,6 +88,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 full_jid,
                 observed_sids,
                 occupant,
+                unbound,
                 session,
             )
             .await
@@ -185,6 +186,7 @@ async fn enqueue_muji_presence_clear(
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
     occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
@@ -207,7 +209,7 @@ async fn enqueue_muji_presence_clear(
             participant_sid: observed_sids.and_then(|sids| sids.participant_sid.clone()),
         },
         generation: None,
-        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
+        unbound_occupant: unbound,
         room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
         occupant,
         // Carried through from the producer when the departure came
@@ -385,6 +387,44 @@ mod tests {
             started: chrono::Utc::now() - chrono::Duration::minutes(5),
             thread_id: "call-thread-id".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn absent_room_preserves_confirmed_departure_policy() {
+        let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
+        let room_jid: BareJid = "confirmed-departure@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
+        let occupant = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let session = waddle_sfu::SessionBinding::new("departed-session").expect("session");
+
+        let outcome = clear_muji_presence_for_departure(
+            state.as_ref(),
+            &room_jid,
+            &full_jid,
+            None,
+            Some(occupant),
+            waddle_sfu::UnboundOccupantPolicy::TearDown,
+            Some(&session),
+        )
+        .await;
+
+        assert_eq!(outcome, WebhookEffectOutcome::Completed);
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("queued clear");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].intent.occupant, Some(occupant));
+        assert_eq!(jobs[0].intent.session.as_ref(), Some(&session));
+        assert_eq!(
+            jobs[0].intent.unbound_occupant,
+            waddle_sfu::UnboundOccupantPolicy::TearDown
+        );
     }
 
     #[tokio::test]

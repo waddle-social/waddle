@@ -154,10 +154,14 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     .await;
     if !recovering_local {
         let reply = bridge
-            .register_remote_user_resource_on_owner(remote_registration_request(
-                occupant.clone(),
-                NodeId::new("foreign-socket-node".to_string()),
-            ))
+            .register_remote_user_resource_on_owner(
+                remote_registration_request(
+                    &bridge,
+                    occupant.clone(),
+                    NodeId::new("foreign-socket-node".to_string()),
+                )
+                .await,
+            )
             .await;
         assert_eq!(
             reply.status,
@@ -482,10 +486,14 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
     if case == ElsewhereCase::RegisteredRemote {
         assert_eq!(
             bridge
-                .register_remote_user_resource_on_owner(remote_registration_request(
-                    occupant.clone(),
-                    NodeId::new("socket-node".to_string()),
-                ))
+                .register_remote_user_resource_on_owner(
+                    remote_registration_request(
+                        &bridge,
+                        occupant.clone(),
+                        NodeId::new("socket-node".to_string()),
+                    )
+                    .await
+                )
                 .await
                 .status,
             RelayRemoteResourceRegistrationStatus::Registered,

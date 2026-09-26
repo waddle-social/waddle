@@ -6,6 +6,11 @@ pub(in super::super) use super::owner_update::owner_remote_entry_if_current;
 
 const REMOTE_RESOURCE_BUSY_UNREGISTER_ATTEMPTS: usize = 3;
 
+#[cfg(test)]
+tokio::task_local! {
+    static REGISTRATION_AUTHORITY_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
+
 fn remote_resource_busy_unregister_backoff(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_millis(50 * (attempt as u64 + 1))
 }
@@ -178,6 +183,46 @@ impl OrderedRelayDeliveryBridge {
                 status: RelayRemoteResourceRegistrationStatus::Unavailable,
             };
         };
+        let Some(generation) = msg.state.occupancy_session else {
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
+            };
+        };
+        // Keep the durable generation lock through every mirror publication
+        // and retirement decision, not merely the initial check. Fresh binds
+        // cannot publish a successor while this registration is still acting
+        // on its predecessor's authority. Retirement itself runs separately
+        // under the per-JID lock; this transaction never waits for socket cleanup.
+        let Ok(mut generation_authority) = services.occupancy_database.begin_immediate().await
+        else {
+            return RelayRemoteResourceRegistrationReply {
+                status: RelayRemoteResourceRegistrationStatus::Unavailable,
+            };
+        };
+        match crate::occupancy_authority::lock_current(
+            &mut generation_authority,
+            &msg.jid,
+            generation,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return RelayRemoteResourceRegistrationReply {
+                    status: RelayRemoteResourceRegistrationStatus::StaleRegistration,
+                };
+            }
+            Err(_) => {
+                return RelayRemoteResourceRegistrationReply {
+                    status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                };
+            }
+        }
+        #[cfg(test)]
+        if let Ok((entered, release)) = REGISTRATION_AUTHORITY_GATE.try_with(Clone::clone) {
+            entered.notify_one();
+            release.notified().await;
+        }
         let target_entity = user_entity(&msg.jid.to_bare());
         let Some(snapshot) = current_claim(&services, &target_entity).await else {
             return RelayRemoteResourceRegistrationReply {
@@ -287,6 +332,7 @@ impl OrderedRelayDeliveryBridge {
         {
             Ok(true) => {
                 let registration = RemoteOwnerRegistration {
+                    occupancy_session: generation,
                     socket_identity,
                     unregister_pending: false,
                     registration_id: msg.registration_id,
@@ -643,6 +689,7 @@ mod tests {
             .expect("register current owner mirror");
 
         let registration = RemoteOwnerRegistration {
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
             unregister_pending: false,
             registration_id: RemoteResourceRegistrationId::fresh(),
@@ -690,8 +737,246 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn owner_local_bind_cannot_skip_an_unconfirmed_foreign_retirement() {
+        let services = Arc::new(
+            services_with_claims(
+                origin_identity(),
+                receiver_identity(),
+                receiver_identity(),
+                test_peer_id(),
+            )
+            .await,
+        );
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::clone(&services));
+        let (jid, incumbent) = seed_current_remote_owner_registration(
+            &bridge,
+            &services,
+            NodeId::new("departed-socket".to_owned()),
+            RemoteResourceSocketGeneration::next(None),
+        )
+        .await;
+        crate::occupancy_authority::publish(
+            &services.occupancy_database,
+            &jid,
+            incumbent.occupancy_session,
+        )
+        .await
+        .expect("initial authority");
+        assert!(
+            bridge
+                .retire_remote_incumbent_before_local_bind(&jid, incumbent.occupancy_session)
+                .await,
+            "same-generation resume must preserve its occupancy"
+        );
+        let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        crate::occupancy_authority::publish(&services.occupancy_database, &jid, replacement)
+            .await
+            .expect("replacement authority");
+        bridge.stop_token.cancel();
+        assert!(
+            !bridge
+                .retire_remote_incumbent_before_local_bind(&jid, replacement)
+                .await
+        );
+        assert!(bridge
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&jid)
+            .is_some_and(|current| remote_owner_registration_matches(current, &incumbent)));
+    }
+
+    #[tokio::test]
+    async fn stale_local_bind_cannot_retire_a_current_remote_generation() {
+        use super::super::owner_retire::RETIREMENT_ATTEMPTS;
+        let services = Arc::new(
+            services_with_claims(
+                origin_identity(),
+                receiver_identity(),
+                receiver_identity(),
+                test_peer_id(),
+            )
+            .await,
+        );
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::clone(&services));
+        let (jid, incumbent) = seed_current_remote_owner_registration(
+            &bridge,
+            &services,
+            NodeId::new("newer-remote-socket".to_owned()),
+            RemoteResourceSocketGeneration::next(None),
+        )
+        .await;
+        let stale_local = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        crate::occupancy_authority::publish(&services.occupancy_database, &jid, stale_local)
+            .await
+            .expect("local bind initially published");
+        crate::occupancy_authority::publish(
+            &services.occupancy_database,
+            &jid,
+            incumbent.occupancy_session,
+        )
+        .await
+        .expect("remote bind overtakes delayed local cleanup");
+        bridge.stop_token.cancel();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert!(
+            !RETIREMENT_ATTEMPTS
+                .scope(
+                    Arc::clone(&attempts),
+                    bridge.retire_remote_incumbent_before_local_bind(&jid, stale_local)
+                )
+                .await
+        );
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            0,
+            "a stale binder must not even request retirement of the current remote socket"
+        );
+        assert!(bridge
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&jid)
+            .is_some_and(|current| remote_owner_registration_matches(current, &incumbent)));
+    }
+
+    #[tokio::test]
+    async fn replacement_bind_waits_for_remote_registration_authority() {
+        let _serial = crate::clustering::claims::clustering_control_plane_table_lock()
+            .lock()
+            .await;
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let db = crate::db::Database::from_config(
+            "registration-authority-race",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url),
+        )
+        .await
+        .expect("open postgres");
+        db.execute("CREATE TABLE IF NOT EXISTS xmpp_occupancy_authority (full_jid TEXT PRIMARY KEY, generation TEXT NOT NULL)")
+            .await.expect("ensure authority schema");
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.occupancy_database = db.clone();
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(services));
+        let old = remote_registration_request(
+            &bridge,
+            "juliet@example.test/phone".parse().expect("JID"),
+            NodeId::new("old-socket".to_owned()),
+        )
+        .await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let registering = tokio::spawn({
+            let bridge = Arc::clone(&bridge);
+            let old = old.clone();
+            let gate = (Arc::clone(&entered), Arc::clone(&release));
+            async move {
+                REGISTRATION_AUTHORITY_GATE
+                    .scope(gate, bridge.register_remote_user_resource_on_owner(old))
+                    .await
+            }
+        });
+        timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("registration reached held authority");
+        let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let binding = tokio::spawn({
+            let db = db.clone();
+            let jid = old.jid.clone();
+            async move { crate::occupancy_authority::publish(&db, &jid, replacement).await }
+        });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let conn = db.guard().await.expect("monitor connection");
+                let mut rows = conn.query(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM xmpp_occupancy_authority%'",
+                    (),
+                ).await.expect("query lock waiter");
+                let count: i64 = rows.next().await.expect("count row").expect("count").get(0).expect("decode count");
+                if count > 0 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("replacement blocked on the old authority lock");
+        assert!(!binding.is_finished());
+        release.notify_one();
+        registering.await.expect("registration finishes");
+        binding
+            .await
+            .expect("binding finishes")
+            .expect("publish replacement");
+        assert_eq!(
+            bridge
+                .register_remote_user_resource_on_owner(old)
+                .await
+                .status,
+            RelayRemoteResourceRegistrationStatus::StaleRegistration
+        );
+    }
+
+    #[tokio::test]
+    async fn displaced_socket_cannot_refresh_its_remote_registration() {
+        let services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(services));
+        let old = remote_registration_request(
+            &bridge,
+            "juliet@example.test/balcony".parse().expect("full JID"),
+            NodeId::new("old-socket".to_owned()),
+        )
+        .await;
+        crate::occupancy_authority::publish(
+            &bridge.services.get().expect("services").occupancy_database,
+            &old.jid,
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        )
+        .await
+        .expect("replacement bind");
+        assert_eq!(
+            bridge
+                .register_remote_user_resource_on_owner(old)
+                .await
+                .status,
+            RelayRemoteResourceRegistrationStatus::StaleRegistration,
+        );
+        assert!(bridge.remote_owner_resources.lock().await.is_empty());
+        assert!(bridge
+            .pending_remote_owner_retirements
+            .lock()
+            .await
+            .is_empty());
+    }
+
     async fn assert_successor_register_returns_busy_without_waiting_for_retirement(
-        successor: RelayRegisterRemoteUserResource,
+        mut successor: RelayRegisterRemoteUserResource,
         displaced_socket_node: NodeId,
         displaced_generation: RemoteResourceSocketGeneration,
     ) {
@@ -709,6 +994,15 @@ mod tests {
             &ClusteringMessagingConfig::default(),
         );
         bridge.wire(Arc::clone(&services));
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        successor.state.occupancy_session = Some(generation);
+        crate::occupancy_authority::publish(
+            &services.occupancy_database,
+            &successor.jid,
+            generation,
+        )
+        .await
+        .expect("publish successor binding");
         let gate = bridge.install_remote_owner_retirement_test_gate();
         let (target, displaced) = seed_current_remote_owner_registration(
             &bridge,

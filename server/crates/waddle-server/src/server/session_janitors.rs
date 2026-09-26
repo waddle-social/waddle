@@ -608,10 +608,12 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
 
                             break;
                         }
-                        Ok(LeaveDisposition::Superseded) => {
+                        Ok(LeaveDisposition::Superseded { current_generation }) => {
                             if let LeaveSessionSelector::Generation(occupant) = selector {
-                                let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                    state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
+                                if current_generation.is_some_and(|current| current != occupant) {
+                                    let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                                        state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
+                                }
                             }
                             crate::metrics::record_local_departure_retry(
                                 crate::metrics::LocalDepartureRetryOutcome::Superseded,
@@ -10127,6 +10129,110 @@ mod local_muc_departure_tests {
         );
     }
 
+    #[tokio::test]
+    async fn same_generation_rejoin_supersedes_receipt_without_unregistering_media() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room = room_jid("superseded-same-generation");
+        let jid = full_jid("alice@example.com/web");
+        let generation = OccupancySessionGeneration::mint();
+
+        let actor = create_room(state.as_ref(), &room).await;
+        let admission_revision = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("initial snapshot")
+            .admission_revision;
+        actor
+            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                    Affiliation::Member,
+                ),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+                session: generation,
+            })
+            .await
+            .expect("first join");
+        let call_id = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(jid.clone());
+
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        assert!(matches!(
+            actor
+                .ask(LeaveByRealJid {
+                    sender_jid: jid.clone(),
+                    cause: OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Generation(generation),
+                    attempt,
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                })
+                .await
+                .expect("committed leave whose response was lost"),
+            LeaveDisposition::Left(_)
+        ));
+        let admission_revision = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("replacement snapshot")
+            .admission_revision;
+        actor
+            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                    Affiliation::Member,
+                ),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+                session: generation,
+            })
+            .await
+            .expect("replacement join");
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("superseded-explicit-g1").expect("sid"),
+            generation,
+        );
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Generation(generation),
+                attempt,
+                notified: std::collections::HashSet::new(),
+                removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        let unregisters = recorder.snapshot();
+        assert_eq!(
+            unregisters.len(),
+            0,
+            "same-generation receipt supersession must preserve rejoined media"
+        );
+        assert!(
+            recorder.has_call_participant(&call_id, &identity),
+            "same-generation media remains registered"
+        );
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot after sweep");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&jid).is_some(),
+            "the replacement occupancy must remain after the stale explicit retry"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the superseded explicit retry must converge"
+        );
+    }
+
     /// A retained retry the room answers with a LIVE `Left` (the session was
     /// removed now, under the generation fence) is evidence about the current
     /// SFU registration: an unbound (restored) one is torn down. Only a
@@ -12092,10 +12198,11 @@ fn remote_muc_sweep_outcome(had_failure: bool) -> SweepOutcome {
 }
 
 /// Collect the occupants whose remote MUC memberships need a cleanup
-/// re-drive (#1249): an ACTIVE membership entry whose occupant full JID
+/// re-drive (#1249): an ACTIVE membership entry whose occupancy generation
 /// has no live connection-registry entry here and no resumable
 /// XEP-0198 session anywhere (this node's memory OR the shared durable
-/// store). Such an entry can only be the residue
+/// store). A replacement sharing the full JID only protects its own
+/// generation. Such an entry can only be the residue
 /// of a failed (or missed) disconnect cleanup — the join path records
 /// memberships strictly while the connection is registered, and both
 /// graceful-leave and successful cleanup forget them.
@@ -12106,7 +12213,7 @@ fn remote_muc_sweep_outcome(had_failure: bool) -> SweepOutcome {
 /// membership on failure and thereby feeds this janitor.
 #[cfg(feature = "clustering")]
 struct RemoteMucReconcileCandidates {
-    occupants: Vec<jid::FullJid>,
+    occupants: Vec<(jid::FullJid, waddle_xmpp_core::OccupancySessionGeneration)>,
     had_failure: bool,
 }
 
@@ -12144,27 +12251,26 @@ async fn collect_remote_muc_reconcile_candidates(
         if foreign_snapshots.is_empty() {
             continue;
         }
-        // Cross-node guard (SM review P1 on PR #1277): a session that
-        // detached HERE and was resume-stolen by another node leaves no
-        // local trace, but its durable row (now owned by the stealing
-        // node) proves the occupancy is still legitimately resumable.
-        // The probe checks this node's memory AND the shared durable
-        // store, and fails closed on read errors.
-        match state
-            .deps
-            .protocol
-            .sm_session_registry
-            .probe_resumable_session_for_full_jid(&occupant)
-            .await
-        {
-            waddle_xmpp::stream_management::ResumableSessionProbe::Present => continue,
-            waddle_xmpp::stream_management::ResumableSessionProbe::Absent => {}
-            waddle_xmpp::stream_management::ResumableSessionProbe::Failed => {
-                had_failure = true;
-                continue;
+        // Exempt only the matching occupancy generation. A detached
+        // replacement does not own a predecessor's retained memberships.
+        let generations: std::collections::HashSet<_> = foreign_snapshots.into_values().collect();
+        for generation in generations {
+            match state
+                .deps
+                .protocol
+                .sm_session_registry
+                .probe_resumable_session_for_occupancy(&occupant, generation)
+                .await
+            {
+                waddle_xmpp::stream_management::ResumableSessionProbe::Present => {}
+                waddle_xmpp::stream_management::ResumableSessionProbe::Absent => {
+                    candidates.push((occupant.clone(), generation));
+                }
+                waddle_xmpp::stream_management::ResumableSessionProbe::Failed => {
+                    had_failure = true;
+                }
             }
         }
-        candidates.push(occupant);
     }
     RemoteMucReconcileCandidates {
         occupants: candidates,
@@ -12217,13 +12323,13 @@ async fn run_remote_muc_membership_sweep(state: &WebSocketState) {
             "remote MUC reconciler: checking retained cleanup for departed occupants"
         );
         let mut sweep_failed = candidates.had_failure;
-        for occupant in candidates.occupants {
+        for (occupant, generation) in candidates.occupants {
             // Re-check liveness IMMEDIATELY before the re-drive
             // (codex review P1 on PR #1277): the candidate list was
             // collected before earlier awaited re-drives, and the
-            // same full JID may have reconnected in that gap. A
-            // registered connection means the occupancy is
-            // legitimate again; the membership-generation guards
+            // same full JID may have resumed in that gap. A
+            // registered connection with the selected generation means
+            // the occupancy is legitimate again; the membership-generation guards
             // inside the cleanup protect the map but cannot undo a
             // relayed remote leave.
             let live = state
@@ -12231,7 +12337,31 @@ async fn run_remote_muc_membership_sweep(state: &WebSocketState) {
                 .protocol
                 .connection_registry
                 .occupancy_session_of(&occupant);
-            if routes::websocket::redrive_remote_muc_cleanup(state, &occupant, live).await
+            if live == Some(generation) {
+                continue;
+            }
+            // Earlier redrives can await network I/O. Recheck SM liveness as
+            // well before acting on the selected generation.
+            match state
+                .deps
+                .protocol
+                .sm_session_registry
+                .probe_resumable_session_for_occupancy(&occupant, generation)
+                .await
+            {
+                waddle_xmpp::stream_management::ResumableSessionProbe::Present => continue,
+                waddle_xmpp::stream_management::ResumableSessionProbe::Failed => {
+                    sweep_failed = true;
+                    continue;
+                }
+                waddle_xmpp::stream_management::ResumableSessionProbe::Absent => {}
+            }
+            if routes::websocket::redrive_remote_muc_cleanup(
+                state,
+                &occupant,
+                routes::websocket::MembershipGenerationFilter::Only(generation),
+            )
+            .await
                 == routes::websocket::MucCleanupOutcome::Failed
             {
                 sweep_failed = true;
@@ -12295,9 +12425,12 @@ mod remote_muc_reconciler_tests {
             waddle_xmpp_core::OccupancySessionGeneration::mint(),
         );
 
-        let cleanup =
-            crate::server::routes::websocket::redrive_remote_muc_cleanup(&state, &occupant, None)
-                .await;
+        let cleanup = crate::server::routes::websocket::redrive_remote_muc_cleanup(
+            &state,
+            &occupant,
+            crate::server::routes::websocket::MembershipGenerationFilter::Any,
+        )
+        .await;
 
         assert_eq!(
             cleanup,
@@ -12352,7 +12485,38 @@ mod remote_muc_reconciler_tests {
         // A displaced generation's snapshot behind the live replacement IS owed.
         memberships.record_join(&alice, &room("orphaned-remote"), "alice", old_generation);
         let candidates = collect_remote_muc_reconcile_candidates(&state).await;
-        assert_eq!(candidates.occupants, vec![alice]);
+        assert_eq!(candidates.occupants, vec![(alice, old_generation)]);
+    }
+
+    #[tokio::test]
+    async fn resumable_replacement_exempts_only_its_own_membership_generation() {
+        let state = create_test_websocket_state().await;
+        let occupant: jid::FullJid = "alice@example.com/web".parse().unwrap();
+        let old_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let replacement = detached_session("replacement", occupant.clone());
+        let memberships = &state.deps.protocol.remote_muc_memberships;
+        memberships.record_join(&occupant, &room("old"), "alice", old_generation);
+        memberships.record_join(
+            &occupant,
+            &room("resumable"),
+            "alice",
+            replacement.occupancy_session,
+        );
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(replacement)
+            .await
+            .unwrap();
+
+        let candidates = collect_remote_muc_reconcile_candidates(&state).await;
+        assert!(!candidates.had_failure);
+        assert_eq!(
+            candidates.occupants,
+            vec![(occupant, old_generation)],
+            "a resumable replacement must not hide the old generation"
+        );
     }
 
     #[tokio::test]
@@ -12362,12 +12526,8 @@ mod remote_muc_reconciler_tests {
 
         // Fully departed: candidate.
         let ghost: jid::FullJid = "ghost@example.com/web".parse().unwrap();
-        memberships.record_join(
-            &ghost,
-            &room("ghost-room"),
-            "ghost",
-            waddle_xmpp_core::OccupancySessionGeneration::mint(),
-        );
+        let ghost_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        memberships.record_join(&ghost, &room("ghost-room"), "ghost", ghost_generation);
 
         // Live connection: not a candidate.
         let live: jid::FullJid = "live@example.com/web".parse().unwrap();
@@ -12389,17 +12549,18 @@ mod remote_muc_reconciler_tests {
 
         // Detached-but-resumable session: not a candidate.
         let detached: jid::FullJid = "detached@example.com/web".parse().unwrap();
+        let detached_session = detached_session("stream-detached", detached.clone());
         memberships.record_join(
             &detached,
             &room("detached-room"),
             "detached",
-            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            detached_session.occupancy_session,
         );
         state
             .deps
             .protocol
             .sm_session_registry
-            .store_session(detached_session("stream-detached", detached.clone()))
+            .store_session(detached_session)
             .await
             .expect("store detached session");
 
@@ -12419,7 +12580,7 @@ mod remote_muc_reconciler_tests {
         assert!(!candidates.had_failure);
         assert_eq!(
             candidates.occupants,
-            vec![ghost],
+            vec![(ghost, ghost_generation)],
             "only the fully departed occupant is re-driven"
         );
     }

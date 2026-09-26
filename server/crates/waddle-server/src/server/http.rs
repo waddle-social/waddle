@@ -1197,6 +1197,7 @@ async fn create_websocket_state(
         if let Some(node_lease) = &state.clustering_claims.node_lease {
             bridge.wire(Arc::new(
                 crate::clustering::route_bridge::OrderedRelayDeliveryServices {
+                    occupancy_database: state.db_pool.global().clone(),
                     claim_store,
                     allowlist_store: Arc::new(
                         crate::clustering::allowlist::PostgresAllowlistStore::new(

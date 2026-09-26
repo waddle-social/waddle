@@ -35,10 +35,10 @@ async fn setup() -> (
     );
     bridge.wire(Arc::clone(&services));
     let reply = bridge
-        .register_remote_user_resource_on_owner(remote_registration_request(
-            target_full(),
-            NodeId::new("socket-node".into()),
-        ))
+        .register_remote_user_resource_on_owner(
+            remote_registration_request(&bridge, target_full(), NodeId::new("socket-node".into()))
+                .await,
+        )
         .await;
     assert_eq!(
         reply.status,
@@ -376,10 +376,14 @@ async fn owner_sweep_retires_1024_mirrors_within_thirty_seconds() {
             .parse()
             .expect("mirror JID");
         let reply = bridge
-            .register_remote_user_resource_on_owner(remote_registration_request(
-                jid.clone(),
-                NodeId::new("socket-node".into()),
-            ))
+            .register_remote_user_resource_on_owner(
+                remote_registration_request(
+                    &bridge,
+                    jid.clone(),
+                    NodeId::new("socket-node".into()),
+                )
+                .await,
+            )
             .await;
         assert_eq!(
             reply.status,

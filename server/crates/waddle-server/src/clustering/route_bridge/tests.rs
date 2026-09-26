@@ -375,7 +375,15 @@ async fn services_with_claims_and_blocking(
         .acquire(&target_entity(), &target_owner)
         .await
         .expect("target claim");
+    let occupancy_database = crate::db::Database::in_memory("relay-occupancy-authority")
+        .await
+        .expect("open occupancy database");
+    crate::db::MigrationRunner::global()
+        .run(&occupancy_database)
+        .await
+        .expect("migrate occupancy database");
     OrderedRelayDeliveryServices {
+        occupancy_database,
         claim_store: store,
         allowlist_store: Arc::new(StaticAllowlist {
             peer_id: origin_peer_id.parse().expect("valid test peer id"),

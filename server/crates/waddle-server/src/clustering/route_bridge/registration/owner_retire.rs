@@ -1,13 +1,102 @@
 use super::super::*;
 use super::owner::{unregister_remote_owner_actor_entry, RemoteOwnerActorUnregisterOutcome};
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static RETIREMENT_ATTEMPTS: Arc<std::sync::atomic::AtomicUsize>;
+}
+
 impl OrderedRelayDeliveryBridge {
+    /// A socket bound on the UserActor owner bypasses the remote registration
+    /// endpoint. It must still retire a foreign incumbent before publishing
+    /// its local route. Same-generation resume keeps the occupancy intact.
+    pub(crate) async fn retire_remote_incumbent_before_local_bind(
+        self: &Arc<Self>,
+        jid: &jid::FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> bool {
+        let Some(services) = self.services.get() else {
+            return false;
+        };
+        let Some(lock) = self.lock_for_remote_owner_registration(jid).await else {
+            return false;
+        };
+        let guard = lock.lock().await;
+        let retired = async {
+            // The caller may have waited for local socket cleanup since it
+            // published this generation. A later remote bind can already own
+            // the JID: hold current authority before inspecting or retiring it.
+            let Ok(Some(_authority)) = crate::occupancy_authority::acquire_current(
+                &services.occupancy_database,
+                jid,
+                generation,
+            )
+            .await
+            else {
+                return false;
+            };
+            let registration = self.remote_owner_resources.lock().await.get(jid).cloned();
+            match registration {
+                None => true,
+                Some(registration) if registration.occupancy_session == generation => true,
+                Some(registration) => {
+                    if self
+                        .retire_remote_owner_registration_with_origin(
+                            services,
+                            jid,
+                            &registration,
+                            waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+                        )
+                        .await
+                    {
+                        self.remove_remote_owner_registration_if_current(jid, &registration)
+                            .await;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        .await;
+        drop(guard);
+        self.remove_remote_owner_registration_lock_if_unused(jid, &lock)
+            .await;
+        retired
+    }
+
     pub(super) async fn retire_remote_owner_registration(
         &self,
         services: &OrderedRelayDeliveryServices,
         jid: &jid::FullJid,
         registration: &RemoteOwnerRegistration,
     ) -> bool {
+        let origin = match crate::occupancy_authority::is_current(
+            &services.occupancy_database,
+            jid,
+            registration.occupancy_session,
+        )
+        .await
+        {
+            Ok(true) => waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+            Ok(false) => waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+            Err(_) => return false,
+        };
+        self.retire_remote_owner_registration_with_origin(services, jid, registration, origin)
+            .await
+    }
+
+    async fn retire_remote_owner_registration_with_origin(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        jid: &jid::FullJid,
+        registration: &RemoteOwnerRegistration,
+        origin: waddle_xmpp::registry::ForceDetachOrigin,
+    ) -> bool {
+        #[cfg(test)]
+        let _ = RETIREMENT_ATTEMPTS.try_with(|attempts| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+        });
         let mut handle =
             RelayHandle::new(registration.socket_node.clone(), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
@@ -15,11 +104,23 @@ impl OrderedRelayDeliveryBridge {
             .force_detach_remote_user_resource(RelayForceDetachRemoteUserResource {
                 jid: jid.clone(),
                 registration_id: registration.registration_id,
-                origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+                occupancy_session: Some(registration.occupancy_session),
+                origin,
                 requester_bare_jid: jid.to_bare(),
                 trace: RelayTraceContext::default(),
             })
             .await;
+        // A stale socket reference proves no live route, not that its remote
+        // room membership cleanup completed. A fresh bind must retain the
+        // retirement obligation until the socket provides that proof.
+        if origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+            && (detach.is_err()
+                || detach.as_ref().is_ok_and(|reply| {
+                    reply.status != RelayRemoteResourceForceDetachStatus::Detached
+                }))
+        {
+            return false;
+        }
         self.finish_remote_owner_registration_retire(services, jid, registration, detach)
             .await
     }

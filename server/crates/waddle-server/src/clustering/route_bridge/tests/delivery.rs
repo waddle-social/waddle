@@ -1000,6 +1000,7 @@ async fn unreachable_write_accepted_ask_is_retryable_and_keeps_the_owner_mirror(
     let entry = ConnectionEntry::new(tx);
     let owner = entry.carbons_handle();
     let stale = RemoteOwnerRegistration {
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
         unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
@@ -1041,6 +1042,7 @@ async fn drained_remote_direct_frame_retry_releases_room_effect_as_infrastructur
     bridge.remote_owner_resources.lock().await.insert(
         target.clone(),
         RemoteOwnerRegistration {
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
             unregister_pending: false,
             registration_id: RemoteResourceRegistrationId::fresh(),
@@ -1372,6 +1374,7 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
     bridge.remote_owner_resources.lock().await.insert(
         target.clone(),
         RemoteOwnerRegistration {
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
             unregister_pending: false,
             registration_id,
@@ -1446,6 +1449,7 @@ async fn remote_full_jid_route_queues_detached_delivery() {
     bridge.remote_owner_resources.lock().await.insert(
         source.clone(),
         RemoteOwnerRegistration {
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
             unregister_pending: false,
             registration_id,
@@ -1563,6 +1567,7 @@ pub(crate) async fn remote_carbon_owner_reply(
     bridge.remote_owner_resources.lock().await.insert(
         source.clone(),
         RemoteOwnerRegistration {
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
             unregister_pending: false,
             registration_id,
@@ -1684,6 +1689,7 @@ async fn stale_force_detach_error_cleans_old_socket_mirror() {
 
     let old_generation = RemoteResourceSocketGeneration::next(None);
     let registration = RemoteOwnerRegistration {
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
         unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
@@ -1807,6 +1813,7 @@ async fn stale_force_detach_busy_actor_retries_and_cleans_without_janitor_work()
 
     let old_generation = RemoteResourceSocketGeneration::next(None);
     let registration = RemoteOwnerRegistration {
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
         unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
@@ -1946,6 +1953,7 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
 
     let old_generation = RemoteResourceSocketGeneration::next(None);
     let registration = RemoteOwnerRegistration {
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
         unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),
@@ -2001,6 +2009,14 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
 
     let (fresh_tx, _fresh_rx) = mpsc::channel(1);
     let fresh_entry = ConnectionEntry::new(fresh_tx);
+    let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    *fresh_entry
+        .occupancy_session
+        .lock()
+        .expect("occupancy mutex") = Some(generation);
+    crate::occupancy_authority::publish(&services.occupancy_database, &target, generation)
+        .await
+        .expect("publish successor binding");
     let successor = RelayRegisterRemoteUserResource {
         jid: target.clone(),
         registration_id: RemoteResourceRegistrationId::fresh(),
@@ -2124,6 +2140,7 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
     );
 
     let registration = RemoteOwnerRegistration {
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
         unregister_pending: false,
         registration_id: RemoteResourceRegistrationId::fresh(),

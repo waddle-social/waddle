@@ -2452,6 +2452,25 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
     ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        self.invalidate_sessions_matching(jid, None).await
+    }
+
+    /// Retire only the bind generation whose authority was displaced. A later
+    /// cross-node bind/resume for the same full JID keeps its own snapshot.
+    pub async fn invalidate_sessions_for_generation(
+        &self,
+        jid: &FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        self.invalidate_sessions_matching(jid, Some(generation))
+            .await
+    }
+
+    async fn invalidate_sessions_matching(
+        &self,
+        jid: &FullJid,
+        generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
         let matching_ids: Vec<String> = {
             let sessions = self
                 .sessions
@@ -2463,11 +2482,16 @@ impl InMemorySmSessionRegistry {
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
             let mut ids: Vec<String> = sessions
                 .iter()
-                .filter(|(_, s)| s.jid == *jid)
+                .filter(|(_, s)| {
+                    s.jid == *jid
+                        && generation.is_none_or(|generation| s.occupancy_session == generation)
+                })
                 .map(|(id, _)| id.clone())
                 .collect();
             for (id, s) in claimed.iter() {
-                if s.jid == *jid {
+                if s.jid == *jid
+                    && generation.is_none_or(|generation| s.occupancy_session == generation)
+                {
                     ids.push(id.clone());
                 }
             }

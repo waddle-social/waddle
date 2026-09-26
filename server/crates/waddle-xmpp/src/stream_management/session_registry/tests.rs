@@ -4201,6 +4201,74 @@ async fn invalidate_sessions_for_jid_preserves_rows_until_confirmed() {
 }
 
 #[tokio::test]
+async fn generation_invalidation_preserves_detached_and_claimed_successors() {
+    use super::super::persistence::InMemorySmPersistence;
+
+    // Both the displaced generation and its same-full-JID successor can be
+    // detached or held by a resume in progress. Only the selected generation
+    // transfers to promotion custody, regardless of which map contains it.
+    for old_claimed in [false, true] {
+        for successor_claimed in [false, true] {
+            let storage = std::sync::Arc::new(InMemorySmPersistence::new());
+            let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+            let jid: FullJid = "alice@example.com/generation-invalidation".parse().unwrap();
+            let old = realistic_test_session_for_jid("displaced", jid.clone());
+            let old_generation = old.occupancy_session;
+            let successor = realistic_test_session_for_jid("successor", jid.clone());
+            let successor_generation = successor.occupancy_session;
+            // Model snapshots persisted by different nodes then recovered
+            // together. Sequential local stores intentionally displace the
+            // previous full-JID session before invalidation can inspect it.
+            for session in [old, successor] {
+                InMemorySmSessionRegistry::new()
+                    .with_persistence(storage.clone())
+                    .store_session(session)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(registry.restore_from_persistence().await.unwrap(), 2);
+            if old_claimed {
+                registry.claim_session("displaced").await.unwrap().unwrap();
+            }
+            if successor_claimed {
+                registry.claim_session("successor").await.unwrap().unwrap();
+            }
+
+            let removed = registry
+                .invalidate_sessions_for_generation(&jid, old_generation)
+                .await
+                .unwrap();
+            assert_eq!(removed.len(), 1);
+            assert_eq!(removed[0].stream_id, "displaced");
+            assert_eq!(removed[0].occupancy_session, old_generation);
+            assert_eq!(removed[0].unacked_stanzas.len(), 2);
+            assert!(registry.claim_session("displaced").await.unwrap().is_none());
+            let old_id = crate::pending_delivery::SmSessionId::new("displaced");
+            let successor_id = crate::pending_delivery::SmSessionId::new("successor");
+            assert!(
+                storage.get_session(&old_id).await.unwrap().is_some(),
+                "promotion retains the old durable row until confirmed"
+            );
+            registry.confirm_drained("displaced").await;
+            assert!(storage.get_session(&old_id).await.unwrap().is_none());
+            let durable_successor = storage.get_session(&successor_id).await.unwrap().unwrap();
+            assert_eq!(durable_successor.occupancy_session, successor_generation);
+            assert_eq!(storage.list_unacked(&successor_id).await.unwrap().len(), 2);
+            if !successor_claimed {
+                registry.claim_session("successor").await.unwrap().unwrap();
+            }
+            let Some(SmClaimCompletion::Resumed(resumed)) =
+                registry.complete_claim("successor").await.unwrap()
+            else {
+                panic!("successor remains resumable");
+            };
+            assert_eq!(resumed.occupancy_session, successor_generation);
+            assert_eq!(resumed.unacked_stanzas.len(), 2);
+        }
+    }
+}
+
+#[tokio::test]
 async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
     // Issue #1098: sessions whose resume window closed during the
     // server's downtime must NOT be durably deleted at restore time —
@@ -7421,13 +7489,32 @@ async fn any_resumable_session_probe_covers_durable_rows_and_fails_closed() {
         presence_priority: 0,
         presence_payloads: Vec::new(),
     };
+    let row = durable_row("stream-durable", Utc::now());
+    let generation = row.occupancy_session;
     storage
-        .upsert_session(durable_row("stream-durable", Utc::now()))
+        .upsert_session(row)
         .await
         .expect("upsert durable row");
     assert!(
         registry.any_resumable_session_for_full_jid(&jid).await,
         "a durable-only row proves the occupancy is still resumable"
+    );
+
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(&jid, generation)
+            .await,
+        super::ResumableSessionProbe::Present,
+    );
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(
+                &jid,
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            )
+            .await,
+        super::ResumableSessionProbe::Absent,
+        "a durable replacement cannot exempt a predecessor's generation",
     );
 
     // Expired durable row: no longer resumable.
@@ -7492,6 +7579,47 @@ async fn typed_resumable_session_probe_surfaces_durable_read_failure() {
         super::ResumableSessionProbe::Failed
     );
     assert!(registry.any_resumable_session_for_full_jid(&jid).await);
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(
+                &jid,
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            )
+            .await,
+        super::ResumableSessionProbe::Failed,
+        "generation-scoped read failures must also fail closed",
+    );
+}
+
+#[tokio::test]
+async fn occupancy_resumable_probe_matches_detached_and_claimed_generation() {
+    let registry = InMemorySmSessionRegistry::new();
+    let session = realistic_test_session("generation-probe");
+    let jid = session.jid.clone();
+    let generation = session.occupancy_session;
+    let other = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    registry.store_session(session).await.unwrap();
+    for claimed in [false, true] {
+        if claimed {
+            registry
+                .claim_session("generation-probe")
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            registry
+                .probe_resumable_session_for_occupancy(&jid, generation)
+                .await,
+            super::ResumableSessionProbe::Present,
+        );
+        assert_eq!(
+            registry
+                .probe_resumable_session_for_occupancy(&jid, other)
+                .await,
+            super::ResumableSessionProbe::Absent,
+        );
+    }
 }
 
 /// Durable store that refuses the whole-table scan. #1803 runs this probe per

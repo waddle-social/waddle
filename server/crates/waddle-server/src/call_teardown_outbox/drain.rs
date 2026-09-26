@@ -315,8 +315,26 @@ fn stale_superseded_by_live_participant(
         return true;
     }
     let identity = Identity::from_jid(participant.clone());
+    // Reconciliation restores connected participants without occupant or
+    // signaling bindings and stamps their registration with its observation
+    // time. That timestamp cannot supersede a confirmed departure's occupant
+    // fence. Preserve the independent token-mint check: a later local issuance
+    // still proves a rejoin even if the restored registration remains unbound.
+    let restored_confirmed_departure = intent.occupant.is_some()
+        && intent.unbound_occupant == waddle_sfu::UnboundOccupantPolicy::TearDown
+        && sfu.has_call_participant(&intent.call_id, &identity)
+        && sfu
+            .participant_occupant_session(&intent.call_id, &identity)
+            .is_none()
+        && sfu
+            .participant_session_binding(&intent.call_id, &identity)
+            .is_none();
     [
-        sfu.participant_registered_at(&intent.call_id, &identity),
+        if restored_confirmed_departure {
+            None
+        } else {
+            sfu.participant_registered_at(&intent.call_id, &identity)
+        },
         sfu.participant_last_minted_at(&intent.call_id, &identity),
     ]
     .into_iter()
@@ -376,19 +394,21 @@ fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
 /// Targets allowed to execute on a node that does not own the room
 /// actor, provided the room has no claim at all. A completion-only
 /// retry needs no actor for its durable effect (the inbox summary).
-/// Participant/Room LiveKit teardowns are safe exactly when they carry
-/// the sid fence the executor resolves against LiveKit's LIVE state
-/// once the local entry is missing (occupancy / listing match before
-/// the destructive call) — so a restart-orphaned room nobody rejoined
-/// still gets its LiveKit cleanup instead of leaving the participant
-/// connected until dead-letter (#1612 review round 14). Muji presence
-/// effects require the owning room actor and stay gated.
+/// Participant/Room LiveKit teardowns can use a SID fence resolved against
+/// LiveKit's live state. A confirmed occupant-fenced departure also remains
+/// safe: the executor waits for reconciliation when local state is missing,
+/// then rejects replacement bindings and permits restored unbound participants.
+/// Muji presence effects require the owning room actor and stay gated.
 fn executes_without_room_owner(intent: &CallTeardownIntent) -> bool {
     match &intent.target {
         TeardownTarget::CallThreadEndRetry { .. } => true,
         TeardownTarget::Participant {
             participant_sid, ..
-        } => participant_sid.is_some(),
+        } => {
+            participant_sid.is_some()
+                || (intent.occupant.is_some()
+                    && intent.unbound_occupant == waddle_sfu::UnboundOccupantPolicy::TearDown)
+        }
         TeardownTarget::Room => intent.room_sid.is_some(),
         TeardownTarget::MujiPresenceClear { .. } | TeardownTarget::MujiRoomSweep { .. } => false,
     }

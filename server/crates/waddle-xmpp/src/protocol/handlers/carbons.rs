@@ -62,6 +62,7 @@ mod tests {
         };
         let jid = test_jid();
         let ctx = StanzaContext {
+            participant_registration: None,
             domain: "waddle.social",
             full_jid: &jid,
             occupant_session: None,

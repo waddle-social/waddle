@@ -561,7 +561,7 @@ pub struct RelayRemoteResourceRegistrationReply {
     pub status: RelayRemoteResourceRegistrationStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_register.v2")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_register.v3")]
 impl Message<RelayRegisterRemoteUserResource> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceRegistrationReply>;
 
@@ -818,6 +818,7 @@ impl Message<RelayDeliverRemoteResourceWriteAcceptedFrame> for RelayActor {
 pub struct RelayForceDetachRemoteUserResource {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
+    pub occupancy_session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     pub origin: waddle_xmpp::registry::ForceDetachOrigin,
     pub requester_bare_jid: jid::BareJid,
     /// Sender's W3C trace context (#1485), telemetry only: absent from
@@ -841,7 +842,7 @@ pub struct RelayForceDetachRemoteUserResourceReply {
     pub status: RelayRemoteResourceForceDetachStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_force_detach.v2")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_force_detach.v3")]
 impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayForceDetachRemoteUserResourceReply>;
 

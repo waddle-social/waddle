@@ -299,6 +299,7 @@ impl XmppStateMachine {
         };
 
         let ctx = StanzaContext {
+            participant_registration: None,
             domain: &self.domain,
             full_jid: &full_jid,
             occupant_session: None,

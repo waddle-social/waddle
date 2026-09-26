@@ -106,6 +106,9 @@ pub(crate) async fn handle_relayed_muji_initiate(
         }
     };
 
+    let participant_registration = relayed_muji_room(iq).and_then(|room| {
+        jingle_muji_gate::participant_registration_expectation(state, &room, &sender)
+    });
     if !is_terminate {
         let room = relayed_muji_room(iq)?;
         match relayed_muji_generation_is_current(state, &room, &sender, occupancy_session).await {
@@ -132,6 +135,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
     }
 
     let ctx = ProtocolStanzaContext {
+        participant_registration,
         domain: state.deps.auth_state.xmpp_domain.as_str(),
         full_jid: &sender,
         media_capabilities,

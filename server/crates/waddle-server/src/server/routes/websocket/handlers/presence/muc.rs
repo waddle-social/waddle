@@ -2122,7 +2122,7 @@ pub async fn handle_muc_leave(
                 Affiliation::None,
             )];
         }
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded) => {
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded { .. }) => {
             waddle_xmpp::telemetry::reliability::increment_muc_cleanup_superseded();
             state
                 .deps

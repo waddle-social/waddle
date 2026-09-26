@@ -4160,3 +4160,112 @@ async fn teardown_executor_honours_the_persisted_unbound_policy() {
     );
     assert_eq!(admin.remove_snapshot().len(), 1);
 }
+
+#[test]
+fn stale_authorized_initiate_cannot_publish_over_a_replacement() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("generation-race").expect("call");
+    let alice = fixture_identity("alice");
+    let first = fixture_occupancy_session();
+    let second = fixture_occupancy_session();
+    let old_sid = SessionBinding::new("old-sid").expect("old session");
+    let new_sid = SessionBinding::new("new-sid").expect("replacement session");
+    // g1 captures its comparison value, then pauses at room authorization.
+    let expected = crate::ParticipantRegistrationExpectation {
+        occupant: sfu.participant_occupant_session(&call, &alice),
+    };
+    // g2 replaces the room occupancy and finishes its authorized initiate.
+    let replacement_token = sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &new_sid,
+            second,
+            expected,
+        )
+        .expect("mint replacement")
+        .expect("register replacement");
+    let minted_at = sfu.participant_last_minted_at(&call, &alice);
+    let registered_at = sfu.participant_registered_at(&call, &alice);
+    sfu.arm_pending_revocation_eject(&call, &alice, replacement_token.expires_at);
+    // The late g1 authorization result must fail at the publication boundary.
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &old_sid,
+            first,
+            expected,
+        )
+        .expect("conditional publication")
+        .is_none());
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(second)
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &alice),
+        Some(new_sid)
+    );
+    assert_eq!(sfu.participant_last_minted_at(&call, &alice), minted_at);
+    assert_eq!(sfu.participant_registered_at(&call, &alice), registered_at);
+    assert!(sfu.has_pending_revocation_eject(&call, &alice));
+    let issued = sfu
+        .issued
+        .get(&(call, alice))
+        .expect("replacement token bucket");
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].jti, replacement_token.jti);
+    assert!(!sfu.is_revoked(&replacement_token.jti));
+}
+
+#[test]
+fn authorized_replacement_can_conditionally_replace_the_previous_binding() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("generation-replacement").expect("call");
+    let alice = fixture_identity("alice");
+    let first = fixture_occupancy_session();
+    let second = fixture_occupancy_session();
+    let old_sid = SessionBinding::new("old-sid").expect("old session");
+    let new_sid = SessionBinding::new("new-sid").expect("replacement session");
+    sfu.register_call_participant_with_session(&call, &alice, &old_sid, first);
+    let expected = crate::ParticipantRegistrationExpectation {
+        occupant: sfu.participant_occupant_session(&call, &alice),
+    };
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &new_sid,
+            second,
+            expected,
+        )
+        .expect("mint replacement")
+        .is_some());
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(second)
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &alice),
+        Some(new_sid)
+    );
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &old_sid,
+            first,
+            expected,
+        )
+        .expect("stale previous initiate")
+        .is_none());
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(second)
+    );
+}

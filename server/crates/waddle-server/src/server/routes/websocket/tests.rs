@@ -1236,6 +1236,13 @@ pub(crate) async fn store_resumable_detached_session(
     session: &Session,
     detached: waddle_xmpp::stream_management::DetachedSession,
 ) {
+    crate::occupancy_authority::publish(
+        state.deps.app_state.db_pool.global(),
+        &detached.jid,
+        detached.occupancy_session,
+    )
+    .await
+    .expect("seed authoritative generation for resumable test session");
     state
         .deps
         .protocol

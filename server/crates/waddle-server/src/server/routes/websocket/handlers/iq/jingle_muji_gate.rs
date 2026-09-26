@@ -284,6 +284,21 @@ pub(super) fn muji_jingle_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding>
     waddle_sfu::SessionBinding::new(jingle.sid.0).ok()
 }
 
+/// Capture before awaiting room authorization, so a concurrent replacement
+/// registration cannot be overwritten after the authorization snapshot.
+pub(super) fn participant_registration_expectation(
+    state: &WebSocketState,
+    room: &BareJid,
+    full_jid: &FullJid,
+) -> Option<waddle_sfu::ParticipantRegistrationExpectation> {
+    let sfu = state.deps.protocol.sfu.as_ref()?;
+    let call = waddle_sfu::CallId::new(room.to_string()).ok()?;
+    let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
+    Some(waddle_sfu::ParticipantRegistrationExpectation {
+        occupant: sfu.participant_occupant_session(&call, &identity),
+    })
+}
+
 /// After a Muji initiate registered the SFU participant, re-check that the
 /// room still holds this connection's generation: a same-FullJID replacement
 /// that re-joined between the pre-dispatch check and the registration would

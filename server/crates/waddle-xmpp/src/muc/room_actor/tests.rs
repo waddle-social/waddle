@@ -4808,7 +4808,7 @@ async fn replayed_receipt_is_superseded_when_the_session_rejoined() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), first_attempt).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 1);
 
@@ -4848,7 +4848,7 @@ async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), first_attempt).await,
-        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded { .. }
     ));
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), second_attempt).await,
@@ -4963,7 +4963,7 @@ async fn retry_of_an_attempt_older_than_the_live_session_is_superseded() {
 
     let stale_retry = leave_with_attempt(&actor, alice.clone(), first_attempt).await;
     assert!(
-        matches!(stale_retry, LeaveDisposition::Superseded),
+        matches!(stale_retry, LeaveDisposition::Superseded { .. }),
         "stale retry must be superseded, got {stale_retry:?}"
     );
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
@@ -5032,7 +5032,7 @@ async fn old_receipt_is_not_replayed_after_the_rejoined_session_was_kicked() {
 
     let stale_retry = leave_with_attempt(&actor, alice.clone(), lost_attempt).await;
     assert!(
-        matches!(stale_retry, LeaveDisposition::Superseded),
+        matches!(stale_retry, LeaveDisposition::Superseded { .. }),
         "a newer generation existed (and was removed by moderation): the stale \
          ordinary departure must not be announced after the 307, got {stale_retry:?}"
     );
@@ -5165,7 +5165,7 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
 
     assert!(matches!(
         leave_with_attempt(&successor, alice.clone(), attempt_a).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(
         receipts_of(&successor.ask(GetSnapshot).await.expect("snapshot")).len(),
@@ -5246,7 +5246,7 @@ async fn replayed_final_departure_is_superseded_when_the_same_account_retook_the
     )
     .await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(replay, LeaveDisposition::Superseded { .. }),
         "a freed nick now held by anyone supersedes the receipt, got {replay:?}"
     );
     assert!(
@@ -5290,7 +5290,12 @@ async fn coalesced_retry_is_superseded_when_the_same_account_retook_the_freed_ni
     )
     .await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(
+            replay,
+            LeaveDisposition::Superseded {
+                current_generation: None
+            }
+        ),
         "the JID fallback applies the freed-nick rule, got {replay:?}"
     );
     assert!(actor
@@ -5334,7 +5339,7 @@ async fn non_final_receipt_is_superseded_once_the_sibling_left_and_the_nick_was_
 
     let replay = leave_with_attempt(&actor, web, attempt).await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(replay, LeaveDisposition::Superseded { .. }),
         "a new nick generation supersedes the non-final receipt, got {replay:?}"
     );
 }
@@ -5366,7 +5371,7 @@ async fn non_final_receipt_is_superseded_once_the_sibling_left_even_without_a_re
 
     let replay = leave_with_attempt(&actor, web, attempt).await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(replay, LeaveDisposition::Superseded { .. }),
         "an absent nick supersedes a non-final receipt, got {replay:?}"
     );
 }
@@ -5492,7 +5497,7 @@ async fn tombstoned_retained_retry_still_drains_other_owed_receipts() {
     // NotOccupant — or, had any tombstone survived, Superseded).
     assert!(matches!(
         retry(a1).await,
-        LeaveDisposition::Superseded | LeaveDisposition::NotOccupant
+        LeaveDisposition::Superseded { .. } | LeaveDisposition::NotOccupant
     ));
     assert!(
         actor
@@ -5701,7 +5706,7 @@ async fn nick_retaken_supersession_consumes_the_unreplayable_receipt() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), attempt).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert!(
         actor
@@ -5791,7 +5796,7 @@ async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice, attempt).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert_eq!(
@@ -5993,7 +5998,7 @@ async fn transferred_older_generation_receipt_is_refused() {
     );
     assert!(matches!(
         leave_with_attempt(&successor, alice.clone(), older_attempt).await,
-        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded { .. }
     ));
     assert!(matches!(
         leave_with_attempt(&successor, alice, newer_attempt).await,
@@ -6643,7 +6648,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
             })
             .await
             .expect("stale retry"),
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
     assert!(matches!(
@@ -6768,7 +6773,7 @@ async fn same_full_jid_rejoin_overwrites_the_stored_generation_and_stale_leave_i
             LeaveSessionSelector::Generation(generation_one),
         )
         .await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
@@ -6814,7 +6819,7 @@ async fn inactive_seal_with_mismatched_generation_is_superseded_not_deferred() {
             LeaveSessionSelector::Generation(stale_generation),
         )
         .await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert!(actor.ask(UnsealInactive).await.expect("unseal"));
     assert!(matches!(
@@ -6853,7 +6858,7 @@ async fn newer_attempt_still_cannot_evict_a_rejoined_session_when_generation_is_
             LeaveSessionSelector::Generation(generation_one),
         )
         .await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert_eq!(
@@ -6978,6 +6983,7 @@ async fn simulate_crash_after_projection_commit(
     let gate = actor
         .commit_projection(crate::muc::durable::RoomProjection::OccupancyJoin {
             occupant: test_full_jid("alice"),
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: crate::muc::durable::MucOccupantNick::new("alice".to_owned())
                 .expect("valid nick"),
         })
@@ -7229,7 +7235,7 @@ async fn join_commits_projection_revision_before_admitting_occupant() {
     assert!(matches!(
         store.recorded_intents().last(),
         Some(crate::muc::RoomDurableMutation::Projection(
-            crate::muc::durable::RoomProjection::OccupancyJoin { occupant, nick }
+            crate::muc::durable::RoomProjection::OccupancyJoin { occupant, nick, .. }
         )) if occupant == &alice && nick.as_str() == "alice"
     ));
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
@@ -10388,7 +10394,7 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
 
 /// #1703 (codex round 3): a same-full-JID rejoin by a different connection
 /// generation must not see the displaced connection's Muji advertisement in
-/// its own join snapshot (it is cleared BEFORE `existing_occupants` is taken).
+/// its own join snapshot, while sibling sessions retain their call state.
 #[tokio::test]
 async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_state() {
     let actor = spawn_room_actor().await;
@@ -10409,6 +10415,34 @@ async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_stat
         .expect("muji upsert")
         .expect("alice is an occupant");
 
+    let sibling: FullJid = "alice@example.com/mobile".parse().unwrap();
+    let sibling_session = OccupancySessionGeneration::mint();
+    join_as_resolver_with_session(&actor, sibling.clone(), "alice", sibling_session)
+        .await
+        .expect("sibling join");
+    actor
+        .ask(UpsertMujiPresence {
+            sender_jid: sibling.clone(),
+            occupant: Some(sibling_session),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("sibling muji update")
+        .expect("sibling occupant");
+    for (jid, session) in [(&alice, first), (&sibling, sibling_session)] {
+        actor
+            .ask(UpsertInCallState {
+                sender_jid: jid.clone(),
+                occupant: Some(session),
+                state: crate::xep::InCallPresenceState {
+                    hand_raised: true,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("in-call update")
+            .expect("occupant");
+    }
     let admission_revision = actor
         .ask(GetSnapshot)
         .await
@@ -10434,6 +10468,90 @@ async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_stat
     assert!(
         own.muji.is_none(),
         "the displaced generation's Muji advertisement must not be replayed to the replacement"
+    );
+    assert!(!own.in_call.hand_raised);
+    let sibling_snapshot = outcome
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.jid == sibling)
+        .expect("sibling snapshot");
+    assert!(sibling_snapshot.muji.is_some());
+    assert!(sibling_snapshot.in_call.hand_raised);
+    let live = actor.ask(GetSnapshot).await.expect("committed state");
+    assert_eq!(live.room.session_generation(&alice), Some(second));
+    assert!(live.room.muji_for_session("alice", &alice).is_none());
+    assert!(
+        !live
+            .room
+            .in_call_state_for_session("alice", &alice)
+            .hand_raised
+    );
+    assert!(live.room.muji_for_session("alice", &sibling).is_some());
+    assert!(
+        live.room
+            .in_call_state_for_session("alice", &sibling)
+            .hand_raised
+    );
+}
+
+/// A refused replacement projection must not clear the incumbent's call state.
+#[tokio::test]
+async fn refused_rejoin_preserves_the_incumbent_call_state() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    let first = OccupancySessionGeneration::mint();
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", first)
+        .await
+        .expect("first join");
+    actor
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("muji update")
+        .expect("current occupant");
+    actor
+        .ask(UpsertInCallState {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            state: crate::xep::InCallPresenceState {
+                hand_raised: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("in-call update")
+        .expect("current occupant");
+    let before = actor.ask(GetSnapshot).await.expect("before replacement");
+    store.set_replay_last_coordinates(true);
+    let replacement = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+            local_domain: "example.com".to_owned(),
+            admission_revision: before.admission_revision,
+            session: OccupancySessionGeneration::mint(),
+        })
+        .await;
+    assert!(matches!(
+        replacement,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+    let after = actor.ask(GetSnapshot).await.expect("after refusal");
+    assert_eq!(after.room.session_generation(&alice), Some(first));
+    assert_eq!(
+        after.room.muji_for_session("alice", &alice),
+        before.room.muji_for_session("alice", &alice)
+    );
+    assert_eq!(
+        after.room.in_call_state_for_session("alice", &alice),
+        before.room.in_call_state_for_session("alice", &alice)
     );
 }
 

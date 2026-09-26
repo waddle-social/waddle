@@ -2334,7 +2334,7 @@ async fn run_group_dm_leave(
                 }
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
-                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded,
+                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded { .. },
                 ) => {
                     pending_local_muc_departures.complete_in_flight(&in_flight);
                 }

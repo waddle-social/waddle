@@ -29,6 +29,7 @@ pub mod muc_durable;
 pub mod notification_activity;
 pub mod notification_outbox;
 pub mod notification_settings_projection;
+pub mod occupancy_authority;
 pub mod pending_delivery;
 pub mod pep_feed_bridge;
 pub mod permissions;

@@ -1464,11 +1464,30 @@ impl LiveKitSfu {
         identity: &Identity,
         session: Option<&SessionBinding>,
         occupant_session: Option<OccupancySessionGeneration>,
-    ) {
+        publication: Option<(&JoinToken, crate::ParticipantRegistrationExpectation)>,
+    ) -> bool {
+        // Preserve the established issued -> calls lock order used by minting.
+        // Keep a vacant issued entry vacant on a failed comparison.
+        let issued_entry =
+            publication.map(|_| self.issued.entry((call_id.clone(), identity.clone())));
+        let call_entry = self.calls.entry(call_id.clone());
+        // A departure may have waited ahead of us; stamp publication only
+        // after both locks are acquired so its sweep recognizes this token
+        // as a later mint.
         let now = Utc::now();
-        match self.calls.entry(call_id.clone()) {
-            dashmap::Entry::Occupied(mut entry) => {
-                let entry = entry.get_mut();
+        let mut protected_from_empty_bucket_eject = false;
+        let _call_entry = match call_entry {
+            dashmap::Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                if let Some((_, expected)) = publication {
+                    let current = entry
+                        .participants
+                        .get(identity)
+                        .and_then(|participant| participant.occupant_session);
+                    if current != expected.occupant {
+                        return false;
+                    }
+                }
                 if entry.participants.is_empty() {
                     entry.generation =
                         self.next_call_generation(call_id, entry.generation.as_u64());
@@ -1488,14 +1507,22 @@ impl LiveKitSfu {
                     .and_modify(|participant| {
                         participant.session = session.cloned();
                         participant.occupant_session = occupant_session;
+                        if publication.is_some() {
+                            protected_from_empty_bucket_eject = participant.registered_without_mint;
+                            participant.registered_without_mint = false;
+                        }
                     })
                     .or_insert_with(|| ParticipantState {
                         session: session.cloned(),
                         occupant_session,
                         ..ParticipantState::new(now)
                     });
+                occupied.into_ref()
             }
             dashmap::Entry::Vacant(entry) => {
+                if publication.is_some_and(|(_, expected)| expected.occupant.is_some()) {
+                    return false;
+                }
                 let generation = self.next_call_generation(call_id, 0);
                 let mut participants = HashMap::new();
                 participants.insert(
@@ -1512,8 +1539,23 @@ impl LiveKitSfu {
                     room_sid: None,
                     room_sid_observed_at: None,
                     participants,
-                });
+                })
             }
+        };
+        if let (Some((token, _)), Some(issued_entry)) = (publication, issued_entry) {
+            let mut issued = issued_entry.or_default();
+            while issued.len() >= MAX_ISSUED_PER_PARTICIPANT {
+                issued.remove(0);
+            }
+            self.last_minted_at
+                .insert((call_id.clone(), identity.clone()), now);
+            issued.push(IssuedJti {
+                jti: token.jti.clone(),
+                exp: token.expires_at,
+                protected_from_empty_bucket_eject,
+                minted_at: now,
+            });
+            self.clear_pending_revocation_eject(call_id, identity);
         }
         // This registration is only reachable through the authorized
         // Jingle gate (the webhook path uses
@@ -1523,7 +1565,9 @@ impl LiveKitSfu {
         // fresh token and arm an eject the mint-time clear already
         // missed — so the authorized registration clears it again
         // (#1612 review round 9).
-        self.clear_pending_revocation_eject(call_id, identity);
+        if publication.is_none() {
+            self.clear_pending_revocation_eject(call_id, identity);
+        }
         // Stamp (or refresh) the registration time so the
         // reconciliation backstop's grace window is measured from the
         // most recent (re)join, not a stale earlier attempt. A
@@ -1534,6 +1578,7 @@ impl LiveKitSfu {
             .insert((call_id.clone(), identity.clone()), now);
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
+        true
     }
 
     /// Session-gated local-only cleanup shared by the trait's plain
@@ -2506,6 +2551,35 @@ impl SfuService for LiveKitSfu {
         Ok(token)
     }
 
+    fn issue_join_token_with_session(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        capabilities: MediaCapabilities,
+        session: &SessionBinding,
+        occupant: OccupancySessionGeneration,
+        expected: crate::ParticipantRegistrationExpectation,
+    ) -> Result<Option<JoinToken>, SfuError> {
+        // JWT construction is side-effect free; publish it only after CAS.
+        let token = mint_join_token(MintInputs {
+            api_key: &self.config.api_key,
+            api_secret: &self.config.api_secret,
+            ws_url: &self.config.ws_url,
+            call_id,
+            identity,
+            capabilities,
+            ttl: self.config.token_ttl,
+        })?;
+        let registered = self.register_participant_with_binding(
+            call_id,
+            identity,
+            Some(session),
+            Some(occupant),
+            Some((&token, expected)),
+        );
+        Ok(registered.then_some(token))
+    }
+
     fn issue_turn_credentials(&self, identity: &Identity) -> Result<TurnCredential, SfuError> {
         mint_turn_credential(
             &self.config.turn_shared_secret,
@@ -2515,7 +2589,7 @@ impl SfuService for LiveKitSfu {
     }
 
     fn register_call_participant(&self, call_id: &CallId, identity: &Identity) {
-        self.register_participant_with_binding(call_id, identity, None, None);
+        self.register_participant_with_binding(call_id, identity, None, None, None);
     }
 
     fn register_call_participant_with_session(
@@ -2525,7 +2599,13 @@ impl SfuService for LiveKitSfu {
         session: &SessionBinding,
         occupant: OccupancySessionGeneration,
     ) {
-        self.register_participant_with_binding(call_id, identity, Some(session), Some(occupant));
+        self.register_participant_with_binding(
+            call_id,
+            identity,
+            Some(session),
+            Some(occupant),
+            None,
+        );
     }
 
     fn register_call_participant_observed(

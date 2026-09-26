@@ -76,6 +76,7 @@ fn session_jid() -> jid::FullJid {
 
 fn stanza_ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
     StanzaContext {
+        participant_registration: None,
         domain: "waddle.social",
         full_jid: jid,
         occupant_session: None,

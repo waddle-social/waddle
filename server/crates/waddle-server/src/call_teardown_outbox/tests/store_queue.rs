@@ -163,6 +163,39 @@ async fn identical_queued_duplicate_returns_the_existing_intent_id() {
 }
 
 #[tokio::test]
+async fn differing_unbound_policy_preserves_confirmed_departure_authority() {
+    let store = store("call-teardown-dedupe-policy").await;
+    let keep = participant_intent_with_occupant();
+    let teardown = CallTeardownIntent {
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
+        ..keep.clone()
+    };
+
+    let keep_id = store.enqueue(keep).await.expect("keep intent");
+    let teardown_id = store
+        .enqueue(teardown.clone())
+        .await
+        .expect("confirmed departure");
+
+    assert_ne!(keep_id, teardown_id);
+    assert_eq!(
+        store
+            .enqueue(teardown)
+            .await
+            .expect("duplicate confirmed departure"),
+        teardown_id
+    );
+    assert_eq!(
+        store
+            .claim_due(8)
+            .await
+            .expect("claim distinct policies")
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn differing_fence_evidence_inserts_a_second_queued_row() {
     let store = store("call-teardown-dedupe-fenced").await;
     let first = participant_intent();

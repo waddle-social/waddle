@@ -596,12 +596,34 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
     ) -> ResumableSessionProbe {
+        self.probe_resumable_session(jid, None).await
+    }
+
+    /// Probe only the occupancy generation whose memberships may be retired.
+    /// A resumable replacement with the same full JID does not own its
+    /// predecessor's memberships, including when only its durable row remains.
+    pub async fn probe_resumable_session_for_occupancy(
+        &self,
+        jid: &FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> ResumableSessionProbe {
+        self.probe_resumable_session(jid, Some(generation)).await
+    }
+
+    async fn probe_resumable_session(
+        &self,
+        jid: &FullJid,
+        generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    ) -> ResumableSessionProbe {
         let in_memory = {
             let matches_memory =
                 |sessions: &std::collections::HashMap<String, super::super::DetachedSession>| {
-                    sessions
-                        .values()
-                        .any(|session| !session.is_expired() && session.jid == *jid)
+                    sessions.values().any(|session| {
+                        !session.is_expired()
+                            && session.jid == *jid
+                            && generation
+                                .is_none_or(|generation| session.occupancy_session == generation)
+                    })
                 };
             let sessions = self.sessions.read();
             let claimed = self.claimed_sessions.read();
@@ -627,8 +649,9 @@ impl InMemorySmSessionRegistry {
             Ok(rows) => {
                 let now = chrono::Utc::now();
                 if rows.iter().any(|row| {
-                    now.signed_duration_since(row.detached_at).to_std().ok()
-                        <= Some(row.max_resume_duration)
+                    generation.is_none_or(|generation| row.occupancy_session == generation)
+                        && now.signed_duration_since(row.detached_at).to_std().ok()
+                            <= Some(row.max_resume_duration)
                 }) {
                     ResumableSessionProbe::Present
                 } else {

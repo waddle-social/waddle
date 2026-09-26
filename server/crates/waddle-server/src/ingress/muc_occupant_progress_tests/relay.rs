@@ -141,7 +141,10 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
         Case::Uncertain => {
             ControlledMucRelay::Outcome(Some(FullJidDeliveryOutcome::MaybeCommitted))
         }
-        Case::LocalDuring => ControlledMucRelay::OwnerRefresh(sm.clone()),
+        Case::LocalDuring => ControlledMucRelay::OwnerRefresh(
+            crate::clustering::route_bridge::tests::muc_refresh::owner_refresh_services(sm.clone())
+                .await,
+        ),
     };
     let local = matches!(case, Case::LocalBefore | Case::LocalDuring);
     let run = CONTROLLED_MUC_RELAY.scope(

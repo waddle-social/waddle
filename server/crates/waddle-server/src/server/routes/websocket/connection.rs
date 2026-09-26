@@ -817,6 +817,7 @@ async fn handle_xmpp_websocket(
         cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await
     };
     finalize_replay_recorded_completions(&state, &mut conn, shutdown_outcome);
+    cleanup::finish_socket_cleanup(&state, &conn, shutdown_outcome).await;
 
     // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
     // detach-for-resume persistence has actually run above — tell the
@@ -939,7 +940,8 @@ pub(super) fn drain_ready_force_detach_requests(
     drained
 }
 
-/// Cross-node semantics are authoritative whenever ANY queued request carries
+/// Fresh binding terminally retires an occupancy, even when a resume was also
+/// queued. Otherwise cross-node semantics win whenever ANY request carries
 /// that origin, regardless of queue order: a stale-retirement request drained
 /// ahead of a cross-node-resume one must not make cleanup skip the synchronous
 /// cross-node unregister fence while both waiters are acknowledged from the
@@ -948,6 +950,11 @@ pub(super) fn drain_ready_force_detach_requests(
 pub(super) fn authoritative_force_detach_origin(
     requests: &[waddle_xmpp::registry::ForceDetachRequest],
 ) -> Option<waddle_xmpp::registry::ForceDetachOrigin> {
+    if requests.iter().any(|request| {
+        request.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+    }) {
+        return Some(waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement);
+    }
     requests
         .iter()
         .any(|request| request.origin == waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume)
@@ -959,7 +966,13 @@ pub(super) fn release_stale_force_detach_waiters_before_cross_node_cleanup(
     requests: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
     primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
 ) {
-    if primary_origin != Some(waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume) {
+    if !matches!(
+        primary_origin,
+        Some(
+            waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+                | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+        )
+    ) {
         return;
     }
 
@@ -1121,8 +1134,11 @@ fn handle_late_force_detach_waiter_during_cross_node_cleanup(
         return;
     }
 
-    if primary_origin == waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
-        && request.origin == waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
+    if matches!(
+        primary_origin,
+        waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume
+            | waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+    ) && request.origin == waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
     {
         // While the cross-node cleanup is synchronously re-entering the
         // UserRegistry actor, a newly queued stale-retirement request already
@@ -2535,6 +2551,58 @@ mod tests {
         assert!(
             task.await.expect("late waiter task joins").is_empty(),
             "stale retirements should be answered inline, not buffered"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_stale_waiter_is_released_during_fresh_replacement_cleanup() {
+        use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest};
+
+        let bare_jid = BareJid::from_str("late-fresh@example.com").unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut rx = Some(rx);
+        let (cancel, task) = start_late_force_detach_waiter_service(
+            &mut rx,
+            bare_jid.clone(),
+            ForceDetachOrigin::FreshBindReplacement,
+        )
+        .expect("late waiter service");
+        let (resume_tx, resume_rx) = oneshot::channel();
+        tx.send(ForceDetachRequest {
+            origin: ForceDetachOrigin::CrossNodeResume,
+            requester_bare_jid: bare_jid.clone(),
+            ack: resume_tx,
+        })
+        .await
+        .unwrap();
+        let (stale_tx, stale_rx) = oneshot::channel();
+        tx.send(ForceDetachRequest {
+            origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+            requester_bare_jid: bare_jid,
+            ack: stale_tx,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stale_rx)
+                .await
+                .expect("release stale actor turn during fresh cleanup")
+                .unwrap(),
+            ForceDetachOutcome::NotPersisted,
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), resume_rx)
+                .await
+                .expect("late resume fails closed during terminal cleanup")
+                .unwrap(),
+            ForceDetachOutcome::NotPersisted,
+            "fresh replacement cannot promise a resumable detached snapshot",
+        );
+        cancel.cancel();
+        assert!(
+            task.await.unwrap().is_empty(),
+            "both late waiters were answered inline"
         );
     }
 

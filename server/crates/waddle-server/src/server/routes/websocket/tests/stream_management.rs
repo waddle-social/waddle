@@ -1953,6 +1953,63 @@ async fn cross_node_origin_is_authoritative_when_stale_retirement_queues_first()
 }
 
 #[tokio::test]
+async fn fresh_replacement_wins_queued_resume_and_releases_stale_actor_waiter() {
+    for reverse in [false, true] {
+        let bare_jid = BareJid::from_str("fresh-replacement@example.com").unwrap();
+        let (stale_tx, mut stale_rx) = oneshot::channel();
+        let (resume_tx, mut resume_rx) = oneshot::channel();
+        let (fresh_tx, mut fresh_rx) = oneshot::channel();
+        let mut requests = vec![
+            ForceDetachRequest {
+                origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+                requester_bare_jid: bare_jid.clone(),
+                ack: stale_tx,
+            },
+            ForceDetachRequest {
+                origin: ForceDetachOrigin::CrossNodeResume,
+                requester_bare_jid: bare_jid.clone(),
+                ack: resume_tx,
+            },
+            ForceDetachRequest {
+                origin: ForceDetachOrigin::FreshBindReplacement,
+                requester_bare_jid: bare_jid,
+                ack: fresh_tx,
+            },
+        ];
+        if reverse {
+            requests.reverse();
+        }
+        let origin = super::super::connection::authoritative_force_detach_origin(&requests);
+        assert_eq!(origin, Some(ForceDetachOrigin::FreshBindReplacement));
+        super::super::connection::release_stale_force_detach_waiters_before_cross_node_cleanup(
+            &mut requests,
+            origin,
+        );
+        assert_eq!(
+            stale_rx.try_recv().unwrap(),
+            ForceDetachOutcome::NotPersisted,
+            "the stale registry actor turn must be released before terminal cleanup reenters it"
+        );
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            resume_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            fresh_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        // Both remaining waiters observe the terminal cleanup result; the
+        // competing resume never receives a false detached-state promise.
+        for request in requests {
+            request.ack.send(ForceDetachOutcome::NotPersisted).unwrap();
+        }
+        assert_eq!(resume_rx.await.unwrap(), ForceDetachOutcome::NotPersisted);
+        assert_eq!(fresh_rx.await.unwrap(), ForceDetachOutcome::NotPersisted);
+    }
+}
+
+#[tokio::test]
 async fn owner_managed_force_detach_waiter_stays_queued_during_cross_node_cleanup() {
     let bare_jid = BareJid::from_str("owner-managed@example.com").expect("valid bare jid");
     let (crossnode_ack_tx, mut crossnode_ack_rx) = oneshot::channel();

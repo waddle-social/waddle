@@ -614,6 +614,202 @@ async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
     );
 }
 
+#[tokio::test]
+async fn confirmed_departure_without_sid_waits_for_restoration_then_executes_without_room_owner() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let call_id = CallId::new("orphaned-occupant@muc.example.test").expect("call id");
+    let identity = Identity::from_jid("alice@example.test/device".parse().expect("full jid"));
+    let now_ms = crate::time::now_ms();
+    let store = &state.deps.protocol.call_teardown_outbox;
+    let intent_id = store
+        .enqueue_at(
+            CallTeardownIntent {
+                call_id: call_id.clone(),
+                target: TeardownTarget::Participant {
+                    identity: identity.as_jid().clone(),
+                    participant_sid: None,
+                },
+                generation: None,
+                occupant: Some(occupant_generation()),
+                unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
+                room_sid: None,
+                session: None,
+            },
+            now_ms - 10_000,
+        )
+        .await
+        .expect("confirmed departure");
+
+    let deferred = super::drain::drain_due_at(&state, 8, now_ms)
+        .await
+        .expect("initial drain");
+    assert_eq!(
+        deferred.requeued, 1,
+        "the executor must defer missing registry state"
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    let queued = store.find(&intent_id).await.expect("find").expect("intent");
+    assert_eq!(
+        queued.last_error,
+        Some(CallTeardownLastError::Retryable(
+            CallTeardownRetryReason::LiveKitOccupied
+        ))
+    );
+
+    // A webhook or reconciliation restores this participant without its old
+    // occupant generation, recording the observation time as its registration.
+    sfu.register_call_participant_observed(&call_id, &identity, &ObservedCallSids::none());
+    assert_eq!(sfu.participant_occupant_session(&call_id, &identity), None);
+    let restored =
+        super::drain::drain_due_at(&state, 8, queued.next_attempt_at_ms.expect("retry time"))
+            .await
+            .expect("restored drain");
+
+    assert_eq!(restored.drained, 1);
+    assert_eq!(
+        admin
+            .remove_calls
+            .lock()
+            .expect("recording lock")
+            .as_slice(),
+        &[(call_id, identity)]
+    );
+    assert_eq!(
+        store
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn confirmed_departure_does_not_override_newer_occupant_or_session_bindings() {
+    for replace_occupant in [false, true] {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+            fixture_config(),
+            Arc::clone(&admin) as Arc<_>,
+        ));
+        let state = state_with_executor(Arc::clone(&sfu)).await;
+        let call_id = CallId::new("alice@example.test:bound-replacement").expect("call id");
+        let identity = Identity::from_jid("alice@example.test/device".parse().expect("jid"));
+        let occupant = occupant_generation();
+        let current_session = waddle_sfu::SessionBinding::new("current-session").expect("session");
+        let old_session = waddle_sfu::SessionBinding::new("departed-session").expect("session");
+        sfu.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &current_session,
+            if replace_occupant {
+                occupant_generation()
+            } else {
+                occupant
+            },
+        );
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .enqueue_at(
+                CallTeardownIntent {
+                    call_id,
+                    target: TeardownTarget::Participant {
+                        identity: identity.as_jid().clone(),
+                        participant_sid: None,
+                    },
+                    generation: None,
+                    occupant: Some(occupant),
+                    unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
+                    room_sid: None,
+                    session: Some(if replace_occupant {
+                        current_session
+                    } else {
+                        old_session
+                    }),
+                },
+                crate::time::now_ms() - 10_000,
+            )
+            .await
+            .expect("departure");
+
+        assert_eq!(drain_due(&state, 8).await.expect("drain").drained, 1);
+        assert!(admin
+            .remove_calls
+            .lock()
+            .expect("recording lock")
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn unconfirmed_departure_or_later_token_mint_keeps_restored_registration() {
+    use waddle_sfu::UnboundOccupantPolicy::{Keep, TearDown};
+
+    for (occupant, policy, mint_token) in [
+        (Some(occupant_generation()), Keep, false),
+        (None, TearDown, false),
+        (Some(occupant_generation()), TearDown, true),
+    ] {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+            fixture_config(),
+            Arc::clone(&admin) as Arc<_>,
+        ));
+        let state = state_with_executor(Arc::clone(&sfu)).await;
+        let call_id =
+            CallId::new("alice@example.test:restored-without-authority").expect("call id");
+        let identity = Identity::from_jid("alice@example.test/device".parse().expect("jid"));
+        sfu.register_call_participant_observed(&call_id, &identity, &ObservedCallSids::none());
+        if mint_token {
+            sfu.issue_join_token(&call_id, &identity, MediaCapabilities::direct_call_peer())
+                .expect("later token");
+        }
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .enqueue_at(
+                CallTeardownIntent {
+                    call_id,
+                    target: TeardownTarget::Participant {
+                        identity: identity.as_jid().clone(),
+                        participant_sid: None,
+                    },
+                    generation: None,
+                    occupant,
+                    unbound_occupant: policy,
+                    room_sid: None,
+                    session: None,
+                },
+                crate::time::now_ms() - 10_000,
+            )
+            .await
+            .expect("departure");
+
+        assert_eq!(drain_due(&state, 8).await.expect("drain").drained, 1);
+        assert!(
+            admin
+                .remove_calls
+                .lock()
+                .expect("recording lock")
+                .is_empty(),
+            "occupant={occupant:?}, policy={policy:?}, mint_token={mint_token}"
+        );
+    }
+}
+
 /// #1612 review round 14: after a restart nobody rejoined this MUC, so
 /// it never re-enters `LocalRoomJids` and holds no claim anywhere. A
 /// sid-fenced LiveKit teardown must still be ATTEMPTED — the executor
