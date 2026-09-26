@@ -26,18 +26,16 @@ pub enum WireSinkError {
     NoRoom,
     #[error("target room jid is invalid: {0}")]
     InvalidRoomJid(String),
-    #[error("room actor lookup failed: {0}")]
-    RoomLookupFailed(String),
     #[error("room {0} is not currently registered")]
     RoomNotFound(String),
 }
 
 /// Emits a successful durable job's judgment result to the wire. The real
 /// implementation ([`WebSocketStateSafetyScoresWireSink`], constructed
-/// alongside the drain loop at startup) fans the fastening out to the
-/// room's current local occupants; the test-only sinks in this module's
-/// own `tests` submodule are for tests of the queue/retry logic that don't
-/// exercise delivery.
+/// alongside the drain loop at startup) archives and broadcasts the
+/// fastening via `broadcast_room_system_message`; the test-only sinks in
+/// this module's own `tests` submodule are for tests of the queue/retry
+/// logic that don't exercise delivery.
 #[async_trait]
 pub trait SafetyScoresWireSink: Send + Sync {
     async fn emit_safety_scores(
