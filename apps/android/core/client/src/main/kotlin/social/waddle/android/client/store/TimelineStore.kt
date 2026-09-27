@@ -225,32 +225,8 @@ class TimelineStore(
             }
             if (existingIndex >= 0) {
                 val existing = list[existingIndex]
-                // A live record supersedes its archived twin (richer
-                // payload); otherwise the first record wins and the
-                // replay is dropped. Applied mutations live on the entry
-                // and survive the swap.
-                if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
-                    val merged = item.copy(
-                        timestamp = item.timestamp ?: existing.item.timestamp,
-                        rejected = existing.item.rejected,
-                    )
-                    // The sort key must follow the adopted timestamp or
-                    // the row keeps its stale placement forever.
-                    list[existingIndex] = existing.copy(
-                        item = merged,
-                        sortInstant = merged.timestamp?.let(::parseInstant) ?: existing.sortInstant,
-                    )
-                    list.sortWith(ENTRY_ORDER)
-                    publish(conversation, list)
-                } else if (existing.item.timestamp == null && item.timestamp != null) {
-                    // The archived copy of a timestampless local echo
-                    // brings the server timestamp; adopt it in place —
-                    // including the sort key, else the echo stays pinned
-                    // at the newest edge above later-arriving messages.
-                    list[existingIndex] = existing.copy(
-                        item = existing.item.copy(timestamp = item.timestamp),
-                        sortInstant = parseInstant(item.timestamp),
-                    )
+                mergedTwin(existing, item)?.let { merged ->
+                    list[existingIndex] = merged
                     list.sortWith(ENTRY_ORDER)
                     publish(conversation, list)
                 }
@@ -274,6 +250,46 @@ class TimelineStore(
             publish(conversation, list)
         }
         return true
+    }
+
+    /**
+     * The same message seen twice (live + archive, or a replay): the
+     * updated entry, or `null` when [existing] already has everything.
+     * A live record supersedes its archived twin (richer payload);
+     * otherwise the first record wins. Applied mutations live on the
+     * entry and survive either way.
+     */
+    private fun mergedTwin(existing: Entry, item: TimelineItem): Entry? {
+        if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
+            val merged = item.copy(
+                timestamp = item.timestamp ?: existing.item.timestamp,
+                rejected = existing.item.rejected,
+                // The archived muc#user JID was stamped first and is
+                // authoritative for this row.
+                authorJid = existing.item.authorJid ?: item.authorJid,
+            )
+            // The sort key must follow the adopted timestamp or the row
+            // keeps its stale placement forever.
+            return existing.copy(
+                item = merged,
+                sortInstant = merged.timestamp?.let(::parseInstant) ?: existing.sortInstant,
+            )
+        }
+        // The archived copy of a timestampless local echo brings the
+        // server timestamp; adopt it in place — including the sort key,
+        // else the echo stays pinned at the newest edge above
+        // later-arriving messages. It also attributes a live row that
+        // arrived unstamped (delayed, or no occupant presence yet).
+        val adoptedTimestamp = item.timestamp?.takeIf { existing.item.timestamp == null }
+        val adoptedAuthor = item.authorJid?.takeIf { existing.item.authorJid == null }
+        if (adoptedTimestamp == null && adoptedAuthor == null) return null
+        return existing.copy(
+            item = existing.item.copy(
+                timestamp = adoptedTimestamp ?: existing.item.timestamp,
+                authorJid = adoptedAuthor ?: existing.item.authorJid,
+            ),
+            sortInstant = adoptedTimestamp?.let(::parseInstant) ?: existing.sortInstant,
+        )
     }
 
     private fun applyMutation(

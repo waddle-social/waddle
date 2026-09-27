@@ -152,8 +152,10 @@ internal class ProfileVerbs(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
+            // The FFI throws for a FAILED lookup (not connected, timeout,
+            // transient stanza error): keep whatever avatar is held.
             return AvatarLookup.Failed
-        } ?: return AvatarLookup.Absent
+        } ?: return AvatarLookup.Absent // `null` = definitively no avatar.
         // An id-only result means the FFI skipped the data fetch: the
         // bytes for that id are, by construction, in the cache we
         // handed it — re-mark them current. Keyed by the requested

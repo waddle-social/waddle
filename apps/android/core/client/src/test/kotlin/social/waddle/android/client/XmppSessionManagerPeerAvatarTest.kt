@@ -14,6 +14,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.store.authorBareJidOf
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleException
 
 /** Peer avatars end to end: lazy fetch, AvatarChanged, reconnect, authors. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -95,6 +96,53 @@ class XmppSessionManagerPeerAvatarTest {
 
         assertEquals(listOf("id-1"), harness.callsFor(alice)[1].second)
         assertEquals("id-1", harness.manager.peerAvatars.avatars.value[alice]?.id)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a failed lookup keeps the held avatar and retries after the retry window`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.avatar = testAvatar(jid = alice, id = "id-1")
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+
+        // Revalidation hits a transient failure: the FFI throws, which is
+        // NOT "no avatar" — the face must stay.
+        harness.client.requestAvatarFailure = WaddleException.Stanza("remote-server-timeout", null)
+        harness.now = PeerAvatarRepository.POSITIVE_TTL_MILLIS
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+        assertEquals(2, harness.callsFor(alice).size)
+        assertEquals("id-1", harness.manager.peerAvatars.avatars.value[alice]?.id)
+
+        // Retried only once the 10-minute window has passed.
+        harness.client.requestAvatarFailure = null
+        harness.now += PeerAvatarRepository.RETRY_TTL_MILLIS - 1
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+        assertEquals(2, harness.callsFor(alice).size)
+        harness.now += 1
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+        assertEquals(3, harness.callsFor(alice).size)
+        assertEquals("id-1", harness.manager.peerAvatars.avatars.value[alice]?.id)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a definitive no-avatar answer clears the held avatar`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.avatar = testAvatar(jid = alice, id = "id-1")
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+
+        harness.client.avatar = null
+        harness.now = PeerAvatarRepository.POSITIVE_TTL_MILLIS
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+        assertNull(harness.manager.peerAvatars.avatars.value[alice])
         harness.manager.logout()
     }
 

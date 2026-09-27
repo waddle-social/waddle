@@ -1183,8 +1183,13 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     @Volatile
     var publishedAvatarBytes: ByteArray? = null
 
+    /** Thrown by [requestAvatar]: the FFI's failed-lookup signal (not "no avatar"). */
+    @Volatile
+    var requestAvatarFailure: Throwable? = null
+
     override suspend fun requestAvatar(jid: String, knownIds: List<String>): WaddleAvatarResult? {
         requestAvatarCalls += jid to knownIds
+        requestAvatarFailure?.let { throw it }
         val current = avatar ?: return null
         // Mirror the FFI's §4.2 contract: a known advertised id answers
         // id-only (no data fetch); an unknown id carries the bytes.

@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
@@ -102,5 +103,60 @@ class OccupantJidStoreTest {
         assertEquals(setOf(room), store.jids.value.keys)
         // Nicks stay case-sensitive (XEP-0045 resourceparts).
         assertNull(store.jidFor(room, "Alice"))
+    }
+
+    private fun twinLive(timestamp: String?) = testMessage(
+        id = "t1",
+        stanzaId = "t1",
+        from = "$room/alice",
+        to = self,
+        messageType = "groupchat",
+        isMuc = true,
+        timestamp = timestamp,
+    )
+
+    private fun twinArchived() = testArchivedMessage(
+        mamId = "m1",
+        id = "t1",
+        stanzaId = "t1",
+        from = "$room/alice",
+        to = self,
+        messageType = "groupchat",
+        authorRealJid = "alice@waddle.test/web",
+    )
+
+    @Test
+    fun `a live twin replacing its archived row keeps the archived author stamp`() {
+        val store = TimelineStore()
+        store.setOwnBareJid(self)
+        store.onArchivedMessage(twinArchived())
+        // Unstamped live copy (delayed / no presence) must not erase it.
+        store.onLiveMessage(twinLive(timestamp = "2026-07-15T10:00:00Z"), authorJid = null)
+
+        val row = store.timeline(room).value.single()
+        assertTrue(row.source is TimelineSource.Live)
+        assertEquals("alice@waddle.test", row.authorJid)
+    }
+
+    @Test
+    fun `an archived twin attributes an unstamped live row`() {
+        val store = TimelineStore()
+        store.setOwnBareJid(self)
+        store.onLiveMessage(twinLive(timestamp = "2026-07-15T10:00:00Z"), authorJid = null)
+        store.onArchivedMessage(twinArchived())
+
+        val row = store.timeline(room).value.single()
+        assertTrue(row.source is TimelineSource.Live)
+        assertEquals("alice@waddle.test", row.authorJid)
+    }
+
+    @Test
+    fun `an archived twin never overrides a live row's own stamp`() {
+        val store = TimelineStore()
+        store.setOwnBareJid(self)
+        store.onLiveMessage(twinLive(timestamp = null), authorJid = "alice.live@waddle.test")
+        store.onArchivedMessage(twinArchived())
+
+        assertEquals("alice.live@waddle.test", store.timeline(room).value.single().authorJid)
     }
 }
