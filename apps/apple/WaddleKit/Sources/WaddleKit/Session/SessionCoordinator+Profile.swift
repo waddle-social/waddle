@@ -9,20 +9,13 @@ extension SessionCoordinator {
         avatars.request(jid)
     }
 
-    /// The real JID behind a row's author, for its avatar. A room nick is
-    /// never turned into a JID: only the room's word counts. That is the
-    /// JID stamped on the row (archived `muc#user` item, or the occupant
-    /// when an undelayed message arrived). An archive page without real
-    /// JIDs falls back to the occupant, or the last JID seen, for the nick;
-    /// a live row never does, since a delayed one may predate a handover.
+    /// The real JID behind a row's author, for its avatar. A room row
+    /// resolves only from its stamp (the archived `muc#user` item, our
+    /// local echo, or the occupant when an undelayed message arrived):
+    /// a nick may have changed hands since, and initials beat a wrong face.
     public func authorJID(of item: TimelineItem) -> BareJID? {
         guard item.conversation.isRoom else { return item.from?.bare }
-        if let jid = item.message.authorRealJID { return jid }
-        if !item.message.isLive, let nick = item.from?.resource,
-           let jid = presence.realJID(ofNick: nick, in: item.conversation.jid) {
-            return jid
-        }
-        return item.isMine ? account.jid : nil
+        return item.message.authorRealJID
     }
 
     public func publishAvatar(_ image: AvatarImage) async throws {

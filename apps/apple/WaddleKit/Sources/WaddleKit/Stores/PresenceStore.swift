@@ -46,11 +46,6 @@ public final class PresenceStore {
     public private(set) var occupants: [BareJID: [String: Occupant]] = [:]
     /// Rooms whose self-presence (status 110) has arrived.
     public private(set) var joinedRooms: Set<BareJID> = []
-    /// Room → nick → the real JID last seen behind it. Kept after the
-    /// occupant leaves and across reconnects, so a departed author keeps
-    /// their avatar; forgotten on `reset()`. XEP-0421 occupant ids would
-    /// be a better key but are not exposed by the core.
-    public private(set) var knownRealJIDs: [BareJID: [String: BareJID]] = [:]
 
     @ObservationIgnored private var resources: [BareJID: [String: ContactPresence]] = [:]
     @ObservationIgnored private let roomJIDs: @MainActor (BareJID) -> Bool
@@ -97,11 +92,6 @@ public final class PresenceStore {
         occupants[room]?[nick]
     }
 
-    /// The live occupant's real JID, else the last one seen for `nick`.
-    public func realJID(ofNick nick: String, in room: BareJID) -> BareJID? {
-        occupants[room]?[nick]?.realJID ?? knownRealJIDs[room]?[nick]
-    }
-
     public func availability(of jid: BareJID) -> Availability {
         contacts[jid]?.availability ?? .offline
     }
@@ -111,18 +101,11 @@ public final class PresenceStore {
         occupants[room] = nil
     }
 
-    /// Drops live presence (the stream closed); keeps `knownRealJIDs`.
     public func clear() {
         contacts.removeAll()
         occupants.removeAll()
         joinedRooms.removeAll()
         resources.removeAll()
-    }
-
-    /// Forgets everything, for sign-out.
-    public func reset() {
-        clear()
-        knownRealJIDs.removeAll()
     }
 
     private func applyOccupant(_ presence: WirePresence, room: BareJID) -> Update {
@@ -143,9 +126,6 @@ public final class PresenceStore {
                 hats: presence.hats
             )
             occupants[room, default: [:]][nick] = occupant
-            if let realJID = occupant.realJID {
-                knownRealJIDs[room, default: [:]][nick] = realJID
-            }
             if isSelf, !joinedRooms.contains(room) {
                 joinedRooms.insert(room)
                 return .joined(room: room)

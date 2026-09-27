@@ -79,8 +79,9 @@ public struct WireMessage: Hashable, Sendable {
     /// XEP-0490 cursors from a sibling device's PEP notification.
     public var displayedCursors: [DisplayedCursor]?
     /// A room author's real JID as the room vouched for it: the archived
-    /// XEP-0045 `muc#user` item, or the occupant when an undelayed live
-    /// message arrived. The first stamp a row gets is kept.
+    /// XEP-0045 `muc#user` item, our own account on a local echo, or the
+    /// occupant when an undelayed live message arrived. The first stamp a
+    /// row gets is kept.
     public var authorRealJID: BareJID?
 
     public init(

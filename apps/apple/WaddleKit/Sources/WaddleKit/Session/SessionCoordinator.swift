@@ -325,7 +325,7 @@ public final class SessionCoordinator {
     private func clearStores() {
         timelines.clear()
         directory.clear()
-        presence.reset()
+        presence.clear()
         typing.clear()
         unread.clearAll()
         deliveries.clear()
@@ -499,12 +499,15 @@ public final class SessionCoordinator {
         }
         trackChatState(message, route: route)
         // An undelayed live message is being spoken now by the present
-        // occupant: pin the row to them, so a later holder of the nick never
-        // takes it over. A delayed one (XEP-0203: room history, replay) may
-        // predate a handover, so it keeps only what the room vouched for.
+        // occupant (us, when it is our nick): pin the row to them, so a later
+        // holder of the nick never takes it over. A delayed one (XEP-0203:
+        // room history, replay) may predate a handover, so it keeps only
+        // what the room vouched for.
         if route.conversation.isRoom, message.isLive, message.timestamp == nil,
            message.authorRealJID == nil, let nick = message.from?.resource {
-            message.authorRealJID = presence.occupant(named: nick, in: route.conversation.jid)?.realJID
+            message.authorRealJID = route.isMine
+                ? account.jid
+                : presence.occupant(named: nick, in: route.conversation.jid)?.realJID
         }
         let result = timelines.ingest(message, route: route)
         if route.isMine {

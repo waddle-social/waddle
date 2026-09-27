@@ -42,18 +42,55 @@ struct RoomAuthorTests {
         coordinator.handle(.presence(occupantPresence("dave", realJID: dave, kind: .unavailable)))
         #expect(coordinator.presence.occupant(named: "dave", in: room) == nil)
         #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
-
-        // A page loaded after they left, from an archive without real JIDs.
-        coordinator.timelines.ingest(roomMessage("earlier", from: "dave", stanzaID: "s0", at: date(0), source: .archive(mamID: "s0")))
-        #expect(coordinator.authorJID(of: row(coordinator, "s0")!) == dave)
     }
 
-    @Test func mappingSurvivesReconnect() {
+    @Test func stampSurvivesReconnect() {
         let coordinator = coordinator()
         coordinator.handle(.presence(occupantPresence("dave", realJID: dave)))
+        coordinator.handle(.message(roomMessage("hi", from: "dave", stanzaID: "s1")))
         coordinator.handle(.disconnected)
-        coordinator.timelines.ingest(roomMessage("hi", from: "dave", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1")))
+        #expect(coordinator.presence.occupant(named: "dave", in: room) == nil)
         #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
+    }
+
+    @Test func archiveRowWithoutRealJIDShowsInitialsAfterAHandover() {
+        let coordinator = coordinator()
+        coordinator.handle(.presence(occupantPresence("sam", realJID: dave)))
+        coordinator.handle(.presence(occupantPresence("sam", realJID: dave, kind: .unavailable)))
+        coordinator.handle(.presence(occupantPresence("sam", realJID: erin)))
+        // Dave's row from an archive that records no real JIDs.
+        coordinator.timelines.ingest(roomMessage("from dave", from: "sam", stanzaID: "s0", at: date(0), source: .archive(mamID: "s0")))
+        #expect(coordinator.authorJID(of: row(coordinator, "s0")!) == nil)
+    }
+
+    @Test func ownNickOnALegacyArchiveRowIsNotUs() {
+        let coordinator = coordinator()
+        // Someone held our nick before us; the archive records no real JID.
+        coordinator.timelines.ingest(roomMessage("before", from: me.nick, stanzaID: "s0", at: date(0), source: .archive(mamID: "s0")))
+        let item = row(coordinator, "s0")!
+        #expect(item.isMine)
+        #expect(coordinator.authorJID(of: item) == nil)
+    }
+
+    @Test func ownSendIsStampedWithOurAccount() async {
+        let coordinator = coordinator()
+        coordinator.isSendReady = true
+        let id = await coordinator.send(Draft(text: "hello"), in: roomConversation)!
+        let echo = coordinator.timelines.timeline(for: roomConversation).items[0]
+        #expect(coordinator.authorJID(of: echo) == me.jid)
+
+        // The reflection (our nick, undelayed) keeps the stamp.
+        coordinator.handle(.message(roomMessage("hello", from: me.nick, stanzaID: "r1", originID: id)))
+        let reflected = coordinator.timelines.timeline(for: roomConversation).items[0]
+        #expect(reflected.isLocalEcho == false)
+        #expect(coordinator.authorJID(of: reflected) == me.jid)
+    }
+
+    @Test func undelayedLiveMessageInOurNickIsUs() {
+        let coordinator = coordinator()
+        // Another device of ours speaking in the room.
+        coordinator.handle(.message(roomMessage("from my phone", from: me.nick, stanzaID: "s1")))
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == me.jid)
     }
 
     @Test func liveRowKeepsItsSenderWhenTheNickChangesHands() {
@@ -131,13 +168,6 @@ struct RoomAuthorTests {
         coordinator.handle(.message(directMessage("hi", from: jid("bob@waddle.test/a"), to: jid("alice@waddle.test/phone"), id: "d1")))
         let item = coordinator.timelines.timeline(for: bobConversation).items[0]
         #expect(coordinator.authorJID(of: item) == bob)
-    }
-
-    @Test func signOutForgetsTheMapping() async {
-        let coordinator = coordinator()
-        coordinator.handle(.presence(occupantPresence("dave", realJID: dave)))
-        await coordinator.stop()
-        #expect(coordinator.presence.realJID(ofNick: "dave", in: room) == nil)
     }
 
     @Test func bodylessHeadlineCreatesNoRow() {
