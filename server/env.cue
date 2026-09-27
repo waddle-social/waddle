@@ -984,6 +984,12 @@ schema.#Project & {
 					  amd64) ;;
 					  *) echo "unsupported CUENV_ARCH=${CUENV_ARCH}" >&2; exit 1 ;;
 					esac
+					# Manual validation of this main-only workflow on a branch must
+					# never publish a branch image or retag it as main.
+					if [ "${GITHUB_REF_TYPE}" = branch ] && [ "${GITHUB_REF_NAME}" != main ]; then
+					  echo "Skipping image publication outside main"
+					  exit 0
+					fi
 
 					echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 					FULL_SHA="$(git rev-parse HEAD)"
