@@ -44,7 +44,7 @@ use super::metrics;
 use super::self_fence::{mark_draining_bounded, LocallyClaimedEntities};
 
 #[cfg(test)]
-use super::self_fence::run_shutdown_drain_with_heartbeat;
+use super::self_fence::{run_shutdown_drain_with_heartbeat, ShutdownLeaseTiming};
 
 /// Upper bound on how long [`mark_draining_bounded`] itself is allowed to
 /// take within the overall drain budget — a hung flag-flip must not eat the
@@ -887,8 +887,11 @@ mod tests {
             &claim_store,
             &me,
             &local_claims,
-            claim_release_budget,
-            lease_ttl,
+            ShutdownLeaseTiming {
+                claim_release_budget,
+                lease_ttl,
+                last_success: tokio::time::Instant::now(),
+            },
             async {},
         ));
         let mut drain_future = drain_future;

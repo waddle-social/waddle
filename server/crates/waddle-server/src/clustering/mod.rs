@@ -433,7 +433,6 @@ impl NodeLifecycle {
         }
     }
 
-    #[cfg(feature = "clustering")]
     pub(crate) fn fatal_fence_token(&self) -> CancellationToken {
         self.fatal_fence.clone()
     }

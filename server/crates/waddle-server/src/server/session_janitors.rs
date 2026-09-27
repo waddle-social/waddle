@@ -7935,6 +7935,14 @@ pub(crate) async fn run_graceful_shutdown_drain(
     let _sm_completion_guard = CompleteSmOnDrop(sm_drain_complete.clone());
 
     drain_token.cancelled().await;
+    let fatal_fence = websocket_state
+        .deps
+        .app_state
+        .node_lifecycle
+        .fatal_fence_token();
+    if fatal_fence.is_cancelled() {
+        return;
+    }
     let shutdown_started = *shutdown_started.get_or_init(tokio::time::Instant::now);
     // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
     // timestamp, fed into the SAME `drain_duration_ms` histogram the
@@ -7966,12 +7974,12 @@ pub(crate) async fn run_graceful_shutdown_drain(
     );
     let connection_budget =
         (total_budget / 2).min(drain_deadline.saturating_duration_since(std::time::Instant::now()));
-    if !websocket_state
-        .deps
-        .shutdown
-        .wait_for_connections_drained_for(connection_budget)
-        .await
-    {
+    let connections_drained = tokio::select! {
+        biased;
+        _ = fatal_fence.cancelled() => return,
+        drained = websocket_state.deps.shutdown.wait_for_connections_drained_for(connection_budget) => drained,
+    };
+    if !connections_drained {
         warn!(
             remaining_connections = websocket_state.deps.shutdown.active_connections(),
             "Graceful shutdown: connection drain timed out; promoting \
@@ -7986,6 +7994,9 @@ pub(crate) async fn run_graceful_shutdown_drain(
     let mut total_drained = 0usize;
     let mut confirmed_streams = Vec::new();
     'drain: loop {
+        if fatal_fence.is_cancelled() {
+            return;
+        }
         if std::time::Instant::now() >= drain_deadline {
             waddle_xmpp::telemetry::reliability::increment_sm_drain_timeout();
             // ADR-0017 Phase 3 Slice 10: whatever this node still
@@ -8009,16 +8020,14 @@ pub(crate) async fn run_graceful_shutdown_drain(
         // sessions and `PendingPromotionRetryLease::Drop` restores any leased
         // retry payload back into the registry for next-startup retry.
         let drain_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
-        let drained = match tokio::time::timeout(
-            drain_budget,
-            websocket_state
-                .deps
-                .protocol
-                .sm_session_registry
-                .drain_all_for_shutdown(),
-        )
-        .await
-        {
+        let drained = match tokio::select! {
+            biased;
+            _ = fatal_fence.cancelled() => return,
+            result = tokio::time::timeout(
+                drain_budget,
+                websocket_state.deps.protocol.sm_session_registry.drain_all_for_shutdown(),
+            ) => result,
+        } {
             Ok(Ok(s)) => s,
             Ok(Err(error)) => {
                 let remaining = record_remaining_sm_drain_abandonment(
@@ -8039,15 +8048,14 @@ pub(crate) async fn run_graceful_shutdown_drain(
         };
         let release_retry_budget =
             drain_deadline.saturating_duration_since(std::time::Instant::now());
-        if tokio::time::timeout(
-            release_retry_budget,
-            websocket_state
-                .deps
-                .protocol
-                .sm_session_registry
-                .retry_pending_claim_releases(64),
-        )
-        .await
+        if tokio::select! {
+            biased;
+            _ = fatal_fence.cancelled() => return,
+            result = tokio::time::timeout(
+                release_retry_budget,
+                websocket_state.deps.protocol.sm_session_registry.retry_pending_claim_releases(64),
+            ) => result,
+        }
         .is_err()
         {
             // Re-enter at the deadline check so timeout telemetry and
@@ -8059,11 +8067,13 @@ pub(crate) async fn run_graceful_shutdown_drain(
             if empty_passes >= QUIET_WINDOW_PASSES {
                 break;
             }
-            tokio::time::sleep(
-                POLL_INTERVAL
-                    .min(drain_deadline.saturating_duration_since(std::time::Instant::now())),
-            )
-            .await;
+            tokio::select! {
+                biased;
+                _ = fatal_fence.cancelled() => return,
+                _ = tokio::time::sleep(
+                    POLL_INTERVAL.min(drain_deadline.saturating_duration_since(std::time::Instant::now())),
+                ) => {}
+            }
             continue;
         }
         empty_passes = 0;
@@ -8325,9 +8335,12 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 }
                 promotion_guard.complete();
             };
-            if tokio::time::timeout(promotion_budget, promotion_work)
-                .await
-                .is_err()
+            if tokio::select! {
+                biased;
+                _ = fatal_fence.cancelled() => return,
+                result = tokio::time::timeout(promotion_budget, promotion_work) => result,
+            }
+            .is_err()
             {
                 // Cancelling the per-session future drops its armed
                 // `PromotionSessionGuard`; remaining sessions stay in the
@@ -8336,10 +8349,16 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 continue 'drain;
             }
         }
-        tokio::time::sleep(
-            POLL_INTERVAL.min(drain_deadline.saturating_duration_since(std::time::Instant::now())),
-        )
-        .await;
+        tokio::select! {
+            biased;
+            _ = fatal_fence.cancelled() => return,
+            _ = tokio::time::sleep(
+                POLL_INTERVAL.min(drain_deadline.saturating_duration_since(std::time::Instant::now())),
+            ) => {}
+        }
+    }
+    if fatal_fence.is_cancelled() {
+        return;
     }
     info!(
         total_drained,
@@ -8355,13 +8374,12 @@ pub(crate) async fn run_graceful_shutdown_drain(
         );
     }
     let ingress_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
-    if !websocket_state
-        .deps
-        .protocol
-        .ingress
-        .drain_and_join(ingress_budget)
-        .await
-    {
+    let ingress_drained = tokio::select! {
+        biased;
+        _ = fatal_fence.cancelled() => return,
+        drained = websocket_state.deps.protocol.ingress.drain_and_join(ingress_budget) => drained,
+    };
+    if !ingress_drained {
         warn!(
             timeout_ms = ingress_budget.as_millis(),
             "Graceful shutdown: ingress authority drain exceeded the shutdown budget; stopping unfinished ingress work"
@@ -13714,6 +13732,97 @@ mod graceful_shutdown_drain_tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn fatal_fence_cancels_stalled_q6_without_promoting_or_losing_replay() {
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let sm_registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(
+                    claim_store.clone(),
+                    SharedNodeIdentity::new(NodeIdentity::new("sm-node", "fatal-q6")),
+                ),
+        );
+        let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let blocking = Arc::new(HangingBlockingStorage {
+            started: Notify::new(),
+        });
+        let state = create_test_websocket_state_with_sm_registry_pending_and_blocking(
+            Arc::clone(&sm_registry),
+            pending.clone(),
+            blocking.clone(),
+        )
+        .await;
+        let fatal_fence = state.deps.app_state.node_lifecycle.fatal_fence_token();
+        let stream_id = "fatal-q6-stalled-promotion";
+        let recipient: jid::BareJid = "romeo@example.com".parse().expect("bare jid");
+        let mut session = detached_session(
+            stream_id,
+            "romeo@example.com/phone".parse().expect("full jid"),
+        );
+        session.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 11,
+            stanza_xml: message_xml(&transient_message(&recipient, "successor retains replay")),
+            original_receipt_at: chrono::Utc::now(),
+        });
+        sm_registry
+            .store_session(session)
+            .await
+            .expect("store detached session");
+
+        let drain_token = tokio_util::sync::CancellationToken::new();
+        let completion = tokio_util::sync::CancellationToken::new();
+        let drain_task = tokio::spawn(run_graceful_shutdown_drain(
+            Arc::clone(&state),
+            drain_token.clone(),
+            Arc::new(Notify::new()),
+            completion.clone(),
+            Arc::new(std::sync::OnceLock::new()),
+            Duration::from_secs(5),
+        ));
+        drain_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), blocking.started.notified())
+            .await
+            .expect("Q6 must reach the blocked promotion");
+        fatal_fence.cancel();
+        tokio::time::timeout(Duration::from_millis(400), drain_task)
+            .await
+            .expect("fatal fence must preempt Q6 promotion")
+            .expect("Q6 task completes");
+
+        assert!(completion.is_cancelled());
+        assert_eq!(
+            sm_registry.live_session_ids().expect("live inventory"),
+            vec![stream_id.to_string()]
+        );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::SmSession, stream_id))
+            .await
+            .expect("current claim")
+            .is_some());
+        assert!(persistence
+            .get_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("durable session read")
+            .is_some());
+        assert_eq!(
+            persistence
+                .list_unacked(&SmSessionId::new(stream_id))
+                .await
+                .expect("durable queue read")
+                .len(),
+            1
+        );
+        assert!(pending
+            .list(&recipient)
+            .await
+            .expect("pending rows")
+            .is_empty());
     }
 
     #[tokio::test]
