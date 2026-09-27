@@ -376,7 +376,7 @@ export interface WasmRosterContact {
   groups: string[];
 }
 
-export interface WasmAvatar {
+interface WasmAvatar {
   jid: string;
   id: string;
   mime_type: string;

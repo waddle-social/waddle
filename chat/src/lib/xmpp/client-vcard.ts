@@ -64,6 +64,7 @@ export class VCardManager {
     if (!fetch.avatar) return cached?.id === fetch.id ? cached.url : null;
     if (!fetch.avatar.data) return null;
     const url = avatarDataUrl(fetch.avatar.data, fetch.avatar.mime_type);
+    if (!url) return null;
     this.avatarCache.set(bareJid, { id: fetch.id, url });
     return url;
   }
