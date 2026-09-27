@@ -9,11 +9,12 @@ import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
 import social.waddle.android.client.testPresence
 
-/** Room author → real bare JID resolution: retained, never guessed. */
+/** Current nick → real JID lookup, and stored-row author resolution. */
 class OccupantJidStoreTest {
     private val room = "room@muc.waddle.test"
+    private val self = "me@waddle.test"
 
-    private fun liveRow(from: String, mine: Boolean = false) = TimelineItem(
+    private fun liveRow(from: String, mine: Boolean = false, authorJid: String? = null) = TimelineItem(
         id = "m1",
         conversationJid = room,
         from = from,
@@ -21,90 +22,71 @@ class OccupantJidStoreTest {
         timestamp = null,
         isMine = mine,
         source = TimelineSource.Live(testMessage(from = from, messageType = "groupchat", isMuc = true)),
-    )
-
-    private fun archivedRow(from: String, authorRealJid: String?) = TimelineItem(
-        id = "m1",
-        conversationJid = room,
-        from = from,
-        body = "hi",
-        timestamp = null,
-        isMine = false,
-        source = TimelineSource.Archived(
-            testArchivedMessage(from = from, messageType = "groupchat", authorRealJid = authorRealJid),
-        ),
+        authorJid = authorJid,
     )
 
     @Test
-    fun `occupant presence maps the nick to the real bare JID`() {
+    fun `occupant presence maps the nick to the real bare JID and survives a leave`() {
         val store = OccupantJidStore()
         store.onPresence(testPresence(from = "$room/alice", mucJid = "alice@waddle.test/phone"))
-
-        assertEquals(mapOf(room to mapOf("alice" to "alice@waddle.test")), store.jids.value)
-    }
-
-    @Test
-    fun `a departed author keeps the last known mapping`() {
-        val store = OccupantJidStore()
-        store.onPresence(testPresence(from = "$room/alice", mucJid = "alice@waddle.test/phone"))
-        store.onPresence(
-            testPresence(from = "$room/alice", presenceType = "unavailable", mucJid = "alice@waddle.test/phone"),
-        )
         store.onPresence(testPresence(from = "$room/alice", presenceType = "unavailable"))
 
-        assertEquals(
-            "alice@waddle.test",
-            authorBareJidOf(liveRow("$room/alice"), store.jids.value[room].orEmpty(), ownBareJid = "me@waddle.test"),
-        )
+        assertEquals("alice@waddle.test", store.jidFor(room, "alice"))
     }
 
     @Test
-    fun `live presence re-points a reused nick but an archive row only fills gaps`() {
+    fun `a reused nick re-points the lookup`() {
         val store = OccupantJidStore()
-        store.onArchivedAuthor("$room/sam", "sam.old@waddle.test")
-        store.onArchivedAuthor("$room/sam", "sam.older@waddle.test")
-        assertEquals("sam.old@waddle.test", store.jids.value[room]?.get("sam"))
+        store.onPresence(testPresence(from = "$room/alice", mucJid = "alice@waddle.test/phone"))
+        store.onPresence(testPresence(from = "$room/alice", mucJid = "bob@waddle.test/x"))
 
-        store.onPresence(testPresence(from = "$room/sam", mucJid = "sam.new@waddle.test/x"))
-        store.onArchivedAuthor("$room/sam", "sam.old@waddle.test")
-        assertEquals("sam.new@waddle.test", store.jids.value[room]?.get("sam"))
+        assertEquals("bob@waddle.test", store.jidFor(room, "alice"))
     }
 
     @Test
-    fun `an unknown room author resolves to null, never a nick-derived guess`() {
-        assertNull(authorBareJidOf(liveRow("$room/alice"), emptyMap(), ownBareJid = "me@waddle.test"))
-        // Semi-anonymous room: presence without a real JID maps nothing.
+    fun `semi-anonymous presence maps nothing`() {
         val store = OccupantJidStore()
-        store.onPresence(testPresence(from = "$room/alice", mucJid = null, mucRole = null))
-        assertNull(authorBareJidOf(liveRow("$room/alice"), store.jids.value[room].orEmpty(), "me@waddle.test"))
+        store.onPresence(testPresence(from = "$room/alice", mucJid = null))
+
+        assertNull(store.jidFor(room, "alice"))
     }
 
     @Test
-    fun `the archived real JID wins over the nick map for that row`() {
-        val row = archivedRow("$room/alice", authorRealJid = "alice.then@waddle.test/web")
-
-        assertEquals(
-            "alice.then@waddle.test",
-            authorBareJidOf(row, mapOf("alice" to "alice.now@waddle.test"), ownBareJid = "me@waddle.test"),
-        )
+    fun `room rows resolve only through the JID stamped when stored`() {
+        assertNull(authorBareJidOf(liveRow("$room/alice"), self))
+        val stamped = liveRow("$room/alice", authorJid = "alice@waddle.test")
+        assertEquals("alice@waddle.test", authorBareJidOf(stamped, self))
     }
 
     @Test
-    fun `own rows and 1-1 rows resolve without the nick map`() {
-        assertEquals(
-            "me@waddle.test",
-            authorBareJidOf(liveRow("$room/me", mine = true), emptyMap(), ownBareJid = "me@waddle.test/phone"),
-        )
+    fun `own rows and 1-1 rows resolve without a stamp`() {
+        assertEquals("me@waddle.test", authorBareJidOf(liveRow("$room/me", mine = true), "Me@waddle.test/phone"))
         val dm = TimelineItem(
             id = "d1",
             conversationJid = "bob@waddle.test",
-            from = "bob@waddle.test/laptop",
+            from = "Bob@waddle.test/laptop",
             body = "yo",
             timestamp = null,
             isMine = false,
-            source = TimelineSource.Live(testMessage(from = "bob@waddle.test/laptop")),
+            source = TimelineSource.Live(testMessage(from = "Bob@waddle.test/laptop")),
         )
-        assertEquals("bob@waddle.test", authorBareJidOf(dm, emptyMap(), ownBareJid = "me@waddle.test"))
+        assertEquals("bob@waddle.test", authorBareJidOf(dm, self))
+    }
+
+    @Test
+    fun `archived rows are stamped with their normalized muc-user JID`() {
+        val store = TimelineStore()
+        store.setOwnBareJid(self)
+        store.onArchivedMessage(
+            testArchivedMessage(
+                from = "$room/gone",
+                to = self,
+                messageType = "groupchat",
+                authorRealJid = "Gone@Waddle.test/web",
+            ),
+        )
+
+        assertEquals("gone@waddle.test", store.timeline(room).value.single().authorJid)
     }
 
     @Test
@@ -119,6 +101,6 @@ class OccupantJidStoreTest {
         )
         assertEquals(setOf(room), store.jids.value.keys)
         // Nicks stay case-sensitive (XEP-0045 resourceparts).
-        assertNull(store.jids.value[room]?.get("Alice"))
+        assertNull(store.jidFor(room, "Alice"))
     }
 }

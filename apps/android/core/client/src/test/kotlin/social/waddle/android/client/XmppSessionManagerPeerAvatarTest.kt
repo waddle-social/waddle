@@ -12,6 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.store.authorBareJidOf
 import social.waddle.client.ffi.WaddleClientEvent
 
 /** Peer avatars end to end: lazy fetch, AvatarChanged, reconnect, authors. */
@@ -161,32 +162,74 @@ class XmppSessionManagerPeerAvatarTest {
         assertTrue(harness.manager.occupantJidStore.jids.value.isEmpty())
     }
 
+    private fun roomMessage(id: String, nick: String, timestamp: String? = null) = WaddleClientEvent.Message(
+        testMessage(
+            id = id,
+            stanzaId = id,
+            from = "$room/$nick",
+            to = "icepuma@waddle.test",
+            messageType = "groupchat",
+            isMuc = true,
+            timestamp = timestamp,
+        ),
+    )
+
+    private fun XmppSessionManager.authorOf(id: String): String? =
+        authorBareJidOf(timelineStore.timeline(room).value.single { it.id == id }, "icepuma@waddle.test")
+
     @Test
-    fun `presence and archived authors feed the retained nick mapping`() = runTest {
+    fun `a reused nick never re-attributes rows stored before it`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.factory.emit(WaddleClientEvent.Presence(testPresence(from = "$room/alice", mucJid = "$alice/phone")))
+        harness.factory.emit(roomMessage("s1", "alice"))
+        harness.factory.emit(
+            WaddleClientEvent.Presence(
+                testPresence(from = "$room/alice", presenceType = "unavailable", mucJid = "$alice/phone"),
+            ),
+        )
+        // Bob joins under Alice's old nick.
+        harness.factory.emit(
+            WaddleClientEvent.Presence(testPresence(from = "$room/alice", mucJid = "bob@waddle.test/web")),
+        )
+        harness.factory.emit(roomMessage("s2", "alice"))
+        runCurrent()
+
+        assertEquals(alice, harness.manager.authorOf("s1"))
+        assertEquals("bob@waddle.test", harness.manager.authorOf("s2"))
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `archive authors and delayed rows never label a nick's later holder`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
         harness.factory.emit(
-            WaddleClientEvent.Presence(testPresence(from = "$room/alice", mucJid = "$alice/phone")),
-        )
-        harness.factory.emit(
-            WaddleClientEvent.Presence(testPresence(from = "$room/alice", presenceType = "unavailable")),
-        )
-        harness.factory.emit(
             WaddleClientEvent.MamResult(
                 testArchivedMessage(
-                    from = "$room/bob",
-                    to = "me@waddle.test",
+                    mamId = "m1",
+                    id = "a1",
+                    stanzaId = "a1",
+                    from = "$room/sam",
+                    to = "icepuma@waddle.test",
                     messageType = "groupchat",
-                    authorRealJid = "bob@waddle.test/web",
+                    authorRealJid = "Sam.Old@waddle.test/web",
                 ),
             ),
         )
+        // No presence for "sam": the archived author must not leak onto it.
+        harness.factory.emit(roomMessage("s3", "sam"))
+        // Join history is delayed: it predates the current "alice" (Bob).
+        harness.factory.emit(
+            WaddleClientEvent.Presence(testPresence(from = "$room/alice", mucJid = "bob@waddle.test/web")),
+        )
+        harness.factory.emit(roomMessage("s4", "alice", timestamp = "2026-07-01T10:00:00Z"))
         runCurrent()
 
-        assertEquals(
-            mapOf("alice" to alice, "bob" to "bob@waddle.test"),
-            harness.manager.occupantJidStore.jids.value[room],
-        )
+        assertEquals("sam.old@waddle.test", harness.manager.authorOf("a1"))
+        assertNull(harness.manager.authorOf("s3"))
+        assertNull(harness.manager.authorOf("s4"))
+        assertNull(harness.manager.occupantJidStore.jids.value[room]?.get("sam"))
         harness.manager.logout()
     }
 

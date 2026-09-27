@@ -142,17 +142,13 @@ class MessageSearchViewModel(
     }
 
     /**
-     * Real bare JID of a match's author: a DM sender's own JID; in a room
-     * the archived real JID, else the retained nick mapping — never a
-     * nick-derived guess.
+     * Real bare JID of a match's author: a DM sender's own JID, a room
+     * match's archived `muc#user` JID — never today's holder of the nick.
      */
     private fun authorJidOf(message: WaddleArchivedMessage): String? {
         val from = message.from ?: return null
-        if (!target.isGroupchat) return normalizedBareJid(from)
-        message.authorRealJid?.let(::normalizedBareJid)?.takeIf { '@' in it }?.let { return it }
-        val nick = resourcepartOf(from) ?: return null
-        val room = normalizedBareJid(target.conversationJid)
-        return sessionManager.occupantJidStore.jids.value[room]?.get(nick)
+        val jid = if (target.isGroupchat) message.authorRealJid ?: return null else from
+        return normalizedBareJid(jid).takeIf { '@' in it }
     }
 
     companion object {

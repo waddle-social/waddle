@@ -30,6 +30,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -179,19 +180,21 @@ private fun AddMemberSearch(state: MembersUiState, viewModel: MembersViewModel) 
             .testTag(MembersScreenTestTags.SEARCH_FIELD),
     )
     state.searchResults.forEach { entry ->
-        ListItem(
-            headlineContent = { Text(text = entry.displayName ?: entry.username) },
-            supportingContent = { Text(text = entry.jid) },
-            leadingContent = {
-                PeerAvatar(
-                    jid = entry.jid,
-                    displayName = entry.displayName ?: entry.username,
-                    size = LIST_AVATAR_SIZE,
-                )
-            },
-            trailingContent = { Text(text = stringResource(R.string.members_add_as_member)) },
-            modifier = Modifier.clickable { viewModel.addMember(entry) },
-        )
+        key(entry.jid) {
+            ListItem(
+                headlineContent = { Text(text = entry.displayName ?: entry.username) },
+                supportingContent = { Text(text = entry.jid) },
+                leadingContent = {
+                    PeerAvatar(
+                        jid = entry.jid,
+                        displayName = entry.displayName ?: entry.username,
+                        size = LIST_AVATAR_SIZE,
+                    )
+                },
+                trailingContent = { Text(text = stringResource(R.string.members_add_as_member)) },
+                modifier = Modifier.clickable { viewModel.addMember(entry) },
+            )
+        }
     }
 }
 

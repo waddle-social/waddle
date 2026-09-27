@@ -25,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -299,25 +300,27 @@ private fun GroupDmAddMemberSheet(
                 )
             }
             results.forEach { entry ->
-                ListItem(
-                    headlineContent = { Text(text = memberLabelOf(entry)) },
-                    supportingContent = { Text(text = entry.jid) },
-                    leadingContent = {
-                        PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
-                    },
-                    modifier = Modifier
-                        .testTag(GroupDmTestTags.ADD_MEMBER_RESULT_PREFIX + entry.jid)
-                        .clickable {
-                            scope.launch {
-                                val result = graph.sessionManager.inviteToGroupDm(
-                                    roomJid = roomJid,
-                                    inviteeJid = entry.jid,
-                                    fullHistory = fullHistory,
-                                )
-                                if (result == RoomAdminResult.Ok) onDismiss() else failed = true
-                            }
+                key(entry.jid) {
+                    ListItem(
+                        headlineContent = { Text(text = memberLabelOf(entry)) },
+                        supportingContent = { Text(text = entry.jid) },
+                        leadingContent = {
+                            PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
                         },
-                )
+                        modifier = Modifier
+                            .testTag(GroupDmTestTags.ADD_MEMBER_RESULT_PREFIX + entry.jid)
+                            .clickable {
+                                scope.launch {
+                                    val result = graph.sessionManager.inviteToGroupDm(
+                                        roomJid = roomJid,
+                                        inviteeJid = entry.jid,
+                                        fullHistory = fullHistory,
+                                    )
+                                    if (result == RoomAdminResult.Ok) onDismiss() else failed = true
+                                }
+                            },
+                    )
+                }
             }
         }
     }

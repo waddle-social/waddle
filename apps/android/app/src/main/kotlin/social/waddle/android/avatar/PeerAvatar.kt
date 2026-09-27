@@ -11,15 +11,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -94,11 +97,27 @@ private fun rememberAvatarImage(source: PeerAvatarSource, key: String): ImageBit
     }
     val avatars by source.avatars.collectAsState()
     val current = avatars[key] ?: return null
-    val cacheKey = "$key#${current.id}"
-    val image by produceState(initialValue = DecodedAvatars.get(cacheKey), cacheKey) {
-        if (value == null) value = withContext(Dispatchers.Default) { DecodedAvatars.decode(cacheKey, current.data) }
+    val data = current.data
+    return rememberDecodedAvatar("$key#${current.id}") { cacheKey -> DecodedAvatars.decode(cacheKey, data) }
+}
+
+/**
+ * The decoded image for [cacheKey] (bare JID + item id). The holder is
+ * KEYED by [cacheKey]: a new id, or a slot reused for another person,
+ * starts from that key's own cache entry (or nothing) — never from the
+ * previous key's bitmap.
+ */
+@Composable
+internal fun rememberDecodedAvatar(
+    cacheKey: String,
+    cached: (String) -> ImageBitmap? = DecodedAvatars::get,
+    decode: (String) -> ImageBitmap?,
+): ImageBitmap? {
+    val image = remember(cacheKey) { mutableStateOf(cached(cacheKey)) }
+    LaunchedEffect(cacheKey) {
+        if (image.value == null) image.value = withContext(Dispatchers.Default) { decode(cacheKey) }
     }
-    return image
+    return image.value
 }
 
 /**
@@ -113,27 +132,41 @@ fun initialsOf(name: String): String {
     return firsts.substring(0, firsts.offsetByCodePoints(0, minOf(2, firsts.codePointCount(0, firsts.length))))
 }
 
-/** Process-wide decoded-bitmap cache keyed by (bare JID, item id). */
-private object DecodedAvatars {
-    private const val MAX_ENTRIES = 128
+/**
+ * Process-wide decoded-bitmap cache keyed by (bare JID, item id),
+ * bounded by decoded bytes rather than entry count.
+ */
+internal object DecodedAvatars {
+    private const val BUDGET_BYTES = 4 * 1024 * 1024
     private const val MAX_EDGE_PX = 256
 
-    private val cache = LruCache<String, ImageBitmap>(MAX_ENTRIES)
+    private val cache = object : LruCache<String, ImageBitmap>(BUDGET_BYTES) {
+        override fun sizeOf(key: String, value: ImageBitmap): Int = value.asAndroidBitmap().byteCount
+    }
 
     fun get(key: String): ImageBitmap? = cache.get(key)
 
     fun decode(key: String, bytes: ByteArray): ImageBitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        var sample = 1
-        while (bounds.outWidth / (sample * 2) >= MAX_EDGE_PX && bounds.outHeight / (sample * 2) >= MAX_EDGE_PX) {
-            sample *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(maxOf(bounds.outWidth, bounds.outHeight), MAX_EDGE_PX)
         }
-        val options = BitmapFactory.Options().apply { inSampleSize = sample }
         val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap() ?: return null
         cache.put(key, image)
         return image
     }
+}
+
+/**
+ * Power-of-two `inSampleSize` bringing the LONGER edge down to at most
+ * twice [maxEdge] (BitmapFactory only honors powers of two), so a tall
+ * or wide image is bounded too.
+ */
+internal fun sampleSizeFor(longerEdge: Int, maxEdge: Int): Int {
+    var sample = 1
+    while (longerEdge / (sample * 2) >= maxEdge) sample *= 2
+    return sample
 }
 
 /** Leading-avatar size of the app's people list rows (Material3 ListItem). */

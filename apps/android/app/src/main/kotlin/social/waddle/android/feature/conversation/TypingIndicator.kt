@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -41,7 +42,9 @@ fun TypingIndicator(
             .padding(horizontal = 16.dp, vertical = 2.dp),
     ) {
         names.take(MAX_TYPING_AVATARS).forEach { name ->
-            PeerAvatar(jid = avatarJidOf(name), displayName = name, size = 16.dp)
+            key(name) {
+                PeerAvatar(jid = avatarJidOf(name), displayName = name, size = 16.dp)
+            }
         }
         Text(
             text = text,

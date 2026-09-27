@@ -41,16 +41,12 @@ fun TimelineList(
     selfBareJid: String? = null,
     authorPresence: Map<String, WaddlePresence> = emptyMap(),
     trustedMediaOrigin: String? = null,
-    /** Room nick → real bare JID (retained); empty for 1:1 timelines. */
-    occupantJids: Map<String, String> = emptyMap(),
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     // reverseLayout renders index 0 at the bottom → newest first.
     val newestFirst = remember(rows) { rows.asReversed() }
-    val avatars = remember(rows, occupantJids, selfBareJid) {
-        messageAvatarsOf(rows, occupantJids, selfBareJid)
-    }
+    val avatars = remember(rows, selfBareJid) { messageAvatarsOf(rows, selfBareJid) }
     // Every wire identity → row, for quote previews and scroll targets.
     val byIdentity = remember(rows) {
         buildMap {
@@ -102,7 +98,6 @@ fun TimelineList(
                 authorPresence = authorPresence,
                 trustedMediaOrigin = trustedMediaOrigin,
                 avatar = storedItem?.let { avatars[avatarKeyOf(it)] },
-                occupantJids = occupantJids,
             )
         }
         if (isLoadingOlder) {

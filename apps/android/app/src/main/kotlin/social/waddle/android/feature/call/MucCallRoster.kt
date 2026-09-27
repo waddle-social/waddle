@@ -1,6 +1,6 @@
 package social.waddle.android.feature.call
 
-import social.waddle.android.jid.bareJidOf
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.jid.localpartOf
 
 /** `room@muc.host/nick` → `room@muc.host` normalized for map keys. */
@@ -119,20 +119,24 @@ fun mucRosterOf(
 
 /**
  * Roster nick → real bare JID: the Muji owner map (nick → real JID)
- * wins; a LiveKit identity without an owner (listed under its localpart,
- * see [identitiesToNicks]) is itself the participant's real JID.
+ * wins; a LiveKit identity WITHOUT an owner entry (listed under its
+ * localpart, see [identitiesToNicks]) is itself the participant's real
+ * JID. Identities of an owned account (any resource) never register a localpart fallback — their row
+ * is their owner nick, and the localpart may be someone else's row.
  */
 private fun participantJidsOf(
     owners: Map<String, String?>,
     liveIdentities: List<String>,
 ): Map<String, String> {
+    val owned = owners.values.mapNotNullTo(HashSet()) { realJid -> realJid?.let(::normalizedBareJid) }
     val jids = HashMap<String, String>()
     for (identity in liveIdentities) {
-        val bare = bareJidOf(identity).trim()
-        if ('@' in bare) jids.putIfAbsent(localpartOf(identity), bare)
+        val bare = normalizedBareJid(identity)
+        if (bare in owned || '@' !in bare) continue
+        jids.putIfAbsent(localpartOf(identity), bare)
     }
     for ((nick, realJid) in owners) {
-        val bare = realJid?.let(::bareJidOf)?.trim() ?: continue
+        val bare = realJid?.let(::normalizedBareJid) ?: continue
         if ('@' in bare) jids[nick] = bare
     }
     return jids

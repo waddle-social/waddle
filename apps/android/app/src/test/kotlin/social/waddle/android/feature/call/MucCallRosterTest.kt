@@ -209,6 +209,29 @@ class MucCallRosterTest {
     }
 
     @Test
+    fun anOwnedIdentityNeverClaimsAnotherRowByLocalpart() {
+        // alice@y is owned under nick "ally"; alice@x (unowned) is listed
+        // under its localpart "alice". Order must not matter.
+        for (identities in listOf(
+            listOf("alice@y.test/phone", "alice@x.test/web"),
+            listOf("alice@x.test/web", "alice@y.test/phone"),
+        )) {
+            val roster = mucRosterOf(
+                room,
+                MucPresenceRosterView(
+                    participants = emptyMap(),
+                    owners = mapOf(room to mapOf("ally" to "alice@y.test/phone")),
+                    raisedHands = emptyMap(),
+                    mutedNicks = emptyMap(),
+                ),
+                LiveRosterView(participants = mapOf(room to identities), leavingRooms = emptyMap()),
+            ).associate { it.nick to it.jid }
+
+            assertEquals(mapOf("ally" to "alice@y.test", "alice" to "alice@x.test"), roster)
+        }
+    }
+
+    @Test
     fun storeSnapshotsDedupeAndNormalizeIdentities() {
         val store = MucCallLiveParticipantsStore()
         store.setParticipants(room, listOf("Alice@Waddle.Test/web", "alice@waddle.test/web", ""))

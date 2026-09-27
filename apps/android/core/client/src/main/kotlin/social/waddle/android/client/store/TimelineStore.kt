@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import social.waddle.android.client.bareJid
 import social.waddle.android.client.conversationKeyOf
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
@@ -97,7 +98,7 @@ class TimelineStore(
      * all return false so callers (the unread counter) don't count what
      * the timeline itself never renders as new content.
      */
-    fun onLiveMessage(message: WaddleMessage): Boolean {
+    fun onLiveMessage(message: WaddleMessage, authorJid: String? = null): Boolean {
         val isGroupchat = message.isMuc || message.messageType == "groupchat"
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
@@ -125,6 +126,7 @@ class TimelineStore(
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Live(message),
+                authorJid = authorJid,
             ),
             isGroupchat = isGroupchat,
             initialTombstone = null,
@@ -157,6 +159,7 @@ class TimelineStore(
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Archived(message),
+                authorJid = message.authorRealJid?.let(::normalizedBareJid)?.takeIf { '@' in it },
             ),
             isGroupchat = isGroupchat,
             // The archive returns retracted originals as tombstones.

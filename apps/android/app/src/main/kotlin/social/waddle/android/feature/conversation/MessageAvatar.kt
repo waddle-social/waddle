@@ -24,7 +24,6 @@ data class MessageAvatar(val jid: String?, val visible: Boolean)
  */
 fun messageAvatarsOf(
     rows: List<ConversationRow>,
-    occupantJids: Map<String, String>,
     selfBareJid: String?,
 ): Map<String, MessageAvatar> {
     val out = HashMap<String, MessageAvatar>()
@@ -38,7 +37,7 @@ fun messageAvatarsOf(
         if (!item.isMine) {
             val grouped = previous?.let { continuesGroup(it, item) } ?: false
             out[avatarKeyOf(item)] = MessageAvatar(
-                jid = authorBareJidOf(item, occupantJids, selfBareJid),
+                jid = authorBareJidOf(item, selfBareJid),
                 visible = !grouped,
             )
         }
@@ -49,23 +48,16 @@ fun messageAvatarsOf(
 
 /**
  * Real bare JID of the author a XEP-0461 reply quotes: the loaded
- * original's resolved author, else the reply's `to` attribute — an
- * occupant JID of this room resolves through [occupantJids], any other
- * JID is the author's own. `null` = unknown (initials).
+ * original's stamped author, else the reply's `to` attribute when it
+ * names a real JID. An occupant JID of this room (original not loaded)
+ * stays unknown — whoever holds that nick now may not have written it.
  */
-fun quotedAuthorJidOf(
-    reply: TimelineItem,
-    quoted: TimelineItem?,
-    occupantJids: Map<String, String>,
-    selfBareJid: String?,
-): String? {
-    if (quoted != null) return authorBareJidOf(quoted, occupantJids, selfBareJid)
+fun quotedAuthorJidOf(reply: TimelineItem, quoted: TimelineItem?, selfBareJid: String?): String? {
+    if (quoted != null) return authorBareJidOf(quoted, selfBareJid)
     val sender = reply.replyToSender?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val bare = normalizedBareJid(sender)
-    if (bare != normalizedBareJid(reply.conversationJid) || !isGroupchatRow(reply)) {
-        return bare.takeIf { '@' in it }
-    }
-    return sender.substringAfter('/', "").ifEmpty { null }?.let(occupantJids::get)
+    val isRoomOccupant = isGroupchatRow(reply) && bare == normalizedBareJid(reply.conversationJid)
+    return bare.takeIf { !isRoomOccupant && '@' in it }
 }
 
 private fun isGroupchatRow(item: TimelineItem): Boolean = when (val source = item.source) {

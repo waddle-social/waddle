@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -44,32 +45,34 @@ fun MentionPopover(
                 .verticalScroll(rememberScrollState()),
         ) {
             candidates.forEach { candidate ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelect(candidate) }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                ) {
-                    if (!candidate.isBroadcast) {
-                        PeerAvatar(
-                            jid = candidate.jid,
-                            displayName = candidate.display,
-                            size = 24.dp,
-                            modifier = Modifier.padding(end = 8.dp),
+                key(candidate.uri) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(candidate) }
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                    ) {
+                        if (!candidate.isBroadcast) {
+                            PeerAvatar(
+                                jid = candidate.jid,
+                                displayName = candidate.display,
+                                size = 24.dp,
+                                modifier = Modifier.padding(end = 8.dp),
+                            )
+                        }
+                        Text(
+                            text = "@${candidate.display}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (candidate.isBroadcast) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    Text(
-                        text = "@${candidate.display}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (candidate.isBroadcast) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 }
             }
         }

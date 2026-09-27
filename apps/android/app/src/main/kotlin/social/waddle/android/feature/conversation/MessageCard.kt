@@ -104,8 +104,6 @@ fun MessageCard(
     trustedMediaOrigin: String? = null,
     /** Leading avatar gutter for a received row; `null` = no gutter. */
     avatar: MessageAvatar? = null,
-    /** Room nick → real bare JID, for the quoted-reply author avatar. */
-    occupantJids: Map<String, String> = emptyMap(),
 ) {
     when (row) {
         is ConversationRow.Stored -> StoredMessageCard(
@@ -121,7 +119,6 @@ fun MessageCard(
             authorPresence = authorPresence,
             trustedMediaOrigin = trustedMediaOrigin,
             avatar = avatar,
-            occupantJids = occupantJids,
             modifier = modifier,
         )
         is ConversationRow.Unconfirmed -> PendingMessageCard(
@@ -146,7 +143,6 @@ private fun StoredMessageCard(
     authorPresence: Map<String, WaddlePresence>,
     trustedMediaOrigin: String?,
     avatar: MessageAvatar?,
-    occupantJids: Map<String, String>,
     modifier: Modifier = Modifier,
 ) {
     val author = authorOf(item)
@@ -223,7 +219,7 @@ private fun StoredMessageCard(
                 QuotedReply(
                     quoted = quoted,
                     fallbackSender = item.replyToSender,
-                    authorJid = quotedAuthorJidOf(item, quoted, occupantJids, selfBareJid),
+                    authorJid = quotedAuthorJidOf(item, quoted, selfBareJid),
                     onClick = { onQuoteClick(replyToId) },
                 )
             }

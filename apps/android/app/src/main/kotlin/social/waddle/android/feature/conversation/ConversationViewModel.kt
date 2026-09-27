@@ -66,8 +66,8 @@ open class ConversationViewModel(
      */
     occupantPresence: Flow<Map<String, WaddlePresence>> = flowOf(emptyMap()),
     /**
-     * Retained room nick → real bare JID (occupant presence + MAM real
-     * authors), for avatars of present AND departed authors. Empty for DMs.
+     * Current room nick → real bare JID (occupant presence), for typing
+     * avatars. Timeline rows carry their own stamped author JID. Empty for DMs.
      */
     occupantJids: Flow<Map<String, String>> = flowOf(emptyMap()),
     /** XEP-0492 effective mode (store fallback resolved to §3 default). */
@@ -124,7 +124,7 @@ open class ConversationViewModel(
     val authorPresence: StateFlow<Map<String, WaddlePresence>> =
         occupantPresence.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
-    /** Room nick → real bare JID; resolves timeline and typing avatars. */
+    /** Current room nick → real bare JID; names typists' avatars. */
     val authorJids: StateFlow<Map<String, String>> =
         occupantJids.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 

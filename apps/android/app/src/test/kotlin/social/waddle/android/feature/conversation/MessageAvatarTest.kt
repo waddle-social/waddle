@@ -19,6 +19,7 @@ class MessageAvatarTest {
         nick: String,
         timestamp: String? = "2026-07-15T10:00:00Z",
         mine: Boolean = false,
+        authorJid: String? = null,
     ) = ConversationRow.Stored(
         TimelineItem(
             id = id,
@@ -30,6 +31,7 @@ class MessageAvatarTest {
             source = TimelineSource.Live(
                 testMessage(id = id, from = "$room/$nick", messageType = "groupchat", isMuc = true),
             ),
+            authorJid = authorJid,
         ),
     )
 
@@ -38,11 +40,12 @@ class MessageAvatarTest {
 
     @Test
     fun `consecutive rows of one author within five minutes share one avatar`() {
-        val first = row("1", "alice", "2026-07-15T10:00:00Z")
-        val second = row("2", "alice", "2026-07-15T10:04:59Z")
-        val later = row("3", "alice", "2026-07-15T10:10:00Z")
+        val stamp = "alice@waddle.test"
+        val first = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = stamp)
+        val second = row("2", "alice", "2026-07-15T10:04:59Z", authorJid = stamp)
+        val later = row("3", "alice", "2026-07-15T10:10:00Z", authorJid = stamp)
         val other = row("4", "bob", "2026-07-15T10:10:30Z")
-        val avatars = messageAvatarsOf(listOf(first, second, later, other), mapOf("alice" to "alice@waddle.test"), self)
+        val avatars = messageAvatarsOf(listOf(first, second, later, other), self)
 
         assertEquals(MessageAvatar("alice@waddle.test", visible = true), avatarOf(avatars, first))
         assertEquals(MessageAvatar("alice@waddle.test", visible = false), avatarOf(avatars, second))
@@ -56,14 +59,14 @@ class MessageAvatarTest {
         val a1 = row("1", "alice")
         val mine = row("2", "me", mine = true)
         val a2 = row("3", "alice")
-        val avatars = messageAvatarsOf(listOf(a1, mine, a2), emptyMap(), self)
+        val avatars = messageAvatarsOf(listOf(a1, mine, a2), self)
 
         assertNull(avatarOf(avatars, mine))
         assertTrue(avatarOf(avatars, a2)!!.visible)
     }
 
     @Test
-    fun `a departed author resolves through the archived real JID`() {
+    fun `a departed author keeps the JID stamped on their row`() {
         val archived = ConversationRow.Stored(
             TimelineItem(
                 id = "m1",
@@ -79,31 +82,29 @@ class MessageAvatarTest {
                         authorRealJid = "gone@waddle.test/web",
                     ),
                 ),
+                authorJid = "gone@waddle.test",
             ),
         )
-        val avatars = messageAvatarsOf(listOf(archived), emptyMap(), self)
+        val avatars = messageAvatarsOf(listOf(archived), self)
 
         assertEquals("gone@waddle.test", avatarOf(avatars, archived)?.jid)
     }
 
     @Test
-    fun `a quoted author resolves from the original, else the reply target without guessing`() {
-        val original = row("1", "alice")
+    fun `a quoted author resolves from the original, else only a real-JID reply target`() {
+        val original = row("1", "alice", authorJid = "alice@waddle.test")
         fun reply(to: String?) = row("2", "bob").item.copy(
             source = TimelineSource.Live(
                 testMessage(id = "2", from = "$room/bob", messageType = "groupchat", isMuc = true)
                     .copy(replyToId = "1", replyToSender = to),
             ),
         )
-        val jids = mapOf("alice" to "alice@waddle.test")
 
-        assertEquals("alice@waddle.test", quotedAuthorJidOf(reply("$room/alice"), original.item, jids, self))
-        // Original not loaded: the room occupant JID resolves via the map…
-        assertEquals("alice@waddle.test", quotedAuthorJidOf(reply("$room/alice"), null, jids, self))
-        // …an unmapped nick stays unknown…
-        assertNull(quotedAuthorJidOf(reply("$room/carol"), null, jids, self))
-        // …and a real JID target is used as-is (normalized).
-        assertEquals("dave@waddle.test", quotedAuthorJidOf(reply("Dave@Waddle.test/x"), null, jids, self))
-        assertNull(quotedAuthorJidOf(reply(null), null, jids, self))
+        assertEquals("alice@waddle.test", quotedAuthorJidOf(reply("$room/alice"), original.item, self))
+        // Original not loaded: whoever holds that nick now may not have written it.
+        assertNull(quotedAuthorJidOf(reply("$room/alice"), null, self))
+        // A real JID target is used as-is (normalized).
+        assertEquals("dave@waddle.test", quotedAuthorJidOf(reply("Dave@Waddle.test/x"), null, self))
+        assertNull(quotedAuthorJidOf(reply(null), null, self))
     }
 }

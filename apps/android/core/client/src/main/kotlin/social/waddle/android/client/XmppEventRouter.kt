@@ -105,7 +105,7 @@ internal class XmppEventRouter(
         // or create DM-list entries.
         val hasContent = message.body != null
         if (!isMutation && hasContent) persistDmRecency(message)
-        val newlyInserted = stores.timelineStore.onLiveMessage(message)
+        val newlyInserted = stores.timelineStore.onLiveMessage(message, liveAuthorJidOf(message))
         if (!isMutation && hasContent) {
             stores.dmStore.onChatMessage(activeSession.ownBareJid, message)
         }
@@ -118,6 +118,19 @@ internal class XmppEventRouter(
         ) ?: return
         trackChatState(key, message)
         if (message.body != null) recordActivity(key, message, newlyInserted)
+    }
+
+    /**
+     * The room author's real JID for an UNDELAYED live groupchat message,
+     * from the occupant presence current at arrival. Delayed ones (join
+     * history, replays) predate that presence — a reused nick would
+     * mislabel them — so they stay unattributed unless the archive says.
+     */
+    private fun liveAuthorJidOf(message: WaddleMessage): String? {
+        if (!(message.isMuc || message.messageType == "groupchat") || message.timestamp != null) return null
+        val from = message.from ?: return null
+        val nick = resourcepart(from) ?: return null
+        return stores.occupantJidStore.jidFor(bareJid(from), nick)
     }
 
     /** Unread + resume-cursor bookkeeping for a content-bearing message. */
@@ -183,11 +196,6 @@ internal class XmppEventRouter(
     private fun routeMamResult(event: XmppEvent.MamResult) {
         stores.timelineStore.onArchivedMessage(event.message)
         val message = event.message
-        val author = message.from
-        val realJid = message.authorRealJid
-        if (message.messageType == "groupchat" && author != null && realJid != null) {
-            stores.occupantJidStore.onArchivedAuthor(author, realJid)
-        }
         if (message.body == null) return
         conversationKeyOf(
             ownBareJid = activeSession.ownBareJid,

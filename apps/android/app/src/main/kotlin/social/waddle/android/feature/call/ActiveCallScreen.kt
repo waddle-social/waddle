@@ -206,7 +206,8 @@ private fun MucRosterPanel(roster: List<MucRosterEntry>, modifier: Modifier = Mo
             .testTag(CallTestTags.MUC_ROSTER),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        items(items = roster, key = { it.nick }) { entry ->
+        // Keyed by identity too: a nick taken over by someone else is a new row.
+        items(items = roster, key = { "${it.nick}|${it.jid.orEmpty()}" }) { entry ->
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
