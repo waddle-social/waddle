@@ -14,9 +14,9 @@ import social.waddle.android.AppGraph
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.prefs.UserPrefs
-import social.waddle.android.jid.bareJidOf
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleAvatar
 
@@ -46,7 +46,7 @@ class SettingsViewModel(
             currentSession,
             sessionManager.profileStore.avatars,
         ) { session, avatars ->
-            session?.jid?.let(::bareJidOf)?.let(avatars::get)
+            session?.jid?.let(::normalizedBareJid)?.let(avatars::get)
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     }
 

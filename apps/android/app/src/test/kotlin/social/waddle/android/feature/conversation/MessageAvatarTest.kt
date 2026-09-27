@@ -85,4 +85,25 @@ class MessageAvatarTest {
 
         assertEquals("gone@waddle.test", avatarOf(avatars, archived)?.jid)
     }
+
+    @Test
+    fun `a quoted author resolves from the original, else the reply target without guessing`() {
+        val original = row("1", "alice")
+        fun reply(to: String?) = row("2", "bob").item.copy(
+            source = TimelineSource.Live(
+                testMessage(id = "2", from = "$room/bob", messageType = "groupchat", isMuc = true)
+                    .copy(replyToId = "1", replyToSender = to),
+            ),
+        )
+        val jids = mapOf("alice" to "alice@waddle.test")
+
+        assertEquals("alice@waddle.test", quotedAuthorJidOf(reply("$room/alice"), original.item, jids, self))
+        // Original not loaded: the room occupant JID resolves via the map…
+        assertEquals("alice@waddle.test", quotedAuthorJidOf(reply("$room/alice"), null, jids, self))
+        // …an unmapped nick stays unknown…
+        assertNull(quotedAuthorJidOf(reply("$room/carol"), null, jids, self))
+        // …and a real JID target is used as-is (normalized).
+        assertEquals("dave@waddle.test", quotedAuthorJidOf(reply("Dave@Waddle.test/x"), null, jids, self))
+        assertNull(quotedAuthorJidOf(reply(null), null, jids, self))
+    }
 }

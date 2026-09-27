@@ -104,6 +104,8 @@ fun MessageCard(
     trustedMediaOrigin: String? = null,
     /** Leading avatar gutter for a received row; `null` = no gutter. */
     avatar: MessageAvatar? = null,
+    /** Room nick → real bare JID, for the quoted-reply author avatar. */
+    occupantJids: Map<String, String> = emptyMap(),
 ) {
     when (row) {
         is ConversationRow.Stored -> StoredMessageCard(
@@ -119,6 +121,7 @@ fun MessageCard(
             authorPresence = authorPresence,
             trustedMediaOrigin = trustedMediaOrigin,
             avatar = avatar,
+            occupantJids = occupantJids,
             modifier = modifier,
         )
         is ConversationRow.Unconfirmed -> PendingMessageCard(
@@ -143,6 +146,7 @@ private fun StoredMessageCard(
     authorPresence: Map<String, WaddlePresence>,
     trustedMediaOrigin: String?,
     avatar: MessageAvatar?,
+    occupantJids: Map<String, String>,
     modifier: Modifier = Modifier,
 ) {
     val author = authorOf(item)
@@ -215,9 +219,11 @@ private fun StoredMessageCard(
         badge = if (isGroupchat(item)) authorBadgeOf(authorPresence[author]) else null,
         header = {
             item.replyToId?.let { replyToId ->
+                val quoted = resolveQuoted(replyToId)
                 QuotedReply(
-                    quoted = resolveQuoted(replyToId),
+                    quoted = quoted,
                     fallbackSender = item.replyToSender,
+                    authorJid = quotedAuthorJidOf(item, quoted, occupantJids, selfBareJid),
                     onClick = { onQuoteClick(replyToId) },
                 )
             }
@@ -286,6 +292,7 @@ private fun StoredMessageCard(
 private fun QuotedReply(
     quoted: TimelineItem?,
     fallbackSender: String?,
+    authorJid: String?,
     onClick: () -> Unit,
 ) {
     Surface(
@@ -300,11 +307,19 @@ private fun QuotedReply(
             val author = quoted?.let { authorOf(it) }
                 ?: fallbackSender?.let { resourcepartOf(it) ?: localpartOf(it) }
             author?.let {
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PeerAvatar(
+                        jid = authorJid,
+                        displayName = it,
+                        size = QUOTE_AVATAR_SIZE,
+                        modifier = Modifier.padding(end = 4.dp),
+                    )
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             Text(
                 text = when {
@@ -792,3 +807,4 @@ private const val INLINE_IMAGE_MEDIA_TYPE = "image/gif"
 
 private val MESSAGE_AVATAR_SIZE: Dp = 28.dp
 private val MESSAGE_AVATAR_GAP: Dp = 6.dp
+private val QUOTE_AVATAR_SIZE: Dp = 16.dp

@@ -1,6 +1,8 @@
 package social.waddle.android.feature.conversation
 
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.store.TimelineItem
+import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.store.authorBareJidOf
 import java.time.Duration
 import java.time.Instant
@@ -43,6 +45,32 @@ fun messageAvatarsOf(
         previous = item
     }
     return out
+}
+
+/**
+ * Real bare JID of the author a XEP-0461 reply quotes: the loaded
+ * original's resolved author, else the reply's `to` attribute — an
+ * occupant JID of this room resolves through [occupantJids], any other
+ * JID is the author's own. `null` = unknown (initials).
+ */
+fun quotedAuthorJidOf(
+    reply: TimelineItem,
+    quoted: TimelineItem?,
+    occupantJids: Map<String, String>,
+    selfBareJid: String?,
+): String? {
+    if (quoted != null) return authorBareJidOf(quoted, occupantJids, selfBareJid)
+    val sender = reply.replyToSender?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val bare = normalizedBareJid(sender)
+    if (bare != normalizedBareJid(reply.conversationJid) || !isGroupchatRow(reply)) {
+        return bare.takeIf { '@' in it }
+    }
+    return sender.substringAfter('/', "").ifEmpty { null }?.let(occupantJids::get)
+}
+
+private fun isGroupchatRow(item: TimelineItem): Boolean = when (val source = item.source) {
+    is TimelineSource.Live -> source.message.isMuc || source.message.messageType == "groupchat"
+    is TimelineSource.Archived -> source.message.messageType == "groupchat"
 }
 
 /** Stable per-row key: ids may collide across senders (see TimelineList). */

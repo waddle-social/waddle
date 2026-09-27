@@ -4,7 +4,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import social.waddle.android.client.bareJid
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.client.ffi.WaddleActivity
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleMood
@@ -48,7 +48,10 @@ class ProfileStore {
 
     private val _avatars = MutableStateFlow<Map<String, WaddleAvatar>>(emptyMap())
 
-    /** bare JID → currently advertised avatar (the account and peers). */
+    /**
+     * [normalizedBareJid] → currently advertised avatar (the account and
+     * peers). Look up with [normalizedBareJid], never a raw JID.
+     */
     val avatars: StateFlow<Map<String, WaddleAvatar>> = _avatars.asStateFlow()
 
     fun setSelfVcard(vcard: WaddleVCard4?) {
@@ -77,20 +80,20 @@ class ProfileStore {
     /** The cached avatar for (bare JID, item id), if any — the XEP-0084
      *  §4.2 lookup that gates whether a fetch may touch the wire. */
     fun cachedAvatar(jid: String, itemId: String): WaddleAvatar? =
-        cacheById.value[bareJid(jid)]?.get(itemId)
+        cacheById.value[normalizedBareJid(jid)]?.get(itemId)
 
     /** The item ids whose bytes are cached for [jid] — the known-id set
      *  handed to the FFI fetch so the §4.2 data-IQ skip happens on the
      *  wire path, not only on the local shortcut. */
     fun knownAvatarIds(jid: String): List<String> =
-        cacheById.value[bareJid(jid)]?.keys?.toList() ?: emptyList()
+        cacheById.value[normalizedBareJid(jid)]?.keys?.toList() ?: emptyList()
 
     /** Record [avatar] as its owner's current avatar and cache its
      *  bytes. The per-JID byte cache is bounded to the
      *  [MAX_CACHED_AVATAR_IDS_PER_JID] most recently seen ids (kept in
      *  insertion order); older entries are evicted. */
     fun onAvatar(avatar: WaddleAvatar) {
-        val owner = bareJid(avatar.jid)
+        val owner = normalizedBareJid(avatar.jid)
         cacheById.update { cache ->
             // Re-insert so the current id is always the newest entry.
             val entries = ((cache[owner] ?: emptyMap()) - avatar.id) + (avatar.id to avatar)
@@ -109,7 +112,7 @@ class ProfileStore {
     /** XEP-0084 §4.3 "no avatar": drop the JID's current avatar. The
      *  id-keyed byte cache is kept — a re-published id must still hit it. */
     fun clearAvatar(jid: String) {
-        _avatars.update { it - bareJid(jid) }
+        _avatars.update { it - normalizedBareJid(jid) }
     }
 
     fun clear() {

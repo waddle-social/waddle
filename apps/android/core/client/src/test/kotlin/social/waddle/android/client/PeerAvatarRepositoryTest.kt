@@ -3,11 +3,11 @@ package social.waddle.android.client
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.store.ProfileStore
 
@@ -160,9 +160,7 @@ class PeerAvatarRepositoryTest {
         h.resolver.releaseAll()
         runCurrent()
 
-        val before = h.repository.epoch.value
         h.repository.markStale()
-        assertTrue(h.repository.epoch.value > before)
         h.repository.ensure(alice)
         runCurrent()
         assertEquals(2, h.resolver.calls.size)
@@ -254,5 +252,70 @@ class PeerAvatarRepositoryTest {
         h.repository.ensure("bob@waddle.test")
         runCurrent()
         assertEquals(3, h.resolver.calls.size)
+    }
+
+    @Test
+    fun `case variants of one JID share a single cache entry`() = runTest {
+        val h = Harness(this)
+        h.resolver.answer(alice, AvatarLookup.Found(testAvatar(jid = alice, id = "id-1")))
+        h.repository.ensure("Alice@Waddle.Test/Phone")
+        h.repository.ensure(alice)
+        runCurrent()
+        h.resolver.releaseAll()
+        runCurrent()
+        h.repository.ensure("ALICE@waddle.test")
+        runCurrent()
+
+        assertEquals(listOf(Call(alice, null)), h.resolver.calls)
+        assertEquals("id-1", h.store.avatars.value[normalizedBareJid("Alice@WADDLE.test")]?.id)
+    }
+
+    @Test
+    fun `a watched JID revalidates on the repository timer without a reconnect`() = runTest {
+        val h = Harness(this)
+        h.resolver.answer(alice, AvatarLookup.Found(testAvatar(jid = alice, id = "id-1")))
+        val release = h.repository.watch(alice)
+        runCurrent()
+        h.resolver.releaseAll()
+        runCurrent()
+        assertEquals(1, h.resolver.calls.size)
+
+        // Ticks before the TTL re-check but fetch nothing.
+        h.now = PeerAvatarRepository.POSITIVE_TTL_MILLIS - 1
+        advanceTimeBy(PeerAvatarRepository.REVALIDATE_TICK_MILLIS)
+        runCurrent()
+        assertEquals(1, h.resolver.calls.size)
+
+        // The first tick past 45 min revalidates with the known id path.
+        h.now = PeerAvatarRepository.POSITIVE_TTL_MILLIS
+        advanceTimeBy(PeerAvatarRepository.REVALIDATE_TICK_MILLIS)
+        runCurrent()
+        assertEquals(2, h.resolver.calls.size)
+        h.resolver.releaseAll()
+        runCurrent()
+
+        // Released: no watcher, no timer, no more fetches.
+        release()
+        h.now = 2 * PeerAvatarRepository.POSITIVE_TTL_MILLIS
+        advanceTimeBy(10 * PeerAvatarRepository.REVALIDATE_TICK_MILLIS)
+        runCurrent()
+        assertEquals(2, h.resolver.calls.size)
+    }
+
+    @Test
+    fun `a new session refetches watched JIDs right away`() = runTest {
+        val h = Harness(this)
+        h.resolver.answer(alice, AvatarLookup.Found(testAvatar(jid = alice, id = "id-1")))
+        val release = h.repository.watch(alice)
+        runCurrent()
+        h.resolver.releaseAll()
+        runCurrent()
+
+        h.repository.markStale()
+        runCurrent()
+        assertEquals(2, h.resolver.calls.size)
+        h.resolver.releaseAll()
+        runCurrent()
+        release()
     }
 }

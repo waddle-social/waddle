@@ -49,6 +49,8 @@ data class ConversationUiState(
 data class ThreadSummary(
     val threadId: String,
     val rootAuthor: String?,
+    /** The row [rootAuthor] was taken from (avatar resolution). */
+    val rootItem: TimelineItem? = null,
     val rootPreview: String,
     /** The preview source was retracted/moderated; render a placeholder. */
     val rootTombstoned: Boolean,

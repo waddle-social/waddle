@@ -18,7 +18,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -47,6 +46,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -55,6 +56,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.client.ffi.WaddleAvatar
 
@@ -171,6 +173,7 @@ private fun AccountRow(
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
         }
     }
+    val avatarLabel = stringResource(R.string.settings_avatar)
     ListItem(
         headlineContent = {
             Text(text = state.username ?: stringResource(R.string.settings_account))
@@ -194,10 +197,12 @@ private fun AccountRow(
                         .size(40.dp)
                         .clip(CircleShape),
                 )
-                else -> Icon(
-                    Icons.Outlined.AccountCircle,
-                    contentDescription = stringResource(R.string.settings_avatar),
-                    modifier = Modifier.size(40.dp),
+                // No image yet: initials, like every other person surface.
+                else -> PeerAvatar(
+                    jid = null,
+                    displayName = state.username ?: state.jid?.substringBefore('@').orEmpty(),
+                    size = 40.dp,
+                    modifier = Modifier.semantics { contentDescription = avatarLabel },
                 )
             }
         },

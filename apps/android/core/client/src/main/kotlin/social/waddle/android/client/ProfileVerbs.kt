@@ -122,7 +122,7 @@ internal class ProfileVerbs(
             true
         },
     ): AvatarLookup {
-        val owner = bareJid(jid)
+        val owner = normalizedBareJid(jid)
         val cached = knownId?.let { stores.profileStore.cachedAvatar(owner, it) }
         val lookup = cached?.let(AvatarLookup::Found) ?: requestAvatar(owner, lease)
         if (lookup == AvatarLookup.Failed) return lookup

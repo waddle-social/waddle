@@ -3,9 +3,8 @@ package social.waddle.android.client
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -24,16 +23,21 @@ sealed interface AvatarLookup {
 }
 
 /**
- * Read side of the peer-avatar cache for the UI: [avatars] is keyed by
- * bare JID only (never a nick); [ensure] is the lazy first-render
- * trigger; [epoch] ticks on every new session so on-screen avatars
- * re-ensure after a reconnect.
+ * Read side of the peer-avatar cache for the UI. [avatars] is keyed by
+ * [normalizedBareJid] only (never a nick).
  */
 interface PeerAvatarSource {
     val avatars: StateFlow<Map<String, WaddleAvatar>>
-    val epoch: StateFlow<Long>
 
+    /** Fetch [jid]'s avatar unless a fresh result (or fetch) exists. */
     fun ensure(jid: String)
+
+    /**
+     * Keep [jid] fresh while a surface shows it: ensures now, then
+     * revalidates on the repository's own coarse timer and on every
+     * new session. Returns the release; call it when the surface leaves.
+     */
+    fun watch(jid: String): () -> Unit
 }
 
 /**
@@ -54,6 +58,9 @@ internal fun interface AvatarResolver {
  *   cached item ids (XEP-0084 §4.2: no data re-download when unchanged);
  * - a miss or a failure is retried after [RETRY_TTL_MILLIS];
  * - a new session ([markStale]) makes every result stale;
+ * - watched JIDs (on screen) are re-checked every
+ *   [REVALIDATE_TICK_MILLIS], so always-visible surfaces still pick up
+ *   the TTLs; the ticker only runs while something is watched;
  * - `AvatarChanged` refetches that JID with the announced id, and a
  *   `null` id (§4.3 disable) drops to initials immediately.
  */
@@ -83,24 +90,66 @@ internal class PeerAvatarRepository(
     private val entries = HashMap<String, Entry>()
     private val permits = Semaphore(maxConcurrent)
     private var currentEpoch = 0L
-    private val _epoch = MutableStateFlow(0L)
 
-    override val epoch: StateFlow<Long> = _epoch.asStateFlow()
+    /** key → number of surfaces currently watching it. */
+    private val watchers = HashMap<String, Int>()
+    private var ticker: Job? = null
 
     override fun ensure(jid: String) {
         val key = keyOf(jid) ?: return
+        synchronized(lock) { ensureLocked(key) }
+    }
+
+    override fun watch(jid: String): () -> Unit {
+        val key = keyOf(jid) ?: return {}
         synchronized(lock) {
-            val entry = entries.getOrPut(key, ::Entry)
-            val attempt = entry.attempt
-            if (attempt != null) {
-                // Started before a reconnect: its answer is already stale.
-                if (attempt.epoch != currentEpoch) entry.rerun = true
-                return
-            }
-            val settled = entry.settled
-            if (settled != null && settled.epoch == currentEpoch && clock() - settled.at < settled.ttl) return
-            start(key, entry, knownId = null)
+            watchers[key] = (watchers[key] ?: 0) + 1
+            if (ticker == null) ticker = scope.launch { revalidateWatched() }
+            ensureLocked(key)
         }
+        var released = false
+        return {
+            synchronized(lock) {
+                if (!released) {
+                    released = true
+                    unwatchLocked(key)
+                }
+            }
+        }
+    }
+
+    private suspend fun revalidateWatched() {
+        while (true) {
+            delay(REVALIDATE_TICK_MILLIS)
+            synchronized(lock) { watchers.keys.toList().forEach(::ensureLocked) }
+        }
+    }
+
+    private fun unwatchLocked(key: String) {
+        val remaining = (watchers[key] ?: return) - 1
+        if (remaining > 0) {
+            watchers[key] = remaining
+            return
+        }
+        watchers -= key
+        if (watchers.isEmpty()) {
+            ticker?.cancel()
+            ticker = null
+        }
+    }
+
+    /** Caller holds [lock]. */
+    private fun ensureLocked(key: String) {
+        val entry = entries.getOrPut(key, ::Entry)
+        val attempt = entry.attempt
+        if (attempt != null) {
+            // Started before a reconnect: its answer is already stale.
+            if (attempt.epoch != currentEpoch) entry.rerun = true
+            return
+        }
+        val settled = entry.settled
+        if (settled != null && settled.epoch == currentEpoch && clock() - settled.at < settled.ttl) return
+        start(key, entry, knownId = null)
     }
 
     /** XEP-0084 metadata notification for [jid]; `null` = avatar disabled. */
@@ -126,21 +175,24 @@ internal class PeerAvatarRepository(
         }
     }
 
-    /** A new session bound: every settled result is stale. */
+    /** A new session bound: every settled result is stale; on-screen JIDs refetch now. */
     fun markStale() {
         synchronized(lock) {
             currentEpoch++
-            _epoch.value = currentEpoch
+            watchers.keys.toList().forEach(::ensureLocked)
         }
     }
 
-    /** Sign-out/relogin: drop all state and cancel in-flight fetches. */
+    /**
+     * Sign-out/relogin: drop all results and cancel in-flight fetches.
+     * Watchers belong to on-screen surfaces and survive; the next
+     * [markStale] refetches them for the new session.
+     */
     fun clear() {
         synchronized(lock) {
             entries.values.forEach { it.attempt?.job?.cancel() }
             entries.clear()
             currentEpoch++
-            _epoch.value = currentEpoch
         }
     }
 
@@ -186,7 +238,7 @@ internal class PeerAvatarRepository(
         }
     }
 
-    private fun keyOf(jid: String): String? = bareJid(jid.trim()).takeIf { it.isNotEmpty() }
+    private fun keyOf(jid: String): String? = normalizedBareJid(jid).takeIf { it.isNotEmpty() }
 
     companion object {
         const val MAX_CONCURRENT_FETCHES = 4
@@ -196,5 +248,8 @@ internal class PeerAvatarRepository(
 
         /** Misses and failures are retried after 10 min. */
         const val RETRY_TTL_MILLIS = 10L * 60 * 1000
+
+        /** Coarse re-check of watched JIDs; the TTLs decide what refetches. */
+        const val REVALIDATE_TICK_MILLIS = 60L * 1000
     }
 }

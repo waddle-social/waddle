@@ -50,7 +50,7 @@ class ThreadViewModel(
         flowOf(emptyMap())
     },
     occupantJids = if (isGroupchat) {
-        sessionManager.occupantJidStore.jids.map { rooms -> rooms[conversationJid].orEmpty() }
+        sessionManager.occupantJidStore.jidsIn(conversationJid)
     } else {
         flowOf(emptyMap())
     },

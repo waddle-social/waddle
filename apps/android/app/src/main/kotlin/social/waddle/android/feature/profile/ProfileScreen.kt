@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -50,6 +49,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -57,6 +58,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.GENERAL_ACTIVITIES
 import social.waddle.android.client.MOOD_KINDS
 import social.waddle.client.ffi.WaddleAvatar
@@ -146,7 +148,8 @@ private fun AvatarSection(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        SelfAvatarImage(avatar = avatar, restAvatarUrl = restAvatarUrl)
+        val selfName by viewModel.selfName.collectAsStateWithLifecycle()
+        SelfAvatarImage(avatar = avatar, restAvatarUrl = restAvatarUrl, selfName = selfName)
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
@@ -175,7 +178,8 @@ private fun AvatarSection(
 
 /** XMPP-published bytes win; the REST avatar URL is the fallback. */
 @Composable
-private fun SelfAvatarImage(avatar: WaddleAvatar?, restAvatarUrl: String?) {
+private fun SelfAvatarImage(avatar: WaddleAvatar?, restAvatarUrl: String?, selfName: String) {
+    val avatarLabel = stringResource(R.string.settings_avatar)
     val modifier = Modifier
         .size(64.dp)
         .clip(CircleShape)
@@ -197,10 +201,12 @@ private fun SelfAvatarImage(avatar: WaddleAvatar?, restAvatarUrl: String?) {
             contentScale = ContentScale.Crop,
             modifier = modifier,
         )
-        else -> Icon(
-            Icons.Outlined.AccountCircle,
-            contentDescription = stringResource(R.string.settings_avatar),
-            modifier = Modifier.size(64.dp),
+        // No image yet: initials, like every other person surface.
+        else -> PeerAvatar(
+            jid = null,
+            displayName = selfName,
+            size = 64.dp,
+            modifier = Modifier.semantics { contentDescription = avatarLabel },
         )
     }
 }

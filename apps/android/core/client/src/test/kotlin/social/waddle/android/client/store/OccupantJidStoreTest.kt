@@ -1,5 +1,7 @@
 package social.waddle.android.client.store
 
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -103,5 +105,20 @@ class OccupantJidStoreTest {
             source = TimelineSource.Live(testMessage(from = "bob@waddle.test/laptop")),
         )
         assertEquals("bob@waddle.test", authorBareJidOf(dm, emptyMap(), ownBareJid = "me@waddle.test"))
+    }
+
+    @Test
+    fun `case variants of the room and real JID share one normalized entry`() = runTest {
+        val store = OccupantJidStore()
+        store.onPresence(testPresence(from = "Room@MUC.waddle.test/alice", mucJid = "Alice@Waddle.Test/x"))
+        store.onPresence(testPresence(from = "room@muc.waddle.test/bob", mucJid = "BOB@waddle.test"))
+
+        assertEquals(
+            mapOf("alice" to "alice@waddle.test", "bob" to "bob@waddle.test"),
+            store.jidsIn("ROOM@muc.waddle.test").first(),
+        )
+        assertEquals(setOf(room), store.jids.value.keys)
+        // Nicks stay case-sensitive (XEP-0045 resourceparts).
+        assertNull(store.jids.value[room]?.get("Alice"))
     }
 }

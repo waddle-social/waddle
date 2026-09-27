@@ -102,6 +102,7 @@ fun TimelineList(
                 authorPresence = authorPresence,
                 trustedMediaOrigin = trustedMediaOrigin,
                 avatar = storedItem?.let { avatars[avatarKeyOf(it)] },
+                occupantJids = occupantJids,
             )
         }
         if (isLoadingOlder) {

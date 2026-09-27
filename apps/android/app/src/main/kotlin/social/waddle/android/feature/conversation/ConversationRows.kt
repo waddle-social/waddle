@@ -98,6 +98,7 @@ fun threadSummariesOf(
         ThreadSummary(
             threadId = thread,
             rootAuthor = previewSource.let(authorNameOf),
+            rootItem = previewSource,
             // Tombstoned content must never leak through previews
             // (XEP-0424/0425); the UI substitutes the placeholder.
             rootPreview = if (previewSource.tombstone != null) "" else previewSource.body,

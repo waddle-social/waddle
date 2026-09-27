@@ -19,6 +19,8 @@ data class MessageSearchHit(
     val key: String,
     /** Display name (MUC nick / DM localpart); null when unattributed. */
     val author: String?,
+    /** The author's real bare JID (avatar); `null` = unknown → initials. */
+    val authorJid: String? = null,
     val body: String,
     /** RFC 3339 archive timestamp; formatted at render time. */
     val timestamp: String?,

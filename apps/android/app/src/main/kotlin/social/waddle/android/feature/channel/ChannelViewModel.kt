@@ -46,7 +46,7 @@ class ChannelViewModel(
         .map { rooms -> mentionCandidatesOf(rooms[roomJid].orEmpty()) },
     occupantPresence = sessionManager.presenceStore.occupants
         .map { rooms -> rooms[roomJid].orEmpty() },
-    occupantJids = sessionManager.occupantJidStore.jids.map { rooms -> rooms[roomJid].orEmpty() },
+    occupantJids = sessionManager.occupantJidStore.jidsIn(roomJid),
     // No public/private discriminator on the topology yet (web
     // parity): every MUC resolves as a private group (§3: always).
     notifyMode = sessionManager.notifySettingsStore.modeFlow(roomJid, ConversationKind.PRIVATE_GROUP),

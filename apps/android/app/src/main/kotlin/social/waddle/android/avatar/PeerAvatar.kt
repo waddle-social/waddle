@@ -10,7 +10,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -29,7 +29,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import social.waddle.android.client.PeerAvatarSource
-import social.waddle.android.jid.bareJidOf
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.theme.consistentColor
 
 /**
@@ -43,8 +43,8 @@ val LocalPeerAvatars = staticCompositionLocalOf<PeerAvatarSource?> { null }
  * XEP-0084 image when one is published, else initials on their XEP-0392
  * consistent color (web `AppAvatar` parity). [jid] is the REAL bare JID
  * — never a nick or a guess; `null` when unknown renders initials.
- * The first composition triggers the lazy fetch; policy lives in the
- * core `PeerAvatarRepository`.
+ * Composition watches the JID (lazy fetch + revalidation while on
+ * screen); policy lives in the core `PeerAvatarRepository`.
  */
 @Composable
 fun PeerAvatar(
@@ -54,7 +54,7 @@ fun PeerAvatar(
     modifier: Modifier = Modifier,
 ) {
     val source = LocalPeerAvatars.current
-    val key = jid?.let(::bareJidOf)?.trim()?.takeIf { it.isNotEmpty() }
+    val key = jid?.let(::normalizedBareJid)?.takeIf { it.isNotEmpty() }
     val image = if (source != null && key != null) rememberAvatarImage(source, key) else null
     Box(
         modifier = modifier
@@ -85,8 +85,13 @@ fun PeerAvatar(
 
 @Composable
 private fun rememberAvatarImage(source: PeerAvatarSource, key: String): ImageBitmap? {
-    val epoch by source.epoch.collectAsState()
-    LaunchedEffect(source, key, epoch) { source.ensure(key) }
+    // Watching (not a composable-side timer) keeps it fresh: the
+    // repository revalidates watched JIDs on its own clock and on every
+    // new session, so no effect here ever loops or delays.
+    DisposableEffect(source, key) {
+        val release = source.watch(key)
+        onDispose { release() }
+    }
     val avatars by source.avatars.collectAsState()
     val current = avatars[key] ?: return null
     val cacheKey = "$key#${current.id}"

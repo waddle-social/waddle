@@ -130,7 +130,6 @@ class XmppSessionManagerPeerAvatarTest {
         harness.client.avatar = testAvatar(jid = alice, id = "id-1")
         harness.manager.peerAvatars.ensure(alice)
         runCurrent()
-        val epoch = harness.manager.peerAvatars.epoch.value
 
         harness.factory.emit(WaddleClientEvent.Disconnected)
         runCurrent()
@@ -138,7 +137,6 @@ class XmppSessionManagerPeerAvatarTest {
         runCurrent()
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
-        assertTrue(harness.manager.peerAvatars.epoch.value > epoch)
         harness.manager.peerAvatars.ensure(alice)
         runCurrent()
         // The fresh attempt's client is asked again.
