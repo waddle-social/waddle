@@ -19,12 +19,13 @@ use super::PromotedOutcome;
 pub(super) struct DeliveryHandles<'a> {
     pub registry: &'a ConnectionRegistry,
     pub user_registry: &'a ActorRef<UserRegistryActor>,
+    pub allow_unfenced_effects: bool,
 }
 
 /// Select the durable authority that must commit with a pending insertion.
 #[derive(Clone, Copy)]
 pub(super) enum PromotionOrigin<'a> {
-    Stream(&'a str),
+    Stream { stream_id: &'a str, sequence: u32 },
     IngressCustody(&'a waddle_xmpp::stream_management::persistence::PersistedIngressAppend),
 }
 
@@ -80,7 +81,14 @@ pub(super) async fn insert_pending(
         outbound_sequence: None,
     };
     let result = match origin {
-        PromotionOrigin::Stream(stream) => pending_storage.insert_fenced(row, stream).await,
+        PromotionOrigin::Stream {
+            stream_id,
+            sequence,
+        } => {
+            pending_storage
+                .insert_fenced_and_prune_unacked(row, stream_id, sequence)
+                .await
+        }
         PromotionOrigin::IngressCustody(append) => {
             use waddle_xmpp::pending_delivery::storage::CustodyInsertOutcome;
             match pending_storage.insert_ingress_custody(row, append).await {
@@ -98,6 +106,13 @@ pub(super) async fn insert_pending(
     match result {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
         Ok(InsertOutcome::QuotaExceeded) => {
+            if !delivery.allow_unfenced_effects {
+                // The SM replay row remains durable after quota rejection.
+                // A direct bounce cannot be committed with its retirement,
+                // so leave it for successor/retry instead of contradicting a
+                // later successful delivery.
+                return PromotedOutcome::StorageFailure;
+            }
             // XEP-0160 §3 step 3 + RFC 6120 §8.3 — bounce
             // <service-unavailable/> to the sender. We use the same
             // typed StanzaError builder the routing layer uses for

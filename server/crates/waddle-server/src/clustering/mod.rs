@@ -433,7 +433,6 @@ impl NodeLifecycle {
         }
     }
 
-    #[cfg(feature = "clustering")]
     pub(crate) fn fatal_fence_token(&self) -> CancellationToken {
         self.fatal_fence.clone()
     }
@@ -984,6 +983,9 @@ pub async fn start_if_enabled(
     db: &Database,
     stop_token: &CancellationToken,
     readiness: NodeLifecycle,
+    sm_drain_complete: CancellationToken,
+    sm_drain_budget: Duration,
+    sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 ) -> Result<(ClusteringHandles, ClusteringShutdown), ClusteringError> {
     if !config.enabled {
         return Ok((ClusteringHandles::default(), ClusteringShutdown(None)));
@@ -996,7 +998,15 @@ pub async fn start_if_enabled(
     // failure and is reported before the Postgres prerequisite.
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (db, stop_token, driver, readiness);
+        let _ = (
+            db,
+            stop_token,
+            driver,
+            readiness,
+            sm_drain_complete,
+            sm_drain_budget,
+            sm_drain_started,
+        );
         Err(ClusteringError::FeatureNotCompiled)
     }
 
@@ -1182,6 +1192,12 @@ pub async fn start_if_enabled(
                     claims::PostgresClaimStore::new(db.clone()),
                 ),
                 claim_release_budget: config.node_lease.claim_release_budget,
+                shutdown_sm_drain: Some(self_fence::ShutdownSmDrain {
+                    process_stop: stop_token.clone(),
+                    complete: sm_drain_complete,
+                    budget: sm_drain_budget,
+                    started: sm_drain_started,
+                }),
             },
         ));
         Ok((handles, ClusteringShutdown(Some(node_lease_task))))

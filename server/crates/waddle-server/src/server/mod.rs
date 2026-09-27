@@ -103,6 +103,9 @@ pub async fn start_with_config(
     // Set up Ecdysis graceful shutdown coordinator
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();
     let stop_token = shutdown.stop_token();
+    let sm_drain_complete = tokio_util::sync::CancellationToken::new();
+    let sm_drain_started = Arc::new(std::sync::OnceLock::new());
+    let sm_drain_budget = session_janitors::max_drain_duration_from_env();
 
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
@@ -246,6 +249,9 @@ pub async fn start_with_config(
         db_pool.global(),
         &stop_token,
         node_lifecycle.clone(),
+        sm_drain_complete.clone(),
+        sm_drain_budget,
+        sm_drain_started.clone(),
     )
     .await?;
 
@@ -396,6 +402,8 @@ pub async fn start_with_config(
             listener: http_listener,
             shutdown_handle: http_shutdown_handle,
             drain_complete: http_drain_complete,
+            sm_drain_complete,
+            sm_drain_started,
         })
         .await
     });

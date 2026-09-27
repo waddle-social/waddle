@@ -17,6 +17,47 @@ fn make_test_jid() -> FullJid {
     "user@example.com/resource".parse().unwrap()
 }
 
+#[test]
+fn pending_claim_release_batch_counts_streams_once_and_fails_closed() {
+    let registry = InMemorySmSessionRegistry::new();
+    let owner = crate::ownership::NodeIdentity::new("node", "incarnation");
+    let mut pending = registry
+        .pending_claim_releases
+        .write()
+        .expect("pending release lock");
+    for epoch in [1, 2] {
+        pending.insert((
+            "first".to_string(),
+            super::super::persistence::SmClaimFence::new(
+                owner.clone(),
+                crate::ownership::ClaimEpoch(epoch),
+            ),
+        ));
+    }
+    drop(pending);
+    assert_eq!(
+        registry.pending_claim_releases_for(&[
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ]),
+        1
+    );
+
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = registry
+            .pending_claim_releases
+            .write()
+            .expect("pending release lock");
+        panic!("poison pending release bookkeeping");
+    }));
+    assert!(poisoned.is_err());
+    assert_eq!(
+        registry.pending_claim_releases_for(&["first".to_string(), "second".to_string()]),
+        2,
+    );
+}
+
 fn bare(s: &str) -> jid::BareJid {
     s.parse().expect("valid bare jid")
 }
@@ -3278,12 +3319,15 @@ async fn test_session_expired() {
     // Create an already-expired session
     let mut session = make_test_session("stream-expired");
     session.max_resume_time = Some(0); // 0 seconds means expired immediately
+    assert!(session.is_expired());
 
     registry.store_session(session).await.unwrap();
 
-    // Wait a tiny bit to ensure expiration
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
+    assert!(registry
+        .claim_session("stream-expired")
+        .await
+        .unwrap()
+        .is_none());
     // Should return None because expired
     let result = registry.take_session("stream-expired").await.unwrap();
     assert!(result.is_none());

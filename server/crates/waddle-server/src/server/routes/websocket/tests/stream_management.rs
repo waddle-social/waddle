@@ -11888,6 +11888,55 @@ mod terminal_ordering_release_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_terminal_redrive_preserves_pending_custody() {
+        use super::super::super::cleanup::{
+            redrive_terminal_pending_rows_to_live_resource_with_cancel, TerminalRedriveOutcome,
+        };
+        let state = create_test_websocket_state().await;
+        let resource: FullJid = "alice@example.com/cancelled-redrive"
+            .parse()
+            .expect("resource");
+        let recipient = resource.to_bare();
+        let seed = SmSessionId::new("cancelled-redrive-seed");
+        seed_claimed_pending_row(state.as_ref(), &recipient, seed.as_str(), 1).await;
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .release_claim(&seed)
+            .await
+            .expect("release pending prefix");
+        let (sender, mut receiver) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &resource, sender).await;
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&resource, true, 0);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let outcome = redrive_terminal_pending_rows_to_live_resource_with_cancel(
+            state.as_ref(),
+            &recipient,
+            cancel,
+        )
+        .await;
+        assert!(outcome == TerminalRedriveOutcome::Aborted);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(&recipient)
+                .await
+                .expect("pending custody")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn repeated_terminal_ordering_deferrals_share_one_retry_pump() {
         use super::super::super::cleanup::{
             redrive_terminal_pending_rows_to_live_resource, TerminalRedriveOutcome,

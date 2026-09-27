@@ -24,7 +24,9 @@
 //! below deliberately skips [`EntityType::SmSession`] entities. An SM
 //! session's "final fenced write" already IS `confirm_drained`'s own
 //! promote-then-delete-then-release sequence, running on an independent
-//! task racing the same shutdown token. Touching the same entity from both
+//! task under the same shutdown token. The node-lease shutdown keeps its
+//! heartbeat and identity active until that Q6 authority work completes.
+//! Touching the same entity from both
 //! drain paths concurrently would be exactly the double-drain hazard the
 //! phase plan's Slice 10 "interaction with existing drain" note warns
 //! against — one path could release a claim the other path's promotion is
@@ -42,7 +44,7 @@ use super::metrics;
 use super::self_fence::{mark_draining_bounded, LocallyClaimedEntities};
 
 #[cfg(test)]
-use super::self_fence::run_shutdown_drain_with_heartbeat;
+use super::self_fence::{run_shutdown_drain_with_heartbeat, ShutdownLeaseTiming};
 
 /// Upper bound on how long [`mark_draining_bounded`] itself is allowed to
 /// take within the overall drain budget — a hung flag-flip must not eat the
@@ -885,8 +887,12 @@ mod tests {
             &claim_store,
             &me,
             &local_claims,
-            claim_release_budget,
-            lease_ttl,
+            ShutdownLeaseTiming {
+                claim_release_budget,
+                lease_ttl,
+                last_success: tokio::time::Instant::now(),
+            },
+            async {},
         ));
         let mut drain_future = drain_future;
 

@@ -1891,6 +1891,19 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     state: &WebSocketState,
     recipient: &BareJid,
 ) -> TerminalRedriveOutcome {
+    redrive_terminal_pending_rows_to_live_resource_with_cancel(
+        state,
+        recipient,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+pub(crate) async fn redrive_terminal_pending_rows_to_live_resource_with_cancel(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    cancel: tokio_util::sync::CancellationToken,
+) -> TerminalRedriveOutcome {
     let blocking_storage: &std::sync::Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
         &state.deps.protocol.blocking_storage;
     // A same-FullJID replacement can race the owner-gated send below. Retry
@@ -1900,6 +1913,9 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
     // chasing an unbounded stream of reconnects.
     let mut last_outcome = TerminalRedriveOutcome::Settled;
     for _ in 0..2 {
+        if cancel.is_cancelled() {
+            return TerminalRedriveOutcome::Aborted;
+        }
         let Some(target) = preferred_live_pending_flush_target(
             &state.deps.protocol.connection_registry,
             recipient,
@@ -1955,21 +1971,24 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
         let resolver = crate::pending_delivery::MamArchiveResolver {
             mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
         };
-        let outcome = crate::pending_delivery::flush_for_resource(
-            &state.deps.protocol.pending_delivery_storage,
-            &state.deps.protocol.connection_registry,
-            recipient,
-            &target.resource,
-            crate::pending_delivery::FlushContext {
-                server_domain: state.deps.auth_state.xmpp_domain.as_str(),
-                sm_session: target.sm_session.as_ref(),
-                blocking_storage: Some(blocking_storage),
-                owner: Some(&target.owner),
-                archive_resolver: &resolver,
-                dispatch_gate: Some(state.deps.protocol.ingress.as_ref()),
-            },
-        )
-        .await;
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return TerminalRedriveOutcome::Aborted,
+            outcome = crate::pending_delivery::flush_for_resource(
+                &state.deps.protocol.pending_delivery_storage,
+                &state.deps.protocol.connection_registry,
+                recipient,
+                &target.resource,
+                crate::pending_delivery::FlushContext {
+                    server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                    sm_session: target.sm_session.as_ref(),
+                    blocking_storage: Some(blocking_storage),
+                    owner: Some(&target.owner),
+                    archive_resolver: &resolver,
+                    dispatch_gate: Some(state.deps.protocol.ingress.as_ref()),
+                },
+            ) => outcome,
+        };
         let target_still_current = state
             .deps
             .protocol
@@ -1979,8 +1998,14 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
         let ordering_deferred = outcome.deferred_ordering > 0;
         let retry_handoff = ordering_deferred || outcome.has_retry_work();
         if !target_still_current && (outcome.claimed > 0 || outcome.pushed > 0) {
-            if retry_handoff {
-                spawn_terminal_pending_ordering_retry(state, target, outcome, retry_lease);
+            if retry_handoff && !cancel.is_cancelled() {
+                spawn_terminal_pending_ordering_retry(
+                    state,
+                    target,
+                    outcome,
+                    retry_lease,
+                    cancel.clone(),
+                );
             }
             // Rows were claimed/pushed into a session that has since been
             // superseded: they sit in that session's channel until ITS
@@ -2018,8 +2043,14 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource(
                 "terminal cleanup re-drove pending_delivery rows onto a live resource"
             );
         }
-        if retry_handoff {
-            spawn_terminal_pending_ordering_retry(state, target, outcome, retry_lease);
+        if retry_handoff && !cancel.is_cancelled() {
+            spawn_terminal_pending_ordering_retry(
+                state,
+                target,
+                outcome,
+                retry_lease,
+                cancel.clone(),
+            );
         }
         if target_still_current {
             return last_outcome;
@@ -2033,6 +2064,7 @@ fn spawn_terminal_pending_ordering_retry(
     mut target: LivePendingFlushTarget,
     mut outcome: crate::pending_delivery::FlushOutcome,
     retry_lease: waddle_xmpp::registry::TerminalOrderingRetryLease,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     let storage = state.deps.protocol.pending_delivery_storage.clone();
     let registry = state.deps.protocol.connection_registry.clone();
@@ -2048,22 +2080,28 @@ fn spawn_terminal_pending_ordering_retry(
         // allow one fresh target selection: its initial presence may already
         // have run while the old claim was still waiting for storage recovery.
         for _ in 0..2 {
-            outcome = crate::pending_delivery::resume_flush_for_resource_with_retry(
-                &storage,
-                &registry,
-                &recipient,
-                &target.resource,
-                crate::pending_delivery::FlushContext {
-                    server_domain: &domain,
-                    sm_session: target.sm_session.as_ref(),
-                    blocking_storage: Some(&blocking),
-                    owner: Some(&target.owner),
-                    archive_resolver: &resolver,
-                    dispatch_gate: Some(ingress.as_ref()),
-                },
-                outcome,
-            )
-            .await;
+            outcome = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                resumed = crate::pending_delivery::resume_flush_for_resource_with_retry(
+                    &storage,
+                    &registry,
+                    &recipient,
+                    &target.resource,
+                    crate::pending_delivery::FlushContext {
+                        server_domain: &domain,
+                        sm_session: target.sm_session.as_ref(),
+                        blocking_storage: Some(&blocking),
+                        owner: Some(&target.owner),
+                        archive_resolver: &resolver,
+                        dispatch_gate: Some(ingress.as_ref()),
+                    },
+                    outcome,
+                ) => resumed,
+            };
+            if cancel.is_cancelled() {
+                return;
+            }
             if let Some(entry) = registry.entry_if_owner(&target.resource, &target.owner) {
                 if entry.is_locally_hosted()
                     && entry.is_presence_available()
@@ -2395,6 +2433,7 @@ async fn promote_terminal_recovery_prefix(
                 blocklist: &blocklist,
                 server_domain: state.deps.auth_state.xmpp_domain.as_str(),
                 recent_tombstones: &item_tombstones,
+                allow_unfenced_effects: true,
             },
         )
         .await;

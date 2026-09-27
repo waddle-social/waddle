@@ -3073,6 +3073,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         blocklist: &Blocklist::empty(),
         server_domain: "example.com",
         recent_tombstones: &[],
+        allow_unfenced_effects: true,
     };
     let summary = promote_session_with_custody(&session, deps).await;
     assert_eq!(summary.queued, 1);
@@ -3109,4 +3110,158 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         1,
         "committed custody retry must not insert again"
     );
+}
+
+#[tokio::test]
+async fn clustered_shutdown_queues_before_live_delivery() {
+    let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new();
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let users = test_user_registry();
+    let target = full("alice@example.com/web");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    dual_register(&registry, &users, target.clone(), sender).await;
+    registry.update_presence(&target, true, 1);
+    let iq_xml = {
+        let iq = xmpp_parsers::iq::Iq::Result {
+            from: Some("server.example/srv".parse().expect("valid full jid")),
+            to: Some("alice@example.com/web".parse().expect("valid full jid")),
+            id: "defer-iq".to_string(),
+            payload: None,
+        };
+        let element: xmpp_parsers::minidom::Element = iq.into();
+        let mut buffer = Vec::new();
+        element.write_to(&mut buffer).expect("serialize IQ");
+        String::from_utf8(buffer).expect("UTF-8 IQ")
+    };
+    let session = detached_session_with_unacked(
+        "clustered-live-handoff",
+        full("alice@example.com/phone"),
+        vec![
+            dm_xml(
+                "bob@example.com/sender",
+                "alice@example.com",
+                "durable first",
+            ),
+            iq_xml,
+        ],
+    );
+    let summary = promote_session_with_custody(
+        &session,
+        TerminalOverflowPromotionDeps {
+            sm_registry: &sm_registry,
+            registry: &registry,
+            user_registry: &users,
+            pending_storage: &storage,
+            blocklist: &Blocklist::empty(),
+            server_domain: "example.com",
+            recent_tombstones: &[],
+            allow_unfenced_effects: false,
+        },
+    )
+    .await;
+    assert_eq!(summary.queued, 1);
+    assert_eq!(summary.redelivered, 0);
+    assert!(
+        summary.has_storage_failure(),
+        "IQ remains for successor retry"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "no direct socket send before durable handoff"
+    );
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn clustered_shutdown_keeps_replay_when_pending_quota_is_full() {
+    let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new();
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::new(QuotaPolicy::CountCap {
+            max_rows: 0,
+        }));
+    let registry = ConnectionRegistry::new();
+    let users = test_user_registry();
+    let sender_jid = full("bob@example.com/sender");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    dual_register(&registry, &users, sender_jid, sender).await;
+    let session = detached_session_with_unacked(
+        "clustered-quota-handoff",
+        full("alice@example.com/phone"),
+        vec![dm_xml(
+            "bob@example.com/sender",
+            "alice@example.com",
+            "retry later",
+        )],
+    );
+    let summary = promote_session_with_custody(
+        &session,
+        TerminalOverflowPromotionDeps {
+            sm_registry: &sm_registry,
+            registry: &registry,
+            user_registry: &users,
+            pending_storage: &storage,
+            blocklist: &Blocklist::empty(),
+            server_domain: "example.com",
+            recent_tombstones: &[],
+            allow_unfenced_effects: false,
+        },
+    )
+    .await;
+    assert!(summary.has_storage_failure());
+    assert_eq!(summary.bounced, 0);
+    assert!(summary.promoted_sequences.is_empty());
+    assert!(
+        receiver.try_recv().is_err(),
+        "no bounce before durable replay retirement"
+    );
+    assert_eq!(session.unacked_stanzas.len(), 1);
+}
+
+#[tokio::test]
+async fn clustered_shutdown_defers_no_store_message_without_a_direct_send() {
+    let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new();
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let users = test_user_registry();
+    let target = full("alice@example.com/web");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    dual_register(&registry, &users, target.clone(), sender).await;
+    registry.update_presence(&target, true, 1);
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("alice@example.com".parse().expect("jid")));
+    message.from = Some("bob@example.com/sender".parse().expect("sender jid"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "ephemeral".to_string());
+    waddle_xmpp::xep::xep0334::add_hint(&mut message, waddle_xmpp::xep::xep0334::Hint::NoStore);
+    let element: xmpp_parsers::minidom::Element = message.into();
+    let mut buffer = Vec::new();
+    element.write_to(&mut buffer).expect("serialize message");
+    let session = detached_session_with_unacked(
+        "clustered-no-store-handoff",
+        full("alice@example.com/phone"),
+        vec![String::from_utf8(buffer).expect("UTF-8 message")],
+    );
+    let summary = promote_session_with_custody(
+        &session,
+        TerminalOverflowPromotionDeps {
+            sm_registry: &sm_registry,
+            registry: &registry,
+            user_registry: &users,
+            pending_storage: &storage,
+            blocklist: &Blocklist::empty(),
+            server_domain: "example.com",
+            recent_tombstones: &[],
+            allow_unfenced_effects: false,
+        },
+    )
+    .await;
+    assert!(summary.has_storage_failure());
+    assert!(summary.promoted_sequences.is_empty());
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
 }

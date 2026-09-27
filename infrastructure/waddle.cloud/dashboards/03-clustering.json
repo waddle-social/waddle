@@ -47,7 +47,7 @@
     {
       "type": "timeseries",
       "title": "Claims released or abandoned on drain",
-      "description": "Ships dark until #1295 completes drain-claim instrumentation rollout.",
+      "description": "Counts each claim once when drain releases it or leaves it for successor recovery. Transient retry attempts are not counted.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {

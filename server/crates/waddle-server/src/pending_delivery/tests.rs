@@ -3858,6 +3858,367 @@ async fn postgres_two_connection_cap_one_race_accepts_exactly_one_insert() {
 
 // ── ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): fenced Q6
 // promotion insert — duplicate-promotion (double-janitor) prevention ──
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let (schema, scoped_url) =
+        create_postgres_test_schema(&base_url, "pending_atomic_sm_promotion").await;
+    let db = Database::from_config(
+        "pending-atomic-sm-promotion-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open scoped postgres");
+    let claim_store = std::sync::Arc::new(PostgresClaimStore::new(db.clone()));
+    claim_store.ensure_schema().await.expect("claim schema");
+    let node = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let stream_id = format!("atomic-sm-{}", uuid::Uuid::new_v4());
+    let other_stream_id = format!("atomic-sm-other-{}", uuid::Uuid::new_v4());
+    claim_store
+        .acquire(
+            &Entity::new(EntityType::SmSession, stream_id.clone()),
+            &node,
+        )
+        .await
+        .expect("claim origin stream");
+    let _sm = crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+        .await
+        .expect("initialize SM tables");
+    let recipient = format!("atomic-sm-{}@example.com", uuid::Uuid::new_v4());
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        Some(&scoped_url),
+        QuotaPolicy::CountCap { max_rows: 1 },
+        true,
+        Some((
+            claim_store as std::sync::Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(node),
+        )),
+        &db,
+    )
+    .await
+    .expect("open fenced pending storage");
+    let conn = db.guard().await.expect("db guard");
+    let detached_at_ms = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "INSERT INTO sm_sessions (\
+            stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked, \
+            max_resume_secs, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, \
+            blocklist_interested, presence_available, presence_priority \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            stream_id.clone(),
+            recipient.clone(),
+            format!("{recipient}/phone"),
+            0_i64,
+            8_i64,
+            0_i64,
+            120_i64,
+            detached_at_ms,
+            120_000_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+        ],
+    )
+    .await
+    .expect("seed durable session");
+    let mut replay_message = Message::new(Some(jid::Jid::from(bare(&recipient))));
+    replay_message.type_ = MessageType::Chat;
+    replay_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "persisted replay".to_string(),
+    );
+    let mut replay_xml = Vec::new();
+    waddle_xmpp::Stanza::Message(replay_message)
+        .to_element()
+        .write_to(&mut replay_xml)
+        .expect("serialize replay message");
+    let replay_xml = String::from_utf8(replay_xml).expect("UTF-8 replay message");
+    for (stream, sequence) in [(&stream_id, 7_i64), (&stream_id, 8), (&other_stream_id, 7)] {
+        conn.execute(
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+             VALUES (?, ?, ?, ?)",
+            crate::db_params![stream.clone(), sequence, replay_xml.clone(), 1_i64],
+        )
+        .await
+        .expect("seed replay row");
+    }
+    let mut initial_rows = conn
+        .query(
+            "SELECT max_resume_secs, detached_at_ms FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.clone()],
+        )
+        .await
+        .expect("read initial resume window");
+    let initial_row = initial_rows
+        .next()
+        .await
+        .expect("read initial session")
+        .expect("durable session");
+    assert_eq!(initial_row.get::<i64>(0).expect("resume seconds"), 120);
+    assert!(
+        chrono::Utc::now().timestamp_millis()
+            - initial_row.get::<i64>(1).expect("detach timestamp")
+            < 120_000,
+        "the seeded session must initially be resumable"
+    );
+    drop(initial_rows);
+    drop(conn);
+
+    let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(std::sync::Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+                .await
+                .expect("open promotion SM persistence"),
+        ));
+    let live_registry = waddle_xmpp::registry::ConnectionRegistry::new();
+    let users = test_user_registry();
+    let alternate = full(&format!("{recipient}/web"));
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    live_registry.register(alternate.clone(), sender);
+    let entry = live_registry
+        .get_entry(&alternate)
+        .expect("live alternate resource");
+    users
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: alternate.clone(),
+            entry,
+        })
+        .await
+        .expect("register alternate resource");
+    live_registry.update_presence(&alternate, true, 1);
+    let session = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: stream_id.clone(),
+        user_id: recipient.clone(),
+        jid: full(&format!("{recipient}/phone")),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 8,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 7,
+            stanza_xml: replay_xml.clone(),
+            original_receipt_at: chrono::Utc::now(),
+        }],
+        max_resume_time: Some(120),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    let pending: std::sync::Arc<dyn PendingDeliveryStorage> = std::sync::Arc::new(storage.clone());
+    let summary = crate::sm_promotion::promote_session_with_custody(
+        &session,
+        crate::sm_promotion::TerminalOverflowPromotionDeps {
+            sm_registry: &sm_registry,
+            registry: &live_registry,
+            user_registry: &users,
+            pending_storage: &pending,
+            blocklist: &waddle_xmpp::protocol::session_state::Blocklist::empty(),
+            server_domain: "example.com",
+            recent_tombstones: &[],
+            allow_unfenced_effects: false,
+        },
+    )
+    .await;
+    assert_eq!(summary.queued, 1);
+    assert_eq!(summary.redelivered, 0);
+    assert!(
+        receiver.try_recv().is_err(),
+        "live-eligible replay must enter durable custody first"
+    );
+    let conn = db.guard().await.expect("db guard");
+    let mut rows = conn
+        .query(
+            "SELECT max_resume_secs, max_resume_duration_ms FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.clone()],
+        )
+        .await
+        .expect("read durable resume bound");
+    let row = rows
+        .next()
+        .await
+        .expect("read resume row")
+        .expect("session row");
+    assert_eq!(row.get::<i64>(0).expect("resume seconds"), 0);
+    assert_eq!(row.get::<i64>(1).expect("resume duration"), 0);
+    drop(rows);
+    drop(conn);
+    assert_eq!(
+        storage
+            .insert_fenced_and_prune_unacked(
+                transient_row(&recipient, "repeated sequence"),
+                &stream_id,
+                7,
+            )
+            .await
+            .expect("repeat already transferred sequence"),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        storage
+            .list(&bare(&recipient))
+            .await
+            .expect("list after repeat")
+            .len(),
+        1,
+        "a repeated transfer must not insert a second pending row"
+    );
+    assert_eq!(
+        storage
+            .insert_fenced_and_prune_unacked(transient_row(&recipient, "over quota"), &stream_id, 8)
+            .await
+            .expect("quota rejection"),
+        InsertOutcome::QuotaExceeded
+    );
+    assert_eq!(
+        storage
+            .list(&bare(&recipient))
+            .await
+            .expect("list pending")
+            .len(),
+        1
+    );
+    let successor = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), stream_id);
+    db.guard()
+        .await
+        .expect("db guard")
+        .execute(
+            "UPDATE clustering_claims SET node_id = ?, node_epoch = ?, \
+             claim_epoch = claim_epoch + 1 WHERE entity = ?",
+            crate::db_params![
+                successor.node_id.clone(),
+                successor.node_epoch.clone(),
+                entity_key,
+            ],
+        )
+        .await
+        .expect("transfer claim to successor");
+    let successor_recipient = format!("successor-{}@example.com", uuid::Uuid::new_v4());
+    assert!(matches!(
+        storage
+            .insert_fenced_and_prune_unacked(
+                transient_row(&successor_recipient, "stale owner"),
+                &stream_id,
+                8,
+            )
+            .await,
+        Err(PendingStorageError::NotOwner { .. })
+    ));
+    let successor_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(std::sync::Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+                .await
+                .expect("open successor SM persistence"),
+        ))
+        .with_claim_store(
+            std::sync::Arc::new(PostgresClaimStore::new(db.clone())),
+            SharedNodeIdentity::new(successor.clone()),
+        );
+    assert_eq!(
+        successor_registry
+            .restore_from_persistence()
+            .await
+            .expect("hydrate successor session"),
+        1
+    );
+    assert!(successor_registry
+        .claim_session(&stream_id)
+        .await
+        .expect("try resume expired session")
+        .is_none());
+    let remaining_replay = successor_registry
+        .drain_expired()
+        .await
+        .expect("drain terminal session");
+    assert_eq!(remaining_replay.len(), 1);
+    assert_eq!(remaining_replay[0].unacked_stanzas.len(), 1);
+    assert_eq!(remaining_replay[0].unacked_stanzas[0].sequence, 8);
+    let successor_storage = crate::pending_delivery::open_for_cluster_mode(
+        Some(&scoped_url),
+        QuotaPolicy::CountCap { max_rows: 1 },
+        true,
+        Some((
+            std::sync::Arc::new(PostgresClaimStore::new(db.clone()))
+                as std::sync::Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(successor),
+        )),
+        &db,
+    )
+    .await
+    .expect("open successor storage");
+    assert_eq!(
+        successor_storage
+            .insert_fenced_and_prune_unacked(
+                transient_row(&successor_recipient, "remaining replay"),
+                &stream_id,
+                8,
+            )
+            .await
+            .expect("successor promotes remaining row"),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        successor_storage
+            .list(&bare(&successor_recipient))
+            .await
+            .expect("list successor pending")
+            .len(),
+        1
+    );
+    let conn = db.guard().await.expect("db guard");
+    let mut rows = conn
+        .query(
+            "SELECT stream_id, sequence FROM sm_unacked ORDER BY stream_id, sequence",
+            (),
+        )
+        .await
+        .expect("query replay rows");
+    let mut remaining = Vec::new();
+    while let Some(row) = rows.next().await.expect("read replay row") {
+        remaining.push((
+            row.get::<String>(0).expect("stream id"),
+            row.get::<i64>(1).expect("sequence"),
+        ));
+    }
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining.contains(&(other_stream_id, 7)));
+    drop(rows);
+    drop(conn);
+    drop(successor_storage);
+    drop(storage);
+    drop(db);
+    drop_postgres_test_schema(&base_url, &schema).await;
+}
 //
 // Element 9's locked text: "promotion executes under the row-locked
 // fenced epoch." This proves `insert_fenced`'s wiring end-to-end against

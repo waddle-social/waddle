@@ -2318,6 +2318,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             peer_id: None,
             claim_store,
             claim_release_budget: Duration::from_secs(5),
+            shutdown_sm_drain: None,
         },
     ));
 

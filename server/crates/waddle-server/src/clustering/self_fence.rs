@@ -19,6 +19,7 @@
 //! does not tear down the swarm — it works to re-register under a fresh
 //! node identity and resume serving.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -433,6 +434,17 @@ pub struct NodeLeaseRunConfig {
     /// [`crate::clustering::drain::run_shutdown_drain`], called from every
     /// ordinary-shutdown branch in [`run_node_lease`]'s `'tick` loop below.
     pub claim_release_budget: Duration,
+    /// Ordinary process shutdown keeps the identity authoritative until the
+    /// independent Q6 SM drain finishes its fenced work. A clustering-only
+    /// cancellation skips this wait because it does not start Q6.
+    pub shutdown_sm_drain: Option<ShutdownSmDrain>,
+}
+
+pub struct ShutdownSmDrain {
+    pub process_stop: CancellationToken,
+    pub complete: CancellationToken,
+    pub budget: Duration,
+    pub started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
 /// Best-effort, time-bounded [`NodeLeaseStore::mark_draining`] — mirrors
@@ -683,30 +695,50 @@ impl Drop for InlineReclaimReservation<'_> {
 /// concurrency). [`run_node_lease`] does not return from this call until
 /// the drain future itself resolves; the heartbeat ticker keeps this node
 /// looking live to the rest of the cluster for exactly as long as that
-/// takes. Heartbeat renewal here is deliberately best-effort only — a
-/// failed/errored renewal during drain is logged and ignored, never
-/// escalated to a second fence: this node already knows it is shutting
-/// down, and the sole purpose of these renewals is to keep the row
-/// visible as live for as long as this node is still legitimately
-/// finishing its own writes, not to re-run the ordinary fencing-loss
-/// handling mid-drain.
-pub(super) async fn run_shutdown_drain_with_heartbeat<L>(
+/// takes. A transient heartbeat error is best-effort during drain; a
+/// zero-row heartbeat proves this identity lost its lease and immediately
+/// terminates the drain so the caller can disable and demote it. The
+/// last-success deadline also bounds repeated errors and a hung heartbeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShutdownDrainOutcome {
+    Completed,
+    LeaseUnavailable,
+}
+
+pub(super) struct ShutdownLeaseTiming {
+    pub claim_release_budget: Duration,
+    pub lease_ttl: Duration,
+    pub last_success: tokio::time::Instant,
+}
+
+pub(super) async fn run_shutdown_drain_with_heartbeat<L, F>(
     lease: &L,
     claim_store: &Arc<dyn ClaimStore>,
     identity: &NodeIdentity,
     local_claims: &Arc<dyn LocallyClaimedEntities>,
-    claim_release_budget: Duration,
-    lease_ttl: Duration,
-) where
+    timing: ShutdownLeaseTiming,
+    after_rooms: F,
+) -> ShutdownDrainOutcome
+where
     L: NodeLeaseStore + Send + Sync,
+    F: Future<Output = ()>,
 {
-    let drain = std::pin::pin!(crate::clustering::drain::run_shutdown_drain(
-        lease,
-        claim_store,
-        identity,
-        local_claims,
+    let ShutdownLeaseTiming {
         claim_release_budget,
-    ));
+        lease_ttl,
+        mut last_success,
+    } = timing;
+    let drain = std::pin::pin!(async {
+        crate::clustering::drain::run_shutdown_drain(
+            lease,
+            claim_store,
+            identity,
+            local_claims,
+            claim_release_budget,
+        )
+        .await;
+        after_rooms.await;
+    });
     let mut drain = drain;
 
     // Renew comfortably inside `lease_ttl` — halved, floored at a tiny 10ms
@@ -718,40 +750,53 @@ pub(super) async fn run_shutdown_drain_with_heartbeat<L>(
     // a fixed floor (e.g. 1s) would make renewal SLOWER than a small
     // configured `lease_ttl`, inverting this function's entire purpose:
     // the row would still go stale mid-drain, just via a different
-    // mechanism. This node's heartbeat is already fresh going into this
-    // call (the ordinary tick loop's own last successful renewal is what
-    // got it here), so the ticker's first tick is deliberately consumed
-    // unused below rather than firing an immediate, redundant renewal on
-    // the common, fast-draining path.
+    // mechanism. Take the ticker's first, immediate tick: shutdown can
+    // start near the last confirmed lease deadline, so waiting half a TTL
+    // before the first renewal would abandon healthy Q6 work needlessly.
     let renewal_period = (lease_ttl / 2).max(Duration::from_millis(10));
     let mut ticker = tokio::time::interval(renewal_period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    ticker.tick().await;
 
     loop {
+        let lease_deadline = last_success + lease_ttl;
         tokio::select! {
             biased;
+            _ = tokio::time::sleep_until(lease_deadline) => {
+                tracing::warn!(node_id = %identity.node_id, "clustering: node lease was not renewed before shutdown deadline; aborting final fenced work");
+                return ShutdownDrainOutcome::LeaseUnavailable;
+            }
             _ = &mut drain => {
-                return;
+                return ShutdownDrainOutcome::Completed;
             }
             _ = ticker.tick() => {
-                match lease.heartbeat(identity, lease_ttl).await {
-                    Ok(true) => {}
+                let write_started = tokio::time::Instant::now();
+                let heartbeat = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(lease_deadline) => {
+                        tracing::warn!(node_id = %identity.node_id, "clustering: shutdown heartbeat did not finish before node lease deadline; aborting final fenced work");
+                        return ShutdownDrainOutcome::LeaseUnavailable;
+                    }
+                    _ = &mut drain => return ShutdownDrainOutcome::Completed,
+                    result = lease.heartbeat(identity, lease_ttl) => result,
+                };
+                match heartbeat {
+                    Ok(true) => {
+                        last_success = write_started;
+                    }
                     Ok(false) => {
                         tracing::warn!(
                             node_id = %identity.node_id,
                             "clustering: heartbeat renewal during graceful drain reported \
-                             fencing loss (0 rows affected); continuing the drain regardless \
-                             — this node is already shutting down"
+                             fencing loss (0 rows affected); aborting final fenced work"
                         );
+                        return ShutdownDrainOutcome::LeaseUnavailable;
                     }
                     Err(error) => {
                         tracing::warn!(
                             %error,
                             node_id = %identity.node_id,
-                            "clustering: heartbeat renewal during graceful drain failed; the \
-                             row may go stale before the drain completes (best-effort only — \
-                             this node is already shutting down)"
+                            "clustering: heartbeat renewal during graceful drain failed; \
+                             retrying only while the last confirmed lease remains fresh"
                         );
                     }
                 }
@@ -824,7 +869,10 @@ struct TerminalFenceContext<'a, L> {
     stop_token: &'a CancellationToken,
     fatal_fence: &'a CancellationToken,
     control_plane_budget: Duration,
+    shutdown_sm_drain: Option<&'a ShutdownSmDrain>,
 }
+
+const SM_DRAIN_WAIT_MARGIN: Duration = Duration::from_millis(100);
 
 impl<L> TerminalFenceContext<'_, L>
 where
@@ -836,46 +884,72 @@ where
         identity: &NodeIdentity,
         claim_release_budget: Duration,
         lease_ttl: Duration,
+        last_success: tokio::time::Instant,
     ) {
         // The clustering scope can be stopped independently of axum. Stop
         // admitting traffic and NEW claims first, but keep the current
         // identity authoritative while mailbox seal barriers complete the
-        // final fenced writes for already-owned rooms.
+        // final fenced writes for already-owned rooms and SM sessions.
+        // The two drains share a start instant set by whichever task observes
+        // process stop first. Bound their combined authority window by the
+        // larger budget, not their sum, even if Q6 starts later.
+        let sm_started = self.shutdown_sm_drain.and_then(|sm| {
+            sm.process_stop
+                .is_cancelled()
+                .then(|| *sm.started.get_or_init(tokio::time::Instant::now))
+        });
         self.readiness.begin_fenced_recovery();
         if self.fatal_fence.is_cancelled() {
             self.finish(identity, identity).await;
             return;
         }
 
-        let mark_draining = std::pin::pin!(mark_draining_bounded(
-            self.lease,
-            identity,
-            self.control_plane_budget,
-        ));
-        tokio::select! {
-            biased;
-            _ = self.fatal_fence.cancelled() => {
-                self.finish(identity, identity).await;
-                return;
+        let after_rooms = async {
+            if let Some(sm) = self
+                .shutdown_sm_drain
+                .filter(|sm| sm.process_stop.is_cancelled())
+            {
+                let started = sm_started
+                    .unwrap_or_else(|| *sm.started.get_or_init(tokio::time::Instant::now));
+                let deadline = started + sm.budget.max(claim_release_budget) + SM_DRAIN_WAIT_MARGIN;
+                if tokio::time::timeout_at(deadline, sm.complete.cancelled())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "clustering: Q6 SM drain did not finish before shutdown deadline; \
+                         disabling node identity with durable SM rows retained for recovery"
+                    );
+                }
             }
-            _ = mark_draining => {}
-        }
-
+        };
         let drain = std::pin::pin!(run_shutdown_drain_with_heartbeat(
             self.lease,
             claim_store,
             identity,
             self.local_claims,
-            claim_release_budget,
-            lease_ttl,
+            ShutdownLeaseTiming {
+                claim_release_budget,
+                lease_ttl,
+                last_success,
+            },
+            after_rooms,
         ));
-        tokio::select! {
+        let outcome = tokio::select! {
             biased;
             _ = self.fatal_fence.cancelled() => {
                 self.finish(identity, identity).await;
                 return;
             }
-            _ = drain => {}
+            outcome = drain => outcome,
+        };
+        if outcome == ShutdownDrainOutcome::LeaseUnavailable {
+            // Wake Q6's independent promotion task before waiting on the
+            // identity publication barrier. Its armed guards preserve the
+            // durable rows for successor recovery when that task is dropped.
+            self.fatal_fence.cancel();
+            self.finish(identity, identity).await;
+            return;
         }
 
         // Only after every successful seal has been released may the
@@ -898,6 +972,21 @@ where
         // Disabled is a typed terminal state: publication guards and claim
         // stores both reject it for the rest of this clustering lifetime.
         self.live_identity.disable().await;
+        if let Some(sm) = self
+            .shutdown_sm_drain
+            .filter(|sm| sm.process_stop.is_cancelled())
+        {
+            // Q6 drops its in-flight guards and records unfinished claims
+            // when fatal fencing wakes it. Keep local inventory available
+            // for that accounting after publication has been disabled, then
+            // demote it. Bound the wait so a stuck Q6 cannot hold shutdown.
+            if tokio::time::timeout(Duration::from_secs(1), sm.complete.cancelled())
+                .await
+                .is_err()
+            {
+                tracing::warn!("clustering: Q6 did not settle after fatal fencing; demoting local claims with incomplete drain accounting");
+            }
+        }
         self.local_claims.demote_owned_by(prior_identity).await;
         if registered_identity != prior_identity {
             self.local_claims.demote_owned_by(registered_identity).await;
@@ -974,6 +1063,7 @@ pub async fn run_node_lease<L>(
         peer_id,
         claim_store,
         claim_release_budget,
+        shutdown_sm_drain,
     } = run_config;
     let lease = Arc::new(lease);
     let fatal_fence = readiness.fatal_fence_token();
@@ -985,6 +1075,7 @@ pub async fn run_node_lease<L>(
         stop_token: &stop_token,
         fatal_fence: &fatal_fence,
         control_plane_budget: config.heartbeat_interval,
+        shutdown_sm_drain: shutdown_sm_drain.as_ref(),
     };
     // Seed the shared handle with the identity this loop starts under —
     // see `live_identity`'s doc comment and the `identity = fresh;`
@@ -1019,7 +1110,7 @@ pub async fn run_node_lease<L>(
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
@@ -1039,7 +1130,7 @@ pub async fn run_node_lease<L>(
             let renewed = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
@@ -1057,7 +1148,7 @@ pub async fn run_node_lease<L>(
 
             match renewed {
                 Ok(true) => {
-                    last_success = tokio::time::Instant::now();
+                    last_success = write_started;
                 }
                 Ok(false) => {
                     tracing::error!(
@@ -1086,7 +1177,7 @@ pub async fn run_node_lease<L>(
             let other_live_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
@@ -1120,7 +1211,7 @@ pub async fn run_node_lease<L>(
             let owned = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
@@ -1136,7 +1227,7 @@ pub async fn run_node_lease<L>(
             let reconcile_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
@@ -1175,7 +1266,7 @@ pub async fn run_node_lease<L>(
             let intents_result = tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
@@ -1202,7 +1293,7 @@ pub async fn run_node_lease<L>(
                         let healthy = tokio::select! {
                             biased;
                             _ = stop_token.cancelled() => {
-                                terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                                terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                                 return;
                             }
                             _ = fatal_fence.cancelled() => {
@@ -1220,7 +1311,7 @@ pub async fn run_node_lease<L>(
                             let cleared = tokio::select! {
                                 biased;
                                 _ = stop_token.cancelled() => {
-                                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                                     return;
                                 }
                                 _ = fatal_fence.cancelled() => {
@@ -1258,7 +1349,7 @@ pub async fn run_node_lease<L>(
                                     tokio::select! {
                                         biased;
                                         _ = stop_token.cancelled() => {
-                                            terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                                            terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                                             return;
                                         }
                                         _ = fatal_fence.cancelled() => {
@@ -1296,7 +1387,7 @@ pub async fn run_node_lease<L>(
                             tokio::select! {
                                 biased;
                                 _ = stop_token.cancelled() => {
-                                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl).await;
+                                    terminal_fence_context.shutdown(&claim_store, &identity, claim_release_budget, config.lease_ttl, last_success).await;
                                     return;
                                 }
                                 _ = fatal_fence.cancelled() => {
@@ -1627,6 +1718,7 @@ pub async fn run_node_lease<L>(
                         // during recovery; prove it once more immediately
                         // before readiness so no stale fresh identity can be
                         // published as serving.
+                        let final_heartbeat_started = tokio::time::Instant::now();
                         let final_heartbeat = std::pin::pin!(tokio::time::timeout(
                             config.lease_ttl,
                             lease.heartbeat(&identity, config.lease_ttl),
@@ -1654,6 +1746,7 @@ pub async fn run_node_lease<L>(
                                     &identity,
                                     claim_release_budget,
                                     config.lease_ttl,
+                                    final_heartbeat_started,
                                 )
                                 .await;
                             return;
@@ -1673,6 +1766,7 @@ pub async fn run_node_lease<L>(
                                     &identity,
                                     claim_release_budget,
                                     config.lease_ttl,
+                                    final_heartbeat_started,
                                 )
                                 .await;
                             return;
@@ -1705,6 +1799,23 @@ mod tests {
     /// otherwise care about drain timing — kept well above every test's own
     /// timer/backoff constants so it never itself becomes the bottleneck.
     const TEST_CLAIM_RELEASE_BUDGET: Duration = Duration::from_secs(5);
+
+    struct GatedShutdownBlocklist {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl waddle_xmpp::xep::xep0191::BlockingStorage for GatedShutdownBlocklist {
+        async fn list_blocked_jids(
+            &self,
+            _user: &jid::BareJid,
+        ) -> Result<Vec<jid::BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(Vec::new())
+        }
+    }
 
     #[test]
     fn lone_survivor_never_isolation_fences() {
@@ -1843,6 +1954,10 @@ mod tests {
             Arc<std::sync::Mutex<Vec<crate::clustering::claims::OrphanedSmSessionClaim>>>,
         registration_entered: Option<Arc<tokio::sync::Notify>>,
         registration_release: Option<Arc<tokio::sync::Notify>>,
+        heartbeat_entered: Option<Arc<tokio::sync::Notify>>,
+        heartbeat_release: Option<Arc<tokio::sync::Notify>>,
+        draining_entered: Option<Arc<tokio::sync::Notify>>,
+        draining_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl FakeLease {
@@ -1861,6 +1976,10 @@ mod tests {
                 orphaned_sm_claims: Arc::new(std::sync::Mutex::new(Vec::new())),
                 registration_entered: None,
                 registration_release: None,
+                heartbeat_entered: None,
+                heartbeat_release: None,
+                draining_entered: None,
+                draining_release: None,
             }
         }
     }
@@ -1903,6 +2022,12 @@ mod tests {
             _me: &NodeIdentity,
             _lease_ttl: Duration,
         ) -> Result<bool, ClaimError> {
+            if let Some(entered) = &self.heartbeat_entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.heartbeat_release {
+                release.notified().await;
+            }
             (self.heartbeat_result.lock().expect("lock"))()
         }
         async fn expire(
@@ -1914,6 +2039,12 @@ mod tests {
         }
         async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
             self.draining_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = &self.draining_entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.draining_release {
+                release.notified().await;
+            }
             Ok(())
         }
         async fn count_other_live_nodes(
@@ -2046,6 +2177,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -2093,6 +2225,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -2139,6 +2272,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -2204,6 +2338,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -2276,6 +2411,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -2463,6 +2599,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -2907,6 +3044,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -2976,6 +3114,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3046,6 +3185,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3119,6 +3259,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3196,6 +3337,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3273,6 +3415,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3348,6 +3491,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3368,6 +3512,646 @@ mod tests {
             2,
             "both pre-fence and potentially registered owners retire"
         );
+    }
+
+    #[tokio::test]
+    async fn ordinary_shutdown_keeps_identity_live_until_real_q6_confirmation() {
+        use waddle_xmpp::pending_delivery::storage::{
+            InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
+        };
+        use waddle_xmpp::stream_management::persistence::{
+            InMemorySmPersistence, SmPersistenceStorage,
+        };
+        use waddle_xmpp::stream_management::{
+            DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, SmSessionRegistry,
+        };
+
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let persistence = Arc::new(InMemorySmPersistence::new());
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(claims.clone(), live_identity.clone()),
+        );
+        let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let blocklist = Arc::new(GatedShutdownBlocklist {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_pending_and_blocking(
+            registry.clone(),
+            pending.clone(),
+            blocklist.clone(),
+        )
+        .await;
+        let jid: jid::FullJid = "romeo@example.com/phone".parse().expect("full jid");
+        let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "queued before shutdown".to_string(),
+        );
+        let mut stanza_xml = Vec::new();
+        waddle_xmpp::Stanza::Message(message)
+            .to_element()
+            .write_to(&mut stanza_xml)
+            .expect("serialize stanza");
+        let stream_id = "cluster-shutdown-q6";
+        registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.to_string(),
+                user_id: jid.to_bare().to_string(),
+                jid: jid.clone(),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                inbound_count: 0,
+                outbound_count: 1,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: vec![DetachedUnackedStanza {
+                    ingress_receipts: Vec::new(),
+                    sequence: 1,
+                    stanza_xml: String::from_utf8(stanza_xml).expect("utf8 stanza"),
+                    original_receipt_at: chrono::Utc::now(),
+                }],
+                max_resume_time: Some(120),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            })
+            .await
+            .expect("store detached session");
+
+        let process_stop = CancellationToken::new();
+        let q6_complete = CancellationToken::new();
+        let sm_started = Arc::new(std::sync::OnceLock::new());
+        let heartbeat_calls = Arc::new(AtomicI64::new(0));
+        let counted_heartbeats = heartbeat_calls.clone();
+        let lease = FakeLease::new(Box::new(move || {
+            counted_heartbeats.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: q6_complete.clone(),
+            budget: Duration::from_secs(4),
+            started: sm_started.clone(),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(50),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        let q6_task = tokio::spawn(
+            crate::server::session_janitors::run_graceful_shutdown_drain(
+                state,
+                process_stop.clone(),
+                Arc::new(tokio::sync::Notify::new()),
+                q6_complete.clone(),
+                sm_started,
+                Duration::from_secs(4),
+            ),
+        );
+        process_stop.cancel();
+        let shutdown = context.shutdown(
+            &claims,
+            &owner,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            tokio::time::Instant::now(),
+        );
+        tokio::pin!(shutdown);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                _ = blocklist.entered.notified() => {}
+                _ = &mut shutdown => panic!("node identity disabled before Q6 reached promotion"),
+            }
+        })
+        .await
+        .expect("Q6 reaches the held blocklist read");
+        let heartbeat_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while heartbeat_calls.load(Ordering::SeqCst) < 2 {
+            assert!(
+                tokio::time::Instant::now() < heartbeat_deadline,
+                "node lease did not renew while Q6 was held"
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                _ = &mut shutdown => panic!("node identity disabled while Q6 was still promoting"),
+            }
+        }
+        assert!(live_identity.current().is_active());
+        assert!(!q6_complete.is_cancelled());
+
+        blocklist.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), &mut shutdown)
+            .await
+            .expect("node shutdown finishes after Q6 confirmation");
+        tokio::time::timeout(Duration::from_secs(5), q6_task)
+            .await
+            .expect("Q6 task completes")
+            .expect("Q6 drain task");
+        assert!(q6_complete.is_cancelled());
+        assert!(!live_identity.current().is_active());
+        assert!(persistence
+            .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id))
+            .await
+            .expect("durable row read")
+            .is_none());
+        assert!(claims
+            .current_claim(&Entity::new(
+                waddle_xmpp::ownership::EntityType::SmSession,
+                stream_id
+            ))
+            .await
+            .expect("claim read")
+            .is_none());
+        assert_eq!(
+            pending
+                .list(&jid.to_bare())
+                .await
+                .expect("pending rows")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_shutdown_bounds_q6_wait_before_disabling_identity() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: completion.clone(),
+            budget: Duration::from_millis(80),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(20),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            context.shutdown(
+                &claims,
+                &owner,
+                Duration::from_millis(20),
+                Duration::from_secs(2),
+                tokio::time::Instant::now(),
+            ),
+        )
+        .await
+        .expect("Q6 wait ends at the shared shutdown deadline");
+        assert!(!completion.is_cancelled());
+        assert!(!live_identity.current().is_active());
+    }
+
+    #[tokio::test]
+    async fn lost_shutdown_heartbeat_preempts_q6_and_disables_identity() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let heartbeat_calls = Arc::new(AtomicU32::new(0));
+        let counted = heartbeat_calls.clone();
+        let lease = FakeLease::new(Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: completion.clone(),
+            budget: Duration::from_secs(2),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(20),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+
+        tokio::time::timeout(
+            Duration::from_millis(1_500),
+            context.shutdown(
+                &claims,
+                &owner,
+                Duration::from_millis(20),
+                Duration::from_millis(40),
+                tokio::time::Instant::now(),
+            ),
+        )
+        .await
+        .expect("definitive lease loss must not wait for Q6's deadline");
+        assert!(heartbeat_calls.load(Ordering::SeqCst) > 0);
+        assert!(fatal_fence.is_cancelled());
+        assert!(!live_identity.current().is_active());
+        assert!(!completion.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_renews_a_healthy_lease_before_its_old_deadline() {
+        let owner = identity();
+        let heartbeat_entered = Arc::new(tokio::sync::Notify::new());
+        let release_drain = Arc::new(tokio::sync::Notify::new());
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        lease.heartbeat_entered = Some(heartbeat_entered.clone());
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let drain = run_shutdown_drain_with_heartbeat(
+            &lease,
+            &claims,
+            &owner,
+            &local_claims,
+            ShutdownLeaseTiming {
+                claim_release_budget: Duration::from_millis(10),
+                lease_ttl: Duration::from_millis(100),
+                last_success: tokio::time::Instant::now() - Duration::from_millis(80),
+            },
+            release_drain.notified(),
+        );
+        tokio::pin!(drain);
+        tokio::select! {
+            biased;
+            result = &mut drain => panic!("healthy shutdown drain ended before renewal: {result:?}"),
+            observed = tokio::time::timeout(Duration::from_millis(10), heartbeat_entered.notified()) => {
+                observed.expect("shutdown must renew before the old lease deadline");
+            }
+        }
+        release_drain.notify_one();
+        let result = tokio::time::timeout(Duration::from_millis(50), &mut drain)
+            .await
+            .expect("renewed lease permits completed Q6 work");
+        assert_eq!(result, ShutdownDrainOutcome::Completed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_renews_while_mark_draining_is_stalled() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let draining_entered = Arc::new(tokio::sync::Notify::new());
+        let draining_release = Arc::new(tokio::sync::Notify::new());
+        let heartbeat_entered = Arc::new(tokio::sync::Notify::new());
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        lease.draining_entered = Some(draining_entered.clone());
+        lease.draining_release = Some(draining_release.clone());
+        lease.heartbeat_entered = Some(heartbeat_entered.clone());
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: completion.clone(),
+            budget: Duration::from_secs(2),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(100),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+        let shutdown = context.shutdown(
+            &claims,
+            &owner,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            tokio::time::Instant::now() - Duration::from_millis(80),
+        );
+        tokio::pin!(shutdown);
+        tokio::select! {
+            result = &mut shutdown => panic!("shutdown ended before marking draining: {result:?}"),
+            _ = draining_entered.notified() => {}
+        }
+        tokio::select! {
+            result = &mut shutdown => panic!("shutdown ended before lease renewal: {result:?}"),
+            observed = tokio::time::timeout(Duration::from_millis(10), heartbeat_entered.notified()) => {
+                observed.expect("lease must renew while mark_draining is pending");
+            }
+        }
+        assert!(live_identity.current().is_active());
+        draining_release.notify_one();
+        completion.cancel();
+        tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("healthy shutdown completes after marking draining and Q6");
+        assert!(!live_identity.current().is_active());
+        assert_eq!(lease.draining_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_heartbeat_errors_stop_at_last_confirmed_lease_deadline() {
+        let owner = identity();
+        let lease = FakeLease::new(Box::new(|| {
+            Err(ClaimError::Backend("heartbeat unavailable".to_string()))
+        }));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_shutdown_drain_with_heartbeat(
+                &lease,
+                &claims,
+                &owner,
+                &local_claims,
+                ShutdownLeaseTiming {
+                    claim_release_budget: Duration::from_millis(10),
+                    lease_ttl: Duration::from_millis(80),
+                    last_success: tokio::time::Instant::now(),
+                },
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("unrenewed lease must bound the Q6 wait");
+        assert_eq!(outcome, ShutdownDrainOutcome::LeaseUnavailable);
+    }
+
+    #[tokio::test]
+    async fn hung_shutdown_heartbeat_stops_at_last_confirmed_lease_deadline() {
+        let owner = identity();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        lease.heartbeat_entered = Some(entered.clone());
+        lease.heartbeat_release = Some(Arc::new(tokio::sync::Notify::new()));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let drain = run_shutdown_drain_with_heartbeat(
+            &lease,
+            &claims,
+            &owner,
+            &local_claims,
+            ShutdownLeaseTiming {
+                claim_release_budget: Duration::from_millis(10),
+                lease_ttl: Duration::from_millis(100),
+                last_success: tokio::time::Instant::now(),
+            },
+            std::future::pending(),
+        );
+        tokio::pin!(drain);
+        tokio::time::timeout(Duration::from_millis(500), async {
+            tokio::select! {
+                _ = entered.notified() => {}
+                outcome = &mut drain => panic!("drain ended before the heartbeat stalled: {outcome:?}"),
+            }
+        })
+        .await
+        .expect("shutdown should attempt heartbeat");
+        let outcome = tokio::time::timeout(Duration::from_millis(500), &mut drain)
+            .await
+            .expect("stalled heartbeat must not outlive the lease");
+        assert_eq!(outcome, ShutdownDrainOutcome::LeaseUnavailable);
+    }
+
+    #[tokio::test]
+    async fn completed_shutdown_drain_preempts_a_hung_heartbeat() {
+        let owner = identity();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release_drain = Arc::new(tokio::sync::Notify::new());
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        lease.heartbeat_entered = Some(entered.clone());
+        lease.heartbeat_release = Some(Arc::new(tokio::sync::Notify::new()));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let drain = run_shutdown_drain_with_heartbeat(
+            &lease,
+            &claims,
+            &owner,
+            &local_claims,
+            ShutdownLeaseTiming {
+                claim_release_budget: Duration::from_millis(10),
+                lease_ttl: Duration::from_secs(2),
+                last_success: tokio::time::Instant::now(),
+            },
+            release_drain.notified(),
+        );
+        tokio::pin!(drain);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                _ = entered.notified() => {}
+                outcome = &mut drain => panic!("drain ended before heartbeat stalled: {outcome:?}"),
+            }
+        })
+        .await
+        .expect("shutdown should attempt heartbeat");
+        release_drain.notify_one();
+        let outcome = tokio::time::timeout(Duration::from_millis(300), &mut drain)
+            .await
+            .expect("completed drain should preempt hung heartbeat");
+        assert_eq!(outcome, ShutdownDrainOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn fatal_fence_preempts_a_waiting_q6_drain() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: CancellationToken::new(),
+            budget: Duration::from_secs(2),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(20),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+        let shutdown = context.shutdown(
+            &claims,
+            &owner,
+            Duration::from_millis(20),
+            Duration::from_secs(2),
+            tokio::time::Instant::now(),
+        );
+        tokio::pin!(shutdown);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(40)) => {}
+            _ = &mut shutdown => panic!("Q6 wait ended before the fatal fence"),
+        }
+        assert!(live_identity.current().is_active());
+
+        fatal_fence.cancel();
+        tokio::time::timeout(Duration::from_millis(1_500), &mut shutdown)
+            .await
+            .expect("fatal fence preempts the Q6 wait");
+        assert!(!live_identity.current().is_active());
+    }
+
+    #[tokio::test]
+    async fn fatal_finish_waits_for_q6_accounting_before_local_demotion() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let demoted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(BlockingSealLocalClaims {
+            entity: Entity::new(
+                waddle_xmpp::ownership::EntityType::SmSession,
+                "q6-accounting",
+            ),
+            seal_started: Arc::new(tokio::sync::Notify::new()),
+            seal_release: Arc::new(tokio::sync::Notify::new()),
+            exact_demoted_owners: demoted.clone(),
+        });
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: completion.clone(),
+            budget: Duration::from_secs(2),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(20),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+        fatal_fence.cancel();
+        let shutdown = context.shutdown(
+            &claims,
+            &owner,
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+            tokio::time::Instant::now(),
+        );
+        tokio::pin!(shutdown);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(40)) => {}
+            _ = &mut shutdown => panic!("local claims demoted before Q6 accounted for them"),
+        }
+        assert!(!live_identity.current().is_active());
+        assert!(demoted.lock().expect("demotion log").is_empty());
+        completion.cancel();
+        tokio::time::timeout(Duration::from_millis(500), &mut shutdown)
+            .await
+            .expect("demotion follows Q6 completion");
+        assert_eq!(
+            demoted.lock().expect("demotion log").as_slice(),
+            std::slice::from_ref(&owner)
+        );
+    }
+
+    #[tokio::test]
+    async fn clustering_only_stop_does_not_wait_for_process_q6() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let clustering_stop = process_stop.child_token();
+        let coordination = ShutdownSmDrain {
+            process_stop,
+            complete: CancellationToken::new(),
+            budget: Duration::from_secs(2),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &clustering_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(20),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        clustering_stop.cancel();
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            context.shutdown(
+                &claims,
+                &owner,
+                Duration::from_millis(20),
+                Duration::from_millis(40),
+                tokio::time::Instant::now(),
+            ),
+        )
+        .await
+        .expect("clustering-only stop skips process Q6 wait");
+        assert!(!live_identity.current().is_active());
     }
 
     #[tokio::test(start_paused = true)]
@@ -3414,6 +4198,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3485,6 +4270,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 
@@ -3786,6 +4572,7 @@ mod tests {
                 peer_id: None,
                 claim_store: task_claim_store,
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
             },
         ));
 

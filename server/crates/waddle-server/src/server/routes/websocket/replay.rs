@@ -675,6 +675,7 @@ async fn record_drained_terminal_xml(
             blocklist: &refreshed_blocklist,
             server_domain: state.deps.auth_state.xmpp_domain.as_str(),
             recent_tombstones: &recent_tombstones,
+            allow_unfenced_effects: true,
         },
     )
     .await;

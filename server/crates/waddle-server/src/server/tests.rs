@@ -987,6 +987,8 @@ async fn test_app_for_state(state: Arc<AppState>) -> Router {
         shutdown_handle: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
             .handle(),
         drain_complete: std::sync::Arc::new(tokio::sync::Notify::new()),
+        sm_drain_complete: tokio_util::sync::CancellationToken::new(),
+        sm_drain_started: std::sync::Arc::new(std::sync::OnceLock::new()),
     })
     .await
     .unwrap()

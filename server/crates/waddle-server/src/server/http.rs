@@ -54,6 +54,8 @@ pub(crate) struct HttpServerDeps {
     /// HTTP server's graceful_shutdown closure waits on this after
     /// stop_token cancels so the runtime doesn't tear down mid-drain.
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
+    pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
+    pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
 const HTTP_FORCED_EXIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
@@ -114,6 +116,8 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         listener,
         shutdown_handle,
         drain_complete,
+        sm_drain_complete,
+        sm_drain_started,
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
@@ -128,8 +132,19 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         acme_http01_challenge_service,
         shutdown_handle,
         drain_complete: drain_complete.clone(),
+        sm_drain_complete: sm_drain_complete.clone(),
+        sm_drain_started,
     })
-    .await?;
+    .await;
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            // No Q6 task exists if router construction failed. Release the
+            // node-lease shutdown gate so startup errors still exit promptly.
+            sm_drain_complete.cancel();
+            return Err(error);
+        }
+    };
 
     let addr = listener.local_addr()?;
     info!("Starting Axum HTTP server on {}", addr);
@@ -344,6 +359,8 @@ pub(crate) struct RouterDeps {
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
+    pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
+    pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
 /// Create the Axum router with all routes and middleware.
@@ -357,6 +374,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         acme_http01_challenge_service,
         shutdown_handle,
         drain_complete,
+        sm_drain_complete,
+        sm_drain_started,
     } = deps;
     let shutdown_stop_token = shutdown_handle.stop_token();
     // Create auth broker state
@@ -457,6 +476,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         Arc::clone(&websocket_state),
         shutdown_stop_token,
         Arc::clone(&drain_complete),
+        sm_drain_complete,
+        sm_drain_started,
     );
 
     let extension_webhooks_router =

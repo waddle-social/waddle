@@ -81,6 +81,44 @@ pub async fn promote_session_unacked(
     server_domain: &str,
     recent_tombstones: &[waddle_xmpp::stream_management::RecentTombstoneRecord],
 ) -> PromotionSummary {
+    promote_session_unacked_with_policy(
+        session,
+        StreamPromotionDeps {
+            registry,
+            user_registry,
+            pending_storage,
+            blocklist,
+            server_domain,
+            recent_tombstones,
+            allow_unfenced_effects: true,
+        },
+    )
+    .await
+}
+
+struct StreamPromotionDeps<'a> {
+    registry: &'a ConnectionRegistry,
+    user_registry: &'a ActorRef<UserRegistryActor>,
+    pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
+    blocklist: &'a Blocklist,
+    server_domain: &'a str,
+    recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
+    allow_unfenced_effects: bool,
+}
+
+async fn promote_session_unacked_with_policy(
+    session: &DetachedSession,
+    deps: StreamPromotionDeps<'_>,
+) -> PromotionSummary {
+    let StreamPromotionDeps {
+        registry,
+        user_registry,
+        pending_storage,
+        blocklist,
+        server_domain,
+        recent_tombstones,
+        allow_unfenced_effects,
+    } = deps;
     let mut summary = PromotionSummary::default();
     let recipient_bare = session.jid.to_bare();
 
@@ -88,7 +126,11 @@ pub async fn promote_session_unacked(
     // classifier. Empty in the common SM-expiry case (otherwise
     // the session wouldn't have been detached in the first place,
     // unless other resources joined after detach).
-    let online = build_online_resources(registry, user_registry, &recipient_bare).await;
+    let online = if allow_unfenced_effects {
+        build_online_resources(registry, user_registry, &recipient_bare).await
+    } else {
+        OnlineResources::empty()
+    };
 
     // Round-2 review R2: select the sequences a recently applied
     // tombstone matches, using the same shared matcher as the
@@ -159,12 +201,24 @@ pub async fn promote_session_unacked(
                     pending_storage,
                     original_receipt_fallback: entry.original_receipt_at,
                     server_domain,
-                    origin: PromotionOrigin::Stream(&session.stream_id),
+                    allow_unfenced_effects,
+                    origin: PromotionOrigin::Stream {
+                        stream_id: &session.stream_id,
+                        sequence: entry.sequence,
+                    },
                 };
                 promote_one(message, entry.sequence, ctx).await
             }
-            Some(Stanza::Iq(iq)) => promote_iq(*iq, registry).await,
-            Some(Stanza::Presence(presence)) => promote_presence(presence, registry).await,
+            Some(Stanza::Iq(iq)) if allow_unfenced_effects => promote_iq(*iq, registry).await,
+            Some(Stanza::Presence(presence)) if allow_unfenced_effects => {
+                promote_presence(presence, registry).await
+            }
+            Some(Stanza::Iq(_) | Stanza::Presence(_)) => {
+                // Clustered shutdown has no atomic replay retirement for a
+                // direct IQ/presence send. Keep its durable replay row for
+                // successor recovery instead of sending under a stale claim.
+                PromotedOutcome::StorageFailure
+            }
             None => PromotedOutcome::Unparseable,
         };
         debug!(
@@ -259,6 +313,9 @@ pub(crate) struct TerminalOverflowPromotionDeps<'a> {
     pub(crate) blocklist: &'a Blocklist,
     pub(crate) server_domain: &'a str,
     pub(crate) recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
+    /// Clustered shutdown only: live sends and quota bounces cannot commit
+    /// atomically with SM replay retirement. Defer them to durable custody.
+    pub(crate) allow_unfenced_effects: bool,
 }
 
 /// Result of reconciling a detached session's replay queue against the
@@ -882,6 +939,7 @@ pub(crate) async fn promote_displaced_sessions(
                 blocklist: &blocklist,
                 server_domain: deps.server_domain,
                 recent_tombstones: &recent_tombstones,
+                allow_unfenced_effects: true,
             },
         )
         .await;
@@ -1001,6 +1059,7 @@ struct PromotionContext<'a> {
     pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
     server_domain: &'a str,
+    allow_unfenced_effects: bool,
     /// The SM session whose unacked queue is being promoted (ADR-0017
     /// Phase 3 Slice 5 FIX 3) — threaded down into
     /// `pending::insert_pending`'s `insert_fenced` call so a cluster-fenced
@@ -1031,7 +1090,7 @@ async fn promote_one(
     // Custody already froze the authoritative receipt time with its payload;
     // the atomic handoff validates that immutable time. Legacy queue-only
     // promotion may still recover an earlier self-stamped replay time.
-    if let (PromotionOrigin::Stream(_), Some(stamp)) =
+    if let (PromotionOrigin::Stream { .. }, Some(stamp)) =
         (ctx.origin, self_stamp_time(&message, ctx.server_domain))
     {
         ctx.original_receipt_fallback = stamp;
@@ -1047,7 +1106,7 @@ async fn promote_one(
     // review on PR #346: earlier code took only the first via
     // `next()` which silently lost deliveries on multi-resource
     // users).
-    if !matches!(routing.live, LiveDecision::None) {
+    if ctx.allow_unfenced_effects && !matches!(routing.live, LiveDecision::None) {
         let targets =
             collect_live_targets(&routing, &message, ctx.registry, ctx.user_registry).await;
         if !targets.is_empty() {
@@ -1083,6 +1142,12 @@ async fn promote_one(
 
     // Step 2: offline storage — if the classifier marked the stanza
     // for `pending_delivery`, insert.
+    if !ctx.allow_unfenced_effects && matches!(routing.pending, PendingDecision::None) {
+        // A non-storable message cannot use the atomic pending handoff.
+        // Keep its SM replay row for successor recovery; dropping it here
+        // could lose a message that an alternate resource could receive.
+        return PromotedOutcome::StorageFailure;
+    }
     match routing.pending {
         PendingDecision::None => {
             // Neither live nor offline survived — nothing to do.
@@ -1127,6 +1192,7 @@ async fn promote_one(
                             DeliveryHandles {
                                 registry: ctx.registry,
                                 user_registry: ctx.user_registry,
+                                allow_unfenced_effects: ctx.allow_unfenced_effects,
                             },
                             ctx.origin,
                         )
@@ -1156,6 +1222,7 @@ async fn promote_one(
         DeliveryHandles {
             registry: ctx.registry,
             user_registry: ctx.user_registry,
+            allow_unfenced_effects: ctx.allow_unfenced_effects,
         },
         ctx.origin,
     )

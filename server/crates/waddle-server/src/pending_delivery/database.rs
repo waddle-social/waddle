@@ -263,6 +263,100 @@ impl DatabasePendingDeliveryStorage {
         self
     }
 
+    async fn insert_under_origin_fence(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+        prune_sequence: Option<u32>,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        // Without clustered fencing there is no co-located durable SM row
+        // whose lifetime this storage can manage.
+        let Some(fencing) = &self.fencing else {
+            return self.insert(row).await;
+        };
+
+        let entity = Entity::new(EntityType::SmSession, origin_stream_id.to_string());
+        let identity = fencing.node_identity.current();
+        let epoch = fencing
+            .claim_store
+            .ensure_claimed(&entity, &identity)
+            .await
+            .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
+        let claim_fence = SmClaimFence::new(identity, epoch);
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+
+        let Some(identity_guard) = fencing
+            .node_identity
+            .guard_if_current(claim_fence.owner())
+            .await
+        else {
+            return Err(PendingStorageError::NotOwner { entity });
+        };
+
+        let fence = PendingInsertFence::new(
+            &entity,
+            &claim_fence,
+            &fencing.node_identity,
+            &identity_guard,
+        );
+        let outcome = insert_in_transaction(&mut tx, &row, self.quota, Some(fence)).await?;
+        if outcome == InsertOutcome::QuotaExceeded {
+            if let Some(sequence) = prune_sequence {
+                if persisted_replay_already_transferred(&mut tx, origin_stream_id, sequence).await?
+                {
+                    return Ok(InsertOutcome::Inserted);
+                }
+            }
+        }
+        if outcome == InsertOutcome::Inserted {
+            if let Some(sequence) = prune_sequence {
+                let removed = tx
+                    .execute(
+                        "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+                        crate::db_params![origin_stream_id.to_string(), i64::from(sequence)],
+                    )
+                    .await
+                    .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+                if removed > 0 {
+                    // Promotion is terminal for this SM stream. A successor
+                    // may hydrate the surviving durable session before Q6
+                    // confirms deletion, but it must not accept a resume
+                    // whose replay suffix now has this sequence missing.
+                    tx.execute(
+                        "UPDATE sm_sessions SET max_resume_secs = 0, \
+                         max_resume_duration_ms = 0 WHERE stream_id = ?",
+                        crate::db_params![origin_stream_id.to_string()],
+                    )
+                    .await
+                    .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+                }
+                if removed == 0
+                    && persisted_replay_already_transferred(&mut tx, origin_stream_id, sequence)
+                        .await?
+                {
+                    // A prior pass already transferred this exact replay
+                    // row. Drop the transaction to roll back the fresh
+                    // pending insert; the earlier handoff is durable.
+                    return Ok(InsertOutcome::Inserted);
+                }
+                // An initial detach can fail before its durable snapshot
+                // exists. Its in-memory queue remains eligible for the
+                // ordinary at-least-once pending insert.
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        drop(identity_guard);
+
+        Ok(outcome)
+    }
+
     async fn execute(
         &self,
         sql: &str,
@@ -292,6 +386,44 @@ impl DatabasePendingDeliveryStorage {
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))
     }
+}
+
+/// A persisted session with no matching replay row has already handed this
+/// sequence off (or scrubbed it). An initial detach whose snapshot never
+/// landed has no session row and retains the ordinary at-least-once fallback.
+async fn persisted_replay_already_transferred(
+    tx: &mut crate::db::Transaction<'_>,
+    stream_id: &str,
+    sequence: u32,
+) -> Result<bool, PendingStorageError> {
+    let replay_exists = {
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM sm_unacked WHERE stream_id = ? AND sequence = ? LIMIT 1",
+                crate::db_params![stream_id.to_string(), i64::from(sequence)],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        rows.next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .is_some()
+    };
+    if replay_exists {
+        return Ok(false);
+    }
+    let mut sessions = tx
+        .query(
+            "SELECT 1 FROM sm_sessions WHERE stream_id = ? LIMIT 1",
+            crate::db_params![stream_id.to_string()],
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    Ok(sessions
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        .is_some())
 }
 
 /// Insert one pending row inside the caller's transaction.
@@ -447,57 +579,23 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         row: PendingRow,
         origin_stream_id: &str,
     ) -> Result<InsertOutcome, PendingStorageError> {
-        // ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): no fencing
-        // context attached (clustering disabled, non-Postgres, or this
-        // storage's `db` failed the co-location check at construction) —
-        // fall back to the exact unfenced path, byte-identical to `insert`.
-        let Some(fencing) = &self.fencing else {
-            return self.insert(row).await;
-        };
-
-        let entity = Entity::new(EntityType::SmSession, origin_stream_id.to_string());
-        let identity = fencing.node_identity.current();
-        // `ensure_claimed`, not a bare `acquire`: the caller (Q6 promotion)
-        // is running against a session this node's own claim lifecycle
-        // already holds (deviation 29's "claim held continuously while the
-        // session sits in `sessions`" invariant) — this is the ordinary
-        // self-reacquire case, exactly like
-        // `sm_persistence_fenced::claim_epoch_for`'s identical call one
-        // table over.
-        let epoch = fencing
-            .claim_store
-            .ensure_claimed(&entity, &identity)
+        self.insert_under_origin_fence(row, origin_stream_id, None)
             .await
-            .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
-        let claim_fence = SmClaimFence::new(identity, epoch);
-        let mut tx = self
-            .db
-            .begin()
+    }
+
+    #[instrument(
+        skip(self, row),
+        fields(recipient = %row.recipient, origin_stream_id, sequence),
+        err
+    )]
+    async fn insert_fenced_and_prune_unacked(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+        sequence: u32,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        self.insert_under_origin_fence(row, origin_stream_id, Some(sequence))
             .await
-            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-
-        let Some(identity_guard) = fencing
-            .node_identity
-            .guard_if_current(claim_fence.owner())
-            .await
-        else {
-            return Err(PendingStorageError::NotOwner { entity });
-        };
-
-        let fence = PendingInsertFence::new(
-            &entity,
-            &claim_fence,
-            &fencing.node_identity,
-            &identity_guard,
-        );
-        let outcome = insert_in_transaction(&mut tx, &row, self.quota, Some(fence)).await?;
-
-        tx.commit()
-            .await
-            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        drop(identity_guard);
-
-        Ok(outcome)
     }
 
     async fn insert_ingress_custody(

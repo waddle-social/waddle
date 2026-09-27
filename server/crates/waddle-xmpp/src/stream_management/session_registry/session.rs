@@ -117,7 +117,7 @@ impl DetachedSession {
         let max_time = self
             .max_resume_time
             .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS as u32);
-        self.detached_at.elapsed() > Duration::from_secs(max_time as u64)
+        max_time == 0 || self.detached_at.elapsed() > Duration::from_secs(max_time as u64)
     }
 
     /// Get remaining time until expiration.
