@@ -84,6 +84,7 @@ async fn sqlite_xep0045_progress_contention_retries_without_repeating_live_deliv
         receivers.push(receiver);
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -192,6 +193,7 @@ async fn reply_during_in_flight_reflection(release_predecessor: bool) {
         receivers.push(receiver);
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -384,6 +386,7 @@ async fn sqlite_xep0045_blocked_fanout_shares_probe_budget_and_reaches_ready_new
         if resource != &newcomer {
             actor
                 .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                     nick: format!("occupant{index}"),
                     real_jid: resource.clone(),
                     role: waddle_xmpp::Role::Participant,
@@ -405,6 +408,7 @@ async fn sqlite_xep0045_blocked_fanout_shares_probe_budget_and_reaches_ready_new
     // This recipient has no obligation in A, so B must remain independently ready.
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "newcomer".into(),
             real_jid: newcomer.clone(),
             role: waddle_xmpp::Role::Participant,

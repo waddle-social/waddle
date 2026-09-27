@@ -315,7 +315,7 @@ mod registration;
 
 pub(super) use observe::observe_sm_resume_finalized;
 pub(super) use registration::{
-    finalize_sm_after_registry_registration, SmRegistrationFinalization,
+    finalize_sm_after_registry_registration, reject_unregistered_resume, SmRegistrationFinalization,
 };
 
 /// Returns true if the frame is an XMPP stanza that counts toward XEP-0198

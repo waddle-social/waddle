@@ -1613,6 +1613,42 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
 }
 
 #[tokio::test]
+async fn teardown_executor_defers_missing_call_when_live_participant_sid_is_unknown() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-live-fence-unknown").expect("call id");
+    let alice = fixture_identity("alice");
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+    admin.set_live_with_sids(&call, vec![(alice.clone(), None)]);
+    assert!(sfu.teardown_executor().current_generation(&call).is_none());
+
+    let intent = CallTeardownIntentLite {
+        call_id: call,
+        target: TeardownTargetLite::Participant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        },
+        generation: None,
+        room_sid: None,
+        occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
+        session: None,
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed unresolved no-op"),
+        TeardownExecution::Occupied
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "an unknown live SID cannot authorize removal under a captured SID fence"
+    );
+}
+
+#[tokio::test]
 async fn inline_teardown_reports_participant_and_room_intents_before_admin_work_completes() {
     let admin = Arc::new(RecordingAdmin::default());
     let gate = Arc::new(Semaphore::new(0));
@@ -4159,4 +4195,418 @@ async fn teardown_executor_honours_the_persisted_unbound_policy() {
         "a confirmed departure keeps its authority across the restart"
     );
     assert_eq!(admin.remove_snapshot().len(), 1);
+}
+
+#[test]
+fn stale_authorized_initiate_cannot_publish_over_a_replacement() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("generation-race").expect("call");
+    let alice = fixture_identity("alice");
+    let first = fixture_occupancy_session();
+    let second = fixture_occupancy_session();
+    let old_sid = SessionBinding::new("old-sid").expect("old session");
+    let new_sid = SessionBinding::new("new-sid").expect("replacement session");
+    // g1 captures its comparison value, then pauses at room authorization.
+    let expected = captured_registration(&sfu, &call, &alice);
+    // g2 replaces the room occupancy and finishes its authorized initiate.
+    let replacement_token = sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &new_sid,
+            second,
+            expected,
+        )
+        .expect("mint replacement")
+        .expect("register replacement");
+    let minted_at = sfu.participant_last_minted_at(&call, &alice);
+    let registered_at = sfu.participant_registered_at(&call, &alice);
+    sfu.arm_pending_revocation_eject(&call, &alice, replacement_token.expires_at);
+    // The late g1 authorization result must fail at the publication boundary.
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &old_sid,
+            first,
+            expected,
+        )
+        .expect("conditional publication")
+        .is_none());
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(second)
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &alice),
+        Some(new_sid)
+    );
+    assert_eq!(sfu.participant_last_minted_at(&call, &alice), minted_at);
+    assert_eq!(sfu.participant_registered_at(&call, &alice), registered_at);
+    assert!(sfu.has_pending_revocation_eject(&call, &alice));
+    let issued = sfu
+        .issued
+        .get(&(call, alice))
+        .expect("replacement token bucket");
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].jti, replacement_token.jti);
+    assert!(!sfu.is_revoked(&replacement_token.jti));
+}
+
+fn captured_registration(
+    sfu: &LiveKitSfu,
+    call: &CallId,
+    identity: &Identity,
+) -> crate::ParticipantRegistrationExpectation {
+    sfu.participant_registration_expectation(call, identity)
+        .expect("LiveKit registration capture")
+}
+
+enum RegistrationAfterPublication {
+    Unchanged,
+    WebhookReplacement,
+    NewSignalingPublication,
+}
+
+async fn assert_initiate_rollback_fences_its_publication(after: RegistrationAfterPublication) {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin.clone() as Arc<_>);
+    let call = CallId::new("publication-rollback").expect("call");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant_observed(
+        &call,
+        &alice,
+        &observed_sids(Some("RM_live"), Some("PA_original")),
+    );
+    let expected = captured_registration(&sfu, &call, &alice);
+    let occupant = fixture_occupancy_session();
+    let session = SessionBinding::new("same-generation-and-session").expect("session");
+    let token = sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &session,
+            occupant,
+            expected,
+        )
+        .expect("mint")
+        .expect("publish");
+    match after {
+        RegistrationAfterPublication::Unchanged => {}
+        RegistrationAfterPublication::WebhookReplacement => {
+            sfu.register_call_participant_observed(
+                &call,
+                &alice,
+                &observed_sids(Some("RM_live"), Some("PA_replacement")),
+            );
+        }
+        RegistrationAfterPublication::NewSignalingPublication => {
+            let replacement = captured_registration(&sfu, &call, &alice);
+            sfu.issue_join_token_with_session(
+                &call,
+                &alice,
+                MediaCapabilities::direct_call_peer(),
+                &session,
+                occupant,
+                replacement,
+            )
+            .expect("replacement mint")
+            .expect("replacement publication");
+        }
+    }
+    let live_sid = stored_participant_sid(&sfu, &call, &alice);
+    let issued = sfu.issued_count(&call, &alice);
+    let minted_at = sfu.participant_last_minted_at(&call, &alice);
+    let outcome = sfu.rollback_participant_registration(&call, &alice, expected);
+    if matches!(after, RegistrationAfterPublication::Unchanged) {
+        assert_eq!(
+            outcome,
+            SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended))
+        );
+        assert!(!sfu.has_call_participant(&call, &alice));
+        assert!(sfu.is_revoked(&token.jti));
+    } else {
+        assert_eq!(
+            outcome,
+            SessionScopedTeardown::SessionMismatch,
+            "post-authorization rollback must target its exact successful publication"
+        );
+        assert!(sfu.has_call_participant(&call, &alice));
+        assert_eq!(stored_participant_sid(&sfu, &call, &alice), live_sid);
+        assert_eq!(
+            sfu.participant_session_binding(&call, &alice),
+            Some(session)
+        );
+        assert_eq!(
+            sfu.participant_occupant_session(&call, &alice),
+            Some(occupant)
+        );
+        assert_eq!(sfu.issued_count(&call, &alice), issued);
+        assert_eq!(sfu.participant_last_minted_at(&call, &alice), minted_at);
+        assert!(!sfu.is_revoked(&token.jti));
+        assert!(!sfu.has_pending_revocation_eject(&call, &alice));
+        tokio::task::yield_now().await;
+        assert!(admin.remove_snapshot().is_empty());
+        assert!(admin.delete_snapshot().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn initiate_rollback_preserves_a_new_webhook_incarnation() {
+    assert_initiate_rollback_fences_its_publication(
+        RegistrationAfterPublication::WebhookReplacement,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn initiate_rollback_preserves_a_later_same_session_publication() {
+    assert_initiate_rollback_fences_its_publication(
+        RegistrationAfterPublication::NewSignalingPublication,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn initiate_rollback_revokes_its_unchanged_publication() {
+    assert_initiate_rollback_fences_its_publication(RegistrationAfterPublication::Unchanged).await;
+}
+
+#[test]
+fn failed_initiate_publication_cannot_roll_back_the_winning_publication() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
+    let call = CallId::new("failed-publication-rollback").expect("call");
+    let alice = fixture_identity("alice");
+    let failed = captured_registration(&sfu, &call, &alice);
+    let winner = captured_registration(&sfu, &call, &alice);
+    let occupant = fixture_occupancy_session();
+    let session = SessionBinding::new("same-session").expect("session");
+    let token = sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &session,
+            occupant,
+            winner,
+        )
+        .expect("mint")
+        .expect("publish winner");
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &session,
+            occupant,
+            failed
+        )
+        .expect("stale CAS")
+        .is_none());
+    assert_eq!(
+        sfu.rollback_participant_registration(&call, &alice, failed),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert!(!sfu.is_revoked(&token.jti));
+}
+
+fn assert_stale_registration_preserves_participant(
+    sfu: &LiveKitSfu,
+    call: &CallId,
+    identity: &Identity,
+    expected: crate::ParticipantRegistrationExpectation,
+) {
+    let participant_sid = stored_participant_sid(sfu, call, identity);
+    let session = sfu.participant_session_binding(call, identity);
+    let occupant = sfu.participant_occupant_session(call, identity);
+    let registered_at = sfu.participant_registered_at(call, identity);
+    let minted_at = sfu.participant_last_minted_at(call, identity);
+    let issued_jtis = || {
+        sfu.issued
+            .get(&(call.clone(), identity.clone()))
+            .map(|issued| {
+                issued
+                    .iter()
+                    .map(|token| token.jti.clone())
+                    .collect::<Vec<_>>()
+            })
+    };
+    let tokens = issued_jtis();
+    sfu.arm_pending_revocation_eject(call, identity, Utc::now() + Duration::hours(1));
+    assert!(
+        sfu.issue_join_token_with_session(
+            call,
+            identity,
+            MediaCapabilities::direct_call_peer(),
+            &SessionBinding::new("stale-initiate").expect("session"),
+            fixture_occupancy_session(),
+            expected,
+        )
+        .expect("conditional admission")
+        .is_none(),
+        "a changed participant must reject stale admission"
+    );
+    assert_eq!(stored_participant_sid(sfu, call, identity), participant_sid);
+    assert_eq!(sfu.participant_session_binding(call, identity), session);
+    assert_eq!(sfu.participant_occupant_session(call, identity), occupant);
+    assert_eq!(sfu.participant_registered_at(call, identity), registered_at);
+    assert_eq!(sfu.participant_last_minted_at(call, identity), minted_at);
+    assert_eq!(issued_jtis(), tokens);
+    assert!(sfu.has_pending_revocation_eject(call, identity));
+}
+
+#[test]
+fn captured_absence_rejects_a_webhook_restored_participant() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
+    let call = CallId::new("absent-to-restored").expect("call");
+    let alice = fixture_identity("alice");
+    let expected = captured_registration(&sfu, &call, &alice);
+    sfu.register_call_participant_observed(
+        &call,
+        &alice,
+        &observed_sids(Some("RM_live"), Some("PA_live")),
+    );
+    assert_stale_registration_preserves_participant(&sfu, &call, &alice, expected);
+}
+
+#[test]
+fn captured_unbound_participant_rejects_removed_and_restored_incarnation() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
+    let call = CallId::new("unbound-restored-again").expect("call");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_live"), Some("PA_same"));
+    sfu.register_call_participant_observed(&call, &alice, &observed);
+    let expected = captured_registration(&sfu, &call, &alice);
+    sfu.note_participant_left(&call, &alice, Some(&observed));
+    assert!(!sfu.has_call_participant(&call, &alice));
+    sfu.register_call_participant_observed(&call, &alice, &observed);
+    assert_stale_registration_preserves_participant(&sfu, &call, &alice, expected);
+}
+
+#[test]
+fn captured_unbound_participant_rejects_a_new_webhook_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
+    let call = CallId::new("unbound-sid-advanced").expect("call");
+    let alice = fixture_identity("alice");
+    sfu.register_call_participant_observed(
+        &call,
+        &alice,
+        &observed_sids(Some("RM_live"), Some("PA_old")),
+    );
+    let expected = captured_registration(&sfu, &call, &alice);
+    sfu.register_call_participant_observed(
+        &call,
+        &alice,
+        &observed_sids(Some("RM_live"), Some("PA_new")),
+    );
+    assert_stale_registration_preserves_participant(&sfu, &call, &alice, expected);
+}
+
+#[test]
+fn captured_binding_rejects_same_occupant_with_a_new_signaling_session() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
+    let call = CallId::new("same-occupant-new-session").expect("call");
+    let alice = fixture_identity("alice");
+    let occupant = fixture_occupancy_session();
+    sfu.register_call_participant_with_session(
+        &call,
+        &alice,
+        &SessionBinding::new("old").expect("session"),
+        occupant,
+    );
+    let expected = captured_registration(&sfu, &call, &alice);
+    sfu.register_call_participant_with_session(
+        &call,
+        &alice,
+        &SessionBinding::new("new").expect("session"),
+        occupant,
+    );
+    assert_stale_registration_preserves_participant(&sfu, &call, &alice, expected);
+}
+
+#[test]
+fn captured_unbound_participant_accepts_unchanged_duplicate_observation() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
+    let call = CallId::new("unchanged-unbound").expect("call");
+    let alice = fixture_identity("alice");
+    let observed = observed_sids(Some("RM_live"), Some("PA_live"));
+    sfu.register_call_participant_observed(&call, &alice, &observed);
+    let expected = captured_registration(&sfu, &call, &alice);
+    sfu.register_call_participant_observed(&call, &alice, &observed);
+    let occupant = fixture_occupancy_session();
+    let session = SessionBinding::new("authorized").expect("session");
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &session,
+            occupant,
+            expected
+        )
+        .expect("admit unchanged participant")
+        .is_some());
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(occupant)
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &alice),
+        Some(session)
+    );
+    assert_eq!(
+        stored_participant_sid(&sfu, &call, &alice),
+        observed.participant_sid
+    );
+}
+
+#[test]
+fn authorized_replacement_can_conditionally_replace_the_previous_binding() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("generation-replacement").expect("call");
+    let alice = fixture_identity("alice");
+    let first = fixture_occupancy_session();
+    let second = fixture_occupancy_session();
+    let old_sid = SessionBinding::new("old-sid").expect("old session");
+    let new_sid = SessionBinding::new("new-sid").expect("replacement session");
+    sfu.register_call_participant_with_session(&call, &alice, &old_sid, first);
+    let expected = captured_registration(&sfu, &call, &alice);
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &new_sid,
+            second,
+            expected,
+        )
+        .expect("mint replacement")
+        .is_some());
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(second)
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &alice),
+        Some(new_sid)
+    );
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &old_sid,
+            first,
+            expected,
+        )
+        .expect("stale previous initiate")
+        .is_none());
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(second)
+    );
 }

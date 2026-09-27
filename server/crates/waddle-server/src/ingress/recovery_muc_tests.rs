@@ -86,6 +86,7 @@ async fn planned_room_with_origin(
         }
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: if matches!(case, Case::SubjectPending | Case::SubjectReady)
@@ -324,6 +325,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         .expect("actor");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "late".into(),
             real_jid: c.clone(),
             role: waddle_xmpp::Role::Participant,

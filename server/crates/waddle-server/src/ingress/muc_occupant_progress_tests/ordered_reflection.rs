@@ -95,6 +95,7 @@ async fn queued_copy_before_relayed_reflection(mut fixture: IngressFixture, full
     for (resource, nick) in [(&sender, "sender"), (&other, "other")] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,

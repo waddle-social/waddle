@@ -1044,6 +1044,9 @@ impl OrderedRelayDeliveryBridge {
                 .cloned()
         };
         let Some(registration) = registration else {
+            if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement {
+                return complete_fresh_remote_retirement(&services, &msg).await;
+            }
             return RelayForceDetachRemoteUserResourceReply {
                 outcome: ForceDetachOutcome::NotPersisted,
                 status: RelayRemoteResourceForceDetachStatus::NotLive,
@@ -1053,15 +1056,27 @@ impl OrderedRelayDeliveryBridge {
             .connection_registry
             .entry_if_owner(&msg.jid, &registration.owner)
         else {
+            if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement {
+                return complete_fresh_remote_retirement(&services, &msg).await;
+            }
             return RelayForceDetachRemoteUserResourceReply {
                 outcome: ForceDetachOutcome::NotPersisted,
                 status: RelayRemoteResourceForceDetachStatus::NotLive,
             };
         };
+        if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+            && (msg.occupancy_session.is_none()
+                || entry.occupancy_session() != msg.occupancy_session)
+        {
+            return RelayForceDetachRemoteUserResourceReply {
+                outcome: ForceDetachOutcome::NotPersisted,
+                status: RelayRemoteResourceForceDetachStatus::Refused,
+            };
+        }
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
         let request = ForceDetachRequest {
             origin: msg.origin,
-            requester_bare_jid: msg.requester_bare_jid,
+            requester_bare_jid: msg.requester_bare_jid.clone(),
             ack,
         };
         if entry.force_detach_sender().try_send(request).is_err() {
@@ -1095,7 +1110,89 @@ impl OrderedRelayDeliveryBridge {
                     RelayRemoteResourceForceDetachStatus::Unknown,
                 ),
             };
+        if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+            && status == RelayRemoteResourceForceDetachStatus::Detached
+        {
+            return complete_fresh_remote_retirement(&services, &msg).await;
+        }
         RelayForceDetachRemoteUserResourceReply { outcome, status }
+    }
+}
+
+async fn complete_fresh_remote_retirement(
+    services: &OrderedRelayDeliveryServices,
+    request: &RelayForceDetachRemoteUserResource,
+) -> RelayForceDetachRemoteUserResourceReply {
+    let complete = async {
+        if request.requester_bare_jid != request.jid.to_bare() {
+            return None;
+        }
+        let state = services.web_socket_state.upgrade()?;
+        let generation = request.occupancy_session?;
+        // A missing relay registration alone cannot certify that a socket
+        // which still owns this generation has stopped its handlers.
+        let entry = services.connection_registry.get_entry(&request.jid);
+        if entry.as_ref().and_then(ConnectionEntry::occupancy_session) == Some(generation) {
+            return None;
+        }
+        use waddle_xmpp::registry::{SocketCleanupState, SocketLifecycleProbe};
+        match services
+            .connection_registry
+            .probe_socket_lifecycle(&request.jid, generation)
+        {
+            SocketLifecycleProbe::Found(SocketCleanupState::Running) => return None,
+            SocketLifecycleProbe::Busy => {
+                // The successor may be waiting for this retirement while it
+                // holds the bind gate. Its published local generation proves
+                // that the prior owning task already crossed that gate.
+                if !entry.as_ref().is_some_and(|entry| {
+                    entry.is_locally_hosted()
+                        && entry
+                            .occupancy_session()
+                            .is_some_and(|current| current != generation)
+                }) {
+                    return None;
+                }
+            }
+            SocketLifecycleProbe::Absent | SocketLifecycleProbe::Found(_) => {}
+        }
+        // A late FreshBindReplacement can receive the primary resume
+        // cleanup's Detached ACK. That proves resumption custody, not its
+        // retirement. The lifecycle may already have been pruned, so check
+        // exact SM custody (including expired or leased promotion payloads)
+        // for both registered and missing-registration requests.
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .has_occupancy_session_custody(&request.jid, generation)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => return None,
+            Err(error) => {
+                tracing::warn!(jid = %request.jid, %generation, %error,
+                    "fresh remote retirement could not verify SM custody completion");
+                return None;
+            }
+        }
+        crate::server::routes::websocket::retire_occupancy_before_bind(
+            &state,
+            &request.jid,
+            generation,
+        )
+        .await
+        .then_some(())
+    }
+    .await
+    .is_some();
+    RelayForceDetachRemoteUserResourceReply {
+        outcome: ForceDetachOutcome::NotPersisted,
+        status: if complete {
+            RelayRemoteResourceForceDetachStatus::Detached
+        } else {
+            RelayRemoteResourceForceDetachStatus::Unknown
+        },
     }
 }
 
@@ -1255,7 +1352,7 @@ mod tests {
     /// and that store PROVES the owner incarnation no longer holds the user
     /// (here: no claim row exists at all). Without wired services no proof
     /// is possible and the obligation is retained by design.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn proof_stale_unregister_retry_clears_the_pending_obligation() {
         let services = Arc::new(
             services_with_claims(
@@ -1266,6 +1363,9 @@ mod tests {
             )
             .await,
         );
+        // SQLx opens SQLite on its worker thread; let that real I/O finish
+        // before virtual time starts advancing retry deadlines.
+        tokio::time::pause();
         let bridge = OrderedRelayDeliveryBridge::new(
             tokio_util::sync::CancellationToken::new(),
             &ClusteringMessagingConfig::default(),
@@ -1367,6 +1467,7 @@ mod tests {
             std::time::Duration::from_millis(50),
             bridge.force_detach_remote_user_resource_on_socket(
                 RelayForceDetachRemoteUserResource {
+                    occupancy_session: None,
                     jid: jid.clone(),
                     registration_id,
                     origin: waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
@@ -1389,6 +1490,442 @@ mod tests {
             request.origin,
             waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_retirement_without_a_registration_cleans_only_its_generation() {
+        use waddle_xmpp::muc::room_actor::{
+            GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation,
+        };
+        use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.connection_registry = Arc::clone(&state.deps.protocol.connection_registry);
+        services.web_socket_state = Arc::downgrade(&state);
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(services));
+        let jid: jid::FullJid = "alice@example.com/departed".parse().expect("sender JID");
+        let sibling: jid::FullJid = "alice@example.com/sibling".parse().expect("sibling JID");
+        let old = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let sibling_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let room = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: "fresh-retirement@muc.example.com"
+                    .parse()
+                    .expect("room JID"),
+                waddle_id: "w".to_owned(),
+                channel_id: "c".to_owned(),
+                config: waddle_xmpp::muc::RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        for (sender, session) in [(&jid, old), (&sibling, sibling_generation)] {
+            room.ask(JoinWithAffiliation {
+                sender_jid: sender.clone(),
+                nick: "alice".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(
+                    waddle_xmpp_core::Affiliation::Member,
+                ),
+                local_domain: "example.com".to_owned(),
+                admission_revision: room
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot")
+                    .admission_revision,
+                session,
+            })
+            .await
+            .expect("join occupant");
+        }
+        let request = RelayForceDetachRemoteUserResource {
+            jid: jid.clone(),
+            registration_id: RemoteResourceRegistrationId::fresh(),
+            occupancy_session: Some(old),
+            origin: waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+            requester_bare_jid: jid.to_bare(),
+            trace: RelayTraceContext::default(),
+        };
+        assert_eq!(
+            bridge
+                .force_detach_remote_user_resource_on_socket(request.clone())
+                .await
+                .status,
+            RelayRemoteResourceForceDetachStatus::Detached
+        );
+        let snapshot = room.ask(GetSnapshot).await.expect("remaining occupancy");
+        assert_eq!(snapshot.room.session_generation(&jid), None);
+        assert_eq!(
+            snapshot.room.session_generation(&sibling),
+            Some(sibling_generation)
+        );
+        let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        room.ask(JoinWithAffiliation {
+            sender_jid: jid.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(
+                waddle_xmpp_core::Affiliation::Member,
+            ),
+            local_domain: "example.com".to_owned(),
+            admission_revision: snapshot.admission_revision,
+            session: replacement,
+        })
+        .await
+        .expect("replacement joins");
+        assert_eq!(
+            bridge
+                .force_detach_remote_user_resource_on_socket(request)
+                .await
+                .status,
+            RelayRemoteResourceForceDetachStatus::Detached
+        );
+        assert_eq!(
+            room.ask(GetSnapshot)
+                .await
+                .expect("replacement survives retry")
+                .room
+                .session_generation(&jid),
+            Some(replacement)
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_route_does_not_hide_a_still_running_socket_cleanup() {
+        use waddle_xmpp::registry::SocketCleanupState;
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.connection_registry = Arc::clone(&state.deps.protocol.connection_registry);
+        services.web_socket_state = Arc::downgrade(&state);
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(services));
+        let jid: jid::FullJid = "alice@example.com/cleanup".parse().expect("JID");
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let (tx, _rx) = mpsc::channel(1);
+        let mut guard = state
+            .deps
+            .protocol
+            .connection_registry
+            .lock_bind(&jid)
+            .await;
+        let lifecycle = guard.publish(ConnectionEntry::new(tx), generation);
+        drop(guard);
+        let request = RelayForceDetachRemoteUserResource {
+            jid: jid.clone(),
+            registration_id: RemoteResourceRegistrationId::fresh(),
+            occupancy_session: Some(generation),
+            origin: waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+            requester_bare_jid: jid.to_bare(),
+            trace: RelayTraceContext::default(),
+        };
+        assert_eq!(
+            bridge
+                .force_detach_remote_user_resource_on_socket(request.clone())
+                .await
+                .status,
+            RelayRemoteResourceForceDetachStatus::Unknown
+        );
+        lifecycle.finish(SocketCleanupState::CleanupPending);
+        assert_eq!(
+            bridge
+                .force_detach_remote_user_resource_on_socket(request.clone())
+                .await
+                .status,
+            RelayRemoteResourceForceDetachStatus::Detached
+        );
+        let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let (tx, _rx) = mpsc::channel(1);
+        let entry = ConnectionEntry::new(tx);
+        *entry.occupancy_session.lock().expect("occupancy mutex") = Some(replacement);
+        let mut guard = state
+            .deps
+            .protocol
+            .connection_registry
+            .lock_bind(&jid)
+            .await;
+        guard.publish(entry.clone(), replacement);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register_entry(jid, entry);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                bridge.force_detach_remote_user_resource_on_socket(request)
+            )
+            .await
+            .expect("retirement must not wait on successor bind mutex")
+            .status,
+            RelayRemoteResourceForceDetachStatus::Detached,
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_retirement_rejects_late_resume_cleanup_ack_until_sm_retirement() {
+        assert_resume_cleanup_retirement_proof(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn fresh_retirement_rejects_pruned_detached_lifecycle_until_sm_retirement() {
+        assert_resume_cleanup_retirement_proof(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn cross_node_resume_still_accepts_detached_cleanup_with_retained_sm() {
+        assert_resume_cleanup_retirement_proof(true, false).await;
+    }
+
+    async fn assert_resume_cleanup_retirement_proof(late_ack: bool, fresh_bind: bool) {
+        use waddle_xmpp::registry::{ForceDetachOrigin, SocketCleanupState, SocketLifecycleProbe};
+        use waddle_xmpp::stream_management::{
+            DetachedSession, DetachedUnackedStanza, SmSessionRegistry,
+        };
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let session =
+            crate::server::routes::websocket::tests::create_test_session(&state, "alice").await;
+        let jid: jid::FullJid = "alice@example.com/detached-proof".parse().unwrap();
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let stream_id = "late-detached-proof";
+        crate::server::routes::websocket::tests::store_resumable_detached_session(
+            &state, &session, DetachedSession {
+                stream_id: stream_id.to_owned(),
+                user_id: session.user_jid.clone(),
+                jid: jid.clone(),
+                occupancy_session: generation,
+                inbound_count: 0,
+                outbound_count: 1,
+                last_acked: 0,
+                replay_gap_through: None,
+                unacked_stanzas: vec![DetachedUnackedStanza {
+                    ingress_receipts: Vec::new(),
+                    sequence: 1,
+                    stanza_xml: "<message xmlns='jabber:client' type='chat' from='bob@example.com/web' to='alice@example.com/detached-proof' id='late-detached'><body>retained by resume cleanup</body></message>".to_owned(),
+                    original_receipt_at: chrono::Utc::now(),
+                }],
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            },
+        ).await;
+        if fresh_bind {
+            crate::occupancy_authority::publish(
+                state.deps.app_state.db_pool.global(),
+                &jid,
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            )
+            .await
+            .unwrap();
+        }
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.connection_registry = Arc::clone(&state.deps.protocol.connection_registry);
+        services.sm_session_registry = Arc::clone(&state.deps.protocol.sm_session_registry);
+        services.web_socket_state = Arc::downgrade(&state);
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(services));
+        let (tx, _rx) = mpsc::channel(1);
+        let entry = ConnectionEntry::new(tx);
+        *entry.occupancy_session.lock().unwrap() = Some(generation);
+        let owner = entry.carbons_handle();
+        let mut cleanup_rx = entry.take_force_detach_rx().unwrap();
+        let mut bind = state
+            .deps
+            .protocol
+            .connection_registry
+            .lock_bind(&jid)
+            .await;
+        let lifecycle = bind.publish(entry.clone(), generation);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register_entry(jid.clone(), entry);
+        drop(bind);
+        let registration_id = RemoteResourceRegistrationId::fresh();
+        let request = RelayForceDetachRemoteUserResource {
+            jid: jid.clone(),
+            registration_id,
+            occupancy_session: Some(generation),
+            origin: if fresh_bind {
+                ForceDetachOrigin::FreshBindReplacement
+            } else {
+                ForceDetachOrigin::CrossNodeResume
+            },
+            requester_bare_jid: jid.to_bare(),
+            trace: RelayTraceContext::default(),
+        };
+        let detach = if late_ack {
+            bridge.remote_socket_resources.lock().await.insert(
+                jid.clone(),
+                RemoteSocketRegistration {
+                    registration_id,
+                    socket_generation: RemoteResourceSocketGeneration::next(None),
+                    owner: owner.clone(),
+                    user_owner: NodeId::new("owner-node".to_owned()),
+                },
+            );
+            let bridge = Arc::clone(&bridge);
+            let request = request.clone();
+            Some(tokio::spawn(async move {
+                bridge
+                    .force_detach_remote_user_resource_on_socket(request)
+                    .await
+            }))
+        } else {
+            None
+        };
+        let queued = if late_ack {
+            Some(
+                cleanup_rx
+                    .recv()
+                    .await
+                    .expect("late request queued during resume cleanup"),
+            )
+        } else {
+            None
+        };
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister_if_owner(&jid, &owner);
+        lifecycle.finish(SocketCleanupState::Detached);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .prune_completed_bind(&jid);
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .probe_socket_lifecycle(&jid, generation),
+            SocketLifecycleProbe::Absent,
+            "normal resume cleanup prunes its completed lifecycle while SM custody survives"
+        );
+        if let Some(queued) = queued {
+            queued.ack.send(ForceDetachOutcome::Detached).unwrap();
+        }
+        let reply = if let Some(detach) = detach {
+            detach.await.unwrap()
+        } else {
+            bridge
+                .force_detach_remote_user_resource_on_socket(request.clone())
+                .await
+        };
+        assert_eq!(reply.status, if fresh_bind { RelayRemoteResourceForceDetachStatus::Unknown } else { RelayRemoteResourceForceDetachStatus::Detached },
+            "a resume detach ACK cannot certify fresh-bind retirement while its SM snapshot remains");
+        assert!(state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session(stream_id)
+            .await
+            .unwrap()
+            .is_some());
+        if fresh_bind {
+            assert!(state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(&jid.to_bare())
+                .await
+                .unwrap()
+                .is_empty());
+            crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
+            assert!(state
+                .deps
+                .protocol
+                .sm_session_registry
+                .peek_session(stream_id)
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                state
+                    .deps
+                    .protocol
+                    .pending_delivery_storage
+                    .list(&jid.to_bare())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                bridge
+                    .force_detach_remote_user_resource_on_socket(request)
+                    .await
+                    .status,
+                RelayRemoteResourceForceDetachStatus::Detached,
+                "retirement retry succeeds after owner maintenance promotes the exact old SM queue"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_retirement_without_cleanup_services_is_not_acknowledged() {
+        let services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(Arc::new(services));
+        let jid: jid::FullJid = "alice@example.com/departed".parse().expect("sender JID");
+        let reply = bridge
+            .force_detach_remote_user_resource_on_socket(RelayForceDetachRemoteUserResource {
+                jid: jid.clone(),
+                registration_id: RemoteResourceRegistrationId::fresh(),
+                occupancy_session: Some(waddle_xmpp_core::OccupancySessionGeneration::mint()),
+                origin: waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+                requester_bare_jid: jid.to_bare(),
+                trace: RelayTraceContext::default(),
+            })
+            .await;
+        assert_eq!(reply.status, RelayRemoteResourceForceDetachStatus::Unknown);
     }
 
     #[tokio::test]
@@ -1463,6 +2000,7 @@ mod tests {
                 bridge
                     .force_detach_remote_user_resource_on_socket(
                         RelayForceDetachRemoteUserResource {
+                            occupancy_session: None,
                             jid,
                             registration_id,
                             origin:

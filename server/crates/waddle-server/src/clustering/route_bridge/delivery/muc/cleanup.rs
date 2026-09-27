@@ -168,7 +168,7 @@ mod tests {
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp_core::{Affiliation, OccupancySessionGeneration};
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn slow_cleanup_settles_ordered_sequence_before_the_next_departure() {
         let services = services_with_claims(
             receiver_identity(),
@@ -211,6 +211,7 @@ mod tests {
             user_claim_epoch: epoch,
             trace: RelayTraceContext::default(),
         };
+        tokio::time::pause();
         let receiver = Arc::new(DelayedCleanupRelay::default());
         TEST_CLEANUP_RELAY
             .scope(receiver.clone(), async {

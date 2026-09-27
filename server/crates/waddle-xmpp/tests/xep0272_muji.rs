@@ -304,6 +304,10 @@ fn default_muji_is_empty() {
 // ── JingleHandler integration: Muji entry path through the federation guard ─
 
 fn fixture_sfu() -> Arc<dyn SfuService> {
+    fixture_livekit_sfu()
+}
+
+fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
     let cfg = SfuConfig {
         api_key: ApiKey::new("APIxxxxxxxx"),
         api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
@@ -337,6 +341,7 @@ fn ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
     // Mirrors the grants the websocket layer's Muji gate derives for
     // a voiced (role ≥ participant) occupant.
     StanzaContext {
+        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation::absent()),
         domain: TEST_DOMAIN,
         full_jid: jid,
         occupant_session: Some(test_occupant_session()),
@@ -972,6 +977,7 @@ fn ctx_with_caps<'a>(
     caps: Option<waddle_sfu::MediaCapabilities>,
 ) -> StanzaContext<'a> {
     StanzaContext {
+        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation::absent()),
         domain: TEST_DOMAIN,
         full_jid: jid,
         occupant_session: Some(test_occupant_session()),
@@ -985,6 +991,7 @@ fn ctx_with_caps_and_session<'a>(
     occupant_session: Option<OccupancySessionGeneration>,
 ) -> StanzaContext<'a> {
     StanzaContext {
+        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation::absent()),
         domain: TEST_DOMAIN,
         full_jid: jid,
         occupant_session,
@@ -1198,7 +1205,8 @@ fn muji_initiate_without_context_generation_is_refused_and_does_not_register() {
 #[test]
 fn muji_session_initiate_is_rate_limited_per_bare_jid() {
     let jid = test_full_jid();
-    let handler = JingleHandler::new(fixture_sfu());
+    let sfu = fixture_sfu();
+    let handler = JingleHandler::new(sfu.clone());
     let mixer = calls_mixer_jid(TEST_DOMAIN).to_string();
 
     // The limiter's default budget is 5 initiates per 30s; the sixth
@@ -1211,7 +1219,12 @@ fn muji_session_initiate_is_rate_limited_per_bare_jid() {
             "room@muc.waddle.test",
             &format!("muji-rate-{attempt}"),
         );
-        let events = handler.handle(&iq, &ctx(&jid));
+        let mut context = ctx(&jid);
+        context.participant_registration = sfu.participant_registration_expectation(
+            &CallId::new("room@muc.waddle.test").expect("call"),
+            &Identity::from_jid(jid.clone()),
+        );
+        let events = handler.handle(&iq, &context);
         conditions.push(first_error_condition(&events));
     }
 
@@ -1397,6 +1410,70 @@ async fn same_sid_terminate_is_fenced_by_the_occupant_generation() {
 }
 
 #[test]
+fn empty_muji_session_initiate_preserves_registration_and_issues_no_token() {
+    // XEP-0166 §7.2 requires at least one content definition. The
+    // Muji room marker cannot replace it or authorize SFU mutations.
+    for has_incumbent in [false, true] {
+        let sfu = fixture_livekit_sfu();
+        let jid = test_full_jid();
+        let identity = Identity::from_jid(jid.clone());
+        let room = "room@muc.waddle.test";
+        let call = CallId::new(room).expect("room call");
+        let incumbent = OccupancySessionGeneration::mint();
+        let incumbent_sid = waddle_sfu::SessionBinding::new("incumbent").expect("session");
+        let incumbent_token = has_incumbent.then(|| {
+            sfu.issue_join_token_with_session(
+                &call,
+                &identity,
+                waddle_sfu::MediaCapabilities::direct_call_peer(),
+                &incumbent_sid,
+                incumbent,
+                waddle_sfu::ParticipantRegistrationExpectation::absent(),
+            )
+            .expect("incumbent token")
+            .expect("incumbent registration")
+        });
+        let issued_before = sfu.issued_count(&call, &identity);
+        let mut context = ctx(&jid);
+        context.occupant_session = Some(OccupancySessionGeneration::mint());
+        context.participant_registration =
+            sfu.participant_registration_expectation(&call, &identity);
+        let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("empty".into()));
+        jingle.initiator = Some(jid.clone().into());
+        let mut payload: Element = jingle.into();
+        payload.append_child(Muji::for_room(room.parse().expect("room JID")).to_element());
+        let iq = Iq::Set {
+            from: Some(jid.clone().into()),
+            to: Some(calls_mixer_jid(TEST_DOMAIN).into()),
+            id: "empty-muji".into(),
+            payload,
+        };
+
+        let events = JingleHandler::new(sfu.clone()).handle(&iq, &context);
+
+        assert_eq!(
+            first_error_condition(&events),
+            Some(DefinedCondition::BadRequest),
+            "empty initiate must be rejected: {events:?}",
+        );
+        assert!(!has_session_accept_to(&events, TEST_INITIATOR));
+        assert_eq!(sfu.issued_count(&call, &identity), issued_before);
+        assert_eq!(sfu.has_call_participant(&call, &identity), has_incumbent);
+        assert_eq!(
+            sfu.participant_occupant_session(&call, &identity),
+            has_incumbent.then_some(incumbent),
+        );
+        assert_eq!(
+            sfu.participant_session_binding(&call, &identity),
+            has_incumbent.then_some(incumbent_sid),
+        );
+        if let Some(token) = incumbent_token {
+            assert!(!sfu.is_revoked(&token.jti));
+        }
+    }
+}
+
+#[test]
 fn muji_session_initiate_with_unbindable_sid_is_rejected_before_registering() {
     // Codex review P2 on #1626: an accepted initiate whose sid cannot
     // be bound (over the 256-byte SessionBinding cap — xmpp_parsers
@@ -1431,4 +1508,78 @@ fn muji_session_initiate_with_unbindable_sid_is_rejected_before_registering() {
         !has_session_accept_to(&events, TEST_INITIATOR),
         "rejected initiate must not mint a session-accept",
     );
+}
+
+#[test]
+fn stale_authorization_cannot_overwrite_the_replacement_muji_registration() {
+    let sfu = fixture_sfu();
+    let room = "room@muc.waddle.test";
+    let call = CallId::new(room).expect("room call");
+    let jid = test_full_jid();
+    let identity = waddle_sfu::Identity::from_jid(jid.clone());
+    let first = OccupancySessionGeneration::mint();
+    let second = OccupancySessionGeneration::mint();
+    let mut old_context = ctx(&jid);
+    old_context.occupant_session = Some(first);
+    old_context.participant_registration =
+        sfu.participant_registration_expectation(&call, &identity);
+    let replacement_sid = waddle_sfu::SessionBinding::new("replacement").expect("session");
+    let replacement_token = sfu
+        .issue_join_token_with_session(
+            &call,
+            &identity,
+            waddle_sfu::MediaCapabilities::direct_call_peer(),
+            &replacement_sid,
+            second,
+            old_context
+                .participant_registration
+                .expect("captured expectation"),
+        )
+        .expect("replacement mint")
+        .expect("replacement registration");
+    let handler = JingleHandler::new(sfu.clone());
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room,
+        "displaced",
+    );
+    let events = handler.handle(&iq, &old_context);
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::Forbidden)
+    );
+    assert!(!has_session_accept_to(&events, TEST_INITIATOR));
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &identity),
+        Some(second)
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &identity),
+        Some(replacement_sid)
+    );
+    assert!(!sfu.is_revoked(&replacement_token.jti));
+}
+
+#[test]
+fn muji_initiate_without_registration_expectation_fails_closed() {
+    let sfu = fixture_sfu();
+    let jid = test_full_jid();
+    let call = CallId::new("room@muc.waddle.test").expect("call");
+    let identity = Identity::from_jid(jid.clone());
+    let mut context = ctx(&jid);
+    context.participant_registration = None;
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        call.as_str(),
+        "missing-expectation",
+    );
+    let events = JingleHandler::new(sfu.clone()).handle(&iq, &context);
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::InternalServerError)
+    );
+    assert!(!sfu.has_call_participant(&call, &identity));
+    assert!(!has_session_accept_to(&events, TEST_INITIATOR));
 }

@@ -56,6 +56,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         receivers.push(rx);
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Moderator,
@@ -142,6 +143,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
     socket_tests::register_test_connection(&state, &c, tx).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "claire".into(),
             real_jid: c.clone(),
             role: waddle_xmpp::Role::Participant,

@@ -14,7 +14,7 @@ type OrderedRelayDeliveryFuture<'a> =
 pub(crate) enum ControlledMucRelay {
     Outcome(Option<FullJidDeliveryOutcome>),
     Pending,
-    OwnerRefresh(std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>),
+    OwnerRefresh(std::sync::Arc<crate::clustering::route_bridge::OrderedRelayDeliveryServices>),
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -1139,9 +1139,9 @@ pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
             return match controlled {
                 ControlledMucRelay::Outcome(outcome) => outcome,
                 ControlledMucRelay::Pending => std::future::pending().await,
-                ControlledMucRelay::OwnerRefresh(sm) => Some(
+                ControlledMucRelay::OwnerRefresh(services) => Some(
                     crate::clustering::route_bridge::tests::muc_refresh::deliver_after_owner_refresh(
-                        target, stanza, deps.ingress_append_context.clone(), sm,
+                        target, stanza, deps.ingress_append_context.clone(), services,
                     ).await,
                 ),
             };

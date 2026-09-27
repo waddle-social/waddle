@@ -241,6 +241,12 @@ async fn handle_sans_io_iq_with_relay_override(
         // connection's initiate would otherwise mint a token and rebind the
         // SFU registration over the replacement's. Terminates are fenced by
         // the registry's occupant+sid gate instead. Mirrors the relayed path.
+        let participant_registration =
+            super::jingle_muji_gate::relayed_muji_room(iq).and_then(|room| {
+                super::jingle_muji_gate::participant_registration_expectation(
+                    state, &room, full_jid,
+                )
+            });
         if muji_terminate_room.is_none() {
             if let Some(room) = super::jingle_muji_gate::relayed_muji_room(iq) {
                 match super::jingle_muji_gate::relayed_muji_generation_is_current(
@@ -277,6 +283,7 @@ async fn handle_sans_io_iq_with_relay_override(
         }
         let (reply_id, reply_from, reply_to) = (ctx.id, ctx.response_from, ctx.response_to);
         let ctx = ProtocolStanzaContext {
+            participant_registration,
             domain,
             full_jid,
             media_capabilities,
@@ -290,7 +297,7 @@ async fn handle_sans_io_iq_with_relay_override(
                     &room,
                     full_jid,
                     *conn_state.occupancy_session,
-                    iq,
+                    participant_registration,
                 )
                 .await
                 {

@@ -44,8 +44,8 @@ async fn unregister_remote_user_resource_if_owner(
 /// stream cannot be resumed twice, but detached fanout can still append
 /// stanzas during the claim-to-registration handoff. This boundary completes
 /// that claim under the stream registry lock, returns the typed final
-/// XEP-0198 outcome, and invalidates superseded detached sessions for fresh
-/// binds.
+/// XEP-0198 outcome. Fresh-bind retirement is completed before registry
+/// publication by the registration admission barrier.
 /// The finalized XEP-0198 response plus the terminal resume result to
 /// record once the caller has revalidated node authority. Emitting the
 /// result before that final check would count a `resumed` (or a flip's
@@ -65,10 +65,6 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
 ) -> SmFinalizationReport {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         return complete_pending_resume_claim(state, conn, jid, owner, stream_id).await;
-    }
-
-    if !conn.phase.is_resumed() {
-        invalidate_older_detached_sessions(state, jid, owner).await;
     }
 
     SmFinalizationReport {
@@ -184,7 +180,7 @@ async fn complete_pending_resume_claim(
                 replay_gap_through = ?detached.replay_gap_through,
                 "SM resume claim gained a replay gap before completion"
             );
-            reset_registered_resume_attempt(state, conn, jid, owner).await;
+            reset_resume_attempt(state, conn, jid, Some(owner)).await;
             resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
@@ -246,82 +242,63 @@ async fn complete_pending_resume_claim(
     }
 }
 
-async fn invalidate_older_detached_sessions(
-    state: &WebSocketState,
-    jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
-) {
-    match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .invalidate_sessions_for_jid(jid)
-        .await
-    {
-        Ok(removed) => {
-            if removed.is_empty() {
-                return;
-            }
-            // Issue #1097: the superseded sessions' unacked queues run
-            // the XEP-0198 §5 promote → confirm chain instead of being
-            // dropped. This runs AFTER the fresh bind registered its
-            // connection, so the promotion chain's alt-resource step
-            // naturally live-delivers to the newly bound resource;
-            // otherwise stanzas land in pending delivery storage.
-            // Durable SM rows are erased only after promotion succeeds
-            // (confirm_drained inside the helper).
-            crate::sm_promotion::promote_displaced_sessions(
-                removed.clone(),
-                crate::sm_promotion::DisplacedPromotionDeps {
-                    sm_registry: &state.deps.protocol.sm_session_registry,
-                    connection_registry: &state.deps.protocol.connection_registry,
-                    user_registry: &state.deps.protocol.user_registry,
-                    pending_storage: &state.deps.protocol.pending_delivery_storage,
-                    blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
-                    server_domain: state.deps.auth_state.xmpp_domain.as_str(),
-                },
-            )
-            .await;
-            for detached in removed {
-                cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
-            }
-        }
-        Err(_error) => {
-            warn!(jid = %jid, failure = "storage", "Failed to invalidate older detached SM sessions for fresh bind");
-        }
-    }
-}
-
-async fn reset_registered_resume_attempt(
+/// A known detached stream can outlive its bind authority across a Recreate
+/// cutover. Fail resumption on the SM layer so the authenticated client can
+/// bind afresh and retry its unhandled outbound tail on this same socket.
+pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+) -> SmRegistrationFinalization {
+    let handled = conn.sm_state.get_inbound_count();
+    if let Some(claim) = conn.pending_resume_claim.take() {
+        claim.release().await;
+    }
+    conn.pending_resume_stream_id = None;
+    conn.pending_resume_h = None;
+    reset_resume_attempt(state, conn, jid, None).await;
+    conn.pending_finalized_resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
+    SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
+        "item-not-found",
+        handled,
+    ))
+}
+
+async fn reset_resume_attempt(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+    owner: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) {
-    let removed = state
-        .deps
-        .protocol
-        .connection_registry
-        .unregister_if_owner(jid, owner)
-        .is_some();
-    if removed {
-        // ADR-0017 Phase 1: the fresh/resumed bind already mirror-registered
-        // this resource into the actor tree, so a resume-rollback that
-        // unregisters it from the DashMap must mirror the unregister too or
-        // the actor-tree resource leaks. Owner-gated on the same token so a
-        // superseding newcomer is not clobbered.
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            jid,
-            Some(Arc::clone(owner)),
-        )
-        .await;
-        unregister_remote_user_resource_if_owner(state, jid, owner).await;
+    if let Some(owner) = owner {
+        let removed = state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister_if_owner(jid, owner)
+            .is_some();
+        if removed {
+            crate::server::dual_registration::mirror_unregister(
+                &state.deps.protocol.user_registry,
+                jid,
+                Some(Arc::clone(owner)),
+            )
+            .await;
+            unregister_remote_user_resource_if_owner(state, jid, owner).await;
+        }
     }
     conn.registry_owner = None;
     // The adopted detached generation is rolled back too: the detached
     // session is restored and will be invalidated with ITS generation, so a
     // fresh bind on this connection must not share it (#1703).
+    if let Some(lifecycle) = conn.socket_lifecycle.take() {
+        lifecycle.finish(waddle_xmpp::registry::SocketCleanupState::Detached);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .prune_completed_bind(jid);
+    }
     conn.occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     conn.phase = ConnectionPhase::authenticated(jid);
     // Replace (never null) the per-connection state machine: the
@@ -340,7 +317,18 @@ async fn reset_registered_resume_attempt(
     conn.init_prebind_state_machine(&domain, &state.deps.protocol.dispatcher, keepalive);
     conn.sm_ingress_fence = None;
     conn.sm_state = StreamManagementState::new();
+    // These flags belong to the failed resumed stream. The next fresh bind
+    // starts unavailable until initial presence and must opt in again to
+    // carbons, roster pushes, and other session-scoped subscriptions.
+    conn.carbons_enabled = false;
+    conn.roster_interested = false;
     conn.blocklist_interested = false;
+    conn.presence_available = false;
+    conn.presence_show = None;
+    conn.presence_status = None;
+    conn.presence_priority = 0;
+    conn.presence_payloads.clear();
+    conn.pending_subscribes_flushed = false;
     conn.suppress_sm_record_next_batch = false;
 }
 

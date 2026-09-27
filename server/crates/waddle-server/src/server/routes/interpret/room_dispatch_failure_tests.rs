@@ -137,6 +137,7 @@ async fn healthy_room(
         .expect("membership");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".into(),
             real_jid: sender.clone(),
             role: waddle_xmpp::Role::Participant,

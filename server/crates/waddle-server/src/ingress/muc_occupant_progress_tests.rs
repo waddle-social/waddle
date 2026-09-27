@@ -80,6 +80,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         receivers.push(rx);
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -194,6 +195,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
     socket_tests::register_test_connection(&state, &c, tx).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "claire".into(),
             real_jid: c.clone(),
             role: waddle_xmpp::Role::Participant,
@@ -236,6 +238,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         receivers[2] = rx;
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "romeo".into(),
                 real_jid: retry_sender.clone(),
                 role: waddle_xmpp::Role::Participant,

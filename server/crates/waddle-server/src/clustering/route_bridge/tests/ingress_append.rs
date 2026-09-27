@@ -94,6 +94,7 @@ async fn ingress_append_authority(
     bridge.remote_owner_resources.lock().await.insert(
         source.clone(),
         RemoteOwnerRegistration {
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
             unregister_pending: false,
             registration_id,
@@ -271,6 +272,7 @@ async fn ingress_append_authority(
                 bridge.remote_owner_resources.lock().await.insert(
                     alternate.clone(),
                     RemoteOwnerRegistration {
+                        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
                         unregister_pending: false,
                         registration_id,
@@ -487,6 +489,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
     bridge.remote_owner_resources.lock().await.insert(
         source.clone(),
         RemoteOwnerRegistration {
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
             unregister_pending: false,
             registration_id,

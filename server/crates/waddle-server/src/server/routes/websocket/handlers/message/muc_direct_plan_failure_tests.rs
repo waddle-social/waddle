@@ -183,6 +183,7 @@ async fn room(
     ] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid,
                 role: waddle_xmpp::Role::Participant,

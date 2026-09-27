@@ -99,6 +99,24 @@ impl SidEvidence<'_> {
     }
 }
 
+/// Exact SFU participant registration observed before asynchronous MUC authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParticipantRegistrationExpectation {
+    revision: Option<uuid::Uuid>,
+    publication_revision: uuid::Uuid,
+}
+
+impl ParticipantRegistrationExpectation {
+    /// An explicitly observed absence, distinct from an unbound participant.
+    /// Adapters should capture the current value through the SFU service.
+    pub fn absent() -> Self {
+        Self {
+            revision: None,
+            publication_revision: uuid::Uuid::new_v4(),
+        }
+    }
+}
+
 pub trait SfuService: Send + Sync + 'static {
     /// Mint a short-lived LiveKit join JWT for `identity` to enter
     /// `call_id` with the given media capabilities. The returned token
@@ -110,6 +128,46 @@ pub trait SfuService: Send + Sync + 'static {
         identity: &Identity,
         capabilities: MediaCapabilities,
     ) -> Result<JoinToken, SfuError>;
+
+    /// Capture participant registration atomically before awaiting authorization.
+    /// `None` means the implementation cannot supply this fence; an observed
+    /// absence is `Some(ParticipantRegistrationExpectation::absent())`.
+    fn participant_registration_expectation(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<ParticipantRegistrationExpectation> {
+        None
+    }
+
+    /// Publish a join token and signaling registration only if the exact
+    /// registration still matches the value read before MUC authorization. The
+    /// comparison, token tracking and registration must share one critical
+    /// section. A mismatch returns `None` without changing any authority.
+    /// Implementations without this atomic operation fail closed.
+    fn issue_join_token_with_session(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+        _capabilities: MediaCapabilities,
+        _session: &SessionBinding,
+        _occupant: OccupancySessionGeneration,
+        _expected: ParticipantRegistrationExpectation,
+    ) -> Result<Option<JoinToken>, SfuError> {
+        Ok(None)
+    }
+
+    /// Undo only the successful publication associated with this expectation.
+    /// Compare its publication revision under the same guard as removal;
+    /// a newer observation or registration must retain all authority.
+    fn rollback_participant_registration(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+        _expected: ParticipantRegistrationExpectation,
+    ) -> SessionScopedTeardown {
+        SessionScopedTeardown::SessionMismatch
+    }
 
     /// Mint a short-lived TURN credential pair for `identity`.
     /// Credentials are HMAC-SHA1 over `<expiry_unix>:<identity>` per

@@ -36,6 +36,7 @@ async fn sqlite_stalled_remote_first_preserves_independent_local_muc_progress() 
         receivers.push(rx);
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,

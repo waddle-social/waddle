@@ -266,36 +266,31 @@ pub(super) fn muji_session_terminate_room(iq: &Iq) -> Option<BareJid> {
     Some(room_jid)
 }
 
-/// The Muji `session-terminate`'s Jingle sid as a typed
-/// [`waddle_sfu::SessionBinding`], when the stanza is such a terminate
-/// and its sid can be one (#1608). `None` for non-terminates and for
-/// pathological sids — the durable relay fallback then persists no
-/// session evidence and keeps its timestamp-fence-only guard.
-/// Any Muji Jingle stanza's sid as a typed binding (initiate or terminate).
-pub(super) fn muji_jingle_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding> {
-    let Iq::Set { payload, .. } = iq else {
-        return None;
-    };
-    if payload.ns() != NS_JINGLE || payload.name() != "jingle" {
-        return None;
-    }
-    find_muji(payload)?;
-    let jingle = Jingle::try_from(payload.clone()).ok()?;
-    waddle_sfu::SessionBinding::new(jingle.sid.0).ok()
+/// Capture before awaiting room authorization, so a concurrent replacement
+/// registration cannot be overwritten after the authorization snapshot.
+pub(super) fn participant_registration_expectation(
+    state: &WebSocketState,
+    room: &BareJid,
+    full_jid: &FullJid,
+) -> Option<waddle_sfu::ParticipantRegistrationExpectation> {
+    let sfu = state.deps.protocol.sfu.as_ref()?;
+    let call = waddle_sfu::CallId::new(room.to_string()).ok()?;
+    let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
+    sfu.participant_registration_expectation(&call, &identity)
 }
 
 /// After a Muji initiate registered the SFU participant, re-check that the
 /// room still holds this connection's generation: a same-FullJID replacement
 /// that re-joined between the pre-dispatch check and the registration would
 /// otherwise have been overwritten. On mismatch the just-made registration
-/// (bound to this generation and sid) is revoked atomically. Returns whether
+/// is revoked only if its exact publication revision still matches. Returns whether
 /// the initiate stands.
 pub(super) async fn initiate_still_current(
     state: &WebSocketState,
     room: &BareJid,
     full_jid: &FullJid,
     generation: waddle_xmpp_core::OccupancySessionGeneration,
-    iq: &Iq,
+    registration: Option<waddle_sfu::ParticipantRegistrationExpectation>,
 ) -> bool {
     if matches!(
         relayed_muji_generation_is_current(state, room, full_jid, generation).await,
@@ -303,18 +298,15 @@ pub(super) async fn initiate_still_current(
     ) {
         return true;
     }
-    if let (Some(sfu), Ok(call_id)) = (
+    if let (Some(sfu), Ok(call_id), Some(registration)) = (
         state.deps.protocol.sfu.as_ref(),
         waddle_sfu::CallId::new(room.to_string()),
+        registration,
     ) {
-        let sid = muji_jingle_session(iq);
-        let _ = sfu.unregister_call_participant_if_occupant_matches(
+        let _ = sfu.rollback_participant_registration(
             &call_id,
             &waddle_sfu::Identity::from_jid(full_jid.clone()),
-            generation,
-            waddle_sfu::UnboundOccupantPolicy::TearDown,
-            waddle_sfu::SidEvidence::Presented(sid.as_ref()),
-            None,
+            registration,
         );
     }
     false
@@ -585,6 +577,7 @@ mod tests {
         }
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_string(),
                 real_jid: jid.clone(),
                 role,

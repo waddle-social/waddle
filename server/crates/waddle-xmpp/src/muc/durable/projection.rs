@@ -19,6 +19,7 @@ pub enum RoomProjection {
     OccupancyJoin {
         occupant: FullJid,
         nick: MucOccupantNick,
+        session: waddle_xmpp_core::OccupancySessionGeneration,
     },
     /// One occupant session left the room.
     OccupancyLeave {

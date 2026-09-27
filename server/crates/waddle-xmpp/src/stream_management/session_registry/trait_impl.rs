@@ -231,7 +231,13 @@ impl InMemorySmSessionRegistry {
             }
 
             for displaced_session in &displaced {
-                displacement_pending.insert(displaced_session.stream_id.clone());
+                displacement_pending.insert(
+                    displaced_session.stream_id.clone(),
+                    (
+                        displaced_session.jid.clone(),
+                        displaced_session.occupancy_session,
+                    ),
+                );
             }
             sessions.insert(stream_id.clone(), session.clone());
             Ok(sessions.len())

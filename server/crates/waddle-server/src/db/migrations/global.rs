@@ -730,6 +730,13 @@ DELETE FROM sessions WHERE auth_context_id IS NULL;
 ALTER TABLE sessions ALTER COLUMN auth_context_id SET NOT NULL;
 "#;
 
+pub const V0013_OCCUPANCY_AUTHORITY: &str = r#"
+CREATE TABLE xmpp_occupancy_authority (
+    full_jid TEXT PRIMARY KEY,
+    generation TEXT NOT NULL
+);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -807,6 +814,12 @@ pub fn all() -> Vec<Migration> {
             description: "Make session auth context total".to_string(),
             sql_sqlite: V0012_AUTH_CONTEXT_TOTAL,
             sql_postgres: V0012_AUTH_CONTEXT_TOTAL_POSTGRES,
+        },
+        Migration {
+            version: 13,
+            description: "Fence occupancy by the current full-JID bind generation".to_string(),
+            sql_sqlite: V0013_OCCUPANCY_AUTHORITY,
+            sql_postgres: V0013_OCCUPANCY_AUTHORITY,
         },
     ]
 }

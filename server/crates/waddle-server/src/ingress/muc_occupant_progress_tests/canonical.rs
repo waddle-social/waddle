@@ -27,6 +27,7 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool
     }
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "original-nick".into(),
             real_jid: submission.sender.clone(),
             role: waddle_xmpp::Role::Participant,
@@ -37,6 +38,7 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool
     if !available {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "unavailable".into(),
                 real_jid: "juliet@example.com/unavailable".parse().expect("occupant"),
                 role: waddle_xmpp::Role::Participant,

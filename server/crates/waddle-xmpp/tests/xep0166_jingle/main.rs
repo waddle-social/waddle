@@ -104,6 +104,7 @@ fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
 
 fn ctx<'a>(jid: &'a FullJid) -> StanzaContext<'a> {
     StanzaContext {
+        participant_registration: None,
         domain: "waddle.test",
         full_jid: jid,
         occupant_session: None,

@@ -44,6 +44,7 @@ fn spawn_room(config: RoomConfig) -> ActorRef<RoomActor> {
 async fn join(actor: &ActorRef<RoomActor>, jid: FullJid, affiliation: Affiliation) {
     actor
         .ask(waddle_xmpp::muc::room_actor::Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "inviter".to_string(),
             real_jid: jid,
             role: Role::Moderator,
@@ -290,6 +291,7 @@ async fn rolling_back_a_joined_invitee_emits_xep0045_status_321() {
         .expect("valid invitee full JID");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "invitee".to_string(),
             real_jid: invitee_session,
             role: Role::Participant,

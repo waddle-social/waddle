@@ -279,6 +279,8 @@ impl RoomCommitDatabaseError {
 /// Errors surfaced by [`MucDurableStore::commit_room_mutation`].
 #[derive(Debug, thiserror::Error)]
 pub enum RoomCommitError {
+    #[error("occupancy join rejected: connection generation is no longer current")]
+    StaleOccupancyGeneration,
     #[error("room mutation commit rejected: exact ownership fence no longer authorizes the room")]
     NotOwner,
     #[error(

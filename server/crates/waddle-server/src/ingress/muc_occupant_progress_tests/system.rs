@@ -35,6 +35,7 @@ async fn partial_pin_broadcast(fixture: IngressFixture) {
         receivers.push(rx);
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: resource.clone(),
                 role: waddle_xmpp::Role::Participant,

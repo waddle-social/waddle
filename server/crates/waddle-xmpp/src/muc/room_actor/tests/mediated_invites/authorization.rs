@@ -119,6 +119,7 @@ async fn open_room_occupant_invite_never_changes_the_member_list() {
     let invitee = test_full_jid("invitee").to_bare();
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "visitor".to_string(),
             real_jid: inviter.clone(),
             role: Role::Participant,
@@ -166,6 +167,7 @@ async fn open_room_no_grant_operations_do_not_reserve_the_invitee_index() {
     ] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_string(),
                 real_jid: inviter,
                 role: Role::Participant,
@@ -201,6 +203,7 @@ async fn ordinary_members_only_invites_require_admin_and_preserve_existing_membe
     let member = test_full_jid("member");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "member".to_string(),
             real_jid: member.clone(),
             role: Role::Participant,
@@ -257,6 +260,7 @@ async fn group_dm_invites_require_member_and_conflict_with_existing_membership()
     let invitee = test_full_jid("invitee").to_bare();
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "member".to_string(),
             real_jid: inviter.clone(),
             role: Role::Participant,
@@ -311,6 +315,7 @@ async fn group_dm_invites_reject_an_occupant_below_member() {
     let invitee = test_full_jid("invitee").to_bare();
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "visitor".to_string(),
             real_jid: inviter.clone(),
             role: Role::Participant,
@@ -391,6 +396,7 @@ async fn group_dm_member_config_update_cannot_disable_members_only() {
     let member = test_full_jid("member");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "member".to_string(),
             real_jid: member.clone(),
             role: Role::Participant,
@@ -436,6 +442,7 @@ async fn room_actor_boundary_normalizes_group_dm_authorization_policy() {
     let invitee = test_full_jid("invitee").to_bare();
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "member".to_string(),
             real_jid: inviter.clone(),
             role: Role::Participant,

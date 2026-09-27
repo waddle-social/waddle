@@ -873,6 +873,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
         .expect("create room");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: sender.clone(),
             role: Role::Participant,
@@ -1149,6 +1150,7 @@ async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast
     ] {
         room_actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid,
                 role: waddle_xmpp::Role::Participant,
@@ -1316,6 +1318,7 @@ async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
             .expect("seed membership");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid: jid,
                 role: Role::Participant,

@@ -78,6 +78,8 @@ mod outbound;
 mod parse_errors;
 mod registration;
 #[cfg(feature = "clustering")]
+pub(crate) use registration::complete_bind_retirements;
+#[cfg(feature = "clustering")]
 mod remote_muc_retry;
 pub(crate) mod replay;
 mod resource_binding;
@@ -102,6 +104,8 @@ pub(crate) use cleanup::redrive_local_muc_cleanup;
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
 pub(crate) use cleanup::retain_abandoned_muc_occupancy_sweep;
+#[cfg(feature = "clustering")]
+pub(crate) use cleanup::retire_occupancy_before_bind;
 pub(crate) use cleanup::sweep_abandoned_muc_occupancy;
 pub use cleanup::MucCleanupOutcome;
 pub(crate) use cleanup::{

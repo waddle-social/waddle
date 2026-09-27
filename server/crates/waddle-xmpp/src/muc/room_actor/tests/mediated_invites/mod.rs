@@ -29,6 +29,7 @@ async fn joined_members_only_invite_actor() -> (ActorRef<RoomActor>, FullJid, Ba
     let invitee = test_full_jid("invitee").to_bare();
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "inviter".to_string(),
             real_jid: inviter.clone(),
             role: Role::Moderator,

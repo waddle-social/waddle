@@ -106,6 +106,7 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
             .expect("affiliation");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: occupant.clone(),
                 role: waddle_xmpp::Role::Moderator,

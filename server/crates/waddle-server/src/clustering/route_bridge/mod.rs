@@ -103,18 +103,41 @@ pub use types::{
 };
 
 #[cfg(test)]
-pub(crate) fn remote_registration_request(
+pub(crate) async fn remote_registration_request(
+    bridge: &Arc<OrderedRelayDeliveryBridge>,
     jid: jid::FullJid,
     socket_node: NodeId,
 ) -> RelayRegisterRemoteUserResource {
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
+    let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    *entry.occupancy_session.lock().expect("occupancy mutex") = Some(generation);
+    crate::occupancy_authority::publish(
+        &bridge
+            .services
+            .get()
+            .expect("wired test bridge")
+            .occupancy_database,
+        &jid,
+        generation,
+    )
+    .await
+    .expect("publish fixture binding authority");
+    remote_registration_request_from_entry(jid, socket_node, &entry)
+}
+
+#[cfg(test)]
+pub(crate) fn remote_registration_request_from_entry(
+    jid: jid::FullJid,
+    socket_node: NodeId,
+    entry: &ConnectionEntry,
+) -> RelayRegisterRemoteUserResource {
     RelayRegisterRemoteUserResource {
         jid,
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_generation: RemoteResourceSocketGeneration::next(None),
         socket_node,
-        state: RemoteResourceStateSnapshot::from_entry(&entry, None),
+        state: RemoteResourceStateSnapshot::from_entry(entry, None),
         trace: RelayTraceContext::default(),
     }
 }
@@ -133,6 +156,7 @@ pub(crate) async fn wire_for_test(
     services.node_identity = node_identity;
     services.connection_registry = Arc::clone(&state.deps.protocol.connection_registry);
     services.user_registry = state.deps.protocol.user_registry.clone();
+    services.occupancy_database = state.deps.app_state.db_pool.global().clone();
     services.sm_session_registry = Arc::clone(&state.deps.protocol.sm_session_registry);
     services.blocking_storage = Arc::clone(&state.deps.protocol.blocking_storage);
     services.web_socket_state = Arc::downgrade(state);
@@ -149,6 +173,7 @@ pub(super) struct RemoteOwnerRetirementTestGate {
 }
 
 pub struct OrderedRelayDeliveryServices {
+    pub occupancy_database: crate::db::Database,
     pub claim_store: Arc<dyn ClaimStore>,
     pub allowlist_store: Arc<dyn AllowlistStore>,
     pub node_lease: Arc<dyn NodeLeaseStore>,
@@ -301,6 +326,7 @@ impl OrderedRelayDeliveryBridge {
         self.remote_owner_resources.lock().await.insert(
             jid,
             RemoteOwnerRegistration {
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 socket_identity: NodeIdentity::new(socket_node.as_str(), "fixture-epoch"),
                 unregister_pending: false,
                 registration_id: RemoteResourceRegistrationId::fresh(),

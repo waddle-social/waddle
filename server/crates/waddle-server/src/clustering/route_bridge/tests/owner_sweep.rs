@@ -1,6 +1,10 @@
 use super::*;
 use waddle_xmpp::telemetry::attributes::SweepOutcome;
 
+// Pausing after database setup leaves a fractional timer tick. Tokio rounds
+// deadlines up to its documented one-millisecond timer-wheel resolution.
+const TIMER_GRANULARITY: Duration = Duration::from_millis(1);
+
 async fn setup() -> (
     Arc<OrderedRelayDeliveryBridge>,
     Arc<OrderedRelayDeliveryServices>,
@@ -35,10 +39,10 @@ async fn setup() -> (
     );
     bridge.wire(Arc::clone(&services));
     let reply = bridge
-        .register_remote_user_resource_on_owner(remote_registration_request(
-            target_full(),
-            NodeId::new("socket-node".into()),
-        ))
+        .register_remote_user_resource_on_owner(
+            remote_registration_request(&bridge, target_full(), NodeId::new("socket-node".into()))
+                .await,
+        )
         .await;
     assert_eq!(
         reply.status,
@@ -120,16 +124,17 @@ async fn owner_sweep_preserves_unreachable_unexpired_socket_and_failed_reads() {
     assert_mirror_exists(&bridge, &services, true).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_bounds_stalled_lease_reads_and_retries_next_pass() {
     let (bridge, services, lease) = setup().await;
+    tokio::time::pause();
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Stalled;
     let started = tokio::time::Instant::now();
     assert_eq!(
         bridge.sweep_remote_owner_resources().await,
         SweepOutcome::Failed
     );
-    assert!(started.elapsed() <= Duration::from_secs(5));
+    assert!(started.elapsed() <= Duration::from_secs(5) + TIMER_GRANULARITY);
     assert_mirror_exists(&bridge, &services, true).await;
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert_eq!(
@@ -243,9 +248,10 @@ async fn owner_sweep_revisits_failed_mirror_despite_continuous_later_arrivals() 
     assert_mirror_exists(&bridge, &services, false).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_budget_preserves_unattempted_candidates_for_later_passes() {
     let (bridge, services, lease) = setup().await;
+    tokio::time::pause();
     {
         let mut registrations = bridge.remote_owner_resources.lock().await;
         let original = registrations[&target_full()].clone();
@@ -272,14 +278,15 @@ async fn owner_sweep_budget_preserves_unattempted_candidates_for_later_passes() 
             bridge.sweep_remote_owner_resources().await,
             SweepOutcome::Failed
         );
-        assert!(started.elapsed() <= Duration::from_secs(30));
+        assert!(started.elapsed() <= Duration::from_secs(30) + TIMER_GRANULARITY);
     }
     assert_mirror_exists(&bridge, &services, false).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_cancellation_keeps_attempted_mirror_available_for_retry() {
     let (bridge, services, lease) = setup().await;
+    tokio::time::pause();
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Stalled;
     assert!(
         tokio::time::timeout(
@@ -367,7 +374,7 @@ async fn owner_sweep_reads_each_socket_once_per_page_and_refreshes_next_page() {
     assert_mirror_exists(&bridge, &services, false).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_retires_1024_mirrors_within_thirty_seconds() {
     let (bridge, services, lease) = setup().await;
     let mut resources = vec![target_full()];
@@ -376,10 +383,14 @@ async fn owner_sweep_retires_1024_mirrors_within_thirty_seconds() {
             .parse()
             .expect("mirror JID");
         let reply = bridge
-            .register_remote_user_resource_on_owner(remote_registration_request(
-                jid.clone(),
-                NodeId::new("socket-node".into()),
-            ))
+            .register_remote_user_resource_on_owner(
+                remote_registration_request(
+                    &bridge,
+                    jid.clone(),
+                    NodeId::new("socket-node".into()),
+                )
+                .await,
+            )
             .await;
         assert_eq!(
             reply.status,
@@ -399,6 +410,7 @@ async fn owner_sweep_retires_1024_mirrors_within_thirty_seconds() {
         1024
     );
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
+    tokio::time::pause();
     let started = tokio::time::Instant::now();
     let mut ticker = crate::server::session_janitors::remote_owner_mirror_ticker();
     for _ in 0..16 {
@@ -428,9 +440,10 @@ async fn owner_sweep_retires_1024_mirrors_within_thirty_seconds() {
         .is_none());
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_pending_age_survives_retries_and_clears_with_incarnation() {
     let (bridge, _services, _lease) = setup().await;
+    tokio::time::pause();
     let original = bridge.remote_owner_resources.lock().await[&target_full()].clone();
     bridge
         .mark_remote_owner_unregister_pending(&target_full(), &original)
@@ -521,9 +534,10 @@ async fn add_six_live_socket_mirrors(bridge: &OrderedRelayDeliveryBridge) {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_busy_child_reply_is_deferred_after_its_full_timeout() {
     let (bridge, services, lease) = setup().await;
+    tokio::time::pause();
     let release = gate_mirror_actor(&services).await;
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     let started = tokio::time::Instant::now();
@@ -542,9 +556,10 @@ async fn owner_sweep_busy_child_reply_is_deferred_after_its_full_timeout() {
     assert_mirror_exists(&bridge, &services, false).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_page_deadline_during_lease_read_is_deferred() {
     let (bridge, services, lease) = setup().await;
+    tokio::time::pause();
     add_six_live_socket_mirrors(&bridge).await;
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::DelayedLive {
         delay: Duration::from_millis(4500),
@@ -556,7 +571,8 @@ async fn owner_sweep_page_deadline_during_lease_read_is_deferred() {
         bridge.sweep_remote_owner_resources().await,
         SweepOutcome::Deferred
     );
-    assert_eq!(started.elapsed(), Duration::from_secs(30));
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(started.elapsed() <= Duration::from_secs(30) + TIMER_GRANULARITY);
     assert_mirror_exists(&bridge, &services, true).await;
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert_eq!(
@@ -566,9 +582,10 @@ async fn owner_sweep_page_deadline_during_lease_read_is_deferred() {
     assert_mirror_exists(&bridge, &services, false).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn owner_sweep_page_deadline_during_busy_actor_is_deferred() {
     let (bridge, services, lease) = setup().await;
+    tokio::time::pause();
     add_six_live_socket_mirrors(&bridge).await;
     let registration = bridge.remote_owner_resources.lock().await[&target_full()].clone();
     bridge
@@ -585,7 +602,8 @@ async fn owner_sweep_page_deadline_during_busy_actor_is_deferred() {
         bridge.sweep_remote_owner_resources().await,
         SweepOutcome::Deferred
     );
-    assert_eq!(started.elapsed(), Duration::from_secs(30));
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(started.elapsed() <= Duration::from_secs(30) + TIMER_GRANULARITY);
     assert!(bridge.remote_owner_resources.lock().await[&target_full()].unregister_pending);
     release.send(()).expect("release owner actor");
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;

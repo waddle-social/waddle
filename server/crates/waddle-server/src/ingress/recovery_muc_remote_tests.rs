@@ -154,10 +154,14 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     .await;
     if !recovering_local {
         let reply = bridge
-            .register_remote_user_resource_on_owner(remote_registration_request(
-                occupant.clone(),
-                NodeId::new("foreign-socket-node".to_string()),
-            ))
+            .register_remote_user_resource_on_owner(
+                remote_registration_request(
+                    &bridge,
+                    occupant.clone(),
+                    NodeId::new("foreign-socket-node".to_string()),
+                )
+                .await,
+            )
             .await;
         assert_eq!(
             reply.status,
@@ -482,10 +486,14 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
     if case == ElsewhereCase::RegisteredRemote {
         assert_eq!(
             bridge
-                .register_remote_user_resource_on_owner(remote_registration_request(
-                    occupant.clone(),
-                    NodeId::new("socket-node".to_string()),
-                ))
+                .register_remote_user_resource_on_owner(
+                    remote_registration_request(
+                        &bridge,
+                        occupant.clone(),
+                        NodeId::new("socket-node".to_string()),
+                    )
+                    .await
+                )
                 .await
                 .status,
             RelayRemoteResourceRegistrationStatus::Registered,
@@ -508,6 +516,7 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         .expect("room");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "foreign".into(),
             real_jid: occupant.clone(),
             role: waddle_xmpp::Role::Participant,
@@ -852,6 +861,7 @@ async fn departed_occupant_cluster_recovery(f: IngressFixture, case: DepartedEls
     if case == DepartedElsewhere::StillSeated {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "foreign".into(),
                 real_jid: occupant.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -1163,6 +1173,7 @@ async fn sqlite_stalled_ghosts_of_one_room_are_repaired_within_the_repair_budget
     for ghost in &ghosts {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: ghost.node().expect("node").to_string(),
                 real_jid: ghost.clone(),
                 role: waddle_xmpp::Role::Participant,

@@ -315,6 +315,7 @@ async fn assert_admin_recovery_preserves_final_roster(
     ] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid: jid.clone(),
                 affiliation,
@@ -326,6 +327,7 @@ async fn assert_admin_recovery_preserves_final_roster(
     let before = actor.ask(GetSnapshot).await.expect("pre-ask snapshot");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "later".to_owned(),
             real_jid: later.clone(),
             affiliation: previous_affiliation,
@@ -621,6 +623,7 @@ async fn assert_admin_recovery_preserves_final_roster(
     let newest: FullJid = "newest@example.com/web".parse().expect("newest");
     successor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "newest".to_owned(),
             real_jid: newest.clone(),
             affiliation: Affiliation::Member,

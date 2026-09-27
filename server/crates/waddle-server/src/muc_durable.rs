@@ -109,10 +109,15 @@ fn persisted_affiliation_fingerprint(entry: &DurableAffiliationEntry) -> serde_j
 
 fn projection_fingerprint(projection: &RoomProjection) -> serde_json::Value {
     match projection {
-        RoomProjection::OccupancyJoin { occupant, nick } => serde_json::json!({
+        RoomProjection::OccupancyJoin {
+            occupant,
+            nick,
+            session,
+        } => serde_json::json!({
             "kind": "occupancy_join",
             "occupant": occupant.to_string(),
             "nick": nick.as_str(),
+            "session": session.to_string(),
         }),
         RoomProjection::OccupancyLeave {
             occupant,
@@ -1425,6 +1430,22 @@ impl PostgresMucRoomStore {
             self.assert_commit_fenced(&mut tx, room_jid, fence, "FOR SHARE")
                 .await?;
         }
+        // Lock order is room claim, connection generation, then room lifecycle.
+        // Fresh bind publication only locks the generation row and releases it
+        // before dispatching cleanup, so there is no reverse lock dependency.
+        if let RoomDurableMutation::Projection(RoomProjection::OccupancyJoin {
+            occupant,
+            session,
+            ..
+        }) = intent
+        {
+            if !crate::occupancy_authority::lock_current(&mut tx, occupant, *session)
+                .await
+                .map_err(Self::commit_error)?
+            {
+                return Err(RoomCommitError::StaleOccupancyGeneration);
+            }
+        }
         // The claim lock serializes this predicate with a destroy's
         // exclusive fenced transaction: once this create has proved no
         // completion exists, a matching destroy cannot commit its tombstone
@@ -2603,7 +2624,12 @@ mod tests {
         RoomDurableMutation::Projection(RoomProjection::OccupancyJoin {
             occupant: "alice@example.com/desktop".parse().expect("valid full JID"),
             nick: MucOccupantNick::new("alice".to_string()).expect("valid nick"),
+            session: projection_test_generation(),
         })
+    }
+
+    fn projection_test_generation() -> waddle_xmpp_core::OccupancySessionGeneration {
+        waddle_xmpp_core::OccupancySessionGeneration::from_uuid(uuid::Uuid::from_u128(1733))
     }
 
     struct ProjectionTestRoom {
@@ -2678,6 +2704,7 @@ mod tests {
             RoomProjection::OccupancyJoin {
                 occupant: occupant.clone(),
                 nick: nick.clone(),
+                session: projection_test_generation(),
             },
             RoomProjection::OccupancyLeave {
                 occupant,
@@ -3141,6 +3168,13 @@ mod tests {
         )
         .await
         .expect("open test postgres");
+        // This shared database is also used by server-startup scenarios.
+        // Install authority through its migration so later startup observes
+        // both the table and its committed ledger entry.
+        crate::db::MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrate shared MUC fixture database");
         let claim_store = Arc::new(PostgresClaimStore::new(db.clone()));
         claim_store
             .ensure_schema()
@@ -3155,6 +3189,15 @@ mod tests {
         .await
         .expect("open muc durable store");
         let conn = db.guard().await.expect("guard");
+        crate::occupancy_authority::publish(
+            &db,
+            &"alice@example.com/desktop"
+                .parse()
+                .expect("projection test JID"),
+            projection_test_generation(),
+        )
+        .await
+        .expect("publish projection test bind");
         conn.execute("DELETE FROM clustering_claims", ())
             .await
             .expect("clean claims");
@@ -5825,6 +5868,223 @@ mod tests {
             .expect("load state")
             .expect("stored room");
         assert_eq!(state.config_coordinates, Some(enforcement.coordinates));
+    }
+
+    #[tokio::test]
+    async fn legacy_join_preserves_authorized_connection_generation() {
+        use waddle_xmpp::muc::room_actor::{Join, RoomActorError};
+        use waddle_xmpp::{Affiliation, Role};
+
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("legacy-join-generation").await else {
+            return;
+        };
+        let occupant = "alice@example.com/desktop".parse().expect("full JID");
+        let current = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        crate::occupancy_authority::publish(&room.db, &occupant, current)
+            .await
+            .expect("publish replacement bind");
+        let store: Arc<dyn MucDurableStore> = Arc::new(room.store);
+        let actor = RoomActor::spawn(RoomActor::new(
+            MucRoom::new(
+                room.room_jid.clone(),
+                "waddle-projection-test".to_string(),
+                "channel-projection-test".to_string(),
+                RoomConfig::default(),
+            ),
+            OccupantIdSecret::new(b"muc-durable-legacy-join-test-secret".to_vec())
+                .expect("valid test secret"),
+        ));
+        actor
+            .ask(RestoreDurableRoomState {
+                store: Arc::clone(&store),
+                claim_fence: room.fence.clone(),
+            })
+            .await
+            .expect("restore room");
+
+        let stale = actor
+            .ask(Join {
+                session: projection_test_generation(),
+                real_jid: occupant.clone(),
+                nick: "alice".to_string(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await;
+        assert!(matches!(
+            stale,
+            Err(SendError::HandlerError(
+                RoomActorError::OwnershipUnavailable
+            ))
+        ));
+        assert_eq!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot")
+                .room
+                .occupant_count(),
+            0,
+            "a displaced connection generation must not enter the live roster"
+        );
+        assert_eq!(
+            store
+                .load_room_state_fenced(&room.room_jid, &room.fence)
+                .await
+                .expect("load unchanged room")
+                .expect("room state")
+                .coordinates,
+            Some(room.create.coordinates),
+            "a displaced generation must not commit a join"
+        );
+
+        actor
+            .ask(Join {
+                session: current,
+                real_jid: occupant.clone(),
+                nick: "alice".to_string(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("the current bind generation can join through the public Join message");
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+        assert_eq!(snapshot.room.occupant_count(), 1);
+        assert_eq!(snapshot.room.session_generation(&occupant), Some(current));
+        assert_ne!(
+            store
+                .load_room_state_fenced(&room.room_jid, &room.fence)
+                .await
+                .expect("load committed room")
+                .expect("room state")
+                .coordinates,
+            Some(room.create.coordinates),
+            "the authorized generation commits its join before entering the roster"
+        );
+    }
+
+    #[tokio::test]
+    async fn departed_generation_cannot_commit_after_replacement_bind() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("displaced-generation").await else {
+            return;
+        };
+        let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let occupant = "alice@example.com/desktop".parse().expect("full JID");
+        crate::occupancy_authority::publish(&room.db, &occupant, replacement)
+            .await
+            .expect("publish replacement bind");
+        let result = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                occupancy_join_projection(),
+                RoomMutationEffects::none(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(RoomCommitError::StaleOccupancyGeneration)
+        ));
+        let stored = room
+            .store
+            .load_room_state_fenced(&room.room_jid, &room.fence)
+            .await
+            .expect("load unchanged room")
+            .expect("room state");
+        assert_eq!(stored.coordinates, Some(room.create.coordinates));
+        let mut replacement_join = occupancy_join_projection();
+        if let RoomDurableMutation::Projection(RoomProjection::OccupancyJoin { session, .. }) =
+            &mut replacement_join
+        {
+            *session = replacement;
+        }
+        room.store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                replacement_join,
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("current generation can join");
+    }
+
+    #[tokio::test]
+    async fn bind_publication_waits_for_authorized_join_transaction() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("bind-projection-lock").await else {
+            return;
+        };
+        let store = Arc::new(room.store);
+        let mut blocker = room.db.begin().await.expect("begin lifecycle blocker");
+        let mut rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_muc_room_lifecycles WHERE room_jid = ? FOR UPDATE",
+                crate::db_params![room.room_jid.to_string()],
+            )
+            .await
+            .expect("lock lifecycle");
+        assert!(rows.next().await.expect("lifecycle row").is_some());
+        drop(rows);
+        let joining = tokio::spawn({
+            let store = Arc::clone(&store);
+            let room_jid = room.room_jid.clone();
+            let fence = room.fence.clone();
+            async move {
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        occupancy_join_projection(),
+                        RoomMutationEffects::none(),
+                    )
+                    .await
+            }
+        });
+        wait_for_lock_waiter(&room.db, "FROM clustering_muc_room_lifecycles").await;
+        let occupant: jid::FullJid = "alice@example.com/desktop".parse().expect("full JID");
+        let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let binding = tokio::spawn({
+            let db = room.db.clone();
+            let occupant = occupant.clone();
+            async move { crate::occupancy_authority::publish(&db, &occupant, replacement).await }
+        });
+        wait_for_lock_waiter(&room.db, "FROM xmpp_occupancy_authority").await;
+        assert!(
+            !binding.is_finished(),
+            "bind must wait for the pending authorized join"
+        );
+        blocker.commit().await.expect("release lifecycle blocker");
+        joining
+            .await
+            .expect("join task")
+            .expect("old join ordered before bind");
+        binding
+            .await
+            .expect("bind task")
+            .expect("replacement published");
+        assert!(
+            crate::occupancy_authority::is_current(&room.db, &occupant, replacement)
+                .await
+                .expect("current authority")
+        );
+        assert!(
+            matches!(
+                store
+                    .commit_room_mutation(
+                        &room.room_jid,
+                        &room.fence,
+                        occupancy_join_projection(),
+                        RoomMutationEffects::none()
+                    )
+                    .await,
+                Err(RoomCommitError::StaleOccupancyGeneration)
+            ),
+            "a delayed retry cannot join after replacement publication"
+        );
     }
 
     #[tokio::test]

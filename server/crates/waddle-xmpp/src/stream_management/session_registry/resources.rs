@@ -45,6 +45,114 @@ impl DetachedPresenceState {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Whether any exact-generation SM payload still awaits resumption or
+    /// terminal promotion. This is custody discovery, not ownership authority:
+    /// foreign and expired durable snapshots also prevent a retirement ACK.
+    pub async fn has_occupancy_session_custody(
+        &self,
+        jid: &FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> Result<bool, SmRegistryError> {
+        let in_memory = {
+            // Hold all transfer endpoints together, in their mutation order.
+            // Separate reads could miss a claimed -> detached release or a
+            // detached -> leased-promotion handoff between the two scans.
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let promotions = self
+                .pending_promotions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let retries = self
+                .pending_promotion_retries
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let matches = |session: &DetachedSession| {
+                session.jid == *jid && session.occupancy_session == generation
+            };
+            sessions.values().any(matches)
+                || claimed.values().any(matches)
+                || promotions
+                    .values()
+                    .any(|(resource, session)| resource == jid && *session == generation)
+                || retries.values().any(matches)
+        };
+        if in_memory {
+            return Ok(true);
+        }
+        let Some(persistence) = &self.persistence else {
+            return Ok(false);
+        };
+        // Expiry ends resumption, not custody: the payload must still complete
+        // the owner-fenced promote/confirm protocol before retirement succeeds.
+        let persisted = persistence
+            .list_sessions_for_full_jid(jid)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+        Ok(persisted
+            .iter()
+            .any(|session| session.occupancy_session == generation))
+    }
+
+    /// Snapshot exact local detached identities. This is discovery only: a
+    /// caller must recheck backend ownership under the stream shard before
+    /// transferring any candidate to promotion. Claimed resumes are excluded.
+    pub fn detached_occupancy_inventory(
+        &self,
+    ) -> Result<
+        Vec<(
+            SmSessionId,
+            FullJid,
+            waddle_xmpp_core::OccupancySessionGeneration,
+        )>,
+        SmRegistryError,
+    > {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+        Ok(sessions
+            .values()
+            .map(|session| {
+                (
+                    SmSessionId::new(session.stream_id.clone()),
+                    session.jid.clone(),
+                    session.occupancy_session,
+                )
+            })
+            .collect())
+    }
+
+    /// Capture preexisting local generations before publishing a fresh bind.
+    /// Includes claimed resumes, whose exact generation is displaced too.
+    /// Never repeat this scan after publication: it could observe a successor.
+    pub fn occupancy_generations_for_full_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<Vec<waddle_xmpp_core::OccupancySessionGeneration>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+        let generations: std::collections::BTreeSet<_> = sessions
+            .values()
+            .chain(claimed.values())
+            .filter(|session| session.jid == *jid)
+            .map(|session| session.occupancy_session)
+            .collect();
+        Ok(generations.into_iter().collect())
+    }
+
     /// Conservatively probe lifecycle ownership before retiring durable stream metadata.
     /// Includes rows not hydrated after a failed startup read and foreign claims.
     pub async fn has_retirement_protection(
@@ -596,12 +704,34 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
     ) -> ResumableSessionProbe {
+        self.probe_resumable_session(jid, None).await
+    }
+
+    /// Probe only the occupancy generation whose memberships may be retired.
+    /// A resumable replacement with the same full JID does not own its
+    /// predecessor's memberships, including when only its durable row remains.
+    pub async fn probe_resumable_session_for_occupancy(
+        &self,
+        jid: &FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> ResumableSessionProbe {
+        self.probe_resumable_session(jid, Some(generation)).await
+    }
+
+    async fn probe_resumable_session(
+        &self,
+        jid: &FullJid,
+        generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    ) -> ResumableSessionProbe {
         let in_memory = {
             let matches_memory =
                 |sessions: &std::collections::HashMap<String, super::super::DetachedSession>| {
-                    sessions
-                        .values()
-                        .any(|session| !session.is_expired() && session.jid == *jid)
+                    sessions.values().any(|session| {
+                        !session.is_expired()
+                            && session.jid == *jid
+                            && generation
+                                .is_none_or(|generation| session.occupancy_session == generation)
+                    })
                 };
             let sessions = self.sessions.read();
             let claimed = self.claimed_sessions.read();
@@ -627,8 +757,9 @@ impl InMemorySmSessionRegistry {
             Ok(rows) => {
                 let now = chrono::Utc::now();
                 if rows.iter().any(|row| {
-                    now.signed_duration_since(row.detached_at).to_std().ok()
-                        <= Some(row.max_resume_duration)
+                    generation.is_none_or(|generation| row.occupancy_session == generation)
+                        && now.signed_duration_since(row.detached_at).to_std().ok()
+                            <= Some(row.max_resume_duration)
                 }) {
                     ResumableSessionProbe::Present
                 } else {

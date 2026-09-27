@@ -399,6 +399,9 @@ pub(in super::super) fn apply_remote_resource_state(
     entry: &ConnectionEntry,
     state: &RemoteResourceStateSnapshot,
 ) {
+    if let Ok(mut generation) = entry.occupancy_session.lock() {
+        *generation = state.occupancy_session;
+    }
     entry
         .carbons_enabled
         .store(state.carbons_enabled, Ordering::Relaxed);

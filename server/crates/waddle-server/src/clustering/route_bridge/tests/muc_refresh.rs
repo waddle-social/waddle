@@ -2,12 +2,11 @@
 use super::*;
 use crate::server::routes::interpret::SmIngressAppendContext;
 
-pub(crate) async fn deliver_after_owner_refresh(
-    target: &jid::FullJid,
-    stanza: &Stanza,
-    context: Option<SmIngressAppendContext>,
+// Build the database fixture before entering the recursive relay callback;
+// delivery itself must remain Send, whereas SQLx fixture setup need not be.
+pub(crate) async fn owner_refresh_services(
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
-) -> FullJidDeliveryOutcome {
+) -> Arc<OrderedRelayDeliveryServices> {
     let mut services = services_with_claims(
         origin_identity(),
         origin_identity(),
@@ -15,13 +14,22 @@ pub(crate) async fn deliver_after_owner_refresh(
         test_peer_id(),
     )
     .await;
+    services.sm_session_registry = sm_session_registry;
+    Arc::new(services)
+}
+
+pub(crate) async fn deliver_after_owner_refresh(
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    context: Option<SmIngressAppendContext>,
+    services: Arc<OrderedRelayDeliveryServices>,
+) -> FullJidDeliveryOutcome {
     let target_entity = user_entity(&target.to_bare());
     services
         .claim_store
         .acquire(&target_entity, &origin_identity())
         .await
         .expect("target now owned locally");
-    services.sm_session_registry = sm_session_registry;
     let mut envelope = envelope();
     envelope.channel.recipient = OrderedRelayRecipient::FullJid(target.clone());
     envelope.target_claim.entity = target_entity.clone();
@@ -29,7 +37,7 @@ pub(crate) async fn deliver_after_owner_refresh(
         .expect("ordinary occupant copy relay payload");
     let prepared = PreparedRemoteDelivery {
         ingress_append_context: context,
-        services: Arc::new(services),
+        services,
         target_entity,
         previous_owner: receiver_identity(),
         channel: envelope.channel.clone(),

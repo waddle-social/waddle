@@ -37,7 +37,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema). `current_version` reads
     // the ledger max, which the waddle namespace (V1020) still dominates
-    // after global V0012.
+    // after global V0013.
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(version, Some(1020));
 }
@@ -246,7 +246,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     assert_eq!(
         applied,
         vec![
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
@@ -557,7 +557,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 32);
+    let migration_count = i64::try_from(runner.migrations.len()).expect("catalog fits i64");
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -567,7 +567,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 32);
+    assert_eq!(migration_ledger_row_count(&db).await, migration_count);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -579,12 +579,17 @@ async fn unknown_owned_ledger_version_fails_closed_without_changes() {
         .unwrap();
     let runner = MigrationRunner::single();
     runner.run(&db).await.unwrap();
+    let unknown_version = WADDLE_NAMESPACE_START - 1;
+    assert!(!runner
+        .migrations
+        .iter()
+        .any(|migration| migration.version == unknown_version));
     let before = migration_ledger_row_count(&db).await;
     let schema_before = sqlite_schema_object_count(&db).await;
     let conn = db.guard().await.unwrap();
     conn.execute(
         "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
-        crate::db_params![13_i64, "future migration", "future-checksum"],
+        crate::db_params![unknown_version, "future migration", "future-checksum"],
     )
     .await
     .unwrap();
@@ -593,7 +598,8 @@ async fn unknown_owned_ledger_version_fails_closed_without_changes() {
     let error = runner.run(&db).await.unwrap_err();
     assert!(matches!(
         error,
-        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 13, .. })
+        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version, .. })
+            if version == unknown_version
     ));
     assert_eq!(migration_ledger_row_count(&db).await, before + 1);
     assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
@@ -1064,7 +1070,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 32);
+    let migration_count = i64::try_from(runner.migrations.len()).expect("catalog fits i64");
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1078,7 +1084,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 32);
+    assert_eq!(migration_ledger_row_count(&db).await, migration_count);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -2228,7 +2234,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     assert_eq!(
         applied,
         vec![
-            6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+            6, 7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
             1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
@@ -2305,8 +2311,8 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+            1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
 
@@ -2426,7 +2432,7 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![8, 9, 10, 11, 12]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13]);
 
     let conn = db.guard().await.unwrap();
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -2491,7 +2497,7 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![10, 11, 12]);
+    assert_eq!(applied, vec![10, 11, 12, 13]);
 
     let conn = db.guard().await.unwrap();
     for table in [
@@ -2682,7 +2688,7 @@ async fn sqlite_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12]
+        vec![12, 13]
     );
 
     let conn = db.guard().await.expect("database guard");
@@ -2753,7 +2759,7 @@ async fn postgres_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12]
+        vec![12, 13]
     );
     assert_postgres_column_type(&db, "sessions", "auth_context_id", "text").await;
 
@@ -2815,8 +2821,8 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+            1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
 
@@ -2961,7 +2967,7 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![8, 9, 10, 11, 12]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13]);
 
     let conn = db.guard().await.expect("postgres guard");
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {

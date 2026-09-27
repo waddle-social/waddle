@@ -275,6 +275,7 @@ async fn test_join_and_occupant_count() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -293,6 +294,7 @@ async fn test_join_duplicate_nick_rejected() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -303,6 +305,7 @@ async fn test_join_duplicate_nick_rejected() {
 
     let result = actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Participant,
@@ -326,6 +329,7 @@ async fn test_join_rejected_when_room_full() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -336,6 +340,7 @@ async fn test_join_rejected_when_room_full() {
 
     let result = actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Participant,
@@ -358,6 +363,7 @@ async fn test_join_owner_affiliation_allowed_when_room_full() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -368,6 +374,7 @@ async fn test_join_owner_affiliation_allowed_when_room_full() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "owner".to_string(),
             real_jid: test_full_jid("owner"),
             role: Role::Moderator,
@@ -508,6 +515,7 @@ async fn test_leave() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -554,6 +562,7 @@ async fn test_get_occupant_by_nick() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -581,6 +590,7 @@ async fn test_get_occupant_by_jid() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: jid.clone(),
             role: Role::Participant,
@@ -637,6 +647,7 @@ async fn members_only_enforcement_ejects_current_non_members_with_status_322() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -752,6 +763,7 @@ async fn test_list_occupants() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -762,6 +774,7 @@ async fn test_list_occupants() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Moderator,
@@ -780,6 +793,7 @@ async fn test_destroy() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -800,6 +814,7 @@ async fn test_apply_admin_items_rejects_moderator_role_change_on_admin() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Moderator,
@@ -854,6 +869,7 @@ async fn test_apply_admin_items_rejects_admin_role_change_on_admin() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Moderator,
@@ -901,6 +917,7 @@ async fn test_apply_admin_items_rejects_moderator_grant_from_role_only_moderator
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: test_full_jid("bob"),
             role: Role::Moderator,
@@ -910,6 +927,7 @@ async fn test_apply_admin_items_rejects_moderator_grant_from_role_only_moderator
         .expect("join bob");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "carol".to_string(),
             real_jid: test_full_jid("carol"),
             role: Role::Participant,
@@ -1406,6 +1424,7 @@ async fn unmanaged_members_only_post_enforcement_snapshot_excludes_removed_confi
     ] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid,
                 role: Role::Participant,
@@ -1523,6 +1542,7 @@ async fn managed_members_only_enforcement_persists_survivor_voice_changes() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Visitor,
@@ -1734,6 +1754,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_true_for_default_rooms() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -1772,6 +1793,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -1817,6 +1839,7 @@ async fn is_dormant_false_while_occupants_present() {
     let actor = spawn_room_actor().await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -2030,6 +2053,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
     for nick in ["alice", "alice-ghost"] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_string(),
                 real_jid: alice.clone(),
                 role: Role::Participant,
@@ -2040,6 +2064,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
     }
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: bob.clone(),
             role: Role::Participant,
@@ -2160,6 +2185,7 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -2301,6 +2327,7 @@ async fn room_snapshot_includes_durable_member_recipients_from_same_actor_read()
     let sender = test_full_jid("sender");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "sender".to_string(),
             real_jid: sender.clone(),
             role: Role::Participant,
@@ -2582,6 +2609,7 @@ async fn space_entitled_member_survives_members_only_enforcement() {
     let _source = hydrate_durable_recipients(&actor, vec![bare("alice@example.com")]).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -2666,6 +2694,7 @@ async fn enforce_members_only_affiliations_prunes_hydrated_durable_recipient() {
     source.set_members(Vec::new());
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -2828,6 +2857,7 @@ async fn upsert_muji_presence_active_stores_and_returns_muji() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3146,6 +3176,7 @@ async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3191,6 +3222,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
     let bob = test_full_jid("bob");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3200,6 +3232,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
         .expect("alice join");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "bob".to_string(),
             real_jid: bob.clone(),
             role: Role::Participant,
@@ -3268,6 +3301,7 @@ async fn clear_muji_presence_reflects_plain_presence_when_no_state_exists() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3357,6 +3391,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -3407,6 +3442,7 @@ async fn leaving_occupant_clears_muji_state() {
     let carol = test_full_jid("carol");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -4808,7 +4844,7 @@ async fn replayed_receipt_is_superseded_when_the_session_rejoined() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), first_attempt).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 1);
 
@@ -4848,7 +4884,7 @@ async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), first_attempt).await,
-        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded { .. }
     ));
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), second_attempt).await,
@@ -4963,7 +4999,7 @@ async fn retry_of_an_attempt_older_than_the_live_session_is_superseded() {
 
     let stale_retry = leave_with_attempt(&actor, alice.clone(), first_attempt).await;
     assert!(
-        matches!(stale_retry, LeaveDisposition::Superseded),
+        matches!(stale_retry, LeaveDisposition::Superseded { .. }),
         "stale retry must be superseded, got {stale_retry:?}"
     );
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
@@ -5032,7 +5068,7 @@ async fn old_receipt_is_not_replayed_after_the_rejoined_session_was_kicked() {
 
     let stale_retry = leave_with_attempt(&actor, alice.clone(), lost_attempt).await;
     assert!(
-        matches!(stale_retry, LeaveDisposition::Superseded),
+        matches!(stale_retry, LeaveDisposition::Superseded { .. }),
         "a newer generation existed (and was removed by moderation): the stale \
          ordinary departure must not be announced after the 307, got {stale_retry:?}"
     );
@@ -5165,7 +5201,7 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
 
     assert!(matches!(
         leave_with_attempt(&successor, alice.clone(), attempt_a).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(
         receipts_of(&successor.ask(GetSnapshot).await.expect("snapshot")).len(),
@@ -5246,7 +5282,7 @@ async fn replayed_final_departure_is_superseded_when_the_same_account_retook_the
     )
     .await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(replay, LeaveDisposition::Superseded { .. }),
         "a freed nick now held by anyone supersedes the receipt, got {replay:?}"
     );
     assert!(
@@ -5290,7 +5326,12 @@ async fn coalesced_retry_is_superseded_when_the_same_account_retook_the_freed_ni
     )
     .await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(
+            replay,
+            LeaveDisposition::Superseded {
+                current_generation: None
+            }
+        ),
         "the JID fallback applies the freed-nick rule, got {replay:?}"
     );
     assert!(actor
@@ -5334,7 +5375,7 @@ async fn non_final_receipt_is_superseded_once_the_sibling_left_and_the_nick_was_
 
     let replay = leave_with_attempt(&actor, web, attempt).await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(replay, LeaveDisposition::Superseded { .. }),
         "a new nick generation supersedes the non-final receipt, got {replay:?}"
     );
 }
@@ -5366,7 +5407,7 @@ async fn non_final_receipt_is_superseded_once_the_sibling_left_even_without_a_re
 
     let replay = leave_with_attempt(&actor, web, attempt).await;
     assert!(
-        matches!(replay, LeaveDisposition::Superseded),
+        matches!(replay, LeaveDisposition::Superseded { .. }),
         "an absent nick supersedes a non-final receipt, got {replay:?}"
     );
 }
@@ -5492,7 +5533,7 @@ async fn tombstoned_retained_retry_still_drains_other_owed_receipts() {
     // NotOccupant — or, had any tombstone survived, Superseded).
     assert!(matches!(
         retry(a1).await,
-        LeaveDisposition::Superseded | LeaveDisposition::NotOccupant
+        LeaveDisposition::Superseded { .. } | LeaveDisposition::NotOccupant
     ));
     assert!(
         actor
@@ -5701,7 +5742,7 @@ async fn nick_retaken_supersession_consumes_the_unreplayable_receipt() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), attempt).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert!(
         actor
@@ -5791,7 +5832,7 @@ async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
 
     assert!(matches!(
         leave_with_attempt(&actor, alice, attempt).await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert_eq!(
@@ -5993,7 +6034,7 @@ async fn transferred_older_generation_receipt_is_refused() {
     );
     assert!(matches!(
         leave_with_attempt(&successor, alice.clone(), older_attempt).await,
-        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded { .. }
     ));
     assert!(matches!(
         leave_with_attempt(&successor, alice, newer_attempt).await,
@@ -6643,7 +6684,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
             })
             .await
             .expect("stale retry"),
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
     assert!(matches!(
@@ -6768,7 +6809,7 @@ async fn same_full_jid_rejoin_overwrites_the_stored_generation_and_stale_leave_i
             LeaveSessionSelector::Generation(generation_one),
         )
         .await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
@@ -6814,7 +6855,7 @@ async fn inactive_seal_with_mismatched_generation_is_superseded_not_deferred() {
             LeaveSessionSelector::Generation(stale_generation),
         )
         .await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     assert!(actor.ask(UnsealInactive).await.expect("unseal"));
     assert!(matches!(
@@ -6853,7 +6894,7 @@ async fn newer_attempt_still_cannot_evict_a_rejoined_session_when_generation_is_
             LeaveSessionSelector::Generation(generation_one),
         )
         .await,
-        LeaveDisposition::Superseded
+        LeaveDisposition::Superseded { .. }
     ));
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert_eq!(
@@ -6880,6 +6921,7 @@ async fn legacy_join_is_gated_by_projection_commit() {
     assert!(matches!(
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: "alice".to_owned(),
                 real_jid: test_full_jid("alice"),
                 role: Role::Participant,
@@ -6978,6 +7020,7 @@ async fn simulate_crash_after_projection_commit(
     let gate = actor
         .commit_projection(crate::muc::durable::RoomProjection::OccupancyJoin {
             occupant: test_full_jid("alice"),
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: crate::muc::durable::MucOccupantNick::new("alice".to_owned())
                 .expect("valid nick"),
         })
@@ -7229,7 +7272,7 @@ async fn join_commits_projection_revision_before_admitting_occupant() {
     assert!(matches!(
         store.recorded_intents().last(),
         Some(crate::muc::RoomDurableMutation::Projection(
-            crate::muc::durable::RoomProjection::OccupancyJoin { occupant, nick }
+            crate::muc::durable::RoomProjection::OccupancyJoin { occupant, nick, .. }
         )) if occupant == &alice && nick.as_str() == "alice"
     ));
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
@@ -7907,6 +7950,7 @@ async fn update_config_persists_moderation_flip_voice_changes() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Visitor,
@@ -8021,6 +8065,7 @@ async fn destroy_seal_blocks_zero_delta_mutations_and_pins() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Moderator,
@@ -8107,6 +8152,7 @@ async fn destroy_seal_blocks_members_only_enforcement() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice,
             role: Role::Participant,
@@ -8138,6 +8184,7 @@ async fn leave_under_destroying_seal_is_deferred_without_memory_change() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8187,6 +8234,7 @@ async fn store_less_leave_under_destroying_seal_is_suppressed_and_recorded() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_owned(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8219,6 +8267,7 @@ async fn unseal_destroy_then_retried_leave_projects_departure() {
     let alice = test_full_jid("alice");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_owned(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8266,6 +8315,7 @@ async fn destroy_seal_blocks_presence_reflection() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8294,6 +8344,7 @@ async fn destroy_seal_blocks_muji_upserts() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8334,6 +8385,7 @@ async fn destroy_seal_blocks_muji_clears() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8382,6 +8434,7 @@ async fn destroy_seal_blocks_in_call_state_updates() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8426,6 +8479,7 @@ async fn destroy_seal_defers_leave_handler() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -8462,6 +8516,7 @@ async fn destroy_seal_blocks_groupchat_broadcasts() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8497,6 +8552,7 @@ async fn destroy_seal_blocks_room_dispatch_snapshots() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -8706,6 +8762,7 @@ async fn unknown_durable_commit_outcome_seals_actor_before_it_can_serve_stale_me
 
     let join = actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: test_full_jid("alice"),
             role: Role::Participant,
@@ -8837,6 +8894,7 @@ async fn role_only_admin_items_stay_direct_without_an_outbox_reservation() {
 
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -9204,6 +9262,7 @@ async fn update_group_dm_config_surfaces_ambiguous_commit_outcome_without_compen
         .expect("member grant");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_string(),
             real_jid: alice.clone(),
             role: Role::Participant,
@@ -10067,6 +10126,7 @@ async fn sealed_room_reports_dormant_so_the_sweep_converges() {
 async fn join_with(actor: &ActorRef<RoomActor>, user: &str, affiliation: Affiliation, role: Role) {
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: user.to_string(),
             real_jid: test_full_jid(user),
             role,
@@ -10388,7 +10448,7 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
 
 /// #1703 (codex round 3): a same-full-JID rejoin by a different connection
 /// generation must not see the displaced connection's Muji advertisement in
-/// its own join snapshot (it is cleared BEFORE `existing_occupants` is taken).
+/// its own join snapshot, while sibling sessions retain their call state.
 #[tokio::test]
 async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_state() {
     let actor = spawn_room_actor().await;
@@ -10409,6 +10469,34 @@ async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_stat
         .expect("muji upsert")
         .expect("alice is an occupant");
 
+    let sibling: FullJid = "alice@example.com/mobile".parse().unwrap();
+    let sibling_session = OccupancySessionGeneration::mint();
+    join_as_resolver_with_session(&actor, sibling.clone(), "alice", sibling_session)
+        .await
+        .expect("sibling join");
+    actor
+        .ask(UpsertMujiPresence {
+            sender_jid: sibling.clone(),
+            occupant: Some(sibling_session),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("sibling muji update")
+        .expect("sibling occupant");
+    for (jid, session) in [(&alice, first), (&sibling, sibling_session)] {
+        actor
+            .ask(UpsertInCallState {
+                sender_jid: jid.clone(),
+                occupant: Some(session),
+                state: crate::xep::InCallPresenceState {
+                    hand_raised: true,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("in-call update")
+            .expect("occupant");
+    }
     let admission_revision = actor
         .ask(GetSnapshot)
         .await
@@ -10434,6 +10522,90 @@ async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_stat
     assert!(
         own.muji.is_none(),
         "the displaced generation's Muji advertisement must not be replayed to the replacement"
+    );
+    assert!(!own.in_call.hand_raised);
+    let sibling_snapshot = outcome
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.jid == sibling)
+        .expect("sibling snapshot");
+    assert!(sibling_snapshot.muji.is_some());
+    assert!(sibling_snapshot.in_call.hand_raised);
+    let live = actor.ask(GetSnapshot).await.expect("committed state");
+    assert_eq!(live.room.session_generation(&alice), Some(second));
+    assert!(live.room.muji_for_session("alice", &alice).is_none());
+    assert!(
+        !live
+            .room
+            .in_call_state_for_session("alice", &alice)
+            .hand_raised
+    );
+    assert!(live.room.muji_for_session("alice", &sibling).is_some());
+    assert!(
+        live.room
+            .in_call_state_for_session("alice", &sibling)
+            .hand_raised
+    );
+}
+
+/// A refused replacement projection must not clear the incumbent's call state.
+#[tokio::test]
+async fn refused_rejoin_preserves_the_incumbent_call_state() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    let first = OccupancySessionGeneration::mint();
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", first)
+        .await
+        .expect("first join");
+    actor
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("muji update")
+        .expect("current occupant");
+    actor
+        .ask(UpsertInCallState {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            state: crate::xep::InCallPresenceState {
+                hand_raised: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("in-call update")
+        .expect("current occupant");
+    let before = actor.ask(GetSnapshot).await.expect("before replacement");
+    store.set_replay_last_coordinates(true);
+    let replacement = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+            local_domain: "example.com".to_owned(),
+            admission_revision: before.admission_revision,
+            session: OccupancySessionGeneration::mint(),
+        })
+        .await;
+    assert!(matches!(
+        replacement,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+    let after = actor.ask(GetSnapshot).await.expect("after refusal");
+    assert_eq!(after.room.session_generation(&alice), Some(first));
+    assert_eq!(
+        after.room.muji_for_session("alice", &alice),
+        before.room.muji_for_session("alice", &alice)
+    );
+    assert_eq!(
+        after.room.in_call_state_for_session("alice", &alice),
+        before.room.in_call_state_for_session("alice", &alice)
     );
 }
 

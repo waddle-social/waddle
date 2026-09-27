@@ -89,6 +89,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
         .expect("room actor");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "juliet".into(),
             real_jid: occupant,
             role: waddle_xmpp::Role::Participant,
@@ -812,6 +813,7 @@ async fn secondary_room_snapshot_failure(fixture: IngressFixture, subject: bool,
         .expect("room actor");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".into(),
             real_jid: sender.clone(),
             role: waddle_xmpp::Role::Moderator,

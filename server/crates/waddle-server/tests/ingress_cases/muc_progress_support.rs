@@ -477,6 +477,7 @@ pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
     for (jid, nick) in [(&a, "alice"), (&submission.sender, "romeo")] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: jid.clone(),
                 role: Role::Participant,
@@ -558,6 +559,7 @@ pub async fn seated_ghost_occupant_is_never_evicted(fixture: IngressFixture) {
     for (jid, nick) in [(&a, "alice"), (&b, "ben"), (&submission.sender, "romeo")] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid: jid.clone(),
                 role: Role::Participant,

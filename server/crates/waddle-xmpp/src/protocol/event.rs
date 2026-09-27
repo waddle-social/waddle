@@ -249,6 +249,8 @@ pub struct StanzaContext<'a> {
     /// The current MUC occupant-session generation, when this stanza
     /// came through a room-scoped connection path that carried one.
     pub occupant_session: Option<OccupancySessionGeneration>,
+    /// SFU binding captured before the asynchronous room authorization check.
+    pub participant_registration: Option<waddle_sfu::ParticipantRegistrationExpectation>,
     /// Media grants derived by the websocket layer's Muji gate from
     /// the sender's current XEP-0045 role, at the moment the gate
     /// authorized this stanza. `Some` only for Muji Jingle IQs that

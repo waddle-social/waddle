@@ -175,17 +175,29 @@ async fn forward_remote_resource_force_detach(
     socket_node: &NodeId,
     request: ForceDetachRequest,
 ) {
+    // Socket cleanup unregisters on this owner before acknowledging detach.
+    // Release the registration map before waiting for that acknowledgement.
+    let occupancy_session = {
+        let registrations = bridge.remote_owner_resources.lock().await;
+        registrations
+            .get(jid)
+            .filter(|registration| registration.registration_id == registration_id)
+            .map(|registration| registration.occupancy_session)
+    };
     let mut handle = RelayHandle::new(socket_node.clone(), bridge.stop_token.clone())
         .with_ask_timeouts(bridge.mailbox_timeout, bridge.reply_timeout);
-    let outcome = match handle
-        .force_detach_remote_user_resource(RelayForceDetachRemoteUserResource {
+    let outcome = match send_force_detach(
+        &mut handle,
+        RelayForceDetachRemoteUserResource {
             jid: jid.clone(),
             registration_id,
+            occupancy_session,
             origin: request.origin,
             requester_bare_jid: request.requester_bare_jid,
             trace: RelayTraceContext::default(),
-        })
-        .await
+        },
+    )
+    .await
     {
         Ok(reply) => reply.outcome,
         Err(error) => {
@@ -198,4 +210,108 @@ async fn forward_remote_resource_force_detach(
         }
     };
     let _ = request.ack.send(outcome);
+}
+
+async fn send_force_detach(
+    handle: &mut RelayHandle,
+    message: RelayForceDetachRemoteUserResource,
+) -> Result<RelayForceDetachRemoteUserResourceReply, RelayAskError> {
+    #[cfg(test)]
+    if let Ok(sender) = tests::FORCE_DETACH_RELAY.try_with(Clone::clone) {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        sender
+            .send((message, reply))
+            .await
+            .expect("test relay receives force-detach");
+        return Ok(receiver.await.expect("test relay replies to force-detach"));
+    }
+    handle.force_detach_remote_user_resource(message).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+    use tokio::time::{timeout, Duration};
+    use tokio_util::sync::CancellationToken;
+    use waddle_xmpp::registry::ForceDetachOrigin;
+    use waddle_xmpp_core::OccupancySessionGeneration;
+
+    tokio::task_local! {
+        pub(super) static FORCE_DETACH_RELAY: mpsc::Sender<(
+            RelayForceDetachRemoteUserResource,
+            oneshot::Sender<RelayForceDetachRemoteUserResourceReply>,
+        )>;
+    }
+
+    #[tokio::test]
+    async fn force_detach_forwarder_allows_owner_unregister_before_socket_ack() {
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        let jid: jid::FullJid = "alice@example.test/phone".parse().expect("full jid");
+        let socket_node = NodeId::new("socket".to_owned());
+        let registration_id = RemoteResourceRegistrationId::fresh();
+        let generation = OccupancySessionGeneration::mint();
+        bridge.remote_owner_resources.lock().await.insert(
+            jid.clone(),
+            RemoteOwnerRegistration {
+                occupancy_session: generation,
+                socket_identity: NodeIdentity::new("socket", "epoch"),
+                unregister_pending: false,
+                registration_id,
+                socket_node: socket_node.clone(),
+                socket_generation: RemoteResourceSocketGeneration::next(None),
+                owner: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let (relay_tx, mut relay_rx) = mpsc::channel(1);
+        let (ack, ack_rx) = oneshot::channel();
+        let forwarder = tokio::spawn(FORCE_DETACH_RELAY.scope(relay_tx, {
+            let bridge = Arc::clone(&bridge);
+            let jid = jid.clone();
+            async move {
+                forward_remote_resource_force_detach(
+                    &bridge,
+                    &jid,
+                    registration_id,
+                    &socket_node,
+                    ForceDetachRequest {
+                        origin: ForceDetachOrigin::OwnerManagedRetirement,
+                        requester_bare_jid: jid.to_bare(),
+                        ack,
+                    },
+                )
+                .await;
+            }
+        }));
+        let (request, reply) = timeout(Duration::from_secs(1), relay_rx.recv())
+            .await
+            .expect("forwarder reaches the relay ask")
+            .expect("force-detach request");
+        assert_eq!(request.occupancy_session, Some(generation));
+        assert_eq!(request.registration_id, registration_id);
+
+        // The socket must unregister on this owner before it can acknowledge
+        // detach. Keep the relay reply pending while completing that step.
+        let retired = timeout(Duration::from_secs(1), async {
+            bridge.remote_owner_resources.lock().await.remove(&jid)
+        })
+        .await
+        .expect("owner registration map must be available before the socket ACK")
+        .expect("incumbent registration remains until unregister");
+        assert_eq!(retired.occupancy_session, generation);
+        reply
+            .send(RelayForceDetachRemoteUserResourceReply {
+                outcome: ForceDetachOutcome::Detached,
+                status: RelayRemoteResourceForceDetachStatus::Detached,
+            })
+            .expect("forwarder still awaits the socket ACK");
+        assert_eq!(
+            ack_rx.await.expect("forwarded ACK"),
+            ForceDetachOutcome::Detached
+        );
+        forwarder.await.expect("forwarder completes");
+    }
 }

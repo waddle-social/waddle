@@ -477,6 +477,7 @@ async fn moderation_flip_drain_replays_persisted_voice_changes_to_sfu() {
     let (actor, _) = actor_with_outbox(state.as_ref(), &room_jid, lifecycle).await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_owned(),
             real_jid: recipient.clone(),
             role: Role::Visitor,
@@ -581,6 +582,7 @@ async fn managed_members_only_drain_replays_persisted_voice_changes_to_sfu() {
     .await;
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "alice".to_owned(),
             real_jid: recipient.clone(),
             role: Role::Visitor,

@@ -265,6 +265,7 @@ fn creator_join() -> JoinWithAffiliation {
 
 fn legacy_join() -> Join {
     Join {
+        session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         real_jid: "legacy@example.com/web".parse().expect("full JID"),
         nick: "legacy".to_string(),
         role: Role::Participant,

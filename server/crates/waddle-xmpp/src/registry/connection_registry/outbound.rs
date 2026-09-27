@@ -203,6 +203,8 @@ impl OutboundStanza {
 /// single-message turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForceDetachOrigin {
+    /// A fresh bind must terminally retire this occupancy before replacing it.
+    FreshBindReplacement,
     /// A cross-node XEP-0198 resume is replacing a still-live stream.
     CrossNodeResume,
     /// A `UserRegistryActor` is retiring a stale actor before claim reuse.

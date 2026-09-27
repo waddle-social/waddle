@@ -63,6 +63,7 @@ async fn inbox_push_receipt(fixture: IngressFixture, disconnect: bool) {
         }
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid: occupant.clone(),
                 role: waddle_xmpp::Role::Participant,

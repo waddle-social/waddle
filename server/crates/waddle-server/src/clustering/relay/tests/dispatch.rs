@@ -27,6 +27,9 @@ async fn ordered_delivery_timeout_aborts_reserved_effect_before_commit() {
     };
     let bridge = OrderedRelayDeliveryBridge::new(CancellationToken::new(), &config);
     bridge.wire(Arc::new(OrderedRelayDeliveryServices {
+        occupancy_database: crate::db::Database::in_memory("relay-dispatch-authority")
+            .await
+            .expect("open occupancy database"),
         claim_store: Arc::new(HangingClaimStore),
         allowlist_store: Arc::new(NoopAllowlist),
         node_lease: Arc::new(NoopNodeLease),

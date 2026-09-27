@@ -791,7 +791,7 @@ async fn local_demotion_discards_in_flight_promotion_retry_restore() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
 
     registry.forget_claim_locally(stream_id).await;
 
@@ -4201,6 +4201,74 @@ async fn invalidate_sessions_for_jid_preserves_rows_until_confirmed() {
 }
 
 #[tokio::test]
+async fn generation_invalidation_preserves_detached_and_claimed_successors() {
+    use super::super::persistence::InMemorySmPersistence;
+
+    // Both the displaced generation and its same-full-JID successor can be
+    // detached or held by a resume in progress. Only the selected generation
+    // transfers to promotion custody, regardless of which map contains it.
+    for old_claimed in [false, true] {
+        for successor_claimed in [false, true] {
+            let storage = std::sync::Arc::new(InMemorySmPersistence::new());
+            let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+            let jid: FullJid = "alice@example.com/generation-invalidation".parse().unwrap();
+            let old = realistic_test_session_for_jid("displaced", jid.clone());
+            let old_generation = old.occupancy_session;
+            let successor = realistic_test_session_for_jid("successor", jid.clone());
+            let successor_generation = successor.occupancy_session;
+            // Model snapshots persisted by different nodes then recovered
+            // together. Sequential local stores intentionally displace the
+            // previous full-JID session before invalidation can inspect it.
+            for session in [old, successor] {
+                InMemorySmSessionRegistry::new()
+                    .with_persistence(storage.clone())
+                    .store_session(session)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(registry.restore_from_persistence().await.unwrap(), 2);
+            if old_claimed {
+                registry.claim_session("displaced").await.unwrap().unwrap();
+            }
+            if successor_claimed {
+                registry.claim_session("successor").await.unwrap().unwrap();
+            }
+
+            let removed = registry
+                .invalidate_sessions_for_generation(&jid, old_generation)
+                .await
+                .unwrap();
+            assert_eq!(removed.len(), 1);
+            assert_eq!(removed[0].stream_id, "displaced");
+            assert_eq!(removed[0].occupancy_session, old_generation);
+            assert_eq!(removed[0].unacked_stanzas.len(), 2);
+            assert!(registry.claim_session("displaced").await.unwrap().is_none());
+            let old_id = crate::pending_delivery::SmSessionId::new("displaced");
+            let successor_id = crate::pending_delivery::SmSessionId::new("successor");
+            assert!(
+                storage.get_session(&old_id).await.unwrap().is_some(),
+                "promotion retains the old durable row until confirmed"
+            );
+            registry.confirm_drained("displaced").await;
+            assert!(storage.get_session(&old_id).await.unwrap().is_none());
+            let durable_successor = storage.get_session(&successor_id).await.unwrap().unwrap();
+            assert_eq!(durable_successor.occupancy_session, successor_generation);
+            assert_eq!(storage.list_unacked(&successor_id).await.unwrap().len(), 2);
+            if !successor_claimed {
+                registry.claim_session("successor").await.unwrap().unwrap();
+            }
+            let Some(SmClaimCompletion::Resumed(resumed)) =
+                registry.complete_claim("successor").await.unwrap()
+            else {
+                panic!("successor remains resumable");
+            };
+            assert_eq!(resumed.occupancy_session, successor_generation);
+            assert_eq!(resumed.unacked_stanzas.len(), 2);
+        }
+    }
+}
+
+#[tokio::test]
 async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
     // Issue #1098: sessions whose resume window closed during the
     // server's downtime must NOT be durably deleted at restore time —
@@ -4652,7 +4720,7 @@ async fn assert_ambiguous_claim_survives_displacement(
         .pending_promotions
         .read()
         .expect("displaced sessions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(!registry
         .sessions
         .read()
@@ -4718,7 +4786,7 @@ async fn assert_ambiguous_claim_survives_displacement(
             .pending_promotions
             .read()
             .expect("pending promotions")
-            .contains(old_stream));
+            .contains_key(old_stream));
         let drained = registry.drain_expired().await.expect("drain retry session");
         assert!(drained
             .iter()
@@ -4732,7 +4800,7 @@ async fn assert_ambiguous_claim_survives_displacement(
             .pending_promotions
             .read()
             .expect("displaced sessions")
-            .contains(old_stream));
+            .contains_key(old_stream));
     }
     assert!(
         crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
@@ -4752,7 +4820,7 @@ async fn assert_ambiguous_claim_survives_displacement(
         .pending_promotions
         .read()
         .expect("displaced sessions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(!registry
         .claim_fences
         .read()
@@ -4865,7 +4933,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(!registry
         .sessions
         .read()
@@ -4903,7 +4971,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(registry
         .claim_store
         .current_claim(&entity)
@@ -4946,7 +5014,7 @@ async fn cancelled_confirm_retains_exact_release_after_durable_delete() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
     store
         .hang_release
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4970,7 +5038,7 @@ async fn cancelled_confirm_retains_exact_release_after_durable_delete() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert!(persistence
         .get_session(&crate::pending_delivery::SmSessionId::new(stream_id))
         .await
@@ -5122,7 +5190,7 @@ async fn reclaimed_hydration_does_not_publish_over_a_pending_promotion() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
 }
 
 #[tokio::test]
@@ -5189,7 +5257,13 @@ fn pending_promotion_blocks_cross_node_exact_repair_transfer() {
         .pending_promotions
         .write()
         .expect("pending promotions")
-        .insert(stream_id.to_string());
+        .insert(
+            stream_id.to_string(),
+            (
+                make_test_jid(),
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            ),
+        );
 
     assert!(!registry
         .transfer_reclaimed_claim_to_exact_release(&entity, &fence, reservation)
@@ -5224,7 +5298,13 @@ async fn promotion_handoff_cancels_stale_identity_reclaimed_reservation() {
         .pending_promotions
         .write()
         .expect("pending promotions")
-        .insert(stream_id.to_string());
+        .insert(
+            stream_id.to_string(),
+            (
+                make_test_jid(),
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            ),
+        );
 
     let outcome = registry
         .release_reclaimed_claim(&entity, &fence, reservation)
@@ -5508,7 +5588,7 @@ async fn displace_stored_session_if_unclaimed_preserves_durable_rows() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains("stream-owner-moved"));
+        .contains_key("stream-owner-moved"));
 
     registry.confirm_drained("stream-owner-moved").await;
     assert!(storage
@@ -5528,7 +5608,7 @@ async fn displace_stored_session_if_unclaimed_preserves_durable_rows() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains("stream-owner-moved"));
+        .contains_key("stream-owner-moved"));
 }
 
 #[tokio::test]
@@ -7421,13 +7501,32 @@ async fn any_resumable_session_probe_covers_durable_rows_and_fails_closed() {
         presence_priority: 0,
         presence_payloads: Vec::new(),
     };
+    let row = durable_row("stream-durable", Utc::now());
+    let generation = row.occupancy_session;
     storage
-        .upsert_session(durable_row("stream-durable", Utc::now()))
+        .upsert_session(row)
         .await
         .expect("upsert durable row");
     assert!(
         registry.any_resumable_session_for_full_jid(&jid).await,
         "a durable-only row proves the occupancy is still resumable"
+    );
+
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(&jid, generation)
+            .await,
+        super::ResumableSessionProbe::Present,
+    );
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(
+                &jid,
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            )
+            .await,
+        super::ResumableSessionProbe::Absent,
+        "a durable replacement cannot exempt a predecessor's generation",
     );
 
     // Expired durable row: no longer resumable.
@@ -7492,6 +7591,47 @@ async fn typed_resumable_session_probe_surfaces_durable_read_failure() {
         super::ResumableSessionProbe::Failed
     );
     assert!(registry.any_resumable_session_for_full_jid(&jid).await);
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(
+                &jid,
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            )
+            .await,
+        super::ResumableSessionProbe::Failed,
+        "generation-scoped read failures must also fail closed",
+    );
+}
+
+#[tokio::test]
+async fn occupancy_resumable_probe_matches_detached_and_claimed_generation() {
+    let registry = InMemorySmSessionRegistry::new();
+    let session = realistic_test_session("generation-probe");
+    let jid = session.jid.clone();
+    let generation = session.occupancy_session;
+    let other = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    registry.store_session(session).await.unwrap();
+    for claimed in [false, true] {
+        if claimed {
+            registry
+                .claim_session("generation-probe")
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            registry
+                .probe_resumable_session_for_occupancy(&jid, generation)
+                .await,
+            super::ResumableSessionProbe::Present,
+        );
+        assert_eq!(
+            registry
+                .probe_resumable_session_for_occupancy(&jid, other)
+                .await,
+            super::ResumableSessionProbe::Absent,
+        );
+    }
 }
 
 /// Durable store that refuses the whole-table scan. #1803 runs this probe per
@@ -7881,7 +8021,7 @@ async fn defer_claimed_resume_release_unwinds_expired_claimed_session() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert_eq!(
         registry
             .pending_promotion_retries
@@ -7961,7 +8101,7 @@ async fn release_claim_moves_expired_claimed_session_to_promotion() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert_eq!(
         registry
             .pending_promotion_retries
@@ -8032,7 +8172,7 @@ async fn stale_deferred_release_keeps_existing_promotion_ownership() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert_eq!(
         registry
             .pending_promotion_retries
@@ -8090,7 +8230,7 @@ async fn stale_deferred_release_after_local_demotion_falls_back_without_reparkin
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert!(!registry
         .pending_promotion_retries
         .read()
@@ -8100,4 +8240,259 @@ async fn stale_deferred_release_after_local_demotion_falls_back_without_reparkin
         .live_session_ids()
         .expect("live inventory after late stale defer")
         .is_empty());
+}
+
+#[tokio::test]
+async fn detached_occupancy_inventory_and_retirement_skip_claimed_resume() {
+    use super::super::persistence::InMemorySmPersistence;
+    let storage = std::sync::Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let jid: FullJid = "alice@example.com/legacy-cutover".parse().unwrap();
+    let session = realistic_test_session_for_jid("legacy-cutover", jid.clone());
+    let generation = session.occupancy_session;
+    let stream_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+    registry.store_session(session).await.unwrap();
+    assert_eq!(
+        registry.detached_occupancy_inventory().unwrap(),
+        vec![(stream_id.clone(), jid.clone(), generation)]
+    );
+    assert_eq!(
+        registry.occupancy_generations_for_full_jid(&jid).unwrap(),
+        vec![generation]
+    );
+    registry
+        .claim_session(stream_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(registry.detached_occupancy_inventory().unwrap().is_empty());
+    assert_eq!(
+        registry.occupancy_generations_for_full_jid(&jid).unwrap(),
+        vec![generation],
+        "fresh bind must also discover a preexisting claimed resume"
+    );
+    assert!(
+        registry
+            .invalidate_detached_session_for_occupancy(&stream_id, &jid, generation)
+            .await
+            .unwrap()
+            .is_none(),
+        "owner maintenance must not consume an in-flight resume"
+    );
+    registry.release_claim(stream_id.as_str()).await.unwrap();
+    assert!(registry
+        .invalidate_detached_session_for_occupancy(
+            &stream_id,
+            &jid,
+            waddle_xmpp_core::OccupancySessionGeneration::mint()
+        )
+        .await
+        .unwrap()
+        .is_none());
+    let retired = registry
+        .invalidate_detached_session_for_occupancy(&stream_id, &jid, generation)
+        .await
+        .unwrap()
+        .expect("exact locally owned detached snapshot");
+    assert_eq!(retired.occupancy_session, generation);
+    assert_eq!(retired.unacked_stanzas.len(), 2);
+    assert!(
+        storage.get_session(&stream_id).await.unwrap().is_some(),
+        "handoff retains durable custody until promotion is confirmed"
+    );
+    registry.confirm_drained(stream_id.as_str()).await;
+    assert!(storage.get_session(&stream_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn detached_occupancy_retirement_rejects_foreign_or_reacquired_claim() {
+    use super::super::persistence::InMemorySmPersistence;
+    use crate::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    for claimed_resume in [false, true] {
+        for same_owner_new_epoch in [false, true] {
+            let storage = std::sync::Arc::new(InMemorySmPersistence::new());
+            let claims = std::sync::Arc::new(InProcessClaimStore::new());
+            let local = NodeIdentity::new("local", "incarnation");
+            let registry = InMemorySmSessionRegistry::new()
+                .with_persistence(storage.clone())
+                .with_claim_store(claims.clone(), SharedNodeIdentity::new(local.clone()));
+            let jid: FullJid = "alice@example.com/foreign-cutover".parse().unwrap();
+            let session = realistic_test_session_for_jid("foreign-cutover", jid.clone());
+            let generation = session.occupancy_session;
+            let stream_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+            registry.store_session(session).await.unwrap();
+            if claimed_resume {
+                registry
+                    .claim_session(stream_id.as_str())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_owned());
+            let original = claims.current_claim(&entity).await.unwrap().unwrap();
+            claims
+                .release(&entity, &local, original.claim_epoch)
+                .await
+                .unwrap();
+            let successor = if same_owner_new_epoch {
+                local
+            } else {
+                NodeIdentity::new("foreign", "incarnation")
+            };
+            let epoch = claims.ensure_claimed(&entity, &successor).await.unwrap();
+            assert_ne!(epoch, original.claim_epoch);
+            assert!(
+                registry
+                    .invalidate_detached_session_for_occupancy(&stream_id, &jid, generation)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a stale local snapshot grants no retirement authority"
+            );
+            assert!(
+                registry
+                    .invalidate_sessions_for_generation(&jid, generation)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "fresh-bind retirement also needs the stored exact claim fence"
+            );
+            assert!(!registry
+                .pending_promotions
+                .read()
+                .unwrap()
+                .contains_key(stream_id.as_str()));
+            assert!(registry
+                .detached_snapshot_matching(&stream_id, |_| true)
+                .unwrap()
+                .is_some());
+            assert!(storage.get_session(&stream_id).await.unwrap().is_some());
+            assert_eq!(storage.list_unacked(&stream_id).await.unwrap().len(), 2);
+            let current = claims.current_claim(&entity).await.unwrap().unwrap();
+            assert_eq!(current.owner, successor);
+            assert_eq!(current.claim_epoch, epoch);
+        }
+    }
+}
+
+#[tokio::test]
+async fn occupancy_custody_survives_claim_and_leased_promotion_without_persistence() {
+    let registry = InMemorySmSessionRegistry::new();
+    let jid: FullJid = "alice@example.com/custody-proof".parse().unwrap();
+    let other_jid: FullJid = "alice@example.com/other".parse().unwrap();
+    let session = realistic_test_session_for_jid("custody-proof", jid.clone());
+    let generation = session.occupancy_session;
+    registry.store_session(session).await.unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    assert!(!registry
+        .has_occupancy_session_custody(&other_jid, generation)
+        .await
+        .unwrap());
+    assert!(!registry
+        .has_occupancy_session_custody(&jid, waddle_xmpp_core::OccupancySessionGeneration::mint())
+        .await
+        .unwrap());
+    registry
+        .claim_session("custody-proof")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    registry.release_claim("custody-proof").await.unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    let leased = registry
+        .invalidate_sessions_for_generation(&jid, generation)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(registry.detached_occupancy_inventory().unwrap().is_empty());
+    assert!(registry
+        .occupancy_generations_for_full_jid(&jid)
+        .unwrap()
+        .is_empty());
+    assert!(
+        registry
+            .has_occupancy_session_custody(&jid, generation)
+            .await
+            .unwrap(),
+        "the active promotion lease retains occupancy metadata outside every payload map"
+    );
+    registry.reinsert_for_retry(leased).await.unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    let retried = registry.drain_expired().await.unwrap();
+    assert_eq!(retried.len(), 1);
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    registry.confirm_drained("custody-proof").await;
+    assert!(!registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn occupancy_custody_includes_expired_foreign_durable_rows_and_read_failures() {
+    use super::super::persistence::SmPersistenceStorage;
+    let storage = std::sync::Arc::new(ScopedProbePersistence::new());
+    let jid: FullJid = "alice@example.com/expired-custody".parse().unwrap();
+    let mut session = realistic_test_session_for_jid("expired-custody", jid.clone());
+    session.max_resume_time = Some(0);
+    let generation = session.occupancy_session;
+    let persisted = super::persistence_codec::detached_to_persisted(&session).unwrap();
+    storage.upsert_session(persisted.clone()).await.unwrap();
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(&jid, generation)
+            .await,
+        ResumableSessionProbe::Absent,
+        "expiry ends resumption only"
+    );
+    assert!(
+        registry
+            .has_occupancy_session_custody(&jid, generation)
+            .await
+            .unwrap(),
+        "a foreign durable payload cannot be ignored because its resume window ended"
+    );
+    assert_eq!(
+        storage
+            .get_session(&persisted.stream_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .occupancy_session,
+        generation
+    );
+    assert!(!registry
+        .has_occupancy_session_custody(&jid, waddle_xmpp_core::OccupancySessionGeneration::mint())
+        .await
+        .unwrap());
+    storage
+        .fail_scoped
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        registry
+            .has_occupancy_session_custody(&jid, generation)
+            .await
+            .is_err(),
+        "a storage outage is not proof of completed retirement"
+    );
 }

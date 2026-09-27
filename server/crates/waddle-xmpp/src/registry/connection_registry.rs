@@ -15,6 +15,7 @@ use tracing::{debug, info, instrument};
 use crate::Stanza;
 
 mod archive_dispatch;
+mod binding;
 mod connections;
 mod outbound;
 mod presence;
@@ -23,6 +24,7 @@ mod sending;
 mod state;
 mod subscriptions;
 
+pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
 pub use outbound::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
     ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance, SendResult,
@@ -36,6 +38,7 @@ pub use state::{LastActivityState, PresenceState};
 /// Thread-safe registry that maps full JIDs to connection entries.
 /// Uses DashMap for concurrent access without explicit locking.
 pub struct ConnectionRegistry {
+    bind_slots: Arc<binding::BindSlots>,
     /// Map of full JID to connection entry (includes sender and carbons status)
     connections: DashMap<FullJid, ConnectionEntry>,
     /// Pending subscription stanzas for offline users (RFC 6121).
@@ -62,6 +65,7 @@ impl ConnectionRegistry {
     pub fn new() -> Self {
         info!("Creating connection registry");
         Self {
+            bind_slots: Arc::new(DashMap::new()),
             connections: DashMap::new(),
             pending_subscription_stanzas: DashMap::new(),
             presence_states: DashMap::new(),

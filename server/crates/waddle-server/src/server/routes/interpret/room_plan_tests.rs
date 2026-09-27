@@ -49,6 +49,7 @@ async fn plan_local_groupchat_prepares_archive_and_inboxes_without_delivery() {
             .expect("persist member affiliation");
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid: jid.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -209,6 +210,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
     for (nick, jid) in [("alice", &alice), ("bob", &bob)] {
         actor
             .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.to_owned(),
                 real_jid: jid.clone(),
                 role: waddle_xmpp::Role::Participant,
@@ -459,6 +461,7 @@ async fn large_room_plan_commits(fixture: crate::ingress::test_support::IngressF
         .expect("sender membership");
     actor
         .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".to_owned(),
             real_jid: sender.clone(),
             role: waddle_xmpp::Role::Participant,

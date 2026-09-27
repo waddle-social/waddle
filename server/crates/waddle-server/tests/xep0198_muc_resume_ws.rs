@@ -250,3 +250,129 @@ async fn successful_resume_preserves_room_generation_without_leave_or_rejoin() {
     observe_message_without_departure(&mut observer, &alice_occupant, "after-resumed-detach").await;
     observer.close().await.expect("observer closes");
 }
+
+async fn fresh_bind_retires_previous_room_generation(detach_for_resume: bool) {
+    let directory = tempfile::tempdir().expect("database directory");
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("replacement.db").display()
+    );
+    let server = TestServer::start_persistent_with_extra_accounts(
+        &database_url,
+        &[("alice", "muc-replacement-password")],
+    );
+    let mut observer = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        "localhost",
+        "admin",
+        server.fixed_account_password(),
+        "observer",
+    )
+    .await
+    .expect("observer connects");
+    let mut original = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        "localhost",
+        "alice",
+        "muc-replacement-password",
+        "phone",
+    )
+    .await
+    .expect("original connects");
+    let room: BareJid = "replacement-contract@muc.localhost".parse().unwrap();
+    let alice_occupant = room.with_resource_str("alice").unwrap();
+    join(&mut observer, &room.with_resource_str("observer").unwrap()).await;
+    let stream = if detach_for_resume {
+        send(
+            &mut original,
+            Element::builder("enable", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .build(),
+        )
+        .await;
+        let enabled: Element = original.recv().await.unwrap().parse().unwrap();
+        assert!(enabled.is("enabled", SM_NS));
+        Some(SmSessionId::new(enabled.attr("id").unwrap()))
+    } else {
+        None
+    };
+    join(&mut original, &alice_occupant).await;
+    let initial: Element = observer.recv().await.unwrap().parse().unwrap();
+    let initial = Presence::try_from(initial).unwrap();
+    assert_eq!(initial.from, Some(alice_occupant.clone().into()));
+    assert_eq!(initial.type_, PresenceType::None);
+    let mut original = Some(original);
+    if let Some(stream) = &stream {
+        drop(original.take());
+        let storage = DatabaseSmPersistence::open(Some(&database_url))
+            .await
+            .unwrap();
+        wait_for_detached(&storage, stream, 1).await;
+    }
+
+    // A fresh bind of the same full JID is a new occupancy, even if the old
+    // transport could have resumed. Its bind response waits for retirement.
+    let mut replacement = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        "localhost",
+        "alice",
+        "muc-replacement-password",
+        "phone",
+    )
+    .await
+    .expect("fresh replacement binds after retirement");
+    let departure: Element = observer
+        .recv_matching(|frame| frame.contains("unavailable"))
+        .await
+        .expect("old occupancy departure")
+        .parse()
+        .unwrap();
+    let departure = Presence::try_from(departure).unwrap();
+    assert_eq!(departure.from, Some(alice_occupant.clone().into()));
+    assert_eq!(departure.type_, PresenceType::Unavailable);
+
+    send_room_message(&mut replacement, &room, "before-replacement-join").await;
+    let rejected: Element = replacement
+        .recv_matching(|frame| frame.contains("before-replacement-join"))
+        .await
+        .expect("unjoined successor message response")
+        .parse()
+        .unwrap();
+    assert_eq!(
+        rejected.attr("type"),
+        Some("error"),
+        "a fresh bind cannot inherit the old room seat"
+    );
+
+    join(&mut replacement, &alice_occupant).await;
+    let joined: Element = observer
+        .recv_matching(|frame| frame.contains("presence"))
+        .await
+        .expect("replacement join broadcast")
+        .parse()
+        .unwrap();
+    let joined = Presence::try_from(joined).unwrap();
+    assert_eq!(joined.from, Some(alice_occupant.clone().into()));
+    assert_eq!(joined.type_, PresenceType::None);
+    // A late drop of the old transport must not retire the replacement.
+    drop(original);
+    send_room_message(&mut replacement, &room, "after-replacement-join").await;
+    observe_message_without_departure(&mut observer, &alice_occupant, "after-replacement-join")
+        .await;
+    replacement
+        .recv_matching(|frame| frame.contains("after-replacement-join"))
+        .await
+        .expect("replacement receives its room reflection");
+    replacement.close().await.unwrap();
+    observer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_bind_retires_live_room_occupancy_before_replacement_joins() {
+    fresh_bind_retires_previous_room_generation(false).await;
+}
+
+#[tokio::test]
+async fn fresh_bind_retires_resumable_room_occupancy_before_replacement_joins() {
+    fresh_bind_retires_previous_room_generation(true).await;
+}
