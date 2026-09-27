@@ -17,7 +17,7 @@ import type { TimelineMessage } from "@/lib/chat-ui";
 
 export type AuthorRef = Partial<Pick<
   TimelineMessage,
-  "authorJid" | "authorOccupantJid" | "authorRealJid" | "authorAvatarJid" | "isSelf" | "createdAt" | "createdAtSource"
+  "authorJid" | "authorOccupantJid" | "authorRealJid" | "authorAvatarJid" | "isSelf" | "createdAt" | "createdAtSource" | "deliveryStatus"
 >>;
 
 function bare(jid: string | null | undefined): string | null {
@@ -87,6 +87,18 @@ function occupantRealJid(directory: OccupantJidDirectory, occupantJid: string): 
 }
 
 /**
+ * A row this client sent or saw echoed live under its current nick. A
+ * room row's `isSelf` otherwise only means "same nick as ours now", which
+ * a past occupant of that nick shares, so it never names us on its own.
+ */
+function isOwnSend(author: AuthorRef): boolean {
+  if (!author.isSelf) return false;
+  return author.deliveryStatus !== undefined
+    || author.createdAtSource === "fallback"
+    || author.createdAtSource === "queued";
+}
+
+/**
  * Resolve a timeline/thread/search author to the bare JID whose avatar to
  * show, or `null` for initials.
  */
@@ -95,9 +107,10 @@ export function resolveAuthorJid(
   directory: OccupantJidDirectory,
   selfJid?: string | null,
 ): string | null {
-  if (author.isSelf && selfJid) return bare(selfJid);
+  // The archive's real JID is authoritative, even over a self flag.
   const real = bare(author.authorRealJid);
   if (real) return real;
+  if (selfJid && isOwnSend(author)) return bare(selfJid);
   // Stamped at live ingest from the occupant mapping in effect then.
   const stamped = bare(author.authorAvatarJid);
   if (stamped) return stamped;
@@ -142,7 +155,7 @@ export function roomOccupantAvatarJidAt(roomJid: string | null | undefined, nick
  * name it.
  */
 export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string): T {
-  if (row.isSelf || row.authorRealJid || row.authorAvatarJid) return row;
+  if (isOwnSend(row) || row.authorRealJid || row.authorAvatarJid) return row;
   const past = row.createdAtSource === "archive" || row.createdAtSource === "delay";
   const author = past
     ? occupantJidDirectory.lookupAt(roomJid, nick, Date.parse(row.createdAt ?? ""))

@@ -15,7 +15,8 @@ import {
 import { button, card, count, kicker } from "styled-system/recipes";
 import type { ChannelSummary } from "@/lib/chat-types";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
-import { conversationPeerAvatarJid, roomOccupantAvatarJid } from "@/lib/avatars/author-jid";
+import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
+import { useCallParticipantAvatarJid } from "@/lib/avatars/use-call-participant-avatar";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { isForumChannel } from "@/lib/channel-types";
 import {
@@ -137,6 +138,7 @@ const dmCallActivities = computed(() => props.dmCallActivities ?? {});
 const callState = useStore($callState);
 // Whether a DM peer is in a call (their XEP-0108 overlay, ADR-010 Phase 3).
 const { peerInCall } = useInCallOverlays();
+const callParticipantAvatarJid = useCallParticipantAvatarJid();
 const currentActiveDmPeer = computed(() => {
   const current = callState.value;
   return current.phase === "active" && current.kind === "dm"
@@ -745,7 +747,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
                   :key="`${entry.key}:${label}`"
                   class="-ml-1.5 first:ml-0 rounded-full ring-2 ring-card"
                 >
-                  <UserAvatar :name="label" :jid="roomOccupantAvatarJid(entry.roomJid, label)" size="xs" />
+                  <UserAvatar :name="label" :jid="callParticipantAvatarJid(entry.roomJid, label)" size="xs" />
                 </span>
               </span>
               <span class="type-caption min-w-0 truncate text-muted-foreground">

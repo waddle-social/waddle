@@ -1,6 +1,7 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { LiveRoomMessage } from "@/lib/xmpp-client";
+import { barePeerJid } from "@/lib/xmpp/jid";
 
 export function mapLiveRoomMessageToTimeline(
   session: WaddleSession,
@@ -16,7 +17,11 @@ export function mapLiveRoomMessageToTimeline(
     body: msg.body,
     createdAt: msg.createdAt,
     createdAtSource: msg.createdAtSource,
-    isSelf: msg.nick === session.username,
+    // The archive's real JID decides; nick equality is only a fallback
+    // for rows without one (a past occupant may have used our nick).
+    isSelf: msg.authorRealJid
+      ? barePeerJid(msg.authorRealJid).toLowerCase() === barePeerJid(session.jid).toLowerCase()
+      : msg.nick === session.username,
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.reactionTargetId) tm.reactionTargetId = msg.reactionTargetId;

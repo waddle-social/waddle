@@ -109,6 +109,44 @@ describe("peer avatars on list surfaces", () => {
   });
 });
 
+describe("call participant stacks", () => {
+  test("Home call cards resolve participants through the Muji owner's real JID", async () => {
+    $mucCallParticipants.set({ "general@conference.example.com": ["alice", "bob"] });
+    $mucCallParticipantOwners.set({
+      "general@conference.example.com": [{ nick: "alice", realJid: "alice@example.com/web" }],
+    });
+    // Bob only has a room disclosure; Alice has none, so only the owner JID can name her.
+    occupantJidDirectory.record("general@conference.example.com", "bob", "bob@example.com");
+    await seedAvatars(["alice@example.com", "bob@example.com"]);
+
+    const html = await renderVueComponent(
+      "../src/components/chat/HomeDashboard.vue",
+      {
+        spaces: [],
+        channels: [{ id: "general", name: "General", jid: "general@conference.example.com", spaceId: "team" }],
+        contacts: [],
+        isLoading: false,
+        channelUnreadMap: {},
+        activeChannelJids: new Set(),
+        dmConversations: [],
+        callParticipantCounts: { "general@conference.example.com": 2 },
+        callParticipants: { "general@conference.example.com": ["alice", "bob"] },
+      },
+      import.meta.url,
+    );
+
+    expect(html).toContain(`src="${avatarFor("alice@example.com")}"`);
+    expect(html).toContain(`src="${avatarFor("bob@example.com")}"`);
+  });
+
+  test("the Rooms page uses the same call-participant resolver as the dock and banner", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/components/community/pages/RoomsPage.vue", import.meta.url), "utf8");
+    expect(source).toContain("jid: callParticipantAvatarJid(tile.roomJid, nick)");
+    expect(source).not.toContain("roomOccupantAvatarJid");
+  });
+});
+
 describe("own avatar", () => {
   const session = {
     session_id: "s",

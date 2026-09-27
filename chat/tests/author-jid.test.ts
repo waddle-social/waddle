@@ -25,7 +25,7 @@ afterEach(() => occupantJidDirectory.clear());
 describe("resolveAuthorJid", () => {
   test("self rows resolve to our own bare JID", () => {
     const { directory } = directoryAt();
-    expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me` }, directory, "me@waddle.social/web"))
+    expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAtSource: "fallback" }, directory, "me@waddle.social/web"))
       .toBe("me@waddle.social");
   });
 
@@ -146,8 +146,52 @@ describe("nick reuse never re-attributes past rows", () => {
 
   test("stamping leaves self rows, archive real JIDs and unknown occupants alone", () => {
     occupantJidDirectory.record(ROOM, "sam", "alice@waddle.social");
-    expect(stampLiveRoomAuthor({ isSelf: true }, ROOM, "sam").authorAvatarJid).toBeUndefined();
+    expect(stampLiveRoomAuthor({ isSelf: true, createdAtSource: "fallback" }, ROOM, "sam").authorAvatarJid).toBeUndefined();
     expect(stampLiveRoomAuthor({ authorRealJid: "carol@waddle.social" }, ROOM, "sam").authorAvatarJid).toBeUndefined();
     expect(stampLiveRoomAuthor({}, ROOM, "nobody").authorAvatarJid).toBeUndefined();
   });
 });
+
+describe("self attribution never comes from nick equality alone", () => {
+  test("an archived row by a past holder of our nick shows the archive's real JID, not our face", () => {
+    const { directory } = directoryAt();
+    expect(resolveAuthorJid({
+      isSelf: true,
+      authorOccupantJid: `${ROOM}/me`,
+      authorRealJid: "previous-me@waddle.social",
+      createdAt: at(1),
+      createdAtSource: "archive",
+    }, directory, "me@waddle.social/web")).toBe("previous-me@waddle.social");
+  });
+
+  test("an archived same-nick row without a real JID uses the mapping of its time, not our JID", () => {
+    const { directory, setMinutes } = directoryAt();
+    directory.record(ROOM, "me", "previous-me@waddle.social");
+    const past = { isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAt: at(1), createdAtSource: "archive" as const };
+    setMinutes(10);
+    directory.record(ROOM, "me", "me@waddle.social");
+    expect(resolveAuthorJid(past, directory, "me@waddle.social/web")).toBe("previous-me@waddle.social");
+    // Nobody mapped at the time: initials rather than our face.
+    expect(resolveAuthorJid({ ...past, createdAt: at(-5) }, directory, "me@waddle.social/web")).toBeNull();
+  });
+
+  test("our own sends and live echoes still resolve to us", () => {
+    const { directory } = directoryAt();
+    const selfJid = "me@waddle.social/web";
+    expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me`, deliveryStatus: "sending" }, directory, selfJid))
+      .toBe("me@waddle.social");
+    expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAtSource: "fallback", createdAt: at(1) }, directory, selfJid))
+      .toBe("me@waddle.social");
+  });
+
+  test("stamping still pins a past same-nick row that merely matches our nick", () => {
+    occupantJidDirectory.record(ROOM, "me", "previous-me@waddle.social");
+    const row = stampLiveRoomAuthor(
+      { isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAt: new Date(Date.now() + 1000).toISOString(), createdAtSource: "archive" },
+      ROOM,
+      "me",
+    );
+    expect(row.authorAvatarJid).toBe("previous-me@waddle.social");
+  });
+});
+

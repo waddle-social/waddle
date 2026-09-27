@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { Menu } from "lucide-vue-next";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
-import { roomOccupantAvatarJid } from "@/lib/avatars/author-jid";
+import { useCallParticipantAvatarJid } from "@/lib/avatars/use-call-participant-avatar";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import { buildHomeChannelUnreadMap } from "@/home/dashboard-props";
@@ -63,6 +63,8 @@ const {
   handleNewGroupDm,
   handleAddPeopleToDm,
 } = props.controller;
+
+const callParticipantAvatarJid = useCallParticipantAvatarJid();
 
 interface RoomTile {
   channel: ChannelSummary;
@@ -159,7 +161,7 @@ const liveCount = computed(() => tiles.value.filter((tile) => tile.live).length)
 function tileAvatars(tile: RoomTile): { nick: string; jid: string | null }[] {
   return tile.nicks.slice(0, 4).map((nick) => ({
     nick,
-    jid: roomOccupantAvatarJid(tile.roomJid, nick),
+    jid: callParticipantAvatarJid(tile.roomJid, nick),
   }));
 }
 
