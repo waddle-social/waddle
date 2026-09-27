@@ -502,8 +502,19 @@ schema.#Project & {
 			inputs: _rustInputs
 		}
 
-		test: _nextestTask & {
+		test: schema.#Task & {
+			// Workspace tests read chart and infrastructure fixtures outside the
+			// Rust source snapshot, and CUE scenario tests need the host cache.
+			// cuenv 0.56 rejects ../ inputs and removes HOME in a hermetic task.
+			hermetic: false
+			command:  "cargo"
+			dir: from: "caller"
 			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]
+			inputs: list.Concat([_rustInputs, [
+				"charts/waddle-server/**",
+				"../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+				"../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
+			]])
 		}
 
 		// nextest cannot run doctests; keep them verified via cargo test --doc.
