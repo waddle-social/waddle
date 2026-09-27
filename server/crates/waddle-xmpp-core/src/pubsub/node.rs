@@ -556,6 +556,23 @@ impl NodeConfig {
         }
     }
 
+    /// Whether a stored config for a well-known PEP node should be
+    /// rewritten to [`Self::pep_for_node`].
+    ///
+    /// Avatar nodes are repaired only from the untouched legacy
+    /// Presence default (`pep_default()`); any other stored config is an
+    /// owner choice made via `configure` and is kept.
+    pub fn needs_reconcile(node: &str, existing: &Self) -> bool {
+        if *existing == Self::pep_for_node(node) {
+            return false;
+        }
+        if node == super::pep::PEP_NODE_AVATAR_DATA || node == super::pep::PEP_NODE_AVATAR_METADATA
+        {
+            return *existing == Self::pep_default();
+        }
+        true
+    }
+
     /// XEP-0490 §3 Message Displayed Synchronization node defaults.
     ///
     /// The XEP mandates the publishing client send these as

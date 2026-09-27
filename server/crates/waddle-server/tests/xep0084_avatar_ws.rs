@@ -1499,3 +1499,58 @@ async fn republish_reconciles_presence_avatar_nodes_to_open() {
     let _ = bob.close().await;
     let _ = admin.close().await;
 }
+
+// An owner's explicit non-default configure (here `roster`) is a privacy
+// choice, not a legacy node: the next avatar publish MUST NOT reopen it.
+#[tokio::test]
+async fn republish_keeps_owner_configured_avatar_access_model() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let mut admin = admin_client(&server, "owner-choice-admin").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    wire_publish_avatar(&mut admin, &admin_bare, "owner-choice-1").await;
+    for node in [NS_AVATAR_DATA, NS_AVATAR_METADATA] {
+        let resp = iq_set_to(
+            &mut admin,
+            &format!("owner-choice-configure-{node}"),
+            &admin_bare,
+            &format!(
+                r#"<pubsub xmlns="http://jabber.org/protocol/pubsub#owner"><configure node="{node}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field><field var="pubsub#access_model"><value>roster</value></field></x></configure></pubsub>"#
+            ),
+        )
+        .await;
+        assert!(
+            resp.contains(r#"type='result'"#),
+            "configure {node}: {resp}"
+        );
+    }
+    wire_publish_avatar(&mut admin, &admin_bare, "owner-choice-2").await;
+
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "owner-choice-bob",
+    )
+    .await
+    .expect("bob connect");
+    for node in [NS_AVATAR_METADATA, NS_AVATAR_DATA] {
+        let resp = iq_get_to(
+            &mut bob,
+            &format!("owner-choice-read-{node}"),
+            &admin_bare,
+            &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+        )
+        .await;
+        assert!(
+            resp.contains("<forbidden"),
+            "non-roster peer MUST stay denied on an owner-restricted {node}: {resp}"
+        );
+    }
+
+    let _ = bob.close().await;
+    let _ = admin.close().await;
+}

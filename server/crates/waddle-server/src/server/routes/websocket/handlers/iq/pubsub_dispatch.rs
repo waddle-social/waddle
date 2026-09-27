@@ -564,8 +564,8 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// non-roster peers. We reconcile the config in-place so the next
 /// publish lands on a spec-conformant node.
 ///
-/// The canonical config wins over an owner's own `configure`: the next
-/// publish to one of these nodes resets it.
+/// Avatar nodes are only repaired from the untouched legacy default, so
+/// an owner's own `configure` survives (see `NodeConfig::needs_reconcile`).
 ///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
 /// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
@@ -592,10 +592,10 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
             return;
         }
     };
-    let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
-    if existing.config == canonical {
+    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(node, &existing.config) {
         return;
     }
+    let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
     if let Err(error) = storage.update_node_config(owner, node, &canonical).await {
         warn!(
             node,

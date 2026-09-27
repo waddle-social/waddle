@@ -173,10 +173,10 @@ fn parse_metadata_prefers_in_band_info_over_url_info() {
 }
 
 #[test]
-fn parse_metadata_event_reports_set_disable_retract_and_bare_jid() {
-    let full_jid: jid::Jid = "alice@example.com/desktop".parse().expect("valid full JID");
+fn parse_metadata_event_reports_set_disable_and_retract() {
+    let owner: jid::Jid = "alice@example.com".parse().expect("valid bare JID");
     let set = PubsubEvent {
-        from: Some(full_jid.clone()),
+        from: Some(owner.clone()),
         node: NS_AVATAR_METADATA.to_string(),
         items: vec![PubsubEventItem {
             id: Some("avatar-1".to_string()),
@@ -227,7 +227,7 @@ fn parse_metadata_event_reports_set_disable_retract_and_bare_jid() {
     );
 
     let empty_metadata = PubsubEvent {
-        from: Some(full_jid.clone()),
+        from: Some(owner.clone()),
         node: NS_AVATAR_METADATA.to_string(),
         items: vec![PubsubEventItem {
             id: Some(AVATAR_REMOVE_ITEM_ID.to_string()),
@@ -243,7 +243,7 @@ fn parse_metadata_event_reports_set_disable_retract_and_bare_jid() {
     );
 
     let retract = PubsubEvent {
-        from: Some(full_jid),
+        from: Some(owner),
         node: NS_AVATAR_METADATA.to_string(),
         items: vec![PubsubEventItem {
             id: Some("avatar-1".to_string()),
@@ -255,6 +255,61 @@ fn parse_metadata_event_reports_set_disable_retract_and_bare_jid() {
         parse_metadata_event(&retract).and_then(|event| event.avatar_id),
         None
     );
+}
+
+#[test]
+fn parse_metadata_event_rejects_full_jid_senders() {
+    // A peer's client or a MUC occupant (room@muc/nick) is not a PEP
+    // service; only the owner's bare JID may announce avatar changes.
+    for from in ["alice@example.com/desktop", "room@muc.example.com/alice"] {
+        let event = PubsubEvent {
+            from: Some(from.parse().expect("valid full JID")),
+            node: NS_AVATAR_METADATA.to_string(),
+            items: vec![PubsubEventItem {
+                id: Some("avatar-1".to_string()),
+                retracted: true,
+                payload: PubsubEventPayload::Empty,
+            }],
+        };
+        assert!(parse_metadata_event(&event).is_none(), "{from}");
+    }
+}
+
+#[test]
+fn transient_stanza_errors_are_failures_not_absent_avatars() {
+    use crate::error::{StanzaError, StanzaErrorType};
+    let error = |error_type, condition: &str| StanzaError {
+        error_type,
+        condition: condition.to_string(),
+        text: None,
+        application_condition: None,
+    };
+    for transient in [
+        error(StanzaErrorType::Wait, "resource-constraint"),
+        error(StanzaErrorType::Cancel, "remote-server-not-found"),
+        error(StanzaErrorType::Wait, "remote-server-timeout"),
+        error(StanzaErrorType::Cancel, "internal-server-error"),
+    ] {
+        let condition = transient.condition.clone();
+        assert_eq!(
+            AvatarRequestFailure::from_stanza_error(transient, |_| ()),
+            AvatarRequestFailure::Other(()),
+            "{condition}"
+        );
+    }
+    for definitive in [
+        error(StanzaErrorType::Cancel, "item-not-found"),
+        error(StanzaErrorType::Auth, "forbidden"),
+        error(StanzaErrorType::Cancel, "feature-not-implemented"),
+        error(StanzaErrorType::Cancel, "service-unavailable"),
+    ] {
+        let condition = definitive.condition.clone();
+        assert_eq!(
+            AvatarRequestFailure::from_stanza_error(definitive, |_| ()),
+            AvatarRequestFailure::<()>::StanzaError,
+            "{condition}"
+        );
+    }
 }
 
 #[test]

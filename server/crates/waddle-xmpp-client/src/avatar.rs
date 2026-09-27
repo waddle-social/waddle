@@ -24,6 +24,7 @@ use sha1::{Digest, Sha1};
 use std::future::Future;
 use uuid::Uuid;
 
+use crate::error::{StanzaError, StanzaErrorType};
 use crate::pep::build_pep_publish_iq_with_item_id;
 use crate::pubsub_event::{PubsubEvent, PubsubEventPayload};
 
@@ -83,6 +84,29 @@ pub struct VcardPhoto {
 pub enum AvatarRequestFailure<E> {
     StanzaError,
     Other(E),
+}
+
+impl<E> AvatarRequestFailure<E> {
+    /// Classify a stanza error answering an avatar IQ. Definitive answers
+    /// (no node, no vCard, not allowed) mean the peer has no readable
+    /// avatar. Transient ones (`type='wait'`, unreachable or failing
+    /// remote server) are failures, so callers keep the avatar they
+    /// already show instead of clearing it.
+    pub fn from_stanza_error(error: StanzaError, transient: impl FnOnce(StanzaError) -> E) -> Self {
+        let is_transient = matches!(error.error_type, StanzaErrorType::Wait)
+            || matches!(
+                error.condition.as_str(),
+                "remote-server-not-found"
+                    | "remote-server-timeout"
+                    | "internal-server-error"
+                    | "resource-constraint"
+            );
+        if is_transient {
+            Self::Other(transient(error))
+        } else {
+            Self::StanzaError
+        }
+    }
 }
 
 /// A XEP-0084 metadata transition announced by a peer's PEP service.
@@ -265,7 +289,14 @@ pub fn parse_metadata_event(event: &PubsubEvent) -> Option<AvatarChanged> {
     if event.node != NS_AVATAR_METADATA {
         return None;
     }
-    let jid = event.from.as_ref()?.to_bare();
+    // PEP notifications come from the owner's bare JID (XEP-0163 §4.3);
+    // a full-JID sender is a peer's client or a MUC occupant, not a PEP
+    // service, and must not drive avatar state.
+    let from = event.from.as_ref()?;
+    if from.resource().is_some() {
+        return None;
+    }
+    let jid = from.to_bare();
     let item = event.items.first()?;
     if item.retracted {
         return Some(AvatarChanged {
@@ -507,7 +538,9 @@ impl AvatarExt for ClientHandle {
     ) -> ClientResult<Option<AvatarFetch>> {
         request_avatar_with_iq_skipping(jid, known_ids, |stanza| async move {
             self.send_iq(stanza).await.map_err(|error| match error {
-                ClientError::StanzaError(_) => AvatarRequestFailure::StanzaError,
+                ClientError::StanzaError(error) => {
+                    AvatarRequestFailure::from_stanza_error(error, ClientError::StanzaError)
+                }
                 other => AvatarRequestFailure::Other(other),
             })
         })

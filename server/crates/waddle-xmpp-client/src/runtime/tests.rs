@@ -305,7 +305,7 @@ fn app_stanza_emits_standalone_pubsub_retract_and_summary_events() {
 fn app_stanza_emits_typed_avatar_change_without_altering_pubsub_message() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     let stanza: Element = "<message xmlns='jabber:client' type='headline' \
-            from='alice@example.com/desktop' to='bob@example.com'>\
+            from='alice@example.com' to='bob@example.com'>\
         <event xmlns='http://jabber.org/protocol/pubsub#event'>\
           <items node='urn:xmpp:avatar:metadata'>\
             <item id='avatar-1'>\
