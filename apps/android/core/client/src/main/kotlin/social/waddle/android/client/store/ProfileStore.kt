@@ -22,7 +22,10 @@ import social.waddle.client.ffi.WaddleVCard4
  * id that is already held locally; [avatars] separately tracks each
  * JID's CURRENTLY advertised avatar for display.
  */
-class ProfileStore {
+class ProfileStore(
+    /** Total encoded-byte budget of the avatar cache, see [evictOverBudget]. */
+    private val maxCachedAvatarBytes: Long = MAX_CACHED_AVATAR_BYTES,
+) {
     private val _selfVcard = MutableStateFlow<WaddleVCard4?>(null)
 
     /** The account's own published vCard4; `null` until loaded or absent. */
@@ -47,6 +50,9 @@ class ProfileStore {
     private val cacheById = MutableStateFlow<Map<String, Map<String, WaddleAvatar>>>(emptyMap())
 
     private val _avatars = MutableStateFlow<Map<String, WaddleAvatar>>(emptyMap())
+
+    /** JIDs with cached bytes, least recently used first (leaf lock). */
+    private val useOrder = LinkedHashSet<String>()
 
     /**
      * [normalizedBareJid] → currently advertised avatar (the account and
@@ -107,7 +113,48 @@ class ProfileStore {
             cache + (owner to bounded)
         }
         _avatars.update { it + (owner to avatar) }
+        markUsed(owner)
     }
+
+    /** [jid] is in use (rendered or refreshed): last to be evicted. */
+    fun markUsed(jid: String) {
+        val owner = normalizedBareJid(jid)
+        synchronized(useOrder) {
+            useOrder.remove(owner)
+            useOrder.add(owner)
+        }
+    }
+
+    /** Encoded bytes held across every JID and cached item id. */
+    fun cachedAvatarBytes(): Long = cacheById.value.values.sumOf(::bytesOf)
+
+    /**
+     * Bound the cache to its byte budget: drop whole JIDs (current
+     * avatar and every cached id), least recently used first, skipping
+     * [protectedJids] (on screen, own account). Returns the evicted JIDs;
+     * they show initials until their next fetch.
+     */
+    fun evictOverBudget(protectedJids: Set<String>): List<String> {
+        var total = cachedAvatarBytes()
+        if (total <= maxCachedAvatarBytes) return emptyList()
+        val cached = cacheById.value
+        val ordered = synchronized(useOrder) { useOrder.toList() }
+        // Anything cached but never marked used goes first.
+        val candidates = (cached.keys - ordered.toSet()) + ordered
+        val evicted = mutableListOf<String>()
+        for (jid in candidates.filter { it !in protectedJids && it in cached }) {
+            if (total <= maxCachedAvatarBytes) break
+            val size = cached.getValue(jid).let(::bytesOf)
+            cacheById.update { it - jid }
+            _avatars.update { it - jid }
+            synchronized(useOrder) { useOrder.remove(jid) }
+            total -= size
+            evicted += jid
+        }
+        return evicted
+    }
+
+    private fun bytesOf(ids: Map<String, WaddleAvatar>): Long = ids.values.sumOf { it.data.size.toLong() }
 
     /** XEP-0084 §4.3 "no avatar": drop the JID's current avatar. The
      *  id-keyed byte cache is kept — a re-published id must still hit it. */
@@ -122,6 +169,7 @@ class ProfileStore {
         _selfTune.value = null
         cacheById.value = emptyMap()
         _avatars.value = emptyMap()
+        synchronized(useOrder) { useOrder.clear() }
     }
 
     companion object {
@@ -129,5 +177,8 @@ class ProfileStore {
          *  recent ones (an avatar A→B→A flip still skips refetches)
          *  without letting a churn-happy peer grow the cache unbounded. */
         const val MAX_CACHED_AVATAR_IDS_PER_JID = 4
+
+        /** Encoded avatar bytes kept across all peers (~4 MB). */
+        const val MAX_CACHED_AVATAR_BYTES = 4L * 1024 * 1024
     }
 }

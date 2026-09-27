@@ -145,10 +145,10 @@ class XmppSessionManager(
     private val avatarScope = CoroutineScope(SupervisorJob() + dispatcher)
 
     private val avatarRepository = PeerAvatarRepository(
-        avatars = stores.profileStore.avatars,
+        store = stores.profileStore,
         resolver = profile::resolveAvatar,
-        clearAvatar = stores.profileStore::clearAvatar,
         scope = avatarScope,
+        ownJid = { activeSession.ownBareJid },
         clock = clock,
     )
 

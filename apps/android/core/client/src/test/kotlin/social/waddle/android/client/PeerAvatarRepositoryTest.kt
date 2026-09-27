@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.store.ProfileStore
 
@@ -64,17 +65,36 @@ class PeerAvatarRepositoryTest {
         }
     }
 
-    private class Harness(scope: TestScope) {
+    private class Harness(
+        scope: TestScope,
+        budgetBytes: Long = ProfileStore.MAX_CACHED_AVATAR_BYTES,
+        own: String? = null,
+    ) {
         var now = 0L
-        val store = ProfileStore()
+        val store = ProfileStore(maxCachedAvatarBytes = budgetBytes)
         val resolver = ScriptedResolver(store)
         val repository = PeerAvatarRepository(
-            avatars = store.avatars,
+            store = store,
             resolver = resolver,
-            clearAvatar = store::clearAvatar,
             scope = scope.backgroundScope,
+            ownJid = { own },
             clock = { now },
         )
+
+        /** Resolve [jid] to a 4-byte avatar and let the fetch settle. */
+        fun load(scope: TestScope, jid: String, watch: Boolean = false): (() -> Unit)? {
+            resolver.answer(jid, AvatarLookup.Found(testAvatar(jid = jid, id = "id-$jid", data = ByteArray(4))))
+            val release = if (watch) {
+                repository.watch(jid)
+            } else {
+                repository.ensure(jid)
+                null
+            }
+            scope.runCurrent()
+            resolver.releaseAll()
+            scope.runCurrent()
+            return release
+        }
     }
 
     private val alice = "alice@waddle.test"
@@ -317,5 +337,49 @@ class PeerAvatarRepositoryTest {
         h.resolver.releaseAll()
         runCurrent()
         release()
+    }
+
+    @Test
+    fun `the encoded-byte budget evicts the least recently used idle JIDs`() = runTest {
+        val h = Harness(this, budgetBytes = 10)
+        listOf("u1", "u2", "u3", "u4").forEach { h.load(this, "$it@waddle.test") }
+
+        assertTrue(h.store.cachedAvatarBytes() <= 10)
+        assertEquals(setOf("u3@waddle.test", "u4@waddle.test"), h.store.avatars.value.keys)
+        assertTrue(h.store.knownAvatarIds("u1@waddle.test").isEmpty())
+    }
+
+    @Test
+    fun `watched and own JIDs are never evicted`() = runTest {
+        val own = "me@waddle.test"
+        val h = Harness(this, budgetBytes = 10, own = own)
+        h.load(this, own)
+        val release = h.load(this, "shown@waddle.test", watch = true)
+        listOf("u1", "u2", "u3").forEach { h.load(this, "$it@waddle.test") }
+
+        val held = h.store.avatars.value.keys
+        assertTrue(own in held)
+        assertTrue("shown@waddle.test" in held)
+        assertTrue(h.store.cachedAvatarBytes() <= 12)
+
+        // Off screen again: it becomes evictable like any idle JID.
+        checkNotNull(release).invoke()
+        h.load(this, "u4@waddle.test")
+        assertTrue("shown@waddle.test" !in h.store.avatars.value.keys)
+        assertTrue(own in h.store.avatars.value.keys)
+    }
+
+    @Test
+    fun `an evicted JID refetches on its next watch even inside the TTL`() = runTest {
+        val h = Harness(this, budgetBytes = 4)
+        h.load(this, "u1@waddle.test")
+        h.load(this, "u2@waddle.test")
+        assertTrue("u1@waddle.test" !in h.store.avatars.value.keys)
+        val before = h.resolver.calls.count { it.jid == "u1@waddle.test" }
+
+        h.load(this, "u1@waddle.test", watch = true)
+
+        assertEquals(before + 1, h.resolver.calls.count { it.jid == "u1@waddle.test" })
+        assertEquals("id-u1@waddle.test", h.store.avatars.value["u1@waddle.test"]?.id)
     }
 }

@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import social.waddle.android.client.store.ProfileStore
 import social.waddle.client.ffi.WaddleAvatar
 
 /** Outcome of one XEP-0084 avatar resolution for a bare JID. */
@@ -65,10 +66,11 @@ internal fun interface AvatarResolver {
  *   `null` id (§4.3 disable) drops to initials immediately.
  */
 internal class PeerAvatarRepository(
-    override val avatars: StateFlow<Map<String, WaddleAvatar>>,
+    private val store: ProfileStore,
     private val resolver: AvatarResolver,
-    private val clearAvatar: (String) -> Unit,
     private val scope: CoroutineScope,
+    /** The signed-in account; its avatar bytes are never evicted. */
+    private val ownJid: () -> String? = { null },
     private val clock: () -> Long = System::currentTimeMillis,
     maxConcurrent: Int = MAX_CONCURRENT_FETCHES,
 ) : PeerAvatarSource {
@@ -85,6 +87,8 @@ internal class PeerAvatarRepository(
         var rerun = false
         var rerunKnownId: String? = null
     }
+
+    override val avatars: StateFlow<Map<String, WaddleAvatar>> = store.avatars
 
     private val lock = Any()
     private val entries = HashMap<String, Entry>()
@@ -104,6 +108,7 @@ internal class PeerAvatarRepository(
         val key = keyOf(jid) ?: return {}
         synchronized(lock) {
             watchers[key] = (watchers[key] ?: 0) + 1
+            store.markUsed(key)
             if (ticker == null) ticker = scope.launch { revalidateWatched() }
             ensureLocked(key)
         }
@@ -132,6 +137,8 @@ internal class PeerAvatarRepository(
             return
         }
         watchers -= key
+        // Off screen now: its bytes may go if the cache is over budget.
+        evictOverBudgetLocked()
         if (watchers.isEmpty()) {
             ticker?.cancel()
             ticker = null
@@ -162,7 +169,7 @@ internal class PeerAvatarRepository(
                 entry.rerun = false
                 entry.rerunKnownId = null
                 entry.settled = Settled(clock(), RETRY_TTL_MILLIS, currentEpoch)
-                clearAvatar(key)
+                store.clearAvatar(key)
                 return
             }
             entry.settled = null
@@ -214,6 +221,17 @@ internal class PeerAvatarRepository(
         }
     }
 
+    /**
+     * Caller holds [lock]. Enforce the store's byte budget, protecting
+     * watched JIDs and the own account, and forget evicted results so
+     * an evicted JID is never "fresh-found" without bytes: its next
+     * watch/ensure refetches.
+     */
+    private fun evictOverBudgetLocked() {
+        val protectedJids = watchers.keys + setOfNotNull(ownJid()?.let(::normalizedBareJid))
+        store.evictOverBudget(protectedJids).forEach { jid -> entries[jid]?.settled = null }
+    }
+
     private fun commit(key: String, attempt: Attempt, projection: () -> Unit): Boolean = synchronized(lock) {
         if (entries[key]?.attempt !== attempt || attempt.superseded) return@synchronized false
         projection()
@@ -228,6 +246,7 @@ internal class PeerAvatarRepository(
             if (!attempt.superseded) {
                 val ttl = if (outcome is AvatarLookup.Found) POSITIVE_TTL_MILLIS else RETRY_TTL_MILLIS
                 entry.settled = Settled(clock(), ttl, attempt.epoch)
+                if (outcome is AvatarLookup.Found) evictOverBudgetLocked()
             }
             if (entry.rerun) {
                 val knownId = entry.rerunKnownId
