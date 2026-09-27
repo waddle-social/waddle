@@ -210,8 +210,10 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// Atomically promote one persisted SM replay entry into pending delivery
     /// and retire its exact `(origin_stream_id, sequence)` replay row. A
     /// clustered backend performs both writes under the same origin-session
-    /// claim fence. On quota rejection or error, the replay row remains for
-    /// retry. Stores without clustered SM persistence retain the ordinary
+    /// claim fence and makes the surviving session non-resumable: it cannot
+    /// promise complete XEP-0198 replay after removing an unacked stanza.
+    /// On quota rejection or error, the replay row and resume state remain
+    /// for retry. Stores without clustered SM persistence retain the ordinary
     /// fenced-insert behavior.
     async fn insert_fenced_and_prune_unacked(
         &self,

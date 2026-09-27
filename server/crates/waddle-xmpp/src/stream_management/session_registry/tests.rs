@@ -3278,12 +3278,15 @@ async fn test_session_expired() {
     // Create an already-expired session
     let mut session = make_test_session("stream-expired");
     session.max_resume_time = Some(0); // 0 seconds means expired immediately
+    assert!(session.is_expired());
 
     registry.store_session(session).await.unwrap();
 
-    // Wait a tiny bit to ensure expiration
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
+    assert!(registry
+        .claim_session("stream-expired")
+        .await
+        .unwrap()
+        .is_none());
     // Should return None because expired
     let result = registry.take_session("stream-expired").await.unwrap();
     assert!(result.is_none());

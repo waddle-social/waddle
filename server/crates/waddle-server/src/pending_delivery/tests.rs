@@ -3863,7 +3863,7 @@ async fn postgres_two_connection_cap_one_race_accepts_exactly_one_insert() {
 #[tokio::test]
 async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
-    use crate::db::{Database, DatabaseConfig, DatabaseDriver};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
     };
@@ -3876,7 +3876,8 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
         create_postgres_test_schema(&base_url, "pending_atomic_sm_promotion").await;
     let db = Database::from_config(
         "pending-atomic-sm-promotion-test",
-        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.clone()),
+        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
     )
     .await
     .expect("open scoped postgres");
@@ -3912,12 +3913,13 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     .await
     .expect("open fenced pending storage");
     let conn = db.guard().await.expect("db guard");
+    let detached_at_ms = chrono::Utc::now().timestamp_millis();
     conn.execute(
         "INSERT INTO sm_sessions (\
             stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked, \
-            detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, \
+            max_resume_secs, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, \
             blocklist_interested, presence_available, presence_priority \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         crate::db_params![
             stream_id.clone(),
             "atomic@example.com",
@@ -3925,7 +3927,8 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
             0_i64,
             8_i64,
             0_i64,
-            1_i64,
+            120_i64,
+            detached_at_ms,
             120_000_i64,
             0_i64,
             0_i64,
@@ -3936,15 +3939,47 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     )
     .await
     .expect("seed durable session");
+    let mut replay_message = Message::new(Some(jid::Jid::from(bare(&recipient))));
+    replay_message.type_ = MessageType::Chat;
+    replay_message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "persisted replay".to_string(),
+    );
+    let mut replay_xml = Vec::new();
+    waddle_xmpp::Stanza::Message(replay_message)
+        .to_element()
+        .write_to(&mut replay_xml)
+        .expect("serialize replay message");
+    let replay_xml = String::from_utf8(replay_xml).expect("UTF-8 replay message");
     for (stream, sequence) in [(&stream_id, 7_i64), (&stream_id, 8), (&other_stream_id, 7)] {
         conn.execute(
             "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
              VALUES (?, ?, ?, ?)",
-            crate::db_params![stream.clone(), sequence, "<message/>", 1_i64],
+            crate::db_params![stream.clone(), sequence, replay_xml.clone(), 1_i64],
         )
         .await
         .expect("seed replay row");
     }
+    let mut initial_rows = conn
+        .query(
+            "SELECT max_resume_secs, detached_at_ms FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.clone()],
+        )
+        .await
+        .expect("read initial resume window");
+    let initial_row = initial_rows
+        .next()
+        .await
+        .expect("read initial session")
+        .expect("durable session");
+    assert_eq!(initial_row.get::<i64>(0).expect("resume seconds"), 120);
+    assert!(
+        chrono::Utc::now().timestamp_millis()
+            - initial_row.get::<i64>(1).expect("detach timestamp")
+            < 120_000,
+        "the seeded session must initially be resumable"
+    );
+    drop(initial_rows);
     drop(conn);
 
     assert_eq!(
@@ -3954,6 +3989,23 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
             .expect("promote exact replay row"),
         InsertOutcome::Inserted
     );
+    let conn = db.guard().await.expect("db guard");
+    let mut rows = conn
+        .query(
+            "SELECT max_resume_secs, max_resume_duration_ms FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.clone()],
+        )
+        .await
+        .expect("read durable resume bound");
+    let row = rows
+        .next()
+        .await
+        .expect("read resume row")
+        .expect("session row");
+    assert_eq!(row.get::<i64>(0).expect("resume seconds"), 0);
+    assert_eq!(row.get::<i64>(1).expect("resume duration"), 0);
+    drop(rows);
+    drop(conn);
     assert_eq!(
         storage
             .insert_fenced_and_prune_unacked(
@@ -4019,6 +4071,35 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
             .await,
         Err(PendingStorageError::NotOwner { .. })
     ));
+    let successor_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(std::sync::Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+                .await
+                .expect("open successor SM persistence"),
+        ))
+        .with_claim_store(
+            std::sync::Arc::new(PostgresClaimStore::new(db.clone())),
+            SharedNodeIdentity::new(successor.clone()),
+        );
+    assert_eq!(
+        successor_registry
+            .restore_from_persistence()
+            .await
+            .expect("hydrate successor session"),
+        1
+    );
+    assert!(successor_registry
+        .claim_session(&stream_id)
+        .await
+        .expect("try resume expired session")
+        .is_none());
+    let remaining_replay = successor_registry
+        .drain_expired()
+        .await
+        .expect("drain terminal session");
+    assert_eq!(remaining_replay.len(), 1);
+    assert_eq!(remaining_replay[0].unacked_stanzas.len(), 1);
+    assert_eq!(remaining_replay[0].unacked_stanzas[0].sequence, 8);
     let successor_storage = crate::pending_delivery::open_for_cluster_mode(
         Some(&scoped_url),
         QuotaPolicy::CountCap { max_rows: 1 },

@@ -321,6 +321,19 @@ impl DatabasePendingDeliveryStorage {
                     )
                     .await
                     .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+                if removed > 0 {
+                    // Promotion is terminal for this SM stream. A successor
+                    // may hydrate the surviving durable session before Q6
+                    // confirms deletion, but it must not accept a resume
+                    // whose replay suffix now has this sequence missing.
+                    tx.execute(
+                        "UPDATE sm_sessions SET max_resume_secs = 0, \
+                         max_resume_duration_ms = 0 WHERE stream_id = ?",
+                        crate::db_params![origin_stream_id.to_string()],
+                    )
+                    .await
+                    .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+                }
                 if removed == 0
                     && persisted_replay_already_transferred(&mut tx, origin_stream_id, sequence)
                         .await?
