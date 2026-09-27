@@ -166,6 +166,8 @@ fun testArchivedMessage(
     reactionEmojis: List<String> = emptyList(),
     stanzaIdBy: String? = null,
     safetyScores: WaddleSafetyScoresFastening? = null,
+    /** XEP-0045 real author JID from the archived `muc#user` payload. */
+    authorRealJid: String? = null,
 ): WaddleArchivedMessage = WaddleArchivedMessage(
     mamId = mamId,
     queryId = null,
@@ -202,7 +204,7 @@ fun testArchivedMessage(
     forumPostKind = null,
     forumTitle = null,
     isSticker = false,
-    authorRealJid = null,
+    authorRealJid = authorRealJid,
     callThread = null,
     callThreadEnded = null,
     safetyScores = safetyScores,
@@ -296,13 +298,11 @@ fun testAvatar(
     id: String = "a1b2c3",
     mimeType: String = "image/png",
     data: ByteArray = byteArrayOf(1, 2, 3),
-    url: String? = null,
 ): WaddleAvatar = WaddleAvatar(
     jid = jid,
     id = id,
     mimeType = mimeType,
     data = data,
-    url = url,
 )
 
 fun testInboxEntry(

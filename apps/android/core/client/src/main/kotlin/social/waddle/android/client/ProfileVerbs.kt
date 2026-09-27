@@ -78,7 +78,7 @@ internal class ProfileVerbs(
         }
         // Each follow-up remains bound to the original lease. A completed
         // old read cannot issue an avatar IQ through a successor client.
-        fetchAvatarForLease(own, lease)
+        resolveAvatarForLease(own, lease)
         if (!activeSession.isCurrent(lease)) return VerbResult.NotConnected
         return VerbResult.Ok
     }
@@ -95,47 +95,68 @@ internal class ProfileVerbs(
      */
     suspend fun fetchAvatar(jid: String, knownId: String? = null): WaddleAvatar? {
         val lease = activeSession.captureOwnerLease() ?: return null
-        return fetchAvatarForLease(jid, lease, knownId)
+        return (resolveAvatarForLease(jid, lease, knownId) as? AvatarLookup.Found)?.avatar
     }
 
-    private suspend fun fetchAvatarForLease(
+    /**
+     * [fetchAvatar] for the peer-avatar policy: distinguishes "nothing
+     * published" (the store drops to initials) from a failure (the store
+     * is left alone), and projects only through [commit] so a superseded
+     * attempt cannot overwrite a newer `AvatarChanged` outcome.
+     */
+    suspend fun resolveAvatar(
+        jid: String,
+        knownId: String?,
+        commit: (() -> Unit) -> Boolean,
+    ): AvatarLookup {
+        val lease = activeSession.captureOwnerLease() ?: return AvatarLookup.Failed
+        return resolveAvatarForLease(jid, lease, knownId, commit)
+    }
+
+    private suspend fun resolveAvatarForLease(
         jid: String,
         lease: ActiveSession.OwnerLease,
         knownId: String? = null,
-    ): WaddleAvatar? {
+        commit: (() -> Unit) -> Boolean = { projection -> projection(); true },
+    ): AvatarLookup {
         val owner = bareJid(jid)
-        if (knownId != null) {
-            stores.profileStore.cachedAvatar(owner, knownId)?.let { cached ->
-                return if (activeSession.applyIfCurrent(lease) {
-                        stores.profileStore.onAvatar(cached)
-                    }
-                ) {
-                    cached
-                } else {
-                    null
+        val cached = knownId?.let { stores.profileStore.cachedAvatar(owner, it) }
+        val lookup = cached?.let(AvatarLookup::Found) ?: requestAvatar(owner, lease)
+        if (lookup == AvatarLookup.Failed) return lookup
+        var committed = false
+        val current = activeSession.applyIfCurrent(lease) {
+            committed = commit {
+                when (lookup) {
+                    is AvatarLookup.Found -> stores.profileStore.onAvatar(lookup.avatar)
+                    AvatarLookup.Absent -> stores.profileStore.clearAvatar(owner)
+                    AvatarLookup.Failed -> Unit
                 }
             }
         }
+        return if (current && committed) lookup else AvatarLookup.Failed
+    }
+
+    /** One §4.2-aware wire fetch for [owner]; never throws. */
+    private suspend fun requestAvatar(owner: String, lease: ActiveSession.OwnerLease): AvatarLookup {
         val knownIds = stores.profileStore.knownAvatarIds(owner)
         val result = try {
             when (val invocation = activeSession.invokeIfCurrent(lease) { it.requestAvatar(owner, knownIds) }) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
-                -> return null
+                -> return AvatarLookup.Failed
                 is ActiveSession.LeaseInvocation.Completed -> invocation.value
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
-            null
-        } ?: return null
+            return AvatarLookup.Failed
+        } ?: return AvatarLookup.Absent
         // An id-only result means the FFI skipped the data fetch: the
         // bytes for that id are, by construction, in the cache we
-        // handed it — re-mark them current.
-        val avatar = result.avatar
-            ?: stores.profileStore.cachedAvatar(owner, result.id)
-            ?: return null
-        return if (activeSession.applyIfCurrent(lease) { stores.profileStore.onAvatar(avatar) }) avatar else null
+        // handed it — re-mark them current. Keyed by the requested
+        // owner so display lookups hit whatever form the wire echoed.
+        val avatar = result.avatar ?: stores.profileStore.cachedAvatar(owner, result.id)
+        return avatar?.let { AvatarLookup.Found(it.copy(jid = owner)) } ?: AvatarLookup.Failed
     }
 
     /**
@@ -198,7 +219,6 @@ internal class ProfileVerbs(
                     id = avatarItemId(data),
                     mimeType = mimeType,
                     data = data,
-                    url = null,
                 ),
             )
         }

@@ -64,6 +64,8 @@ class XmppSessionManager(
     connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
     /** Test seam for the stale terminal-auth completion race. */
     private val beforeTerminalAuthCommit: suspend () -> Unit = {},
+    /** Wall clock for the peer-avatar TTLs. */
+    clock: () -> Long = System::currentTimeMillis,
 ) {
     private val stores = SessionStores()
 
@@ -80,6 +82,7 @@ class XmppSessionManager(
     val roomMembersStore = stores.roomMembersStore
     val stickerPackStore = stores.stickerPackStore
     val profileStore = stores.profileStore
+    val occupantJidStore = stores.occupantJidStore
     val extensionCommandStore = stores.extensionCommandStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
@@ -118,7 +121,14 @@ class XmppSessionManager(
     )
 
     private val router: XmppEventRouter =
-        XmppEventRouter(activeSession, stores, resume, readState, callStore) { peer, timestamp ->
+        XmppEventRouter(
+            activeSession,
+            stores,
+            resume,
+            readState,
+            callStore,
+            onAvatarChanged = { jid, avatarId -> avatarRepository.onAvatarChanged(jid, avatarId) },
+        ) { peer, timestamp ->
             persistDmSeen(peer, timestamp)
         }
 
@@ -130,6 +140,23 @@ class XmppSessionManager(
 
     private val stickers = StickerVerbs(activeSession, stores)
     private val profile = ProfileVerbs(activeSession, stores)
+
+    /** Manager-lifetime: [clearSessionState] cancels its fetches per session. */
+    private val avatarScope = CoroutineScope(SupervisorJob() + dispatcher)
+
+    private val avatarRepository = PeerAvatarRepository(
+        avatars = stores.profileStore.avatars,
+        resolver = profile::resolveAvatar,
+        clearAvatar = stores.profileStore::clearAvatar,
+        scope = avatarScope,
+        clock = clock,
+    )
+
+    /**
+     * Peer XEP-0084 avatars for the UI (bare-JID keyed, lazy, policy in
+     * [PeerAvatarRepository]).
+     */
+    val peerAvatars: PeerAvatarSource = avatarRepository
     private val extensions = ExtensionCommandVerbs(activeSession, stores)
 
     private val catchup =
@@ -522,6 +549,8 @@ class XmppSessionManager(
         freshStream: Boolean,
         lease: ActiveSession.OwnerLease,
     ) {
+        // Every (re)connect: peer avatars revalidate on next render.
+        if (activeSession.isCurrent(lease)) avatarRepository.markStale()
         // Topology discovery now heads the sequential ready pipeline:
         // the bookmark-driven rejoin derives its join set from it.
         attemptScope.launch {
@@ -595,6 +624,7 @@ class XmppSessionManager(
     private suspend fun clearSessionState() {
         messenger.clearAcknowledged()
         stores.clear()
+        avatarRepository.clear()
         readState.clearPending()
         resume.clear()
         callStore.clear()

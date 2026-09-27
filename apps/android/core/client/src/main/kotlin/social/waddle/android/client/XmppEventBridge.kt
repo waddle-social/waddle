@@ -38,7 +38,8 @@ class XmppEventBridge : WaddleEventListener {
             is WaddleClientEvent.DeliveryFailed -> channel.trySend(XmppEvent.DeliveryFailed(event.stanzaId))
             is WaddleClientEvent.MessageRejected ->
                 channel.trySend(XmppEvent.MessageRejected(event.stanzaId, event.from, event.to))
-            is WaddleClientEvent.AvatarChanged -> Unit
+            is WaddleClientEvent.AvatarChanged ->
+                channel.trySend(XmppEvent.AvatarChanged(event.jid, event.avatarId))
             is WaddleClientEvent.Call -> channel.trySend(XmppEvent.Call(event.event))
             is WaddleClientEvent.InboxPush -> channel.trySend(XmppEvent.InboxPush(event.entry))
             is WaddleClientEvent.AuthenticationFailed ->

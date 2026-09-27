@@ -30,6 +30,8 @@ internal class XmppEventRouter(
     private val resume: ResumePersistence,
     private val readState: ReadStateCoordinator,
     private val callStore: CallStore,
+    /** XEP-0084 metadata notifications, for the peer-avatar policy. */
+    private val onAvatarChanged: (jid: String, avatarId: String?) -> Unit = { _, _ -> },
     private val persistDmSeen: (peer: String, timestamp: String) -> Unit,
 ) {
     private val _events = MutableSharedFlow<XmppEvent>(
@@ -62,6 +64,7 @@ internal class XmppEventRouter(
             is XmppEvent.InboxPush -> routeInboxEntry(event.entry)
             is XmppEvent.Presence -> {
                 stores.presenceStore.onPresence(event.presence)
+                stores.occupantJidStore.onPresence(event.presence)
                 // XEP-0272 Muji bookkeeping rides the same serialized
                 // presence stream (web `set_on_presence` wrapper parity).
                 callStore.onPresence(event.presence)
@@ -71,6 +74,7 @@ internal class XmppEventRouter(
             // single-consumer dispatch path, so accept/reject can never
             // interleave with tie-break sends (web single-thread parity).
             is XmppEvent.Call -> callStore.onCallEvent(event.event)
+            is XmppEvent.AvatarChanged -> onAvatarChanged(event.jid, event.avatarId)
             else -> Unit
         }
         _events.tryEmit(event)
@@ -179,6 +183,11 @@ internal class XmppEventRouter(
     private fun routeMamResult(event: XmppEvent.MamResult) {
         stores.timelineStore.onArchivedMessage(event.message)
         val message = event.message
+        val author = message.from
+        val realJid = message.authorRealJid
+        if (message.messageType == "groupchat" && author != null && realJid != null) {
+            stores.occupantJidStore.onArchivedAuthor(author, realJid)
+        }
         if (message.body == null) return
         conversationKeyOf(
             ownBareJid = activeSession.ownBareJid,
