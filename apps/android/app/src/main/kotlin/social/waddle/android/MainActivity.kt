@@ -14,6 +14,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.MutableStateFlow
+import social.waddle.android.avatar.LocalPeerAvatars
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.theme.WaddleTheme
 
@@ -75,7 +76,10 @@ class MainActivity : ComponentActivity() {
                 controller.isAppearanceLightNavigationBars = !darkTheme
             }
             WaddleTheme(themeMode) {
-                CompositionLocalProvider(LocalAppGraph provides graph) {
+                CompositionLocalProvider(
+                    LocalAppGraph provides graph,
+                    LocalPeerAvatars provides graph.sessionManager.peerAvatars,
+                ) {
                     AppShell(
                         pendingConversationJid = pendingConversationJid,
                         onConversationConsumed = { pendingConversationJid.value = null },

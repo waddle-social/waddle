@@ -12,11 +12,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -49,6 +51,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -57,6 +60,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import social.waddle.android.R
 import social.waddle.android.WaddleApplication
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.AuthorBadge
 import social.waddle.android.client.AuthorBadgeKind
 import social.waddle.android.client.FileDisposition
@@ -98,6 +102,8 @@ fun MessageCard(
     authorPresence: Map<String, WaddlePresence> = emptyMap(),
     /** Origin whose cached XEP-0363 preview images may load (web parity). */
     trustedMediaOrigin: String? = null,
+    /** Leading avatar gutter for a received row; `null` = no gutter. */
+    avatar: MessageAvatar? = null,
 ) {
     when (row) {
         is ConversationRow.Stored -> StoredMessageCard(
@@ -112,6 +118,7 @@ fun MessageCard(
             selfBareJid = selfBareJid,
             authorPresence = authorPresence,
             trustedMediaOrigin = trustedMediaOrigin,
+            avatar = avatar,
             modifier = modifier,
         )
         is ConversationRow.Unconfirmed -> PendingMessageCard(
@@ -135,15 +142,19 @@ private fun StoredMessageCard(
     selfBareJid: String?,
     authorPresence: Map<String, WaddlePresence>,
     trustedMediaOrigin: String?,
+    avatar: MessageAvatar?,
     modifier: Modifier = Modifier,
 ) {
+    val author = authorOf(item)
+    val leading = avatar?.let { gutter -> @Composable { MessageAvatarGutter(gutter, author) } }
     if (item.tombstone != null) {
         MessageBubble(
-            author = authorOf(item),
+            author = author,
             time = formatTimestamp(item.timestamp),
             body = null,
             isMine = item.isMine,
             modifier = modifier,
+            leading = leading,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -162,7 +173,6 @@ private fun StoredMessageCard(
         }
         return
     }
-    val author = authorOf(item)
     val stickerFile = stickerFileOf(item)
     val inlineImageUrl = item.body.trim().takeIf {
         stickerFile == null && item.sharedFiles.isEmpty() && isImageUrl(item.body)
@@ -201,6 +211,7 @@ private fun StoredMessageCard(
         onLongPress = if (item.rejected) null else ({ onLongPress(item) }),
         modifier = modifier,
         authorColor = consistentColor(author),
+        leading = leading,
         badge = if (isGroupchat(item)) authorBadgeOf(authorPresence[author]) else null,
         header = {
             item.replyToId?.let { replyToId ->
@@ -348,7 +359,6 @@ private fun PendingMessageCard(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     author: String,
@@ -364,6 +374,8 @@ private fun MessageBubble(
     authorColor: Color? = null,
     /** Single seniority badge after the author name (authority > hats). */
     badge: AuthorBadge? = null,
+    /** Avatar gutter before the bubble (received rows only). */
+    leading: (@Composable () -> Unit)? = null,
     header: @Composable () -> Unit = {},
     extras: @Composable () -> Unit,
 ) {
@@ -373,78 +385,132 @@ private fun MessageBubble(
             .padding(horizontal = 12.dp, vertical = 3.dp),
         horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
     ) {
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            // Web parity: a message mentioning the signed-in account gets
-            // a subtly tinted bubble. Own messages keep the "mine" color —
-            // it already dominates, and losing it would blur authorship.
-            color = when {
-                isMine -> MaterialTheme.colorScheme.primaryContainer
-                mentionsSelf -> MaterialTheme.colorScheme.secondaryContainer
-                else -> MaterialTheme.colorScheme.surfaceContainerHigh
-            },
-            modifier = Modifier
-                .widthIn(max = 340.dp)
-                .semantics(mergeDescendants = true) {}
-                .then(
-                    if (onLongPress != null) {
-                        Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress)
-                    } else {
-                        Modifier
-                    },
-                ),
+        Row(verticalAlignment = Alignment.Top) {
+            leading?.invoke()
+            MessageSurface(
+                isMine = isMine,
+                mentionsSelf = mentionsSelf,
+                onLongPress = onLongPress,
+                author = author,
+                authorColor = authorColor,
+                badge = badge,
+                time = time,
+                edited = edited,
+                pinned = pinned,
+                header = header,
+                body = body,
+                extras = extras,
+            )
+        }
+    }
+}
+
+/**
+ * Received-row avatar gutter: the author's avatar at the start of a
+ * sender group, an equal-width spacer on grouped follow-ups so bubbles
+ * stay aligned.
+ */
+@Composable
+private fun MessageAvatarGutter(avatar: MessageAvatar, author: String) {
+    if (avatar.visible) {
+        PeerAvatar(
+            jid = avatar.jid,
+            displayName = author,
+            size = MESSAGE_AVATAR_SIZE,
+            modifier = Modifier.padding(end = MESSAGE_AVATAR_GAP),
+        )
+    } else {
+        Spacer(modifier = Modifier.width(MESSAGE_AVATAR_SIZE + MESSAGE_AVATAR_GAP))
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageSurface(
+    isMine: Boolean,
+    mentionsSelf: Boolean,
+    onLongPress: (() -> Unit)?,
+    author: String,
+    authorColor: Color?,
+    badge: AuthorBadge?,
+    time: String?,
+    edited: Boolean,
+    pinned: Boolean,
+    header: @Composable () -> Unit,
+    body: (@Composable () -> Unit)?,
+    extras: @Composable () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        // Web parity: a message mentioning the signed-in account gets
+        // a subtly tinted bubble. Own messages keep the "mine" color —
+        // it already dominates, and losing it would blur authorship.
+        color = when {
+            isMine -> MaterialTheme.colorScheme.primaryContainer
+            mentionsSelf -> MaterialTheme.colorScheme.secondaryContainer
+            else -> MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        modifier = Modifier
+            .widthIn(max = 340.dp)
+            .semantics(mergeDescendants = true) {}
+            .then(
+                if (onLongPress != null) {
+                    Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress)
+                } else {
+                    Modifier
+                },
+            ),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = author,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = authorColor ?: MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+                badge?.let {
                     Text(
-                        text = author,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = authorColor ?: MaterialTheme.colorScheme.primary,
+                        text = it.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = badgeColor(it.kind),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(end = 8.dp),
+                        modifier = Modifier.padding(end = 8.dp).widthIn(max = 120.dp),
                     )
-                    badge?.let {
-                        Text(
-                            text = it.label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = badgeColor(it.kind),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(end = 8.dp).widthIn(max = 120.dp),
-                        )
-                    }
-                    time?.let {
-                        Text(
-                            text = it,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (edited) {
-                        Text(
-                            text = stringResource(R.string.message_edited),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
-                    }
-                    if (pinned) {
-                        Icon(
-                            Icons.Outlined.PushPin,
-                            contentDescription = stringResource(R.string.message_pinned),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 4.dp).size(14.dp),
-                        )
-                    }
                 }
-                header()
-                body?.invoke()
-                extras()
+                time?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (edited) {
+                    Text(
+                        text = stringResource(R.string.message_edited),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp),
+                    )
+                }
+                if (pinned) {
+                    Icon(
+                        Icons.Outlined.PushPin,
+                        contentDescription = stringResource(R.string.message_pinned),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp).size(14.dp),
+                    )
+                }
             }
+            header()
+            body?.invoke()
+            extras()
         }
     }
 }
@@ -723,3 +789,6 @@ private const val MESSAGE_TYPE_GROUPCHAT = "groupchat"
 private val STICKER_SIZE = 112.dp
 
 private const val INLINE_IMAGE_MEDIA_TYPE = "image/gif"
+
+private val MESSAGE_AVATAR_SIZE: Dp = 28.dp
+private val MESSAGE_AVATAR_GAP: Dp = 6.dp

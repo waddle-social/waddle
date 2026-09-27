@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -45,6 +44,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.calls.CallKind
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.jid.bareJidOf
@@ -100,6 +100,8 @@ fun ActiveCallScreen(
             } else {
                 AudioCallBackdrop(
                     peerJid = peerJid,
+                    // A group call's backdrop is the room, not a person.
+                    avatarJid = peerJid.takeUnless { isMucCall },
                     statusText = callStatusText(state, durationSeconds),
                     roster = mucRoster.takeIf { isMucCall },
                 )
@@ -156,6 +158,8 @@ fun ActiveCallScreen(
 @Composable
 private fun AudioCallBackdrop(
     peerJid: String,
+    /** Real bare JID behind the backdrop avatar; `null` = initials. */
+    avatarJid: String?,
     statusText: String,
     /** Group-call roster rows; `null` hides the panel (DM calls). */
     roster: List<MucRosterEntry>? = null,
@@ -167,7 +171,7 @@ private fun AudioCallBackdrop(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        CallPeerAvatar(peerJid = peerJid, size = 112.dp)
+        CallPeerAvatar(jid = avatarJid, name = localpartOf(bareJidOf(peerJid)), size = 112.dp)
         Text(
             text = localpartOf(bareJidOf(peerJid)),
             style = MaterialTheme.typography.headlineMedium,
@@ -212,7 +216,9 @@ private fun MucRosterPanel(roster: List<MucRosterEntry>, modifier: Modifier = Mo
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
-                CallPeerAvatar(peerJid = entry.nick, size = 32.dp)
+                // Resolved from the Muji owner map / LiveKit identity only;
+                // an unresolved nick renders initials, never a guess.
+                CallPeerAvatar(jid = entry.jid, name = entry.nick, size = 32.dp)
                 Text(
                     text = entry.nick,
                     style = MaterialTheme.typography.bodyLarge,
@@ -336,23 +342,10 @@ private fun CallControls(
     }
 }
 
-/** Circular monogram avatar for the call surfaces. */
+/** Call-surface avatar: the shared [PeerAvatar] at call sizes. */
 @Composable
-internal fun CallPeerAvatar(peerJid: String, size: Dp) {
-    val name = localpartOf(bareJidOf(peerJid))
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = name.take(1).uppercase(),
-            style = MaterialTheme.typography.displaySmall,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
-        )
-    }
+internal fun CallPeerAvatar(jid: String?, name: String, size: Dp) {
+    PeerAvatar(jid = jid, displayName = name, size = size)
 }
 
 @Composable

@@ -172,6 +172,43 @@ class MucCallRosterTest {
     }
 
     @Test
+    fun rosterEntriesCarryRealJidsWithoutNickGuessing() {
+        val roster = mucRosterOf(
+            room,
+            MucPresenceRosterView(
+                participants = emptyMap(),
+                owners = mapOf(room to mapOf("alice" to "alice@waddle.test/phone", "ghost" to null)),
+                raisedHands = emptyMap(),
+                mutedNicks = emptyMap(),
+            ),
+            LiveRosterView(
+                participants = mapOf(room to listOf("alice@waddle.test/phone", "bob@waddle.test/web")),
+                leavingRooms = emptyMap(),
+            ),
+        )
+        assertEquals(
+            listOf(
+                MucRosterEntry("alice", handRaised = false, muted = false, jid = "alice@waddle.test"),
+                // No owner mapping: the LiveKit identity IS the real JID.
+                MucRosterEntry("bob", handRaised = false, muted = false, jid = "bob@waddle.test"),
+            ),
+            roster,
+        )
+        val presenceOnly = mucRosterOf(
+            room,
+            MucPresenceRosterView(
+                participants = mapOf(room to linkedSetOf("carol")),
+                owners = emptyMap(),
+                raisedHands = emptyMap(),
+                mutedNicks = emptyMap(),
+            ),
+            LiveRosterView(participants = emptyMap(), leavingRooms = emptyMap()),
+        )
+        // An unresolved nick stays unresolved (initials), never nick@domain.
+        assertEquals(listOf(MucRosterEntry("carol", handRaised = false, muted = false)), presenceOnly)
+    }
+
+    @Test
     fun storeSnapshotsDedupeAndNormalizeIdentities() {
         val store = MucCallLiveParticipantsStore()
         store.setParticipants(room, listOf("Alice@Waddle.Test/web", "alice@waddle.test/web", ""))

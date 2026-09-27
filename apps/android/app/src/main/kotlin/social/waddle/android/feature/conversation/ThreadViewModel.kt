@@ -49,6 +49,11 @@ class ThreadViewModel(
     } else {
         flowOf(emptyMap())
     },
+    occupantJids = if (isGroupchat) {
+        sessionManager.occupantJidStore.jids.map { rooms -> rooms[conversationJid].orEmpty() }
+    } else {
+        flowOf(emptyMap())
+    },
     threadId = threadId,
     uploader = uploader,
     onConversationRead = onConversationRead,

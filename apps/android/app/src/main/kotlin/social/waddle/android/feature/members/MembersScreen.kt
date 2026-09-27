@@ -10,7 +10,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,6 +43,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.client.store.MemberListStatus
 import social.waddle.client.ffi.WaddleMucAffiliation
@@ -242,7 +243,7 @@ private fun MemberListRow(row: MemberRow, onClick: () -> Unit) {
                 }
             }
         },
-        leadingContent = { Icon(Icons.Outlined.AccountCircle, contentDescription = null) },
+        leadingContent = { PeerAvatar(jid = row.jid, displayName = row.displayName, size = LIST_AVATAR_SIZE) },
         trailingContent = {
             Column {
                 Text(text = affiliationLabel(row.affiliation))

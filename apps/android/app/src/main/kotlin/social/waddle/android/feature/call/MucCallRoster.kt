@@ -1,5 +1,6 @@
 package social.waddle.android.feature.call
 
+import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
 
 /** `room@muc.host/nick` → `room@muc.host` normalized for map keys. */
@@ -79,6 +80,8 @@ data class MucRosterEntry(
     val handRaised: Boolean,
     /** `urn:waddle:in-call:0` self-reported mute marker. */
     val muted: Boolean,
+    /** The participant's real bare JID (avatar); `null` = unknown. */
+    val jid: String? = null,
 )
 
 /** One consistent read of the Muji-presence flows, keyed by room. */
@@ -108,7 +111,29 @@ fun mucRosterOf(
     )
     val raised = presence.raisedHands[room].orEmpty()
     val muted = presence.mutedNicks[room].orEmpty()
+    val jids = participantJidsOf(presence.owners[room].orEmpty(), live.participants[room].orEmpty())
     return nicks.map { nick ->
-        MucRosterEntry(nick = nick, handRaised = nick in raised, muted = nick in muted)
+        MucRosterEntry(nick = nick, handRaised = nick in raised, muted = nick in muted, jid = jids[nick])
     }
+}
+
+/**
+ * Roster nick → real bare JID: the Muji owner map (nick → real JID)
+ * wins; a LiveKit identity without an owner (listed under its localpart,
+ * see [identitiesToNicks]) is itself the participant's real JID.
+ */
+private fun participantJidsOf(
+    owners: Map<String, String?>,
+    liveIdentities: List<String>,
+): Map<String, String> {
+    val jids = HashMap<String, String>()
+    for (identity in liveIdentities) {
+        val bare = bareJidOf(identity).trim()
+        if ('@' in bare) jids.putIfAbsent(localpartOf(identity), bare)
+    }
+    for ((nick, realJid) in owners) {
+        val bare = realJid?.let(::bareJidOf)?.trim() ?: continue
+        if ('@' in bare) jids[nick] = bare
+    }
+    return jids
 }

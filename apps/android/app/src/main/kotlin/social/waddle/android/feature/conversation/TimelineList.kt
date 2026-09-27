@@ -41,11 +41,16 @@ fun TimelineList(
     selfBareJid: String? = null,
     authorPresence: Map<String, WaddlePresence> = emptyMap(),
     trustedMediaOrigin: String? = null,
+    /** Room nick → real bare JID (retained); empty for 1:1 timelines. */
+    occupantJids: Map<String, String> = emptyMap(),
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     // reverseLayout renders index 0 at the bottom → newest first.
     val newestFirst = remember(rows) { rows.asReversed() }
+    val avatars = remember(rows, occupantJids, selfBareJid) {
+        messageAvatarsOf(rows, occupantJids, selfBareJid)
+    }
     // Every wire identity → row, for quote previews and scroll targets.
     val byIdentity = remember(rows) {
         buildMap {
@@ -96,6 +101,7 @@ fun TimelineList(
                 selfBareJid = selfBareJid,
                 authorPresence = authorPresence,
                 trustedMediaOrigin = trustedMediaOrigin,
+                avatar = storedItem?.let { avatars[avatarKeyOf(it)] },
             )
         }
         if (isLoadingOlder) {
@@ -137,7 +143,7 @@ private fun rowKey(row: ConversationRow): String = when (row) {
     // collisions as distinct rows (suppressing them would be an
     // injection vector), and same-sender same-id always merges — so
     // the pair is unique where the id alone would crash the LazyColumn.
-    is ConversationRow.Stored -> "s:${row.item.id}:${row.item.from.orEmpty()}"
+    is ConversationRow.Stored -> "s:${avatarKeyOf(row.item)}"
     is ConversationRow.Unconfirmed -> "p:${row.message.localId}"
 }
 

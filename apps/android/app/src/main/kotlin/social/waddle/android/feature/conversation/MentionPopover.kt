@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.MentionCandidate
 
 /**
@@ -50,6 +51,14 @@ fun MentionPopover(
                         .clickable { onSelect(candidate) }
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                 ) {
+                    if (!candidate.isBroadcast) {
+                        PeerAvatar(
+                            jid = candidate.jid,
+                            displayName = candidate.display,
+                            size = 24.dp,
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
+                    }
                     Text(
                         text = "@${candidate.display}",
                         style = MaterialTheme.typography.bodyMedium,

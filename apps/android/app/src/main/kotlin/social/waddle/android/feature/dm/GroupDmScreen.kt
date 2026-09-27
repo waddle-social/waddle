@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -41,6 +40,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.feature.channel.ChannelViewModel
 import social.waddle.android.feature.conversation.ConversationScreen
@@ -301,7 +302,9 @@ private fun GroupDmAddMemberSheet(
                 ListItem(
                     headlineContent = { Text(text = memberLabelOf(entry)) },
                     supportingContent = { Text(text = entry.jid) },
-                    leadingContent = { Icon(Icons.Outlined.Person, contentDescription = null) },
+                    leadingContent = {
+                        PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
+                    },
                     modifier = Modifier
                         .testTag(GroupDmTestTags.ADD_MEMBER_RESULT_PREFIX + entry.jid)
                         .clickable {

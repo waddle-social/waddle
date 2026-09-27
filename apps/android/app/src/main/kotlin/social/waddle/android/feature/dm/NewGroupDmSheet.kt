@@ -9,9 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -32,6 +30,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 
 /**
  * Create-group-DM sheet (web `NewGroupDmDialog` parity): XEP-0055
@@ -87,7 +87,7 @@ fun NewGroupDmSheet(
                 ListItem(
                     headlineContent = { Text(text = label) },
                     supportingContent = { Text(text = jid) },
-                    leadingContent = { Icon(Icons.Outlined.Check, contentDescription = null) },
+                    leadingContent = { PeerAvatar(jid = jid, displayName = label, size = LIST_AVATAR_SIZE) },
                     trailingContent = {
                         Icon(
                             Icons.Outlined.Close,
@@ -112,7 +112,9 @@ fun NewGroupDmSheet(
                 ListItem(
                     headlineContent = { Text(text = memberLabelOf(entry)) },
                     supportingContent = { Text(text = entry.jid) },
-                    leadingContent = { Icon(Icons.Outlined.Person, contentDescription = null) },
+                    leadingContent = {
+                        PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
+                    },
                     modifier = Modifier
                         .testTag(NewGroupDmTestTags.RESULT_ROW_PREFIX + entry.jid)
                         .clickable { viewModel.toggleMember(entry) },

@@ -117,7 +117,10 @@ internal class ProfileVerbs(
         jid: String,
         lease: ActiveSession.OwnerLease,
         knownId: String? = null,
-        commit: (() -> Unit) -> Boolean = { projection -> projection(); true },
+        commit: (() -> Unit) -> Boolean = { projection ->
+            projection()
+            true
+        },
     ): AvatarLookup {
         val owner = bareJid(jid)
         val cached = knownId?.let { stores.profileStore.cachedAvatar(owner, it) }
