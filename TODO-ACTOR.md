@@ -1,86 +1,143 @@
 # Distributed-actors implementation TODO
 
-Execution order for the [distributed-actors roadmap #1664](https://github.com/waddle-social/waddle/issues/1664), derived from the native blocked-by graph, sequenced for maximum parallelism and minimum rebase churn. Assembled from wayfinder map #1628 (closed 2026-08-07); program history in #1425 (closed).
+Status audited **2026-09-27** against `main@35ecd05c8`, GitHub issue/PR state, native dependency edges, and the source/test evidence noted below. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. This audit did not query live telemetry or rerun Rust suites.
 
-**Critical path (9 deep):** #1651 → #1652/#1653 → #1654 → #1655 → #1656 → #1657 → #1658 → #1659. Everything else feeds this spine from the side — start the side chains immediately so the spine never waits on them.
+The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. Native blocked-by edges remain canonical for sequencing.
 
-## Standard flow (every slice)
+## What to tackle next
 
-1. Branch + **draft PR** whose description carries the plan (repo rule — first action).
-2. Implement per the issue's Scope/Acceptance. Hard rules: XMPP-native, XEP conformance, typed payloads, XML via builders, dedicated XEP suites, clippy `-D warnings`, bun-only.
-3. Adversarial personas review to CLEAN; reviews bind to the **exact head SHA**, remediation restarts review. `codex review` as an independent pass on spine slices.
-4. All checks green (nix gates need the branch to contain current main — merge up before judging red CI). Update PR title/desc, undraft, merge; monitor CI to green.
-5. Behavioral slices get post-deploy Loki/metric verification (merges roll to prod via Flux).
+- **Immediate reliability:** #1386 — coordinate clustered shutdown with SM drain completion and classify terminal authority loss. The 2026-09-25 issue report remains relevant; current code already sleeps 250 ms between nonempty passes, so the old “no backoff” diagnosis is stale.
+- **Distributed-actors bug:** #1732 — retire displaced-generation media authority without revoking the successor's tokens or removing its LiveKit participant. #1869 narrowed the replacement paths but explicitly deferred this work; re-establish the reproducer against the new bind fencing.
+- **Small distributed-actors task:** #1688 — require `deployment.uuid` at render time for durable database configurations. Clustering already requires it; cover the remaining durable/noncluster configurations, preserve explicit dev/memory behavior, bump the chart, and verify the GitOps render.
+- **Roadmap progress:** finish the #1658 acceptance audit, beginning with #1759 reconciliation and the remaining #1776 guarantees. Do not reimplement closed carve-outs listed below.
+- **Larger recovery task:** design #1826 and #1825 together — durable remote-join handoff plus recovery of departures after socket-node restart. Persisting membership only after the join reply does not close the lost-acknowledgement gap.
 
-Model assignment: **gpt-5.6-terra via codex** (worktree-isolated) for clear-spec slices; **fable-5 / opus-5 / gpt-5.6-sol** for semantically dangerous ones (marked ⚠ below). Reviews always fable-5/opus-5 personas.
+**Remaining critical path:** #1658 → (#1659 ∥ #1660) → #1661 → #1662 → #1663. All prerequisites through #1657 are closed. The later umbrellas are sharpening/evaluation work, not ready-to-code feature tickets.
 
-Known traps: cuenv lock drift is nondeterministic (rerun, never edit the lock) · chat tests need `bun run build` first · jingle/telemetry tests flake when filtered · span-export close race is CI-only.
+## Delivery and verification
 
----
+1. Follow `AGENTS.md`: branch and draft PR with a plan before nontrivial implementation; preserve unrelated work.
+2. Use XMPP-native semantics, relevant XEPs, typed payloads and XML builders. Rust protocol work needs the dedicated XEP suites; keep Clippy clean with `-D warnings`; use Bun for JavaScript/TypeScript.
+3. Material design changes need independent architecture review. Resolve concrete in-scope review findings, and bind review/verification evidence to the reviewed commit.
+4. Run the checks appropriate to the change, update the PR description, mark ready, and monitor CI. Keep the #1316 pacing and #1294/#1389 resume regressions green in later actor work.
+5. Record deployment verification separately from merge status. Use the current cutover runbook for incompatible changes; production activation needs its own authorized window and evidence.
 
-## Wave 1 — now, all parallel (worktrees)
+## Completed foundation and authority work (former waves 1–5)
 
-Merge order within the wave: **#1642 lands first** (advisory remediation + −6k-line deletion everyone else would rebase over). The rest merge as they go green.
+Every issue in this table is closed. Historical constraints are retained where they matter to future changes.
 
-- [OK] **#1642** `fix(server): remove XEP-0397 ISR and drop the token store` — re-derive from harvest branch `codex/distributed-actors-p0-3`; **add the `clustering_isr_tokens` DROP migration** #1610 lacked; carries ADR-011; stale-doc cleanup. Closes advisory GHSA-5687-26jr-g8vv on merge. Behavioral: clustered reconnects take the slow path (sanctioned).
-- [OK] **#1316** session-bootstrap flood overruns unacked queue — MERGED 2e726779 (PR #1669, 2026-08-09) after 13 codex review rounds. Owed: post-deploy Mimir check (SmUnackedEvictions now `> 0` with `path` label).
-- [OK] **#1294** cross-node resume takes over the UserActor claim — MERGED cd9ba752 (PR #1668, 2026-08-09; squash-rebased onto post-#1669 main). Owed: post-deploy Loki checks.
-- [OK] **#1389** conflict-close surfaces as terminal "replaced by newer sign-in" — MERGED with #1294 in PR #1668 (superseded-session recovery: witnesses, banner on all surfaces, successor convergence).
-- [OK] **#1644** `feat(server): room lifecycle and revision types with expand-only schema` — MERGED e436da56 (PR #1673, 2026-08-11). Store-owned ensure_schema DDL, no migration version (#1651 freeze intact); codex-bot review loop clean at 7c8dd1d2. #1645-binding notes in the PR desc. Unblocks #1645.
-- [OK] ⚠ **#1650** `feat(server): typed ingress identity domain and versioned semantic digest` — ten identity types + SemanticDigest v1 canonicalizer + property suites; **fixes and closes #1137** (wrap-aware comparator at the three plain-`>` sites).
-- [OK] **#1651** `fix(server): append-only migration ledger with checksum enforcement` — MERGED 43860571 (PR #1671, 2026-08-10). Codex review clean at bf8f7949. **Rolling-deploy constraint: do not add a new migration version until ledger-aware binaries are fully rolled out** (a pre-ledger pod seeing an unknown version would reset the ledger). Unblocks #1652 and (with #1650) #1653.
-- [OK] **#1648** `feat(server): closed observation variants and bounded cluster metrics` — MERGED b072120c (PR #1708, 2026-08-23); the four metric families mapped onto closed variants, PR #1238 consumed and closed.
-- [OK] **#1649** `feat(chat): closed telemetry observations with source-level identity removal` — MERGED 33018c2c (PR #1719, 2026-08-27). Faro identity removed at source (resource, `call_id`, message IDs, error text/stacks); closed observation unions + measurement schemas; native surfaces proven telemetry-off by `scripts/check-native-remote-telemetry.sh` (TOML-semantic Cargo closure) wired into Apple/Android/chat CI.
+| Issue | Landed work | Evidence / follow-up |
+| --- | --- | --- |
+| #1642 | Removed XEP-0397 ISR and the token store; ADR-011 | PR #1665 merged 2026-08-07. Superseded PR #1610 remains closed. Advisory disposition is still pending below. |
+| #1643 | Durable principal fence for cross-node SM resume | PR #1666 merged 2026-08-07. Expired-claim promotion follow-up #1667 also closed via #1718; Grafana verification is tracked by #1722. Do not restore the rejected fail-closed migration-runner policy from the harvest branch. |
+| #1316 | Bootstrap pacing and deferred-cap recovery | PR #1669 merged 2026-08-09. Eviction-path telemetry verification is tracked by #1722. |
+| #1294, #1389 | Cross-node UserActor takeover and nonterminal successor recovery | PR #1668 merged 2026-08-09. Preserve their regression suites; the old roadmap's separate Loki follow-up has no completion evidence recorded in this audit. |
+| #1644 | Room lifecycle/revision types and expand-only schema | PR #1673 merged 2026-08-11; unblocked #1645. |
+| #1645 | Persist durable room mutations before memory changes | PR #1692 merged 2026-08-14. |
+| #1646 | Durable room effect outbox and per-lifecycle FIFO | PR #1694 merged 2026-08-16. End-to-end remote write acceptance #1696 also closed via PR #1727 on 2026-09-03. |
+| #1647 | Claim-fenced occupancy and pin projections | PR #1702 merged 2026-08-22. Pin-state rehydration remains deferred to the later durable-owner work. |
+| #1648 | Closed server observations and bounded metrics | PR #1708 merged 2026-08-23; consumed and closed unmerged baseline PR #1238. |
+| #1649 | Identity-free closed browser telemetry | PR #1719 merged 2026-08-27. Native telemetry-off checks landed; Grafana/Faro acceptance remains #1722. |
+| #1650, #1137 | Typed ingress identities, semantic digest and wrapping SM comparisons | PR #1676 merged 2026-08-11. |
+| #1651 | Append-only checksummed migration ledger | PR #1671 merged 2026-08-09. The original pre-ledger rollout freeze is historical, not a current blanket migration freeze; subsequent migrations have landed. |
+| #1652 | Database lineage attestation | PR #1672 merged 2026-08-10. Enrollment completed through #1674/#1675; keep the deployment UUID stable. Remaining chart-wide validation is #1688. |
+| #1653 | Foundation schema and inert epoch guards | PR #1686 merged 2026-08-12. Role separation #1689 and epoch activation remain separate. |
+| #1654 | PostgreSQL ingress unit of work and substrate repositories | PR #1690 merged 2026-08-12. |
+| #1655 | Transaction-taking MAM/inbox repositories | PR #1691 merged 2026-08-12. |
+| #1656 | Shadow atomic ingress transaction | PR #1693 merged 2026-08-14; issue closed with the authority cutover on 2026-09-08. |
+| #1695 | Shadow soak disposition | Window ended early by operator decision on 2026-09-05; issue closed 2026-09-08. Evaluable criteria passed; retention-horizon criteria were not evaluated, not declared passed. Finding #1735 was fixed by #1736. |
+| #1657 | Ingress authority cutover and canonical identity | PR #1738 merged 2026-09-08; removed shadow scaffolding. Operations: [ingress authority](server/docs/operations/ingress-authority.md). Current rollout strategy is governed by the newer #1869 cutover below. |
 
-## Wave 2 — after their wave-1 blockers
+## Effect executors (former waves 6–7)
 
-- [OK] ⚠ **#1643** `feat(server): durable principal fence for cross-node SM resume` (after #1642) — MERGED 375ba545 (PR #1666, 2026-08-07). Both #1610 defects root-caused; custody branch deleted. Owed: post-deploy Loki checks, follow-up #1667 (expired-claim promotion). Note for #1651: do NOT resurrect harvest's fail-closed runner policy as-is — it breaks the combined global+waddle test-runner history (see PR #1666 root-cause).
-- [OK] ⚠ **#1645** `fix(server): commit durable room state before memory mutation` (after #1644) — MERGED 90240584 (PR #1692, 2026-08-14). The inversion across every durable mutation kind; boundary lock ordering; retires `OwnershipLostAfterApply`/`PersistFailed` windows. Heavy adversarial review.
-- [OK] **#1652** `feat(server): database lineage attestation at readiness` — MERGED 0b59cfca (PR #1672, 2026-08-10); enrollment-gated rollout owed.
-- [OK] ⚠ **#1653** `feat(server): expand-only foundation schema with inert epoch guards` — PR #1686: table pack, inert transaction-bound guards, manifest, and epoch-0 compatibility proof.
+### #1658 — open, prerequisites complete
 
-## Wave 3
+The direct-message executor remains the prerequisite for both #1659 and #1660. Its September 20 comment is no longer an accurate list of open carve-outs.
 
-- [OK] **#1646** `feat(server): durable room effect outbox with per-lifecycle FIFO` (after #1645) — follow the `call_teardown_outbox` pattern; destroy leases + tombstone. MERGED 8ea8cfe5 (PR #1694, 2026-08-16). Follow-up **#1696** (end-to-end remote write acceptance for relayed effects) MERGED 9923bd02 (PR #1727, 2026-09-03) — shipped as a dedicated `remote_resource_write_accepted.v1` ask; `deliver_ordered.v2` unchanged.
-- [OK] **#1647** `feat(server): one-use occupancy projection authorization` (after #1645, ∥ #1646) — PR #1702; claim-fenced one-use occupancy and pin projections, with local departure convergence retries. Pin-state rehydration remains with the P4 owner (#1660), per the #1647 scope amendment.
-- [OK] **#1654** `feat(server): Postgres ingress unit-of-work seam and substrate repositories` (after #1652 + #1653) — dark; one-transaction-spans-everything proof.
+**Landed/closed:** #1739–#1743 recovery foundations (PR #1752), #1753 extension ingress identity, #1755 recovery executor, #1756 keyed recipient append receipts, #1757 per-occupant fanout progress, #1760 append-proof/payload liveness, #1778 cross-node detached append identity, #1789 registered-socket detach identity, and #1805 UserActor delivery identity (PR #1820). Adjacent #1803 backlog work and #1804 relay compatibility are also closed.
 
-## Wave 4
+**Recent completion:** #1770 archive/dispatch ordering landed in **PR #1834 on 2026-09-24**. It includes the production #1759 live full-JID recipient-preparation path, exact dispatch claims/offer state, and ordered recovery. It is no longer a draft awaiting merge.
 
-- [OK] **#1655** `feat(server): transaction-taking MAM and inbox repositories` (after #1654) — MERGED 61726ad1 (PR #1691, 2026-08-12). MAM leaves its private pool; call sites untouched until cutover.
-- [OK] ⚠ **#1656** `feat(server): shadow atomic ingress transaction` (after #1655 + #1643 + #1644) — MERGED 0818f7fd (PR #1693, 2026-08-14); issue closed 2026-09-08 with #1657. Full boundary transaction on live traffic, new-tables-only; shadow health via P0.5 closed-variant vocabulary.
+Still to reconcile before closing #1658:
 
-**✓ Soak gate completed:** #1695 closed early on 2026-09-05 by operator decision; all evaluable criteria passed. #1657 is unblocked.
+- [ ] **#1759:** verify the full live-full-JID plan/commit/execute acceptance on SQLite and PostgreSQL, especially one recipient archive/unread mutation on retry and carbon behavior. Production work is merged; historical synthetic tests and contradictory runbook paragraphs still need reconciliation (see closure audit below).
+- [ ] **#1776:** remaining durable send/observer guarantees. #1834 advanced live ordering and claims, but explicitly retained offer-to-SM crash uncertainty and non-SM/keyless at-least-once cases. Do not equate dispatch ordering with every sink being idempotent.
+- [ ] **#1790:** reassess the performance proposal against current callers. Ordered/processed live copies now require authority too; the issue's assumption that live sends cannot use it is stale. Identify genuinely redundant reads without introducing liveness probes or weakening authorization.
+- [ ] Compare the full #1658 scope with current code/tests: frozen targets before `h`, exact replay bytes and delay, distinct archive identities, ordinal round-trip, crash recovery, and non-SM uncertainty. Closed child issues alone do not establish epic completion.
 
-- [OK] **#1695** `ops(server): run the #1656 production soak` — closed early 2026-09-05 by operator decision; all evaluable criteria passed. Finding #1735 fixed by PR #1736. Ongoing operations: [ingress authority](server/docs/operations/ingress-authority.md).
+### Remaining dependent work
 
-## Wave 5
+| Issue | Current state | Boundary to preserve |
+| --- | --- | --- |
+| #1659 — fenced MUC manifest/reflection | Blocked by open #1658; #1646 prerequisite is complete | Frozen pre-`h` targets, reflection as an ordinary child, idempotent missing-child recovery; `GroupchatRetrySuppression` still exists in `server/routes/interpret/deps.rs` and the tombstone path; deletion remains pending. |
+| #1660 — opaque extension delivery keys | Blocked by open #1658; parallel with #1659 once unblocked | One receipt authority, durable same-key acceptance, descendant-aware GC; calls/pins retain the `AwaitingDurableOwner` carve-out. |
+| #1661 — P2 transport sharpening | Blocked by #1659 and #1660 | Mailbox + zero-payload hints; explicit **P2.2 mailbox DDL/core** slice is needed (issue comment identifies the omission). Cut relay consumers over lane by lane before deleting ordered relay. |
+| #1662 — P3 connections/resume sharpening | Blocked by #1661 | Build on existing claim/resume machinery. Includes server + WASM/chat XEP-0388 SASL2 and XEP-0198 §11 inline resume; preserve #1294/#1389 behavior. |
+| #1663 — P4 state/actor sharpening | Blocked by #1662 | Evaluate remaining state against the code then; calls/pins durability and obsolete actor cleanup are not assumed complete. |
+| #1664 — program index | Open umbrella | Keep open until the program is dispositioned; its initial “takeable now” section needs reconciliation with this completed foundation. |
 
-- [OK] ⚠ **#1657** `feat(server): ingress authority cutover with canonical identity` (after #1656 + #1645) — MERGED ebdc3f34 (PR #1738, 2026-09-08): committed ingress decisions advance `h`, post-commit effects have durable payload-complete intents, and cluster-global aliases decide and repair duplicates, replacing MAM dedupe and the parallel observation path (RFC 0018 §1). Ten review rounds (90 findings) fixed in-branch; five remaining gaps recorded as RFC stated limitations and filed under #1658. Deployed as a Recreate cutover; flip the HelmRelease back to RollingUpdate once verified.
+## Occupancy, relay and independent follow-ups
 
-## Wave 6–7
+- [x] **#1733:** same-full-JID occupancy displacement and generation fencing, **PR #1869 merged 2026-09-27**. Includes typed legacy resume failure, bounded retirement, shorter SQL guard lifetimes, exact media rollback authority, and SM custody checks. Plan: [occupancy displacement](docs/planning/1733-occupancy-displacement.md).
+- [x] **#1804:** live relay compatibility, PR #1841 merged 2026-09-24. Covers the documented route/frame baseline, not arbitrary registration/schema compatibility.
+- [x] Remote mirror/MUC cleanup PR #1821, retirement operations PR #1823, and reconnect-contract PR #1824 merged 2026-09-22. Their remaining durability gaps are #1825/#1826, not unfinished work in those PRs.
+- [ ] **#1732:** generation-specific token revocation and safe displaced-participant retirement. Ordinary local replacement changed under #1869; validate the residual path before implementation. Never revoke the shared identity's entire token bucket or remove a successor based only on the old FullJID.
+- [ ] **#1825 + #1826:** durable membership/departure recovery and join acknowledgement handoff. Preserve genuine resume and replacement generations; transport failure is not departure authority.
+- [ ] **#1386:** bounded coordination of room/SM shutdown, terminal-versus-transient confirmation outcomes, and a regression running both lifecycles together. Preserve immediate fatal-fence preemption and successor custody.
+- [ ] **#1709:** the stack overflow was mitigated by PR #1710's 8 MiB Tokio worker stack. The remaining task is to identify/box the oversized Jingle future, not to rediscover the shipped mitigation.
+- [ ] **#1699:** consolidate overlapping room-outbox flake tracking with #1705/#1745 only after preserving the deterministic mid-pass test requirement and the separate group-DM rename failure mentioned on #1699. The original drain defect was fixed in #1708.
+- [ ] **#1641:** adjudicate unlanded #1357 transport-write responsibility and generation-fenced client callback work; retain custody branches until both packets are dispositioned.
 
-- [ ] ⚠ **#1658** `feat(server): idempotent direct-message effect execution` (after #1657) — keeps #1316's regression seam green. #1770 stage 2 and its #1759 recipient-preparation dependency are implemented in draft PR #1834; completion is pending verification and merge.
-- [ ] ⚠ **#1659** `feat(server): fenced MUC effect manifest and reflection` (after #1658 + #1646) — deletes `GroupchatRetrySuppression`.
-- [ ] ⚠ **#1660** `feat(server): opaque delivery keys for extension effects` (after #1658, ∥ #1659) — single receipt authority; calls/pins stay `AwaitingDurableOwner`.
+Other useful open reliability tasks: #1787 reconnect/offline-message loss (not resolved by #1869), #1806 PostgreSQL fixture-name truncation, #1846 push failure classification, and #1847 terminalization alert semantics. These are adjacent bug work, not prerequisites inferred for the actor spine.
 
-## Wave 8 — sharpening evaluations (grilling sessions, not implementation)
+## Cutover, activation and operational verification
 
-- [ ] **#1661** P2 umbrella → fine slices (after #1659 + #1660 merge) — mailbox + zero-payload hints; **staged lane-by-lane relay cutover**, ordered-relay code deleted last.
-- [ ] **#1662** P3 umbrella → fine slices (after P2 sharpened) — includes committed **P3.4: XEP-0388 SASL2 + XEP-0198 §11 inline resume** (cross-surface: server + WASM client + chat). Keep-green: #1294/#1389 seams.
-- [ ] **#1663** P4 sharpening (after P3 umbrella) — evaluate remaining state/actor cleanup against the then-current codebase.
+- [ ] **Current #1869 cutover:** committed GitOps strategy is `Recreate` for V0013 occupancy authority and register/force-detach protocol changes. Verify the new fleet and the runbook checks, then restore `RollingUpdate` in a **separate** change through the #1841 cutover guard. Neither the earlier #1657 instruction nor #1841 authorizes skipping this cutover. See [relay cutovers](docs/operations/relay-cutovers.md#occupancy-authority-cutover-1733-pr-1869). No live completion is asserted by this audit.
+- [x] **Database lineage enrollment:** #1674 provisioned the UUID; #1675 recorded ready/attested replicas and removed one-shot enrollment. This is no longer owed rollout work.
+- [ ] **#1688:** durable-database render-time UUID requirement, as scoped above.
+- [ ] **#1689:** provision the migration-owner/runtime-role split; #1653 is complete, so implementation is unblocked. Runtime must not own/alter protected tables or assume the owner role.
+- [ ] **Epoch 0→1 activation:** requires #1689, complete guard coverage, no old writers, and an explicit forward-only activation plan. Do not infer activation from merged guard code.
+- [ ] **Cluster admission enablement:** retain as a separate activation item; this audit did not establish a completed activation.
+- [ ] **`sessions` auth-context NOT NULL tightening:** separate migration/activation after proving the remaining data satisfies it.
+- [ ] **SASL2 feature advertisement:** separate activation after P3.4 server/client implementation and conformance coverage.
+- [ ] **#1722:** record all four Grafana-side checks: eviction `path` labels, shutdown budget, claimed-expiry promotion, and identity-free Faro events. Pod-side checks and merged code do not complete this issue.
+- [ ] **Historical #1294/#1643 Loki follow-up:** reconcile the old roadmap's owed checks with recorded rollout evidence; no new operational check was performed here. #1722 covers the later #1667 promotion verification.
+- [ ] **Advisory GHSA-5687-26jr-g8vv:** API still reports **draft**, with neither publication nor closure recorded. #1642 remediation is merged; decide publication/closure separately, without conflating remediation with advisory disposition.
 
-## Activation backlog (each its own issue when prerequisites land; prod activity needs explicit approval + named window + runbook)
+## Open-issue closure audit
 
-- [ ] Epoch 0→1 flip (guard coverage + no-old-writers verification; forward-only)
-- [ ] **#1689** Provision ingress-guard migration-owner/runtime-role split before the epoch 0→1 flip.
-- [ ] Cluster admission enablement
-- [ ] NOT NULL tightening of `sessions` auth-context columns
-- [ ] SASL2 stream-feature advertisement (P3.4)
+Recommendations below are based on source/test inspection and merged PR evidence. Issues have **not** been closed by this documentation update, and existing tests were inspected rather than rerun.
 
-## Housekeeping (nothing blocks on these)
+### Ready to close with the implementation evidence
 
-- [ ] Adjudicate **#1641** (unlanded #1357 remnants: transport write-responsibility seam + 0198 suite; generation-fenced callback test) — ordinary-bug work; custody branches retained until resolved.
-- [ ] Delete stale branches: `codex/reject-muc-client-delay`, `codex/seal-room-destroy-mam-epoch`, `codex/send-muc-status-332`, `codex/reap-dead-room-claims`, `codex/1311-monolith-backup`, `codex/adr0017-user-actor-claim-lifecycle`, `codex/fix-cluster-remote-resource-reconciliation`; `codex/fix-public-channel-members-only-backfill` only after verifying the five-channel `members_only` prod state (repair unlanded, its V1007 slot consumed — re-file as fresh migration if still broken).
-- [ ] Custody branches stay until their consumers land: `codex/distributed-actors-p0-1-client-sm` + `backup/pr1357-p0-1-pre-successor-20260724` (until #1641). `codex/distributed-actors-p0-3` DELETED 2026-08-07 (#1642 + #1643 both merged).
-- [ ] Close/publish decision on advisory GHSA-5687-26jr-g8vv after #1642 merges.
+| Open issue | Recommendation and evidence |
+| --- | --- |
+| [#1338 — migration race/atomicity](https://github.com/waddle-social/waddle/issues/1338) | Close as completed by [PR #1671](https://github.com/waddle-social/waddle/pull/1671). The migration runner takes a PostgreSQL transaction-scoped advisory lock and commits DDL with the ledger updates in the same transaction; concurrent-runner and rollback tests cover the two reported failures. |
+| [#1296 — remote cleanup retries against a live owner](https://github.com/waddle-social/waddle/issues/1296) | Close as superseded by [PR #1785](https://github.com/waddle-social/waddle/pull/1785) and [PR #1869](https://github.com/waddle-social/waddle/pull/1869). Fresh foreign claims no longer drive noisy acquisition retries; exact-generation cleanup can route through the current UserActor owner. Claim-observation tests and the dedicated transferred-owner cleanup regression cover both deferral and convergence without waiting for owner death. No new live telemetry check was performed. |
+| [#1737 — room authority follows relay metadata](https://github.com/waddle-social/waddle/issues/1737) | Close as completed by [PR #1738](https://github.com/waddle-social/waddle/pull/1738). Digest authorities now derive from offered room shape; the actual owner commits a claim-fenced `Relayed` ingress plan before reserved MUC execution, including local-owner fallback. Shape/plan/fenced-commit tests cover the replacement design. |
+
+### Acceptance reconciliation or consolidation first
+
+| Open issue | Why it should not be closed unconditionally |
+| --- | --- |
+| #1138 | Original detach age is preserved by the snapshot codec introduced in #1676 and restored for expiry checks. Implementation appears fixed, but this audit did not establish the exact repeated successful fanout → restart → original expiry-window regression. Verify that acceptance before closing. |
+| #1759 | Core feature landed in #1834. `interpret/tests/plan.rs` now expects recipient archive preparation, but `tests/ingress_cases/recipient_drift.rs` still constructs historical unreceipted live plans. The ingress runbook's older #1759 limitation contradicts its newer completion paragraph. Reconcile those and establish the exact retry/unread acceptance evidence, then close rather than reimplement. |
+| #1699 | Original outbox defect fixed in #1708; overlaps #1705/#1745. Preserve the deterministic scheduling refinement and separately disposition the group-DM rename failure before closing as consolidated. |
+| #1658, #1776 | Partial completion is substantial, but the documented keyless/uncertain-send guarantees remain. Keep open for the remaining acceptance work. |
+| #1709, #1790 | Mitigation/current-caller changes make their descriptions stale; neither establishes that the remaining optimization work is complete. |
+| #1401 | #1869 addresses connection displacement, but malformed/invalid bind error handling remains a separate acceptance requirement. |
+| #1295 | Ordinary cluster drain still skips UserActor claims; do not close merely because #1294 takeover or room draining landed. |
+| #1298 | Member-list IQ still depends on a local RoomActor; relay support alone does not prove remote-owner query acceptance. |
+| #1670 | Cancellation/custody improvements do not establish durable promotion inventory for every failure/restart path; some retry queues remain memory-only. |
+| #1427 | Some retention/age-out work exists, but the missing-target quota-bounce path still needs disposition. |
+
+## Branch and tracker housekeeping
+
+Remote branch existence was checked with `git ls-remote` on 2026-09-27; no branches were deleted in this audit.
+
+- [x] `codex/distributed-actors-p0-3` is absent; #1642/#1643 are complete.
+- [x] #1869's `fix/1733-displace-occupancy-on-bind` local/remote branch cleanup completed after merge.
+- [ ] Previously listed stale branches **still exist remotely**: `codex/reject-muc-client-delay`, `codex/seal-room-destroy-mam-epoch`, `codex/send-muc-status-332`, `codex/reap-dead-room-claims`, `codex/1311-monolith-backup`, `codex/adr0017-user-actor-claim-lifecycle`, `codex/fix-cluster-remote-resource-reconciliation`. Verify unique commits and associated issue disposition before deleting; existence alone is not proof they are disposable.
+- [ ] `codex/fix-public-channel-members-only-backfill` still exists. Preserve until the five-channel `members_only` state is verified; the old V1007 slot was consumed, so any still-needed repair requires a fresh migration.
+- [ ] Custody branches `codex/distributed-actors-p0-1-client-sm` and `backup/pr1357-p0-1-pre-successor-20260724` both still exist. Keep until #1641's packet decisions are recorded.
+- [ ] Reconcile the GitHub #1664 index and stale issue descriptions using this audit. This update changes the repository roadmap only; it does not edit GitHub issue bodies or record unperformed operational results.
