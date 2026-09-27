@@ -22,6 +22,8 @@ pub struct InMemoryPubSubStorage {
     subscriptions: dashmap::DashMap<(String, String, String), Subscription>,
     /// (owner_bare_jid, node_name, entity_bare_jid) -> Affiliation
     affiliations: dashmap::DashMap<(String, String, String), Affiliation>,
+    /// (owner_bare_jid, node_name) of nodes the owner explicitly configured.
+    owner_configured: dashmap::DashSet<(String, String)>,
 }
 
 impl Default for InMemoryPubSubStorage {
@@ -37,6 +39,7 @@ impl InMemoryPubSubStorage {
             items: dashmap::DashMap::new(),
             subscriptions: dashmap::DashMap::new(),
             affiliations: dashmap::DashMap::new(),
+            owner_configured: dashmap::DashSet::new(),
         }
     }
 
@@ -83,6 +86,7 @@ impl PubSubStorage for InMemoryPubSubStorage {
 
         let node_existed = self.nodes.remove(&key).is_some();
         self.items.remove(&key);
+        self.owner_configured.remove(&key);
 
         Ok(node_existed)
     }
@@ -330,6 +334,23 @@ impl PubSubStorage for InMemoryPubSubStorage {
         };
 
         Ok(())
+    }
+
+    async fn mark_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<(), XmppError> {
+        self.owner_configured.insert(Self::key(owner, node_name));
+        Ok(())
+    }
+
+    async fn is_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError> {
+        Ok(self.owner_configured.contains(&Self::key(owner, node_name)))
     }
 
     async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError> {

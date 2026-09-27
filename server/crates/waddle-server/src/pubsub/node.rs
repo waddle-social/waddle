@@ -252,6 +252,38 @@ impl DatabasePubSubStorage {
         Ok(names)
     }
 
+    pub(super) async fn mark_owner_configured_impl(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<(), XmppError> {
+        self.execute(
+            "INSERT INTO pubsub_owner_configured (owner_jid, node_name) VALUES (?, ?) \
+             ON CONFLICT (owner_jid, node_name) DO NOTHING",
+            crate::db_params![owner.to_string(), node_name],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(super) async fn is_owner_configured_impl(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError> {
+        let mut rows = self
+            .query(
+                "SELECT 1 FROM pubsub_owner_configured WHERE owner_jid = ? AND node_name = ?",
+                crate::db_params![owner.to_string(), node_name],
+            )
+            .await?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+            .is_some())
+    }
+
     pub(super) async fn update_node_config_impl(
         &self,
         owner: &BareJid,

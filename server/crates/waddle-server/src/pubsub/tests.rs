@@ -2104,68 +2104,78 @@ async fn dm_bookmark_node_delete_clears_only_direct_projection_rows() {
 }
 
 #[tokio::test]
-async fn avatar_nodes_open_fixup_reopens_legacy_presence_nodes_once() {
+async fn startup_reopens_legacy_presence_avatar_nodes_but_keeps_owner_choices() {
     use waddle_xmpp::pubsub::{AccessModel, NodeConfig};
     let artifacts = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
     )
     .join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
-    let path = artifacts.join(format!("pubsub-fixup-{}.db", uuid::Uuid::new_v4()));
+    let path = artifacts.join(format!("pubsub-avatar-repair-{}.db", uuid::Uuid::new_v4()));
     let url = format!("sqlite://{}", path.display());
-    let owner = jid("alice@example.com");
+    let legacy = jid("legacy@example.com");
+    let chooser = jid("chooser@example.com");
     let avatar_nodes = ["urn:xmpp:avatar:data", "urn:xmpp:avatar:metadata"];
 
-    // A pre-fixup database: legacy Presence avatar nodes, fixup not yet recorded.
+    // Legacy nodes (e.g. created by an old pod mid-rollout) and nodes the
+    // owner explicitly configured to Presence.
     {
         let storage = DatabasePubSubStorage::open(Some(&url))
             .await
             .expect("storage");
         for node in avatar_nodes {
+            for owner in [&legacy, &chooser] {
+                storage.get_or_create_node(owner, node).await.expect("node");
+                storage
+                    .update_node_config(owner, node, &NodeConfig::pep_default())
+                    .await
+                    .expect("presence config");
+            }
             storage
-                .get_or_create_node(&owner, node)
+                .mark_owner_configured(&chooser, node)
                 .await
-                .expect("node");
-            storage
-                .update_node_config(&owner, node, &NodeConfig::pep_default())
-                .await
-                .expect("legacy config");
+                .expect("mark");
         }
-        storage
-            .execute("DELETE FROM pubsub_data_fixups", ())
-            .await
-            .expect("forget fixup");
     }
-    // Startup applies the fixup once.
-    {
+    // Every startup repairs unmarked legacy nodes and leaves owner choices.
+    for _ in 0..2 {
         let storage = DatabasePubSubStorage::open(Some(&url))
             .await
             .expect("storage");
         for node in avatar_nodes {
-            let stored = storage
-                .get_node(&owner, node)
+            let legacy_node = storage
+                .get_node(&legacy, node)
                 .await
                 .expect("read")
                 .expect("node");
-            assert_eq!(stored.config.access_model, AccessModel::Open, "{node}");
-            // After the fixup, the owner deliberately restricts the node again.
-            storage
-                .update_node_config(&owner, node, &NodeConfig::pep_default())
+            assert_eq!(legacy_node.config.access_model, AccessModel::Open, "{node}");
+            let chosen = storage
+                .get_node(&chooser, node)
                 .await
-                .expect("owner choice");
+                .expect("read")
+                .expect("node");
+            assert_eq!(chosen.config.access_model, AccessModel::Presence, "{node}");
+            assert!(storage
+                .is_owner_configured(&chooser, node)
+                .await
+                .expect("marker"));
         }
     }
-    // A later startup must not undo the owner's choice.
+    // Deleting a node drops its marker with it.
     let storage = DatabasePubSubStorage::open(Some(&url))
         .await
         .expect("storage");
-    for node in avatar_nodes {
-        let stored = storage
-            .get_node(&owner, node)
-            .await
-            .expect("read")
-            .expect("node");
-        assert_eq!(stored.config.access_model, AccessModel::Presence, "{node}");
-    }
+    storage
+        .delete_node(&chooser, avatar_nodes[0])
+        .await
+        .expect("delete");
+    storage
+        .get_or_create_node(&chooser, avatar_nodes[0])
+        .await
+        .expect("recreate");
+    assert!(!storage
+        .is_owner_configured(&chooser, avatar_nodes[0])
+        .await
+        .expect("marker"));
     let _ = std::fs::remove_file(&path);
 }

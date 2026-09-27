@@ -132,6 +132,21 @@ pub trait PubSubStorage: Send + Sync + 'static {
         config: &NodeConfig,
     ) -> Result<(), XmppError>;
 
+    /// Record that the owner explicitly configured this node (XEP-0060
+    /// §8.2), so server-side default repairs never override the choice.
+    async fn mark_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<(), XmppError>;
+
+    /// Whether the owner has explicitly configured this node.
+    async fn is_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError>;
+
     /// Purge all items from a node without deleting the node (XEP-0060 §8.5).
     /// Returns the number of items removed.
     async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError>;

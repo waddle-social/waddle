@@ -124,6 +124,22 @@ impl PubSubStorage for DatabasePubSubStorage {
         self.update_node_config_impl(owner, node_name, config).await
     }
 
+    async fn mark_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<(), XmppError> {
+        self.mark_owner_configured_impl(owner, node_name).await
+    }
+
+    async fn is_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError> {
+        self.is_owner_configured_impl(owner, node_name).await
+    }
+
     async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError> {
         self.purge_node_impl(owner, node_name).await
     }

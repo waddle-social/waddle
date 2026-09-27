@@ -367,6 +367,22 @@ mod tests {
             ) -> Result<Vec<String>, XmppError> {
                 boom("list_node_names_for_item")
             }
+            async fn mark_owner_configured(
+                &self,
+                _owner: &BareJid,
+                _node_name: &str,
+            ) -> Result<(), XmppError> {
+                boom("mark_owner_configured")
+            }
+
+            async fn is_owner_configured(
+                &self,
+                _owner: &BareJid,
+                _node_name: &str,
+            ) -> Result<bool, XmppError> {
+                boom("is_owner_configured")
+            }
+
             async fn update_node_config(
                 &self,
                 _owner: &BareJid,

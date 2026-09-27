@@ -401,7 +401,24 @@ pub(super) async fn handle_pubsub_admin_request(
                 .update_node_config(target_jid, &node, &config)
                 .await
             {
-                Ok(_) => vec![iq_to_xml(build_pubsub_success(iq))],
+                Ok(_) => {
+                    // Record the owner's explicit choice so server-side
+                    // default repairs (legacy avatar nodes) never undo it.
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .mark_owner_configured(target_jid, &node)
+                        .await
+                    {
+                        warn!(node = %node, error = %error, "Failed to record owner-configured PubSub node");
+                        return vec![iq_to_xml(build_pubsub_error(
+                            iq,
+                            PubSubError::InternalServerError,
+                        ))];
+                    }
+                    vec![iq_to_xml(build_pubsub_success(iq))]
+                }
                 Err(_) => {
                     vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
                 }

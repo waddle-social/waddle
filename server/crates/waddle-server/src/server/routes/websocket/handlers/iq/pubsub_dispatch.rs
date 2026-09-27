@@ -564,14 +564,16 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// non-roster peers. We reconcile the config in-place so the next
 /// publish lands on a spec-conformant node.
 ///
-/// Avatar nodes are not reconciled: legacy Presence avatar nodes are
-/// repaired once by the pubsub data fixup, and any later config is the
-/// owner's choice.
+/// Avatar nodes are repaired only from the legacy Presence default and
+/// never after the owner configured them (see `NodeConfig::needs_reconcile`).
 ///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
-/// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, DND) — we don't bulk-rewrite arbitrary user node configs here.
+/// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
+/// nodes, DND) — we don't bulk-rewrite arbitrary user node configs here.
 async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
     if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
     {
         return;
@@ -590,7 +592,18 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
             return;
         }
     };
-    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(node, &existing.config) {
+    let owner_configured = match storage.is_owner_configured(owner, node).await {
+        Ok(configured) => configured,
+        Err(error) => {
+            warn!(node, error = %error, "Failed to read owner-configured marker; skipping reconcile");
+            return;
+        }
+    };
+    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(
+        node,
+        &existing.config,
+        owner_configured,
+    ) {
         return;
     }
     let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);

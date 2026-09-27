@@ -515,7 +515,8 @@ async fn ensure_canonical_pep_node(
 ) -> Result<(), ProfileSyncError> {
     let storage = &state.deps.protocol.pubsub_storage;
     let (existing, _) = storage.get_or_create_node(jid, node).await?;
-    if NodeConfig::needs_reconcile(node, &existing.config) {
+    let owner_configured = storage.is_owner_configured(jid, node).await?;
+    if NodeConfig::needs_reconcile(node, &existing.config, owner_configured) {
         storage
             .update_node_config(jid, node, &NodeConfig::pep_for_node(node))
             .await?;

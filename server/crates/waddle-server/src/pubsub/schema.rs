@@ -84,6 +84,7 @@ impl DatabasePubSubStorage {
                 "pubsub_items",
                 "pubsub_subscriptions",
                 "pubsub_affiliations",
+                "pubsub_owner_configured",
                 "pubsub_nodes",
             ] {
                 self.execute(&format!("DROP TABLE IF EXISTS {table}"), ())
@@ -102,38 +103,26 @@ impl DatabasePubSubStorage {
             )
             .await?;
         }
-        self.run_data_fixups().await
+        self.repair_legacy_avatar_nodes().await
     }
 
-    /// One-shot data fixups, each applied at most once per database and
-    /// recorded in `pubsub_data_fixups`.
+    /// Startup repair of legacy XEP-0084 avatar nodes.
     ///
-    /// `avatar_nodes_open_v1`: client-published XEP-0084 avatar nodes used
-    /// to be auto-created on the Presence default, which Waddle's authz
-    /// admits only the owner to, so the avatar was invisible to every
-    /// peer. Presence was the default then, so no owner chose it; every
-    /// such node is reopened once. Afterwards a Presence avatar node is
-    /// an owner choice and is left alone.
-    async fn run_data_fixups(&self) -> Result<(), XmppError> {
-        const AVATAR_NODES_OPEN_V1: &str = "avatar_nodes_open_v1";
-        let mut applied = self
-            .query(
-                "SELECT 1 FROM pubsub_data_fixups WHERE name = ?",
-                crate::db_params![AVATAR_NODES_OPEN_V1],
-            )
-            .await?;
-        if applied
-            .next()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?
-            .is_some()
-        {
-            return Ok(());
-        }
+    /// Older binaries auto-created client-published avatar nodes on the
+    /// Presence default, which Waddle's authz admits only the owner to, so
+    /// the avatar was invisible to every peer. Every startup reopens such
+    /// nodes unless the owner explicitly configured them (recorded in
+    /// `pubsub_owner_configured` by the XEP-0060 §8.2 configure path).
+    /// Running on every startup, not once, also repairs nodes created by
+    /// old pods during a rolling deploy.
+    async fn repair_legacy_avatar_nodes(&self) -> Result<(), XmppError> {
         let reopened = self
             .execute(
                 "UPDATE pubsub_nodes SET access_model = ? \
-                 WHERE access_model = ? AND node_name IN (?, ?)",
+                 WHERE access_model = ? AND node_name IN (?, ?) \
+                 AND NOT EXISTS (SELECT 1 FROM pubsub_owner_configured oc \
+                     WHERE oc.owner_jid = pubsub_nodes.owner_jid \
+                     AND oc.node_name = pubsub_nodes.node_name)",
                 crate::db_params![
                     AccessModel::Open.to_string(),
                     AccessModel::Presence.to_string(),
@@ -142,12 +131,9 @@ impl DatabasePubSubStorage {
                 ],
             )
             .await?;
-        self.execute(
-            "INSERT INTO pubsub_data_fixups (name) VALUES (?) ON CONFLICT (name) DO NOTHING",
-            crate::db_params![AVATAR_NODES_OPEN_V1],
-        )
-        .await?;
-        info!(reopened, "pubsub data fixup avatar_nodes_open_v1 applied");
+        if reopened > 0 {
+            info!(reopened, "reopened legacy Presence avatar nodes");
+        }
         Ok(())
     }
 
@@ -458,7 +444,12 @@ impl DatabasePubSubStorage {
         )
         .await?;
         self.execute(
-            "CREATE TABLE IF NOT EXISTS pubsub_data_fixups (name TEXT NOT NULL PRIMARY KEY)",
+            "CREATE TABLE IF NOT EXISTS pubsub_owner_configured (\
+                owner_jid TEXT NOT NULL, \
+                node_name TEXT NOT NULL, \
+                PRIMARY KEY (owner_jid, node_name), \
+                FOREIGN KEY (owner_jid, node_name) \
+                    REFERENCES pubsub_nodes(owner_jid, node_name) ON DELETE CASCADE)",
             (),
         )
         .await?;
