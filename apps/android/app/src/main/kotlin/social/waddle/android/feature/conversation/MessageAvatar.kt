@@ -37,9 +37,11 @@ fun messageAvatarsOf(
         if (!item.isMine) {
             val jid = authorBareJidOf(item, selfBareJid)
             val grouped = previous?.let { prev ->
-                // Same resolved person, not just the same nick: a reused
-                // nick or an unknown author starts a new group.
-                jid != null && authorBareJidOf(prev, selfBareJid) == jid && continuesGroup(prev, item)
+                // Same sender and window (continuesGroup) AND the same
+                // resolved person: a reused nick, or known vs unknown,
+                // splits; two unknown rows from one nick group (web
+                // groups by nick) under one initials avatar.
+                authorBareJidOf(prev, selfBareJid) == jid && continuesGroup(prev, item)
             } ?: false
             out[avatarKeyOf(item)] = MessageAvatar(jid = jid, visible = !grouped)
         }

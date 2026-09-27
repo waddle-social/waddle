@@ -109,16 +109,32 @@ class MessageAvatarTest {
     }
 
     @Test
-    fun `a reused nick or an unknown author never continues the previous group`() {
+    fun `differing resolved authors split a group even under one nick`() {
         val alice = row("1", "bob", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
         // Alice wrote as "bob"; the nick then passed to Bob within 5 min.
         val bob = row("2", "bob", "2026-07-15T10:01:00Z", authorJid = "bob@waddle.test")
-        val unknown1 = row("3", "carol", "2026-07-15T10:02:00Z")
-        val unknown2 = row("4", "carol", "2026-07-15T10:03:00Z")
-        val avatars = messageAvatarsOf(listOf(alice, bob, unknown1, unknown2), self)
+        val avatars = messageAvatarsOf(listOf(alice, bob), self)
 
         assertEquals(MessageAvatar("bob@waddle.test", visible = true), avatarOf(avatars, bob))
-        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, unknown1))
-        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, unknown2))
+    }
+
+    @Test
+    fun `consecutive unknown-author rows from one nick share one avatar`() {
+        val rows = (1..5).map { row("$it", "carol", "2026-07-15T10:0$it:00Z") }
+        val avatars = messageAvatarsOf(rows, self)
+
+        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, rows.first()))
+        rows.drop(1).forEach { assertEquals(MessageAvatar(null, visible = false), avatarOf(avatars, it)) }
+    }
+
+    @Test
+    fun `an unknown and a known author under one nick split`() {
+        val unknown = row("1", "dana", "2026-07-15T10:00:00Z")
+        val known = row("2", "dana", "2026-07-15T10:01:00Z", authorJid = "dana@waddle.test")
+        val unknownAgain = row("3", "dana", "2026-07-15T10:02:00Z")
+        val avatars = messageAvatarsOf(listOf(unknown, known, unknownAgain), self)
+
+        assertEquals(MessageAvatar("dana@waddle.test", visible = true), avatarOf(avatars, known))
+        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, unknownAgain))
     }
 }
