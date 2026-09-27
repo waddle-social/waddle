@@ -202,8 +202,9 @@ class PeerAvatarRepositoryTest {
     }
 
     @Test
-    fun `AvatarChanged refetches with the announced id as the known id`() = runTest {
+    fun `AvatarChanged for a held avatar refetches with the announced id as the known id`() = runTest {
         val h = Harness(this)
+        h.store.onAvatar(testAvatar(jid = alice, id = "id-1"))
         h.resolver.answer(alice, AvatarLookup.Found(testAvatar(jid = alice, id = "id-2")))
         h.repository.onAvatarChanged(alice, "id-2")
         runCurrent()
@@ -413,5 +414,63 @@ class PeerAvatarRepositoryTest {
         h.resolver.releaseAll()
         runCurrent()
         release()
+    }
+
+    @Test
+    fun `a burst of AvatarChanged for unseen JIDs queues no lookups`() = runTest {
+        val h = Harness(this)
+        val watched = "shown@waddle.test"
+        h.resolver.answer(watched, AvatarLookup.Found(testAvatar(jid = watched, id = "id-1")))
+        val release = h.repository.watch(watched)
+        runCurrent()
+        h.resolver.releaseAll()
+        runCurrent()
+        val baseline = h.resolver.calls.size
+
+        (1..50).forEach { h.repository.onAvatarChanged("contact$it@waddle.test", "id-$it") }
+        h.repository.onAvatarChanged(watched, "id-2")
+        runCurrent()
+
+        // Only the on-screen JID refetches.
+        assertEquals(listOf(Call(watched, "id-2")), h.resolver.calls.drop(baseline))
+        h.resolver.releaseAll()
+        runCurrent()
+
+        // An unseen contact is still fetched lazily on its first render.
+        h.repository.ensure("contact7@waddle.test")
+        runCurrent()
+        assertEquals(Call("contact7@waddle.test", null), h.resolver.calls.last())
+        release()
+    }
+
+    @Test
+    fun `AvatarChanged marks a settled but unshown JID stale without fetching`() = runTest {
+        val h = Harness(this)
+        h.resolver.answer(alice, AvatarLookup.Absent)
+        h.repository.ensure(alice)
+        runCurrent()
+        h.resolver.releaseAll()
+        runCurrent()
+
+        h.repository.onAvatarChanged(alice, "id-new")
+        runCurrent()
+        assertEquals(1, h.resolver.calls.size)
+
+        // Inside the 10-minute miss window, yet the next render refetches.
+        h.repository.ensure(alice)
+        runCurrent()
+        assertEquals(2, h.resolver.calls.size)
+    }
+
+    @Test
+    fun `a disable for an unseen JID still clears its held avatar`() = runTest {
+        val h = Harness(this)
+        h.store.onAvatar(testAvatar(jid = alice, id = "id-1"))
+        h.repository.onAvatarChanged("bob@waddle.test", null)
+        h.repository.onAvatarChanged(alice, null)
+        runCurrent()
+
+        assertNull(h.store.avatars.value[alice])
+        assertEquals(emptyList<Call>(), h.resolver.calls)
     }
 }

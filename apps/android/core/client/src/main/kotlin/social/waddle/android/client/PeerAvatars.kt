@@ -162,19 +162,37 @@ internal class PeerAvatarRepository(
         start(key, entry, knownId = null)
     }
 
-    /** XEP-0084 metadata notification for [jid]; `null` = avatar disabled. */
+    /**
+     * XEP-0084 metadata notification for [jid]; `null` = avatar disabled.
+     *
+     * Lazy like everything else: only a JID that is on screen, whose
+     * avatar is held, or whose fetch is in flight refetches now. For any
+     * other JID (a roster contact nobody has rendered) the event only
+     * marks a known result stale — a burst of contact updates must not
+     * queue lookups — and the first render fetches as usual.
+     */
     fun onAvatarChanged(jid: String, avatarId: String?) {
         val key = keyOf(jid) ?: return
         synchronized(lock) {
-            val entry = entries.getOrPut(key, ::Entry)
-            entry.attempt?.superseded = true
             if (avatarId == null) {
-                entry.rerun = false
-                entry.rerunKnownId = null
-                entry.settled = Settled(clock(), RETRY_TTL_MILLIS, currentEpoch)
+                // A disable always drops the held avatar, seen or not.
                 store.clearAvatar(key)
+                entries[key]?.let { entry ->
+                    entry.attempt?.superseded = true
+                    entry.rerun = false
+                    entry.rerunKnownId = null
+                    entry.settled = Settled(clock(), RETRY_TTL_MILLIS, currentEpoch)
+                }
                 return
             }
+            val existing = entries[key]
+            val live = key in watchers || key in store.avatars.value || existing?.attempt != null
+            if (!live) {
+                existing?.settled = null
+                return
+            }
+            val entry = existing ?: Entry().also { entries[key] = it }
+            entry.attempt?.superseded = true
             entry.settled = null
             if (entry.attempt != null) {
                 entry.rerun = true
