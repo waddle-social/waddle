@@ -19,6 +19,7 @@ impl WaddleClient {
                 on_message_delivery_failed: None,
                 on_message_rejected: None,
                 on_mds_displayed: None,
+                on_avatar_changed: None,
                 on_pubsub_event: None,
                 on_call: None,
                 on_stream_management: None,
@@ -87,6 +88,12 @@ impl WaddleClient {
     /// event, with a `WaddleMdsDisplayedEntry`-shaped JS value.
     pub fn set_on_mds_displayed(&mut self, cb: Function) {
         self.inner.borrow_mut().on_mds_displayed = Some(cb);
+    }
+
+    /// XEP-0084 §4.1 metadata transition handler. Invoked once per peer PEP
+    /// event with a `WaddleAvatarChanged`-shaped JS value.
+    pub fn set_on_avatar_changed(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_avatar_changed = Some(cb);
     }
 
     /// Generic XEP-0060 pubsub event handler. Invoked once per

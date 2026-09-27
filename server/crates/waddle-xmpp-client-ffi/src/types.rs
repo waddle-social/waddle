@@ -706,9 +706,7 @@ pub struct WaddleTopology {
 
 /// XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.
 ///
-/// `data` is the raw image bytes (base64-decoded) when carried by XMPP.
-/// `url` is present when XEP-0084 metadata or vCard `EXTVAL` points to an
-/// externally hosted avatar.
+/// `data` is the raw image bytes (base64-decoded) carried in-band by XMPP.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleAvatar {
     /// Bare JID the avatar belongs to (string form).
@@ -719,8 +717,6 @@ pub struct WaddleAvatar {
     pub mime_type: String,
     /// Decoded image bytes.
     pub data: Vec<u8>,
-    /// Externally hosted avatar URL.
-    pub url: Option<String>,
 }
 
 /// Outcome of a §4.2-aware avatar fetch: `id` is the item id the fetch
@@ -1313,6 +1309,8 @@ pub enum WaddleClientEvent {
         from: Jid,
         to: Option<Jid>,
     },
+    /// XEP-0084 metadata transition announced by a peer's PEP service.
+    AvatarChanged { jid: Jid, avatar_id: Option<String> },
     /// Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
     /// a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
     /// query-response entries resolve the `fetch_inbox` verb and are

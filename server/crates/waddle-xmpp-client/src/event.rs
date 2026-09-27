@@ -1,5 +1,6 @@
 use minidom::Element;
 
+use crate::avatar::AvatarChanged;
 use crate::bootstrap::{
     AuthenticationRequest, ResourceBindingRequest, SaslFailure, StreamFeatures,
 };
@@ -53,6 +54,8 @@ pub enum ClientEvent {
     /// carried the notification; same consumer story as
     /// [`ClientEvent::PubsubItemsRetracted`].
     PubsubAttachmentSummary(PubsubAttachmentSummaryUpdate),
+    /// XEP-0084 metadata transition announced by a peer's PEP service.
+    AvatarChanged(AvatarChanged),
     /// Transport-level delivery status for outbound message stanzas.
     MessageDelivery(MessageDeliveryEvent),
     /// A parsed message error. Echoed bodies and extensions are never dispatched.

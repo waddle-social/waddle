@@ -553,7 +553,13 @@ pub struct WaddleAvatar {
     pub id: String,
     pub mime_type: String,
     pub data: Vec<u8>,
-    pub url: Option<String>,
+}
+
+/// XEP-0084 metadata transition delivered to the browser callback surface.
+#[derive(Debug, Serialize)]
+pub struct WaddleAvatarChanged {
+    pub jid: String,
+    pub avatar_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -306,7 +306,6 @@ impl WaddleClient {
                     id: avatar.id,
                     mime_type: avatar.mime_type,
                     data: avatar.data,
-                    url: avatar.url,
                 }),
             }),
             Ok(None) => None,

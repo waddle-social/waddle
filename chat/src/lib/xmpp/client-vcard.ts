@@ -53,7 +53,6 @@ export class VCardManager {
     const bareJid = barePeerJid(jid);
     if (xmpp.request_avatar) {
       const avatar = await xmpp.request_avatar(bareJid);
-      if (avatar?.url) return avatar.url;
       if (avatar?.data) return avatarDataUrl(avatar.data, avatar.mime_type);
     }
     return null;

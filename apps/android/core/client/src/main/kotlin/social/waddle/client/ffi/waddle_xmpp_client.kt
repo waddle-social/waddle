@@ -7444,9 +7444,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
 /**
  * XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.
  *
- * `data` is the raw image bytes (base64-decoded) when carried by XMPP.
- * `url` is present when XEP-0084 metadata or vCard `EXTVAL` points to an
- * externally hosted avatar.
+ * `data` is the raw image bytes (base64-decoded) carried in-band by XMPP.
  */
 data class WaddleAvatar (
     /**
@@ -7468,11 +7466,6 @@ data class WaddleAvatar (
      * Decoded image bytes.
      */
     var `data`: kotlin.ByteArray
-    ,
-    /**
-     * Externally hosted avatar URL.
-     */
-    var `url`: kotlin.String?
 
 ){
 
@@ -7493,7 +7486,6 @@ public object FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer<WaddleAvatar>
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterByteArray.read(buf),
-            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -7501,8 +7493,7 @@ public object FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer<WaddleAvatar>
             FfiConverterString.allocationSize(value.`jid`) +
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterString.allocationSize(value.`mimeType`) +
-            FfiConverterByteArray.allocationSize(value.`data`) +
-            FfiConverterOptionalString.allocationSize(value.`url`)
+            FfiConverterByteArray.allocationSize(value.`data`)
     )
 
     override fun write(value: WaddleAvatar, buf: ByteBuffer) {
@@ -7510,7 +7501,6 @@ public object FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer<WaddleAvatar>
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`mimeType`, buf)
             FfiConverterByteArray.write(value.`data`, buf)
-            FfiConverterOptionalString.write(value.`url`, buf)
     }
 }
 
@@ -12399,6 +12389,19 @@ sealed class WaddleClientEvent {
     }
 
     /**
+     * XEP-0084 metadata transition announced by a peer's PEP service.
+     */
+    data class AvatarChanged(
+        val `jid`: social.waddle.client.ffi.Jid,
+        val `avatarId`: kotlin.String?) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    /**
      * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
      * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
      * query-response entries resolve the `fetch_inbox` verb and are
@@ -12493,16 +12496,20 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterTypeJid.read(buf),
                 FfiConverterOptionalTypeJid.read(buf),
                 )
-            9 -> WaddleClientEvent.InboxPush(
+            9 -> WaddleClientEvent.AvatarChanged(
+                FfiConverterTypeJid.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            10 -> WaddleClientEvent.InboxPush(
                 FfiConverterTypeWaddleInboxEntry.read(buf),
                 )
-            10 -> WaddleClientEvent.Call(
+            11 -> WaddleClientEvent.Call(
                 FfiConverterTypeWaddleCallEvent.read(buf),
                 )
-            11 -> WaddleClientEvent.AuthenticationFailed(
+            12 -> WaddleClientEvent.AuthenticationFailed(
                 FfiConverterTypeWaddleSaslCondition.read(buf),
                 )
-            12 -> WaddleClientEvent.Error(
+            13 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -12564,6 +12571,14 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 + FfiConverterTypeStanzaId.allocationSize(value.`stanzaId`)
                 + FfiConverterTypeJid.allocationSize(value.`from`)
                 + FfiConverterOptionalTypeJid.allocationSize(value.`to`)
+            )
+        }
+        is WaddleClientEvent.AvatarChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeJid.allocationSize(value.`jid`)
+                + FfiConverterOptionalString.allocationSize(value.`avatarId`)
             )
         }
         is WaddleClientEvent.InboxPush -> {
@@ -12638,23 +12653,29 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterOptionalTypeJid.write(value.`to`, buf)
                 Unit
             }
-            is WaddleClientEvent.InboxPush -> {
+            is WaddleClientEvent.AvatarChanged -> {
                 buf.putInt(9)
+                FfiConverterTypeJid.write(value.`jid`, buf)
+                FfiConverterOptionalString.write(value.`avatarId`, buf)
+                Unit
+            }
+            is WaddleClientEvent.InboxPush -> {
+                buf.putInt(10)
                 FfiConverterTypeWaddleInboxEntry.write(value.`entry`, buf)
                 Unit
             }
             is WaddleClientEvent.Call -> {
-                buf.putInt(10)
+                buf.putInt(11)
                 FfiConverterTypeWaddleCallEvent.write(value.`event`, buf)
                 Unit
             }
             is WaddleClientEvent.AuthenticationFailed -> {
-                buf.putInt(11)
+                buf.putInt(12)
                 FfiConverterTypeWaddleSaslCondition.write(value.`condition`, buf)
                 Unit
             }
             is WaddleClientEvent.Error -> {
-                buf.putInt(12)
+                buf.putInt(13)
                 FfiConverterString.write(value.`description`, buf)
                 Unit
             }

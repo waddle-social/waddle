@@ -451,6 +451,11 @@ export class WaddleClient {
      */
     set_dm_notification_mode(options: any): Promise<any>;
     /**
+     * XEP-0084 §4.1 metadata transition handler. Invoked once per peer PEP
+     * event with a `WaddleAvatarChanged`-shaped JS value.
+     */
+    set_on_avatar_changed(cb: Function): void;
+    /**
      * Register a callback for inbound XMPP-native call events
      * (XEP-0353 JMI envelopes + XEP-0166 Jingle session control
      * carrying a `urn:waddle:transports:livekit:0` transport).

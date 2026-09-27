@@ -43,6 +43,8 @@ final class FFIEventListener: WaddleEventListener {
             let recipient = to.flatMap(JID.init(parsing:))
             guard to == nil || recipient != nil else { return nil }
             return .messageRejected(stanzaID: stanzaId, from: sender, to: recipient)
+        case .avatarChanged(_, _):
+            return nil
         case .call:
             BridgeLog.debug("dropped call event: calls are not bridged")
             return nil

@@ -152,6 +152,9 @@ fn pubsub_notification_events(event: &crate::messaging::MessagingEvent) -> Vec<C
     };
     let mut events = Vec::new();
     for pubsub_event in &message.pubsub_events {
+        if let Some(avatar_changed) = crate::avatar::parse_metadata_event(pubsub_event) {
+            events.push(ClientEvent::AvatarChanged(avatar_changed));
+        }
         if let Some(retracted) = pubsub_event.retracted_items() {
             events.push(ClientEvent::PubsubItemsRetracted(retracted));
         }

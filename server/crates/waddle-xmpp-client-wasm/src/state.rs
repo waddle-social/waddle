@@ -288,6 +288,9 @@ pub(crate) struct WaddleClientInner {
     /// inbound PEP event, so the chat layer can apply each one
     /// independently without re-parsing the message.
     pub(crate) on_mds_displayed: Option<Function>,
+    /// XEP-0084 metadata transition callback. Receives a typed bare JID and
+    /// optional in-band avatar item id.
+    pub(crate) on_avatar_changed: Option<Function>,
     pub(crate) on_pubsub_event: Option<Function>,
     pub(crate) on_call: Option<Function>,
     pub(crate) on_stream_management: Option<Function>,

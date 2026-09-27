@@ -381,7 +381,6 @@ export interface WasmAvatar {
   id: string;
   mime_type: string;
   data?: Uint8Array;
-  url?: string;
 }
 
 export interface WasmUploadSlot {
@@ -495,6 +494,12 @@ export interface WasmMdsDisplayedEntry {
   chat_id: string;
   stanza_id: string;
   stanza_id_by: string;
+}
+
+/** XEP-0084 peer avatar metadata transition surfaced by the wasm client. */
+export interface WasmAvatarChanged {
+  jid: string;
+  avatar_id?: string;
 }
 
 export interface WasmPubsubEvent {

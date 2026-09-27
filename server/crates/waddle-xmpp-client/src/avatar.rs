@@ -5,10 +5,11 @@
 //! current avatar hash and MIME type, then fetch the matching item from the
 //! `urn:xmpp:avatar:data` node and base64-decode its payload. If XEP-0084 is
 //! unavailable or unusable, fall back to the XEP-0054 `vcard-temp` `PHOTO`
-//! shape, supporting both `BINVAL` bytes and `EXTVAL` URLs.
+//! shape, accepting only in-band `BINVAL` bytes so resolving an avatar never
+//! leaks the viewer's IP address to a third-party URL.
 //!
 //! Typed payloads only — JIDs use [`BareJid`], errors use [`ClientError`], and
-//! the raw image bytes / URL live in [`Avatar`].
+//! the raw image bytes live in [`Avatar`].
 //!
 //! Publishing (XEP-0084 §3) is builder-only here: callers compute the SHA-1
 //! item id with [`compute_avatar_item_id`], publish the data item first via
@@ -21,10 +22,10 @@ use jid::BareJid;
 use minidom::Element;
 use sha1::{Digest, Sha1};
 use std::future::Future;
-use url::Url;
 use uuid::Uuid;
 
 use crate::pep::build_pep_publish_iq_with_item_id;
+use crate::pubsub_event::{PubsubEvent, PubsubEventPayload};
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
@@ -54,7 +55,6 @@ pub struct AvatarInfo {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub bytes: Option<u64>,
-    pub url: Option<String>,
 }
 
 /// A fetched user avatar.
@@ -68,8 +68,6 @@ pub struct Avatar {
     pub mime_type: String,
     /// Raw image bytes (base64-decoded), if carried by XMPP.
     pub data: Vec<u8>,
-    /// HTTP(S) avatar URL, if the avatar is externally hosted.
-    pub url: Option<String>,
 }
 
 /// vCard `PHOTO` payload from XEP-0054.
@@ -77,7 +75,6 @@ pub struct Avatar {
 pub struct VcardPhoto {
     pub mime_type: Option<String>,
     pub data: Option<Vec<u8>>,
-    pub url: Option<String>,
 }
 
 /// Error classification for request flows that distinguish stanza-level
@@ -86,6 +83,16 @@ pub struct VcardPhoto {
 pub enum AvatarRequestFailure<E> {
     StanzaError,
     Other(E),
+}
+
+/// A XEP-0084 metadata transition announced by a peer's PEP service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarChanged {
+    /// Bare JID of the peer that published the metadata transition.
+    pub jid: BareJid,
+    /// The advertised in-band avatar item id, or `None` when the peer
+    /// disabled its avatar or retracted the metadata item.
+    pub avatar_id: Option<String>,
 }
 
 // ── IQ builders ──────────────────────────────────────────────────────────────
@@ -247,26 +254,71 @@ pub fn parse_metadata_response(iq: &Element) -> Option<AvatarInfo> {
         return None;
     }
     let item = items.get_child("item", NS_PUBSUB)?;
-    let metadata = item.get_child("metadata", NS_AVATAR_METADATA)?;
-    let info = metadata
-        .children()
-        .find(|c| c.name() == "info" && c.ns() == NS_AVATAR_METADATA)?;
+    parse_metadata_info(item.get_child("metadata", NS_AVATAR_METADATA)?)
+}
 
-    let id = info.attr("id")?.to_string();
-    let mime_type = info.attr("type").unwrap_or("image/png").to_string();
-    let width = info.attr("width").and_then(|v| v.parse().ok());
-    let height = info.attr("height").and_then(|v| v.parse().ok());
-    let bytes = info.attr("bytes").and_then(|v| v.parse().ok());
-    let url = info.attr("url").map(str::to_string);
+/// Parse an XEP-0084 metadata PEP event into one typed avatar transition.
+///
+/// XEP-0084 metadata is a singleton node in normal operation. A retraction
+/// and an empty `<metadata/>` both mean the peer has no current avatar.
+pub fn parse_metadata_event(event: &PubsubEvent) -> Option<AvatarChanged> {
+    if event.node != NS_AVATAR_METADATA {
+        return None;
+    }
+    let jid = event.from.as_ref()?.to_bare();
+    let item = event.items.first()?;
+    if item.retracted {
+        return Some(AvatarChanged {
+            jid,
+            avatar_id: None,
+        });
+    }
+    let PubsubEventPayload::Opaque { element } = &item.payload else {
+        return None;
+    };
+    if !element.is("metadata", NS_AVATAR_METADATA) {
+        return None;
+    }
+
+    Some(AvatarChanged {
+        jid,
+        avatar_id: metadata_avatar_id(element),
+    })
+}
+
+fn metadata_avatar_id(metadata: &Element) -> Option<String> {
+    let mut external_id = None;
+    for info in metadata_info_elements(metadata) {
+        let Some(id) = info.attr("id") else {
+            continue;
+        };
+        if info.attr("url").is_none() {
+            return Some(id.to_string());
+        }
+        external_id.get_or_insert_with(|| id.to_string());
+    }
+    external_id
+}
+
+/// Select an in-band metadata representation. URL-only `<info/>` elements
+/// are deliberately ignored: resolving them would disclose the viewer's IP
+/// address to an arbitrary third party.
+fn parse_metadata_info(metadata: &Element) -> Option<AvatarInfo> {
+    let info = metadata_info_elements(metadata).find(|child| child.attr("url").is_none())?;
 
     Some(AvatarInfo {
-        id,
-        mime_type,
-        width,
-        height,
-        bytes,
-        url,
+        id: info.attr("id")?.to_string(),
+        mime_type: info.attr("type").unwrap_or("image/png").to_string(),
+        width: info.attr("width").and_then(|value| value.parse().ok()),
+        height: info.attr("height").and_then(|value| value.parse().ok()),
+        bytes: info.attr("bytes").and_then(|value| value.parse().ok()),
     })
+}
+
+fn metadata_info_elements(metadata: &Element) -> impl Iterator<Item = &Element> {
+    metadata
+        .children()
+        .filter(|child| child.name() == "info" && child.ns() == NS_AVATAR_METADATA)
 }
 
 /// Parse a pubsub-items IQ result carrying an avatar-data payload.
@@ -292,18 +344,6 @@ pub fn parse_vcard_photo_response(iq: &Element) -> Option<VcardPhoto> {
     let vcard = iq.get_child("vCard", NS_VCARD_TEMP)?;
     let photo = vcard.get_child("PHOTO", NS_VCARD_TEMP)?;
 
-    if let Some(url) = photo
-        .get_child("EXTVAL", NS_VCARD_TEMP)
-        .map(Element::text)
-        .filter(|text| !text.trim().is_empty())
-    {
-        return Some(VcardPhoto {
-            mime_type: None,
-            data: None,
-            url: Some(url.trim().to_string()),
-        });
-    }
-
     let base64_text = photo.get_child("BINVAL", NS_VCARD_TEMP)?.text();
     let data = decode_base64_bytes(&base64_text)?;
     let mime_type = photo
@@ -315,7 +355,6 @@ pub fn parse_vcard_photo_response(iq: &Element) -> Option<VcardPhoto> {
     Some(VcardPhoto {
         mime_type,
         data: Some(data),
-        url: None,
     })
 }
 
@@ -376,19 +415,6 @@ where
                 }));
             }
 
-            if let Some(url) = info.url.as_deref().and_then(normalize_https_avatar_url) {
-                return Ok(Some(AvatarFetch {
-                    id: info.id.clone(),
-                    avatar: Some(Avatar {
-                        jid: jid.clone(),
-                        id: info.id,
-                        mime_type: info.mime_type,
-                        data: Vec::new(),
-                        url: Some(url),
-                    }),
-                }));
-            }
-
             let data_iq = build_data_request_iq(jid, &info.id);
             match send_iq(data_iq).await {
                 Ok(data_response) => {
@@ -401,7 +427,6 @@ where
                                     id: info.id,
                                     mime_type: info.mime_type,
                                     data,
-                                    url: None,
                                 }),
                             }));
                         }
@@ -442,34 +467,12 @@ where
 }
 
 fn vcard_photo_to_avatar(jid: &BareJid, photo: VcardPhoto) -> Option<Avatar> {
-    if let Some(url) = photo.url.as_deref().and_then(normalize_https_avatar_url) {
-        let id = url.clone();
-        return Some(Avatar {
-            jid: jid.clone(),
-            id,
-            mime_type: photo.mime_type.unwrap_or_else(|| "image/png".to_string()),
-            data: Vec::new(),
-            url: Some(url),
-        });
-    }
-
     photo.data.map(|data| Avatar {
         jid: jid.clone(),
         id: "vcard-photo".to_string(),
         mime_type: photo.mime_type.unwrap_or_else(|| "image/png".to_string()),
         data,
-        url: None,
     })
-}
-
-fn normalize_https_avatar_url(url: &str) -> Option<String> {
-    let trimmed = url.trim();
-    let parsed = Url::parse(trimmed).ok()?;
-    if parsed.scheme() == "https" {
-        Some(trimmed.to_string())
-    } else {
-        None
-    }
 }
 
 fn decode_base64_bytes(base64_text: &str) -> Option<Vec<u8>> {

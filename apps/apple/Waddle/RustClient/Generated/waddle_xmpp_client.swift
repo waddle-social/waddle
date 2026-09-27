@@ -5935,9 +5935,7 @@ public func FfiConverterTypeWaddleArchivedMessage_lower(_ value: WaddleArchivedM
 /**
  * XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.
  *
- * `data` is the raw image bytes (base64-decoded) when carried by XMPP.
- * `url` is present when XEP-0084 metadata or vCard `EXTVAL` points to an
- * externally hosted avatar.
+ * `data` is the raw image bytes (base64-decoded) carried in-band by XMPP.
  */
 public struct WaddleAvatar: Equatable, Hashable {
     /**
@@ -5956,10 +5954,6 @@ public struct WaddleAvatar: Equatable, Hashable {
      * Decoded image bytes.
      */
     public var data: Data
-    /**
-     * Externally hosted avatar URL.
-     */
-    public var url: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -5975,15 +5969,11 @@ public struct WaddleAvatar: Equatable, Hashable {
          */mimeType: String,
         /**
          * Decoded image bytes.
-         */data: Data,
-        /**
-         * Externally hosted avatar URL.
-         */url: String?) {
+         */data: Data) {
         self.jid = jid
         self.id = id
         self.mimeType = mimeType
         self.data = data
-        self.url = url
     }
 
 
@@ -6005,8 +5995,7 @@ public struct FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer {
                 jid: FfiConverterString.read(from: &buf),
                 id: FfiConverterString.read(from: &buf),
                 mimeType: FfiConverterString.read(from: &buf),
-                data: FfiConverterData.read(from: &buf),
-                url: FfiConverterOptionString.read(from: &buf)
+                data: FfiConverterData.read(from: &buf)
         )
     }
 
@@ -6015,7 +6004,6 @@ public struct FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.mimeType, into: &buf)
         FfiConverterData.write(value.data, into: &buf)
-        FfiConverterOptionString.write(value.url, into: &buf)
     }
 }
 
@@ -12304,6 +12292,11 @@ public enum WaddleClientEvent: Equatable, Hashable {
     case messageRejected(stanzaId: StanzaId, from: Jid, to: Jid?
     )
     /**
+     * XEP-0084 metadata transition announced by a peer's PEP service.
+     */
+    case avatarChanged(jid: Jid, avatarId: String?
+    )
+    /**
      * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
      * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
      * query-response entries resolve the `fetch_inbox` verb and are
@@ -12375,16 +12368,19 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case 8: return .messageRejected(stanzaId: try FfiConverterTypeStanzaId.read(from: &buf), from: try FfiConverterTypeJid.read(from: &buf), to: try FfiConverterOptionTypeJid.read(from: &buf)
         )
 
-        case 9: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
+        case 9: return .avatarChanged(jid: try FfiConverterTypeJid.read(from: &buf), avatarId: try FfiConverterOptionString.read(from: &buf)
         )
 
-        case 10: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        case 10: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
         )
 
-        case 11: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        case 11: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         )
 
-        case 12: return .error(description: try FfiConverterString.read(from: &buf)
+        case 12: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        )
+
+        case 13: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -12435,23 +12431,29 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             FfiConverterOptionTypeJid.write(to, into: &buf)
 
 
-        case let .inboxPush(entry):
+        case let .avatarChanged(jid,avatarId):
             writeInt(&buf, Int32(9))
+            FfiConverterTypeJid.write(jid, into: &buf)
+            FfiConverterOptionString.write(avatarId, into: &buf)
+
+
+        case let .inboxPush(entry):
+            writeInt(&buf, Int32(10))
             FfiConverterTypeWaddleInboxEntry.write(entry, into: &buf)
 
 
         case let .call(event):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
 
 
         case let .authenticationFailed(condition):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
 
 
         case let .error(description):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(13))
             FfiConverterString.write(description, into: &buf)
 
         }
