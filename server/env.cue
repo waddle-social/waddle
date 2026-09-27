@@ -11,6 +11,8 @@ import (
 let _rustInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
+	"README.md",
+	"capabilities.toml",
 	".config/nextest.toml",
 	"rust-toolchain.toml",
 	"crates/**",
@@ -28,6 +30,8 @@ let _nixInputs = [
 	"../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
 	"Cargo.toml",
 	"Cargo.lock",
+	"README.md",
+	"capabilities.toml",
 	".config/nextest.toml",
 	"rust-toolchain.toml",
 	"crates/**",

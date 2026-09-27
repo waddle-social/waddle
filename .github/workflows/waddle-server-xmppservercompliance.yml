@@ -21,6 +21,10 @@ on:
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
+    - server/README.md
+    - server/README.md/**
+    - server/capabilities.toml
+    - server/capabilities.toml/**
     - server/charts/waddle-server/**
     - server/crates/**
     - server/env.cue
@@ -47,6 +51,10 @@ on:
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
+    - server/README.md
+    - server/README.md/**
+    - server/capabilities.toml
+    - server/capabilities.toml/**
     - server/charts/waddle-server/**
     - server/crates/**
     - server/env.cue
