@@ -168,7 +168,7 @@ pub(super) async fn handle_pubsub_iq(
                 }
 
                 // Pre-publish reconcile for well-known PEP nodes whose
-                // canonical XEP-defined config is stricter than the
+                // canonical XEP-defined config differs from the
                 // generic `pep_default()`. Only the owner's own PEP
                 // service is affected — peer fetches go through the
                 // Items arm, not Publish.
@@ -564,11 +564,17 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// non-roster peers. We reconcile the config in-place so the next
 /// publish lands on a spec-conformant node.
 ///
+/// The XEP-0084 avatar nodes had the same history: client-published
+/// avatars auto-created them on the Presence default, which admits
+/// only the owner, so the avatar was invisible to every peer.
+///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
-/// are stricter than ad-hoc PEP defaults (currently `urn:xmpp:vcard4`)
-/// — we don't bulk-rewrite arbitrary user node configs here.
+/// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
+/// nodes, DND) — we don't bulk-rewrite arbitrary user node configs here.
 async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
     if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
     {
         return;

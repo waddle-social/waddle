@@ -1216,3 +1216,139 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
 
     let _ = admin.close().await;
 }
+
+// ============================================================================
+// Wire-published avatars are readable by other users
+// ============================================================================
+//
+// A client-published XEP-0084 avatar auto-creates its PEP nodes. Those
+// nodes must be as readable as the OIDC-published ones (`open`), or
+// every peer's items-get answers `forbidden` and the avatar is
+// invisible to everyone but its owner.
+
+async fn wire_publish_avatar(client: &mut WsXmppClient, owner_bare: &str, item_id: &str) {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    let png = tiny_png();
+    let png_b64 = BASE64.encode(&png);
+    let data = iq_set_to(
+        client,
+        &format!("{item_id}-data"),
+        owner_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{NS_AVATAR_DATA}"><item id="{item_id}"><data xmlns="{NS_AVATAR_DATA}">{png_b64}</data></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(data.contains(r#"type='result'"#), "data publish: {data}");
+    let meta = iq_set_to(
+        client,
+        &format!("{item_id}-meta"),
+        owner_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{NS_AVATAR_METADATA}"><item id="{item_id}"><metadata xmlns="{NS_AVATAR_METADATA}"><info id="{item_id}" type="image/png" bytes="{}"/></metadata></item></publish></pubsub>"#,
+            png.len()
+        ),
+    )
+    .await;
+    assert!(
+        meta.contains(r#"type='result'"#),
+        "metadata publish: {meta}"
+    );
+}
+
+async fn assert_peer_reads_avatar(peer: &mut WsXmppClient, owner_bare: &str, item_id: &str) {
+    for node in [NS_AVATAR_METADATA, NS_AVATAR_DATA] {
+        let resp = iq_get_to(
+            peer,
+            &format!("peer-read-{item_id}-{node}"),
+            owner_bare,
+            &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+        )
+        .await;
+        assert!(
+            resp.contains(r#"type='result'"#) && resp.contains(&format!(r#"id='{item_id}'"#)),
+            "peer MUST be able to read {node} of a wire-published avatar: {resp}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wire_published_avatar_is_readable_by_other_users() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let mut admin = admin_client(&server, "wire-avatar-admin").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    wire_publish_avatar(&mut admin, &admin_bare, "wire-avatar-1").await;
+
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "wire-avatar-bob",
+    )
+    .await
+    .expect("bob connect");
+    assert_peer_reads_avatar(&mut bob, &admin_bare, "wire-avatar-1").await;
+
+    let _ = bob.close().await;
+    let _ = admin.close().await;
+}
+
+// Avatar nodes auto-created before the `open` default shipped are
+// stuck on the Presence access model; the owner's next avatar publish
+// MUST reconcile them so peers can read the new avatar.
+#[tokio::test]
+async fn republish_reconciles_presence_avatar_nodes_to_open() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let mut admin = admin_client(&server, "legacy-avatar-admin").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    wire_publish_avatar(&mut admin, &admin_bare, "legacy-avatar-1").await;
+    for node in [NS_AVATAR_DATA, NS_AVATAR_METADATA] {
+        let resp = iq_set_to(
+            &mut admin,
+            &format!("legacy-configure-{node}"),
+            &admin_bare,
+            &format!(
+                r#"<pubsub xmlns="http://jabber.org/protocol/pubsub#owner"><configure node="{node}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field><field var="pubsub#access_model"><value>presence</value></field></x></configure></pubsub>"#
+            ),
+        )
+        .await;
+        assert!(
+            resp.contains(r#"type='result'"#),
+            "legacy configure {node}: {resp}"
+        );
+    }
+
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "legacy-avatar-bob",
+    )
+    .await
+    .expect("bob connect");
+    let denied = iq_get_to(
+        &mut bob,
+        "legacy-denied",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_METADATA}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        denied.contains("<forbidden"),
+        "precondition: Presence avatar node denies peers: {denied}"
+    );
+
+    wire_publish_avatar(&mut admin, &admin_bare, "legacy-avatar-2").await;
+    assert_peer_reads_avatar(&mut bob, &admin_bare, "legacy-avatar-2").await;
+
+    let _ = bob.close().await;
+    let _ = admin.close().await;
+}

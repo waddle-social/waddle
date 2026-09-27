@@ -138,6 +138,11 @@ impl PepHandler {
             // PEP node access model is `open`.
             return AccessModel::Open;
         }
+        if node == PEP_NODE_AVATAR_DATA || node == PEP_NODE_AVATAR_METADATA {
+            // XEP-0084: peers resolve avatars without a roster
+            // relationship, so the avatar nodes are publicly readable.
+            return AccessModel::Open;
+        }
         if node == PEP_NODE_STICKERS {
             // XEP-0449: the sticker-pack node access model SHOULD be
             // `open` so other users can fetch referenced packs.

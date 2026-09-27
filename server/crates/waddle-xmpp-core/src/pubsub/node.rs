@@ -331,6 +331,10 @@ impl NodeConfig {
             config = Self::stickers_defaults();
         } else if node == super::pep::PEP_NODE_VCARD4 {
             config = Self::vcard4_defaults();
+        } else if node == super::pep::PEP_NODE_AVATAR_DATA
+            || node == super::pep::PEP_NODE_AVATAR_METADATA
+        {
+            config = Self::avatar_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DND {
             config = Self::waddle_dnd_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS {
@@ -529,6 +533,21 @@ impl NodeConfig {
     /// than growing an unbounded item history — matching the
     /// OIDC-managed publisher in `waddle-server::profile::publish`.
     pub fn vcard4_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Open,
+            max_items: 1,
+            ..Self::pep_default()
+        }
+    }
+
+    /// XEP-0084 user avatar (`urn:xmpp:avatar:data` / `:metadata`) PEP
+    /// node defaults.
+    ///
+    /// Avatars are resolved by peers that share only a room with the
+    /// owner, so the nodes are `open` like vCard4 — the Presence
+    /// default admits only the owner. `max_items = 1` so a new avatar
+    /// replaces the previous one.
+    pub fn avatar_defaults() -> Self {
         Self {
             access_model: AccessModel::Open,
             max_items: 1,
