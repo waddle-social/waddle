@@ -750,15 +750,12 @@ where
     // a fixed floor (e.g. 1s) would make renewal SLOWER than a small
     // configured `lease_ttl`, inverting this function's entire purpose:
     // the row would still go stale mid-drain, just via a different
-    // mechanism. This node's heartbeat is already fresh going into this
-    // call (the ordinary tick loop's own last successful renewal is what
-    // got it here), so the ticker's first tick is deliberately consumed
-    // unused below rather than firing an immediate, redundant renewal on
-    // the common, fast-draining path.
+    // mechanism. Take the ticker's first, immediate tick: shutdown can
+    // start near the last confirmed lease deadline, so waiting half a TTL
+    // before the first renewal would abandon healthy Q6 work needlessly.
     let renewal_period = (lease_ttl / 2).max(Duration::from_millis(10));
     let mut ticker = tokio::time::interval(renewal_period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    ticker.tick().await;
 
     loop {
         let lease_deadline = last_success + lease_ttl;
@@ -3782,6 +3779,43 @@ mod tests {
         assert!(fatal_fence.is_cancelled());
         assert!(!live_identity.current().is_active());
         assert!(!completion.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_renews_a_healthy_lease_before_its_old_deadline() {
+        let owner = identity();
+        let heartbeat_entered = Arc::new(tokio::sync::Notify::new());
+        let release_drain = Arc::new(tokio::sync::Notify::new());
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        lease.heartbeat_entered = Some(heartbeat_entered.clone());
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let drain = run_shutdown_drain_with_heartbeat(
+            &lease,
+            &claims,
+            &owner,
+            &local_claims,
+            ShutdownLeaseTiming {
+                claim_release_budget: Duration::from_millis(10),
+                lease_ttl: Duration::from_millis(100),
+                last_success: tokio::time::Instant::now() - Duration::from_millis(80),
+            },
+            release_drain.notified(),
+        );
+        tokio::pin!(drain);
+        tokio::select! {
+            biased;
+            result = &mut drain => panic!("healthy shutdown drain ended before renewal: {result:?}"),
+            observed = tokio::time::timeout(Duration::from_millis(10), heartbeat_entered.notified()) => {
+                observed.expect("shutdown must renew before the old lease deadline");
+            }
+        }
+        release_drain.notify_one();
+        let result = tokio::time::timeout(Duration::from_millis(50), &mut drain)
+            .await
+            .expect("renewed lease permits completed Q6 work");
+        assert_eq!(result, ShutdownDrainOutcome::Completed);
     }
 
     #[tokio::test]

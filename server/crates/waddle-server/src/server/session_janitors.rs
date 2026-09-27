@@ -7849,6 +7849,42 @@ fn record_sm_drain_outcome(released: bool) {
     }
 }
 
+/// Keep completed sessions accounted for even if a later session loses the
+/// node lease and Q6 returns early. Release retries may settle until ingress
+/// drain finishes, so the normal path records just before signaling Q6 done.
+struct ConfirmedSmDrainOutcomes<'a> {
+    registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    stream_ids: Vec<String>,
+}
+
+impl ConfirmedSmDrainOutcomes<'_> {
+    fn record(&mut self) {
+        if self.stream_ids.is_empty() {
+            return;
+        }
+        let pending = self.registry.pending_claim_releases_for(&self.stream_ids);
+        let released = self.stream_ids.len().saturating_sub(pending);
+        #[cfg(feature = "clustering")]
+        {
+            if released > 0 {
+                crate::clustering::metrics::record_claims_released_on_drain(released as u64);
+            }
+            if pending > 0 {
+                crate::clustering::metrics::record_claims_abandoned_on_drain(pending as u64);
+            }
+        }
+        #[cfg(not(feature = "clustering"))]
+        let _ = released;
+        self.stream_ids.clear();
+    }
+}
+
+impl Drop for ConfirmedSmDrainOutcomes<'_> {
+    fn drop(&mut self) {
+        self.record();
+    }
+}
+
 fn record_remaining_sm_drain_abandonment(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
 ) -> usize {
@@ -7992,7 +8028,10 @@ pub(crate) async fn run_graceful_shutdown_drain(
     const QUIET_WINDOW_PASSES: u32 = 8;
     let mut empty_passes = 0u32;
     let mut total_drained = 0usize;
-    let mut confirmed_streams = Vec::new();
+    let mut confirmed_streams = ConfirmedSmDrainOutcomes {
+        registry: &websocket_state.deps.protocol.sm_session_registry,
+        stream_ids: Vec::new(),
+    };
     'drain: loop {
         if fatal_fence.is_cancelled() {
             return;
@@ -8305,7 +8344,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // Durable confirmation and exact claim release are separate
                 // outcomes. Retry terminal releases through the quiet window
                 // before classifying this claim for drain metrics.
-                confirmed_streams.push(session.stream_id.clone());
+                confirmed_streams.stream_ids.push(session.stream_id.clone());
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
                 if let Err(error) = websocket_state
@@ -8364,15 +8403,6 @@ pub(crate) async fn run_graceful_shutdown_drain(
         total_drained,
         "Graceful shutdown: SM Q6 drain complete (iterative)"
     );
-    for stream_id in confirmed_streams {
-        record_sm_drain_outcome(
-            !websocket_state
-                .deps
-                .protocol
-                .sm_session_registry
-                .pending_claim_release_for(&stream_id),
-        );
-    }
     let ingress_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
     let ingress_drained = tokio::select! {
         biased;
@@ -8391,6 +8421,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
     crate::clustering::metrics::record_drain_duration_ms(
         sm_drain_started.elapsed().as_secs_f64() * 1000.0,
     );
+    confirmed_streams.record();
     // Node-lease shutdown may now disable this identity. All Q6 fenced
     // writes and ingress authority work are finished; the remaining profile
     // and webhook tracker waits do not belong to the SM ownership drain.
@@ -13150,6 +13181,25 @@ mod graceful_shutdown_drain_tests {
         started: Notify,
     }
 
+    struct BlockAfterFirstStorage {
+        calls: std::sync::atomic::AtomicUsize,
+        blocked: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl waddle_xmpp::xep::xep0191::BlockingStorage for BlockAfterFirstStorage {
+        async fn list_blocked_jids(
+            &self,
+            _user: &jid::BareJid,
+        ) -> Result<Vec<jid::BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Ok(Vec::new());
+            }
+            self.blocked.notify_one();
+            std::future::pending().await
+        }
+    }
+
     #[async_trait::async_trait]
     impl waddle_xmpp::xep::xep0191::BlockingStorage for HangingBlockingStorage {
         async fn list_blocked_jids(
@@ -13512,6 +13562,83 @@ mod graceful_shutdown_drain_tests {
                 .counter_sum("waddle.clustering.claims_released_on_drain", &[])
                 .unwrap_or(0),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn fatal_fence_records_earlier_confirmed_claims() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let registry =
+            Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+        let blocking = Arc::new(BlockAfterFirstStorage {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            blocked: Notify::new(),
+        });
+        let state = create_test_websocket_state_with_sm_registry_pending_and_blocking(
+            registry.clone(),
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited()),
+            blocking.clone(),
+        )
+        .await;
+        let first = "shutdown-confirmed-before-fatal";
+        registry
+            .store_session(detached_session(
+                first,
+                "romeo@example.com/first".parse().expect("full jid"),
+            ))
+            .await
+            .expect("store first session");
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(run_graceful_shutdown_drain(
+            state.clone(),
+            stop.clone(),
+            Arc::new(Notify::new()),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
+            Duration::from_secs(5),
+        ));
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if persistence
+                    .get_session(&SmSessionId::new(first))
+                    .await
+                    .expect("first durable row")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first session confirms before the quiet window ends");
+
+        registry
+            .store_session(detached_session(
+                "shutdown-held-after-confirmation",
+                "romeo@example.com/second".parse().expect("full jid"),
+            ))
+            .await
+            .expect("store second session");
+        tokio::time::timeout(Duration::from_secs(2), blocking.blocked.notified())
+            .await
+            .expect("second session reaches blocked promotion");
+        state
+            .deps
+            .app_state
+            .node_lifecycle
+            .fatal_fence_token()
+            .cancel();
+        tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("fatal fence preempts Q6")
+            .expect("Q6 task completes");
+        assert_eq!(
+            metrics.counter_sum("waddle.clustering.claims_released_on_drain", &[]),
+            Some(1),
         );
     }
 

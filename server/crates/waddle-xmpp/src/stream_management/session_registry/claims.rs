@@ -976,12 +976,20 @@ impl InMemorySmSessionRegistry {
             .map_or(0, |pending| pending.len())
     }
 
-    /// Whether the exact claim release for a confirmed drain still needs a
-    /// retry. Treat poisoned bookkeeping as unresolved for drain accounting.
-    pub fn pending_claim_release_for(&self, stream_id: &str) -> bool {
-        self.pending_claim_releases.read().map_or(true, |pending| {
-            pending.iter().any(|(id, _)| id == stream_id)
-        })
+    /// Count confirmed drains whose exact claim release still needs a retry.
+    /// Snapshot pending IDs once so a large shutdown inventory does not scan
+    /// the release set separately for every confirmed session. Treat poisoned
+    /// bookkeeping as unresolved for drain accounting.
+    pub fn pending_claim_releases_for(&self, stream_ids: &[String]) -> usize {
+        let Ok(pending) = self.pending_claim_releases.read() else {
+            return stream_ids.len();
+        };
+        let pending_ids: std::collections::HashSet<&str> =
+            pending.iter().map(|(id, _)| id.as_str()).collect();
+        stream_ids
+            .iter()
+            .filter(|id| pending_ids.contains(id.as_str()))
+            .count()
     }
 
     /// Purely local, best-effort forgetting of `stream_id`'s claim

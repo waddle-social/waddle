@@ -17,6 +17,47 @@ fn make_test_jid() -> FullJid {
     "user@example.com/resource".parse().unwrap()
 }
 
+#[test]
+fn pending_claim_release_batch_counts_streams_once_and_fails_closed() {
+    let registry = InMemorySmSessionRegistry::new();
+    let owner = crate::ownership::NodeIdentity::new("node", "incarnation");
+    let mut pending = registry
+        .pending_claim_releases
+        .write()
+        .expect("pending release lock");
+    for epoch in [1, 2] {
+        pending.insert((
+            "first".to_string(),
+            super::super::persistence::SmClaimFence::new(
+                owner.clone(),
+                crate::ownership::ClaimEpoch(epoch),
+            ),
+        ));
+    }
+    drop(pending);
+    assert_eq!(
+        registry.pending_claim_releases_for(&[
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ]),
+        1
+    );
+
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = registry
+            .pending_claim_releases
+            .write()
+            .expect("pending release lock");
+        panic!("poison pending release bookkeeping");
+    }));
+    assert!(poisoned.is_err());
+    assert_eq!(
+        registry.pending_claim_releases_for(&["first".to_string(), "second".to_string()]),
+        2,
+    );
+}
+
 fn bare(s: &str) -> jid::BareJid {
     s.parse().expect("valid bare jid")
 }
