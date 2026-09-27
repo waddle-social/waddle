@@ -35,11 +35,13 @@ fun messageAvatarsOf(
             continue
         }
         if (!item.isMine) {
-            val grouped = previous?.let { continuesGroup(it, item) } ?: false
-            out[avatarKeyOf(item)] = MessageAvatar(
-                jid = authorBareJidOf(item, selfBareJid),
-                visible = !grouped,
-            )
+            val jid = authorBareJidOf(item, selfBareJid)
+            val grouped = previous?.let { prev ->
+                // Same resolved person, not just the same nick: a reused
+                // nick or an unknown author starts a new group.
+                jid != null && authorBareJidOf(prev, selfBareJid) == jid && continuesGroup(prev, item)
+            } ?: false
+            out[avatarKeyOf(item)] = MessageAvatar(jid = jid, visible = !grouped)
         }
         previous = item
     }

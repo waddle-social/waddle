@@ -76,6 +76,9 @@ internal class PeerAvatarRepository(
 ) : PeerAvatarSource {
     private class Attempt(val epoch: Long) {
         var superseded = false
+
+        /** Its JID's bytes were evicted mid-flight: record no result. */
+        var evicted = false
         var job: Job? = null
     }
 
@@ -229,7 +232,12 @@ internal class PeerAvatarRepository(
      */
     private fun evictOverBudgetLocked() {
         val protectedJids = watchers.keys + setOfNotNull(ownJid()?.let(::normalizedBareJid))
-        store.evictOverBudget(protectedJids).forEach { jid -> entries[jid]?.settled = null }
+        store.evictOverBudget(protectedJids).forEach { jid ->
+            entries[jid]?.let { entry ->
+                entry.settled = null
+                entry.attempt?.evicted = true
+            }
+        }
     }
 
     private fun commit(key: String, attempt: Attempt, projection: () -> Unit): Boolean = synchronized(lock) {
@@ -243,7 +251,9 @@ internal class PeerAvatarRepository(
             val entry = entries[key] ?: return
             if (entry.attempt !== attempt) return
             entry.attempt = null
-            if (!attempt.superseded) {
+            // An eviction mid-flight leaves the JID unsettled: whatever
+            // this attempt saw, its next watch/ensure must fetch again.
+            if (!attempt.superseded && !attempt.evicted) {
                 val ttl = if (outcome is AvatarLookup.Found) POSITIVE_TTL_MILLIS else RETRY_TTL_MILLIS
                 entry.settled = Settled(clock(), ttl, attempt.epoch)
                 if (outcome is AvatarLookup.Found) evictOverBudgetLocked()

@@ -107,4 +107,18 @@ class MessageAvatarTest {
         assertEquals("dave@waddle.test", quotedAuthorJidOf(reply("Dave@Waddle.test/x"), null, self))
         assertNull(quotedAuthorJidOf(reply(null), null, self))
     }
+
+    @Test
+    fun `a reused nick or an unknown author never continues the previous group`() {
+        val alice = row("1", "bob", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
+        // Alice wrote as "bob"; the nick then passed to Bob within 5 min.
+        val bob = row("2", "bob", "2026-07-15T10:01:00Z", authorJid = "bob@waddle.test")
+        val unknown1 = row("3", "carol", "2026-07-15T10:02:00Z")
+        val unknown2 = row("4", "carol", "2026-07-15T10:03:00Z")
+        val avatars = messageAvatarsOf(listOf(alice, bob, unknown1, unknown2), self)
+
+        assertEquals(MessageAvatar("bob@waddle.test", visible = true), avatarOf(avatars, bob))
+        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, unknown1))
+        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, unknown2))
+    }
 }

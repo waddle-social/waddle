@@ -140,8 +140,11 @@ internal class ProfileVerbs(
     }
 
     /** One §4.2-aware wire fetch for [owner]; never throws. */
-    private suspend fun requestAvatar(owner: String, lease: ActiveSession.OwnerLease): AvatarLookup {
-        val knownIds = stores.profileStore.knownAvatarIds(owner)
+    private suspend fun requestAvatar(
+        owner: String,
+        lease: ActiveSession.OwnerLease,
+        knownIds: List<String> = stores.profileStore.knownAvatarIds(owner),
+    ): AvatarLookup {
         val result = try {
             when (val invocation = activeSession.invokeIfCurrent(lease) { it.requestAvatar(owner, knownIds) }) {
                 ActiveSession.LeaseInvocation.Stale,
@@ -161,7 +164,10 @@ internal class ProfileVerbs(
         // handed it — re-mark them current. Keyed by the requested
         // owner so display lookups hit whatever form the wire echoed.
         val avatar = result.avatar ?: stores.profileStore.cachedAvatar(owner, result.id)
-        return avatar?.let { AvatarLookup.Found(it.copy(jid = owner)) } ?: AvatarLookup.Failed
+        if (avatar != null) return AvatarLookup.Found(avatar.copy(jid = owner))
+        // Id-only, but the bytes were evicted while the IQ was in flight:
+        // ask once more without known ids so the data comes back.
+        return if (knownIds.isEmpty()) AvatarLookup.Failed else requestAvatar(owner, lease, emptyList())
     }
 
     /**

@@ -1187,8 +1187,13 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     @Volatile
     var requestAvatarFailure: Throwable? = null
 
+    /** Runs inside [requestAvatar] once per call, e.g. to race an eviction. */
+    @Volatile
+    var duringRequestAvatar: () -> Unit = {}
+
     override suspend fun requestAvatar(jid: String, knownIds: List<String>): WaddleAvatarResult? {
         requestAvatarCalls += jid to knownIds
+        duringRequestAvatar()
         requestAvatarFailure?.let { throw it }
         val current = avatar ?: return null
         // Mirror the FFI's §4.2 contract: a known advertised id answers

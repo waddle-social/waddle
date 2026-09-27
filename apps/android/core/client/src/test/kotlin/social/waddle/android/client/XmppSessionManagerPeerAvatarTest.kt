@@ -131,6 +131,34 @@ class XmppSessionManagerPeerAvatarTest {
     }
 
     @Test
+    fun `an id-only answer whose bytes were evicted mid-flight refetches the data once`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.avatar = testAvatar(jid = alice, id = "id-1")
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+
+        // Revalidation sends id-1 as known → the fake answers id-only, but
+        // the cached bytes vanish while the IQ is in flight.
+        var evictOnce = true
+        harness.client.duringRequestAvatar = {
+            if (evictOnce) {
+                evictOnce = false
+                harness.manager.profileStore.clear()
+            }
+        }
+        harness.now = PeerAvatarRepository.POSITIVE_TTL_MILLIS
+        harness.manager.peerAvatars.ensure(alice)
+        runCurrent()
+
+        val calls = harness.callsFor(alice)
+        assertEquals(listOf("id-1"), calls[1].second)
+        assertEquals(emptyList<String>(), calls[2].second)
+        assertEquals("id-1", harness.manager.peerAvatars.avatars.value[alice]?.id)
+        harness.manager.logout()
+    }
+
+    @Test
     fun `a definitive no-avatar answer clears the held avatar`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
