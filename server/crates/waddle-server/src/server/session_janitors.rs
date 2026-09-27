@@ -998,7 +998,7 @@ fn max_promotion_attempts_from_env() -> u32 {
         .unwrap_or(DEFAULT_ATTEMPTS)
 }
 
-fn max_drain_duration_from_env() -> std::time::Duration {
+pub(crate) fn max_drain_duration_from_env() -> std::time::Duration {
     const DEFAULT_SECS: u64 = 30;
     const MIN_SECS: u64 = 1;
     const MAX_SECS: u64 = 600;
@@ -7849,6 +7849,17 @@ fn record_sm_drain_outcome(released: bool) {
     }
 }
 
+fn record_remaining_sm_drain_abandonment(
+    registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+) -> usize {
+    let remaining = registry.live_session_ids().map_or(0, |ids| ids.len());
+    if remaining > 0 {
+        #[cfg(feature = "clustering")]
+        crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
+    }
+    remaining
+}
+
 async fn abandon_shutdown_session_if_claim_lost(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
@@ -7881,19 +7892,25 @@ pub(crate) fn spawn_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,
     drain_notify: Arc<tokio::sync::Notify>,
+    sm_drain_complete: tokio_util::sync::CancellationToken,
+    shutdown_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 ) {
     tokio::spawn(run_graceful_shutdown_drain(
         websocket_state,
         drain_token,
         drain_notify,
+        sm_drain_complete,
+        shutdown_started,
         max_drain_duration_from_env(),
     ));
 }
 
-async fn run_graceful_shutdown_drain(
+pub(crate) async fn run_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,
     drain_notify: Arc<tokio::sync::Notify>,
+    sm_drain_complete: tokio_util::sync::CancellationToken,
+    shutdown_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
     total_budget: std::time::Duration,
 ) {
     // Always notify_one on exit (success or early-return) so
@@ -7906,8 +7923,16 @@ async fn run_graceful_shutdown_drain(
         }
     }
     let _notify_guard = NotifyOnDrop(drain_notify);
+    struct CompleteSmOnDrop(tokio_util::sync::CancellationToken);
+    impl Drop for CompleteSmOnDrop {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+    let _sm_completion_guard = CompleteSmOnDrop(sm_drain_complete.clone());
 
     drain_token.cancelled().await;
+    let shutdown_started = *shutdown_started.get_or_init(tokio::time::Instant::now);
     // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
     // timestamp, fed into the SAME `drain_duration_ms` histogram the
     // generic per-entity room drain records into (below, once the Q6
@@ -7931,15 +7956,17 @@ async fn run_graceful_shutdown_drain(
     // promotion for sessions that already detached cleanly — the
     // stuck session itself falls back to its durable SM row on
     // next startup either way.
-    let drain_deadline = std::time::Instant::now() + total_budget;
+    let drain_deadline = shutdown_started.into_std() + total_budget;
     info!(
         active_connections = websocket_state.deps.shutdown.active_connections(),
         "Graceful shutdown: waiting for live sessions to close and detach"
     );
+    let connection_budget =
+        (total_budget / 2).min(drain_deadline.saturating_duration_since(std::time::Instant::now()));
     if !websocket_state
         .deps
         .shutdown
-        .wait_for_connections_drained_for(total_budget / 2)
+        .wait_for_connections_drained_for(connection_budget)
         .await
     {
         warn!(
@@ -7961,17 +7988,9 @@ async fn run_graceful_shutdown_drain(
             // believes it owns at the timeout never even reached
             // `drain_all_for_shutdown` this pass — abandoned, same as
             // the generic per-entity drain's own budget-overrun path.
-            let remaining = websocket_state
-                .deps
-                .protocol
-                .sm_session_registry
-                .live_session_ids()
-                .map(|ids| ids.len())
-                .unwrap_or(0);
-            if remaining > 0 {
-                #[cfg(feature = "clustering")]
-                crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
-            }
+            let remaining = record_remaining_sm_drain_abandonment(
+                &websocket_state.deps.protocol.sm_session_registry,
+            );
             warn!(
                 total_drained,
                 remaining,
@@ -7998,7 +8017,10 @@ async fn run_graceful_shutdown_drain(
         {
             Ok(Ok(s)) => s,
             Ok(Err(error)) => {
-                warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
+                let remaining = record_remaining_sm_drain_abandonment(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                );
+                warn!(%error, remaining, "Graceful shutdown: drain_all_for_shutdown failed");
                 break;
             }
             Err(_) => {
@@ -8065,6 +8087,9 @@ async fn run_graceful_shutdown_drain(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
+                // One read-only fence check avoids promoting the queue when
+                // a successor already owns this exact session. The final
+                // durable delete still performs its own write-path fence.
                 if abandon_shutdown_session_if_claim_lost(
                     &websocket_state.deps.protocol.sm_session_registry,
                     &mut promotion_guard,
@@ -8321,6 +8346,10 @@ async fn run_graceful_shutdown_drain(
     crate::clustering::metrics::record_drain_duration_ms(
         sm_drain_started.elapsed().as_secs_f64() * 1000.0,
     );
+    // Node-lease shutdown may now disable this identity. All Q6 fenced
+    // writes and ingress authority work are finished; the remaining profile
+    // and webhook tracker waits do not belong to the SM ownership drain.
+    sm_drain_complete.cancel();
 
     // Drain the OIDC profile-publish tracker before notifying
     // shutdown complete. Each in-flight `ensure_pep_profile_published`
@@ -13087,11 +13116,43 @@ mod graceful_shutdown_drain_tests {
     }
 
     #[tokio::test]
+    async fn graceful_shutdown_late_q6_start_does_not_restart_connection_wait_budget() {
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let state = create_test_websocket_state_with_sm_registry(registry).await;
+        let held_connection = state.deps.shutdown.connection_guard();
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        let completion = tokio_util::sync::CancellationToken::new();
+        let started = Arc::new(std::sync::OnceLock::new());
+        started
+            .set(tokio::time::Instant::now() - Duration::from_secs(3))
+            .expect("set shared shutdown start");
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            run_graceful_shutdown_drain(
+                state,
+                stop,
+                Arc::new(Notify::new()),
+                completion.clone(),
+                started,
+                Duration::from_secs(2),
+            ),
+        )
+        .await
+        .expect("late Q6 start must use the expired shared connection budget");
+        assert!(completion.is_cancelled());
+        drop(held_connection);
+    }
+
+    #[tokio::test]
     async fn graceful_shutdown_abandons_terminally_disabled_identity_without_deleting_durable_row()
     {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-        let persistence =
-            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let persistence = Arc::new(HangingSmReadPersistence::default());
+        persistence
+            .allow_reads
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let claims = Arc::new(InProcessClaimStore::new());
         let identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "disabled"));
         let registry = Arc::new(
@@ -13108,6 +13169,9 @@ mod graceful_shutdown_drain_tests {
             ))
             .await
             .expect("store detached session");
+        persistence
+            .delete_attempts
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         identity.disable().await;
 
         let token = tokio_util::sync::CancellationToken::new();
@@ -13117,6 +13181,8 @@ mod graceful_shutdown_drain_tests {
             state,
             token,
             Arc::new(Notify::new()),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_secs(5),
         )
         .await;
@@ -13131,6 +13197,13 @@ mod graceful_shutdown_drain_tests {
             .await
             .expect("durable session read")
             .is_some());
+        assert_eq!(
+            persistence
+                .delete_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "terminal loss must skip durable confirmation entirely"
+        );
         assert_eq!(
             metrics.counter_sum("waddle.clustering.claims_abandoned_on_drain", &[]),
             Some(1)
@@ -13186,6 +13259,8 @@ mod graceful_shutdown_drain_tests {
             state,
             token,
             Arc::new(Notify::new()),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_secs(5),
         )
         .await;
@@ -13240,6 +13315,8 @@ mod graceful_shutdown_drain_tests {
             state,
             token,
             Arc::new(Notify::new()),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_secs(5),
         )
         .await;
@@ -13297,6 +13374,8 @@ mod graceful_shutdown_drain_tests {
             Arc::clone(&state),
             drain_token.clone(),
             Arc::clone(&drain_notify),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_millis(400),
         ));
 
@@ -13382,6 +13461,8 @@ mod graceful_shutdown_drain_tests {
             Arc::clone(&state),
             drain_token.clone(),
             Arc::clone(&drain_notify),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_millis(400),
         ));
         drain_token.cancel();
@@ -13448,6 +13529,8 @@ mod graceful_shutdown_drain_tests {
             Arc::clone(&state),
             drain_token.clone(),
             Arc::clone(&drain_notify),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_millis(75),
         ));
         drain_token.cancel();
@@ -13503,6 +13586,8 @@ mod graceful_shutdown_drain_tests {
             Arc::clone(&state),
             drain_token.clone(),
             Arc::clone(&drain_notify),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_millis(50),
         ));
 
@@ -13570,6 +13655,8 @@ mod graceful_shutdown_drain_tests {
             Arc::clone(&state),
             drain_token.clone(),
             Arc::clone(&drain_notify),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
             Duration::from_millis(75),
         ));
 

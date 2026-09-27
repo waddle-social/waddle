@@ -24,7 +24,9 @@
 //! below deliberately skips [`EntityType::SmSession`] entities. An SM
 //! session's "final fenced write" already IS `confirm_drained`'s own
 //! promote-then-delete-then-release sequence, running on an independent
-//! task racing the same shutdown token. Touching the same entity from both
+//! task under the same shutdown token. The node-lease shutdown keeps its
+//! heartbeat and identity active until that Q6 authority work completes.
+//! Touching the same entity from both
 //! drain paths concurrently would be exactly the double-drain hazard the
 //! phase plan's Slice 10 "interaction with existing drain" note warns
 //! against — one path could release a claim the other path's promotion is
@@ -887,6 +889,7 @@ mod tests {
             &local_claims,
             claim_release_budget,
             lease_ttl,
+            async {},
         ));
         let mut drain_future = drain_future;
 
