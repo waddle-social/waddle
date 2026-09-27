@@ -13247,7 +13247,8 @@ mod graceful_shutdown_drain_tests {
         let delete_times = persistence
             .delete_times
             .lock()
-            .expect("delete attempt times");
+            .expect("delete attempt times")
+            .clone();
         assert_eq!(delete_times.len(), 2);
         assert!(
             delete_times[1].duration_since(delete_times[0]) >= Duration::from_millis(250),
