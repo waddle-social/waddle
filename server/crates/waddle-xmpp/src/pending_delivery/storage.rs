@@ -207,6 +207,22 @@ pub trait PendingDeliveryStorage: Send + Sync {
         self.insert(row).await
     }
 
+    /// Atomically promote one persisted SM replay entry into pending delivery
+    /// and retire its exact `(origin_stream_id, sequence)` replay row. A
+    /// clustered backend performs both writes under the same origin-session
+    /// claim fence. On quota rejection or error, the replay row remains for
+    /// retry. Stores without clustered SM persistence retain the ordinary
+    /// fenced-insert behavior.
+    async fn insert_fenced_and_prune_unacked(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+        sequence: u32,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        let _ = sequence;
+        self.insert_fenced(row, origin_stream_id).await
+    }
+
     /// Atomically insert the pending row and mark its exact ingress allocation
     /// promoted, only while the durable allocation remains pending. Backends
     /// must share a transaction with custody storage and hold the SM claim

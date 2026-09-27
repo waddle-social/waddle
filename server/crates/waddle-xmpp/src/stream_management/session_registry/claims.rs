@@ -976,6 +976,14 @@ impl InMemorySmSessionRegistry {
             .map_or(0, |pending| pending.len())
     }
 
+    /// Whether the exact claim release for a confirmed drain still needs a
+    /// retry. Treat poisoned bookkeeping as unresolved for drain accounting.
+    pub fn pending_claim_release_for(&self, stream_id: &str) -> bool {
+        self.pending_claim_releases.read().map_or(true, |pending| {
+            pending.iter().any(|(id, _)| id == stream_id)
+        })
+    }
+
     /// Purely local, best-effort forgetting of `stream_id`'s claim
     /// (ADR-0017 Phase 3 Slice 5, carried debt (b): the
     /// `LocallyClaimedEntities::demote` contract). Removes it from both

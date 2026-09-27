@@ -24,7 +24,7 @@ pub(super) struct DeliveryHandles<'a> {
 /// Select the durable authority that must commit with a pending insertion.
 #[derive(Clone, Copy)]
 pub(super) enum PromotionOrigin<'a> {
-    Stream(&'a str),
+    Stream { stream_id: &'a str, sequence: u32 },
     IngressCustody(&'a waddle_xmpp::stream_management::persistence::PersistedIngressAppend),
 }
 
@@ -80,7 +80,14 @@ pub(super) async fn insert_pending(
         outbound_sequence: None,
     };
     let result = match origin {
-        PromotionOrigin::Stream(stream) => pending_storage.insert_fenced(row, stream).await,
+        PromotionOrigin::Stream {
+            stream_id,
+            sequence,
+        } => {
+            pending_storage
+                .insert_fenced_and_prune_unacked(row, stream_id, sequence)
+                .await
+        }
         PromotionOrigin::IngressCustody(append) => {
             use waddle_xmpp::pending_delivery::storage::CustodyInsertOutcome;
             match pending_storage.insert_ingress_custody(row, append).await {

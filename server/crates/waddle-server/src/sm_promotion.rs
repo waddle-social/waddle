@@ -159,7 +159,10 @@ pub async fn promote_session_unacked(
                     pending_storage,
                     original_receipt_fallback: entry.original_receipt_at,
                     server_domain,
-                    origin: PromotionOrigin::Stream(&session.stream_id),
+                    origin: PromotionOrigin::Stream {
+                        stream_id: &session.stream_id,
+                        sequence: entry.sequence,
+                    },
                 };
                 promote_one(message, entry.sequence, ctx).await
             }
@@ -1031,7 +1034,7 @@ async fn promote_one(
     // Custody already froze the authoritative receipt time with its payload;
     // the atomic handoff validates that immutable time. Legacy queue-only
     // promotion may still recover an earlier self-stamped replay time.
-    if let (PromotionOrigin::Stream(_), Some(stamp)) =
+    if let (PromotionOrigin::Stream { .. }, Some(stamp)) =
         (ctx.origin, self_stamp_time(&message, ctx.server_domain))
     {
         ctx.original_receipt_fallback = stamp;
