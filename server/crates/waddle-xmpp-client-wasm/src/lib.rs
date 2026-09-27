@@ -8,7 +8,7 @@ use jid::{BareJid, FullJid, Jid};
 use js_sys::{Function, Promise};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
-use waddle_xmpp_client::avatar::{request_avatar_with_iq, AvatarRequestFailure};
+use waddle_xmpp_client::avatar::{request_avatar_with_iq_skipping, AvatarRequestFailure};
 use waddle_xmpp_client::discovery::{
     self, build_disco_info_iq, build_disco_items_iq, build_muc_admin_affiliation_list_iq,
     build_muc_admin_affiliation_set_iq, build_roster_get_iq, build_upload_slot_iq,

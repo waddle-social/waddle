@@ -383,6 +383,12 @@ export interface WasmAvatar {
   data?: Uint8Array;
 }
 
+/** XEP-0084 §4.2-aware fetch: `avatar` is absent when `id` was already known. */
+export interface WasmAvatarFetch {
+  id: string;
+  avatar?: WasmAvatar | null;
+}
+
 export interface WasmUploadSlot {
   put_url: string;
   get_url: string;
