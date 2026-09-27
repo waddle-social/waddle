@@ -143,6 +143,30 @@ struct RoomAuthorTests {
         #expect(row(coordinator, "s1")?.message.authorRealJID == erin)
     }
 
+    @Test func delayedLiveRowAdoptsItsArchiveTwinsStamp() {
+        let coordinator = coordinator()
+        coordinator.handle(.presence(occupantPresence("sam", realJID: erin)))
+        coordinator.handle(.message(roomMessage("from dave", from: "sam", stanzaID: "s1", at: date(1))))
+        #expect(row(coordinator, "s1")?.message.authorRealJID == nil)
+
+        var archived = roomMessage("from dave", from: "sam", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1"))
+        archived.authorRealJID = dave
+        coordinator.timelines.ingest(archived)
+        #expect(row(coordinator, "s1")?.message.source == .live)
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
+    }
+
+    @Test func archiveTwinNeverReplacesALiveStamp() {
+        let coordinator = coordinator()
+        coordinator.handle(.presence(occupantPresence("sam", realJID: dave)))
+        coordinator.handle(.message(roomMessage("hi", from: "sam", stanzaID: "s1")))
+        var archived = roomMessage("hi", from: "sam", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1"))
+        archived.authorRealJID = erin
+        coordinator.timelines.ingest(archived)
+        #expect(row(coordinator, "s1")?.message.timestamp == date(1))
+        #expect(row(coordinator, "s1")?.message.authorRealJID == dave)
+    }
+
     @Test func firstStampSurvivesALaterCopy() {
         let coordinator = coordinator()
         var archived = roomMessage("hi", from: "sam", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1"))

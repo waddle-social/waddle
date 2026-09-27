@@ -263,16 +263,23 @@ public final class TimelineStore {
             replaced.isArchived = !incomingIsLive && existing.isArchived
             return replaced
         }
-        // The archive copy of a timestampless live row brings the server
-        // timestamp; adopt it so the row sorts correctly.
+        // Otherwise the stored row stays, but adopts what only the other
+        // copy has: the server timestamp of a timestampless live row (so it
+        // sorts correctly), and an author stamp it lacks (a delayed live row
+        // gets none; its archive twin may name the author). An existing
+        // stamp is never replaced.
+        var replaced = existing
+        var changed = false
         if existing.item.timestamp == nil, let timestamp = incoming.timestamp {
-            var replaced = existing
             replaced.item.message.timestamp = timestamp
-            replaced.item.message.authorRealJID = replaced.item.message.authorRealJID ?? incoming.message.authorRealJID
             replaced.sortDate = timestamp
-            return replaced
+            changed = true
         }
-        return nil
+        if existing.item.message.authorRealJID == nil, let author = incoming.message.authorRealJID {
+            replaced.item.message.authorRealJID = author
+            changed = true
+        }
+        return changed ? replaced : nil
     }
 
     // MARK: - Mutations
