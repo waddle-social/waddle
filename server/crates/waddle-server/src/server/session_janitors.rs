@@ -610,7 +610,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         }
                         Ok(LeaveDisposition::Superseded { current_generation }) => {
                             if let LeaveSessionSelector::Generation(occupant) = selector {
-                                if current_generation.is_some_and(|current| current != occupant) {
+                                // Only a live same-generation rejoin protects
+                                // this media. Absence is cleanup proof too.
+                                if current_generation != Some(occupant) {
                                     let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
                                         state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
                                 }
@@ -10188,6 +10190,113 @@ mod local_muc_departure_tests {
             0,
             "the superseded explicit retry must converge"
         );
+    }
+
+    #[tokio::test]
+    async fn superseded_departure_without_occupancy_retires_only_matching_media() {
+        for matching_media in [Some(true), Some(false), None] {
+            let recorder = Arc::new(RecordingSfu::default());
+            let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+            let room = room_jid("superseded-no-occupancy");
+            let jid = full_jid("alice@example.com/web");
+            let generation = OccupancySessionGeneration::mint();
+            let actor = create_room(state.as_ref(), &room).await;
+            let mut attempts = Vec::new();
+            let mut successors = Vec::new();
+            // One retained item coalesces many nick departures. After the
+            // preflight below, 17 unreplayable receipts remain: enough to hit
+            // the bounded janitor drain before it can reach NotOccupant.
+            for index in 0..18 {
+                let nick = format!("shared-nick-{index}");
+                actor
+                    .ask(Join {
+                        session: generation,
+                        nick: nick.clone(),
+                        real_jid: jid.clone(),
+                        role: Role::Participant,
+                        affiliation: Affiliation::Member,
+                    })
+                    .await
+                    .expect("join departed generation");
+                let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+                assert!(matches!(
+                    actor
+                        .ask(LeaveByRealJid {
+                            sender_jid: jid.clone(),
+                            cause: OccupancyLeaveCause::Disconnect,
+                            session: LeaveSessionSelector::Generation(generation),
+                            attempt,
+                            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                        })
+                        .await
+                        .expect("commit departure with lost reply"),
+                    LeaveDisposition::Left(_)
+                ));
+                attempts.push(attempt);
+                let successor = full_jid(&format!("bob{index}@example.com/web"));
+                join_member(&actor, &successor, &nick).await;
+                successors.push(successor);
+            }
+            let attempt = *attempts.last().expect("retained departures");
+            assert!(matches!(
+                actor
+                    .ask(LeaveByRealJid {
+                        sender_jid: jid.clone(),
+                        cause: OccupancyLeaveCause::Disconnect,
+                        session: LeaveSessionSelector::Generation(generation),
+                        attempt,
+                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::RetainedRetry,
+                    })
+                    .await
+                    .expect("consume superseded departure receipt"),
+                LeaveDisposition::Superseded {
+                    current_generation: None
+                }
+            ));
+
+            let call = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+            let identity = waddle_sfu::Identity::from_jid(jid.clone());
+            match matching_media {
+                Some(matching) => recorder.register_call_participant_with_session(
+                    &call,
+                    &identity,
+                    &waddle_sfu::SessionBinding::new("retained-media").expect("session binding"),
+                    if matching {
+                        generation
+                    } else {
+                        OccupancySessionGeneration::mint()
+                    },
+                ),
+                None => recorder.register_call_participant(&call, &identity),
+            }
+            state.deps.protocol.pending_local_muc_departures.record(
+                crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                    room: room.clone(),
+                    jid: jid.clone(),
+                    cause: OccupancyLeaveCause::Disconnect,
+                    selector: LeaveSessionSelector::Generation(generation),
+                    attempt,
+                    notified: HashSet::new(),
+                    removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
+                },
+            );
+
+            run_local_muc_departure_sweep(&state).await;
+
+            assert_eq!(
+                recorder.has_call_participant(&call, &identity),
+                matching_media != Some(true)
+            );
+            assert_eq!(
+                recorder.snapshot().len(),
+                usize::from(matching_media == Some(true))
+            );
+            let snapshot = actor.ask(GetSnapshot).await.expect("current roster");
+            for successor in &successors {
+                assert!(snapshot.room.find_occupant_by_real_jid(successor).is_some());
+            }
+            assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+        }
     }
 
     #[tokio::test]

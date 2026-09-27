@@ -92,6 +92,9 @@ pub const RECONCILE_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone)]
 struct ParticipantState {
+    /// Changes with registration, token publication, or observed incarnation.
+    /// Occupancy alone cannot distinguish absence from an unbound restoration.
+    registration_revision: uuid::Uuid,
     participant_sid: Option<ParticipantSid>,
     /// When `participant_sid` was last written from a live observation
     /// (join webhook or occupancy probe). Lets the reconcile probe
@@ -129,6 +132,7 @@ struct ParticipantState {
 impl ParticipantState {
     fn new(first_registered_at: DateTime<Utc>) -> Self {
         Self {
+            registration_revision: uuid::Uuid::new_v4(),
             participant_sid: None,
             participant_sid_observed_at: None,
             participant_sid_event_at: None,
@@ -145,6 +149,7 @@ impl ParticipantState {
         participant_sid: Option<ParticipantSid>,
     ) -> Self {
         Self {
+            registration_revision: uuid::Uuid::new_v4(),
             participant_sid_observed_at: participant_sid.is_some().then_some(first_registered_at),
             participant_sid_event_at: None,
             participant_sid_contested_at: None,
@@ -171,6 +176,10 @@ impl ParticipantState {
                 .flatten(),
             ..Self::restored(first_registered_at, observed_sids.participant_sid.clone())
         }
+    }
+
+    fn advance_registration_revision(&mut self) {
+        self.registration_revision = uuid::Uuid::new_v4();
     }
 }
 
@@ -329,6 +338,8 @@ enum SessionGate<'a> {
     /// that could not become a binding — it can never match a bound
     /// session.
     Presented(Option<&'a SessionBinding>),
+    /// Roll back only the exact publication made by this authorization attempt.
+    Registration(uuid::Uuid),
     /// Clear only when the stored occupant generation is exactly
     /// `Some(presented)`; an UNBOUND registration is cleared only when the
     /// caller's `unbound` policy says its evidence allows it (#1703).
@@ -900,6 +911,7 @@ impl LiveKitSfu {
         entry.room_sid_observed_at = Some(listing_started_at);
         for participant in entry.participants.values_mut() {
             participant.participant_sid = None;
+            participant.advance_registration_revision();
         }
     }
 
@@ -976,6 +988,7 @@ impl LiveKitSfu {
                         && participant.first_registered_at <= probe_freshness_boundary
                     {
                         participant.participant_sid.clone_from(participant_sid);
+                        participant.advance_registration_revision();
                         participant.participant_sid_observed_at = Some(now);
                         participant.participant_sid_contested_at = None;
                     } else if participant_sid.is_some()
@@ -1004,6 +1017,7 @@ impl LiveKitSfu {
                             "SFU reconcile: advancing a stale participant sid from authoritative occupancy"
                         );
                         participant.participant_sid.clone_from(participant_sid);
+                        participant.advance_registration_revision();
                         participant.participant_sid_observed_at = Some(now);
                         participant.participant_sid_contested_at = None;
                     } else if participant_sid.is_some()
@@ -1020,6 +1034,7 @@ impl LiveKitSfu {
                         // which same-second twin survived (#1612
                         // review round 14).
                         participant.participant_sid_contested_at = None;
+                        participant.advance_registration_revision();
                     }
                 } else {
                     entry.participants.insert(
@@ -1346,6 +1361,7 @@ impl LiveKitSfu {
                                              deferring sid resolution to reconciliation"
                                         );
                                         state.participant_sid_contested_at = Some(observed_at);
+                                        state.advance_registration_revision();
                                         return SidGuardDisposition::Applied {
                                             participant_rejoined: false,
                                         };
@@ -1359,6 +1375,7 @@ impl LiveKitSfu {
                                     "LiveKit join advanced the participant sid for a new participant incarnation"
                                 );
                                 state.participant_sid = Some(participant_sid.clone());
+                                state.advance_registration_revision();
                                 state.participant_sid_observed_at = Some(observed_at);
                                 state.participant_sid_event_at = observed_sids.observed_event_at;
                                 state.participant_sid_contested_at = None;
@@ -1424,6 +1441,7 @@ impl LiveKitSfu {
                         .participant_sid
                         .clone_from(&observed_sids.participant_sid);
                     if observed_sids.participant_sid.is_some() {
+                        state.advance_registration_revision();
                         state.participant_sid_observed_at = Some(observed_at);
                         state.participant_sid_event_at = observed_sids.observed_event_at;
                     }
@@ -1469,6 +1487,9 @@ impl LiveKitSfu {
         occupant_session: Option<OccupancySessionGeneration>,
         publication: Option<(&JoinToken, crate::ParticipantRegistrationExpectation)>,
     ) -> bool {
+        let registration_revision = publication
+            .map(|(_, expected)| expected.publication_revision)
+            .unwrap_or_else(uuid::Uuid::new_v4);
         // Preserve the established issued -> calls lock order used by minting.
         // Keep a vacant issued entry vacant on a failed comparison.
         let issued_entry =
@@ -1486,8 +1507,8 @@ impl LiveKitSfu {
                     let current = entry
                         .participants
                         .get(identity)
-                        .and_then(|participant| participant.occupant_session);
-                    if current != expected.occupant {
+                        .map(|participant| participant.registration_revision);
+                    if current != expected.revision {
                         return false;
                     }
                 }
@@ -1508,6 +1529,7 @@ impl LiveKitSfu {
                     .participants
                     .entry(identity.clone())
                     .and_modify(|participant| {
+                        participant.registration_revision = registration_revision;
                         participant.session = session.cloned();
                         participant.occupant_session = occupant_session;
                         if publication.is_some() {
@@ -1516,6 +1538,7 @@ impl LiveKitSfu {
                         }
                     })
                     .or_insert_with(|| ParticipantState {
+                        registration_revision,
                         session: session.cloned(),
                         occupant_session,
                         ..ParticipantState::new(now)
@@ -1523,7 +1546,7 @@ impl LiveKitSfu {
                 occupied.into_ref()
             }
             dashmap::Entry::Vacant(entry) => {
-                if publication.is_some_and(|(_, expected)| expected.occupant.is_some()) {
+                if publication.is_some_and(|(_, expected)| expected.revision.is_some()) {
                     return false;
                 }
                 let generation = self.next_call_generation(call_id, 0);
@@ -1531,6 +1554,7 @@ impl LiveKitSfu {
                 participants.insert(
                     identity.clone(),
                     ParticipantState {
+                        registration_revision,
                         session: session.cloned(),
                         occupant_session,
                         ..ParticipantState::new(now)
@@ -1726,6 +1750,9 @@ impl LiveKitSfu {
         let now = Utc::now();
         let mut entry = match self.calls.get_mut(call_id) {
             Some(entry) => entry,
+            None if matches!(session_gate, SessionGate::Registration(_)) => {
+                return ClearDisposition::SessionMismatch;
+            }
             None => return ClearDisposition::NoCall,
         };
         if matches!(
@@ -1747,6 +1774,16 @@ impl LiveKitSfu {
         // stale clear) or after the whole clear — never in between.
         match session_gate {
             SessionGate::Any => {}
+            SessionGate::Registration(revision) => {
+                if entry
+                    .participants
+                    .get(identity)
+                    .map(|state| state.registration_revision)
+                    != Some(revision)
+                {
+                    return ClearDisposition::SessionMismatch;
+                }
+            }
             SessionGate::Presented(presented) => {
                 if let Some(bound) = entry
                     .participants
@@ -1792,11 +1829,13 @@ impl LiveKitSfu {
             .and_then(|participant| participant.occupant_session)
             .or(match session_gate {
                 SessionGate::Occupant { presented, .. } => Some(presented),
-                SessionGate::Any | SessionGate::Presented(_) => None,
+                SessionGate::Any | SessionGate::Presented(_) | SessionGate::Registration(_) => None,
             });
         let unbound_occupant = match session_gate {
             SessionGate::Occupant { unbound, .. } => unbound,
-            SessionGate::Any | SessionGate::Presented(_) => crate::UnboundOccupantPolicy::Keep,
+            SessionGate::Any | SessionGate::Presented(_) | SessionGate::Registration(_) => {
+                crate::UnboundOccupantPolicy::Keep
+            }
         };
         let room_sid = entry.room_sid.clone();
         let was_present = entry.participants.remove(identity).is_some();
@@ -2538,6 +2577,7 @@ impl SfuService for LiveKitSfu {
         let mut protected_from_empty_bucket_eject = false;
         if let Some(mut call_entry) = self.calls.get_mut(call_id) {
             if let Some(participant) = call_entry.participants.get_mut(identity) {
+                participant.advance_registration_revision();
                 protected_from_empty_bucket_eject = participant.registered_without_mint;
                 participant.registered_without_mint = false;
             }
@@ -2552,6 +2592,23 @@ impl SfuService for LiveKitSfu {
             minted_at,
         });
         Ok(token)
+    }
+
+    fn participant_registration_expectation(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> Option<crate::ParticipantRegistrationExpectation> {
+        let revision = self.calls.get(call_id).and_then(|entry| {
+            entry
+                .participants
+                .get(identity)
+                .map(|participant| participant.registration_revision)
+        });
+        Some(crate::ParticipantRegistrationExpectation {
+            revision,
+            publication_revision: uuid::Uuid::new_v4(),
+        })
     }
 
     fn issue_join_token_with_session(
@@ -2588,6 +2645,20 @@ impl SfuService for LiveKitSfu {
             &self.config.turn_shared_secret,
             identity,
             self.config.turn_ttl,
+        )
+    }
+
+    fn rollback_participant_registration(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        expected: crate::ParticipantRegistrationExpectation,
+    ) -> SessionScopedTeardown {
+        self.unregister_participant_gated(
+            call_id,
+            identity,
+            None,
+            SessionGate::Registration(expected.publication_revision),
         )
     }
 

@@ -221,11 +221,16 @@ impl InMemorySmSessionRegistry {
                 Ok(ClaimedReleaseTransition::Restored)
             }
             Some(session) => {
-                promotions.insert(stream_id.to_string());
+                promotions.insert(
+                    stream_id.to_string(),
+                    (session.jid.clone(), session.occupancy_session),
+                );
                 retries.insert(stream_id.to_string(), session);
                 Ok(ClaimedReleaseTransition::PromotionOwned)
             }
-            None if promotions.contains(stream_id) => Ok(ClaimedReleaseTransition::PromotionOwned),
+            None if promotions.contains_key(stream_id) => {
+                Ok(ClaimedReleaseTransition::PromotionOwned)
+            }
             None => Ok(ClaimedReleaseTransition::Missing),
         }
     }
@@ -311,7 +316,7 @@ impl InMemorySmSessionRegistry {
             || self
                 .pending_promotions
                 .read()
-                .map(|promotions| promotions.contains(stream_id))
+                .map(|promotions| promotions.contains_key(stream_id))
                 .unwrap_or(true);
         if detached_or_claimed {
             tracing::warn!(
@@ -386,8 +391,11 @@ impl InMemorySmSessionRegistry {
                     .write()
                     .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
                 let removed = sessions.remove(stream_id);
-                if removed.is_some() {
-                    promotions.insert(stream_id.clone());
+                if let Some(session) = &removed {
+                    promotions.insert(
+                        stream_id.clone(),
+                        (session.jid.clone(), session.occupancy_session),
+                    );
                 }
                 removed
             };
@@ -420,7 +428,7 @@ impl InMemorySmSessionRegistry {
         let promotions = self.pending_promotions.read().ok()?;
         let mut out: Vec<String> = sessions.keys().cloned().collect();
         out.extend(claimed.keys().cloned());
-        out.extend(promotions.iter().cloned());
+        out.extend(promotions.keys().cloned());
         out.sort();
         out.dedup();
         Some(out)
@@ -455,7 +463,7 @@ impl InMemorySmSessionRegistry {
         }
         {
             let displaced = self.pending_promotions.read().ok()?;
-            out.extend(displaced.iter().cloned());
+            out.extend(displaced.keys().cloned());
         }
         {
             let retries = self.pending_promotion_retries.read().ok()?;
@@ -704,7 +712,7 @@ impl InMemorySmSessionRegistry {
             (Ok(sessions), Ok(claimed), Ok(promotions)) => Some(
                 sessions.contains_key(stream_id)
                     || claimed.contains_key(stream_id)
-                    || promotions.contains(stream_id),
+                    || promotions.contains_key(stream_id),
             ),
             _ => None,
         }
@@ -716,7 +724,7 @@ impl InMemorySmSessionRegistry {
         let promotions = self.pending_promotions.read().ok()?;
         Some((
             sessions.contains_key(stream_id) || claimed.contains_key(stream_id),
-            promotions.contains(stream_id),
+            promotions.contains_key(stream_id),
         ))
     }
 
@@ -1383,7 +1391,7 @@ impl InMemorySmSessionRegistry {
                 .pending_promotions
                 .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                .contains(&stream_id);
+                .contains_key(&stream_id);
             if still_pending {
                 drained.push(retry.finish());
             } else {
@@ -1470,7 +1478,12 @@ impl InMemorySmSessionRegistry {
                 return Ok(None);
             }
             let removed = sessions.remove(stream_id.as_str());
-            promotions.insert(stream_id.as_str().to_owned());
+            if let Some(session) = &removed {
+                promotions.insert(
+                    stream_id.as_str().to_owned(),
+                    (session.jid.clone(), session.occupancy_session),
+                );
+            }
             removed
         };
         let Some(session) = removed else {
@@ -1514,8 +1527,11 @@ impl InMemorySmSessionRegistry {
                     Some(session) if session.is_expired() => sessions.remove(stream_id),
                     _ => None,
                 };
-                if removed.is_some() {
-                    promotions.insert(stream_id.clone());
+                if let Some(session) = &removed {
+                    promotions.insert(
+                        stream_id.clone(),
+                        (session.jid.clone(), session.occupancy_session),
+                    );
                 }
                 removed
             };
@@ -1670,8 +1686,9 @@ impl InMemorySmSessionRegistry {
             .pending_promotions
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let occupancy = (session.jid.clone(), session.occupancy_session);
         sessions.insert(stream_id.clone(), session);
-        promotions.insert(stream_id);
+        promotions.insert(stream_id, occupancy);
         Ok(())
     }
 
@@ -1687,7 +1704,7 @@ impl InMemorySmSessionRegistry {
             .pending_promotions
             .read()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if !promotions.contains(&stream_id) {
+        if !promotions.contains_key(&stream_id) {
             return Ok(PendingPromotionRetryRetention::NotTracked);
         }
         self.pending_promotion_retries
@@ -2511,8 +2528,11 @@ impl InMemorySmSessionRegistry {
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
             let removed = sessions.remove(stream_id);
-            if removed.is_some() {
-                promotions.insert(stream_id.to_string());
+            if let Some(session) = &removed {
+                promotions.insert(
+                    stream_id.to_string(),
+                    (session.jid.clone(), session.occupancy_session),
+                );
             }
             removed
         };
@@ -2627,8 +2647,11 @@ impl InMemorySmSessionRegistry {
                     None
                 };
                 let removed = (detached, claimed);
-                if removed.0.is_some() || removed.1.is_some() {
-                    promotions.insert(stream_id.clone());
+                if let Some(session) = removed.0.as_ref().or(removed.1.as_ref()) {
+                    promotions.insert(
+                        stream_id.clone(),
+                        (session.jid.clone(), session.occupancy_session),
+                    );
                 }
                 removed
             };

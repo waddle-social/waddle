@@ -1616,9 +1616,7 @@ mod tests {
         // voiced occupant; tests for the fail-closed path override
         // `media_capabilities` explicitly.
         StanzaContext {
-            participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation {
-                occupant: None,
-            }),
+            participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation::absent()),
             domain: "waddle.test",
             full_jid: jid,
             occupant_session: Some(waddle_xmpp_core::OccupancySessionGeneration::mint()),

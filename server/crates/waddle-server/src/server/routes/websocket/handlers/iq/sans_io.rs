@@ -297,7 +297,7 @@ async fn handle_sans_io_iq_with_relay_override(
                     &room,
                     full_jid,
                     *conn_state.occupancy_session,
-                    iq,
+                    participant_registration,
                 )
                 .await
                 {

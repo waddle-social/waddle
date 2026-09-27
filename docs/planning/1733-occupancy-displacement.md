@@ -41,6 +41,14 @@ The durable generation check independently prevents their delayed joins from
 overwriting a newer room occupant. Restart/lost-handoff work in #1825/#1826 is
 related, but does not cover every ordinary detached-session discovery case.
 
+A fresh remote bind that races an already-started resumption detach must wait
+for that generation's SM custody to clear, including expired snapshots and
+promotion work already handed to a worker. A detach acknowledgement is not
+terminal-retirement proof. The bind retries while the existing owner completes
+recovery; the 60-second maintenance interval can outlast one bind retry budget,
+so this race may require another client reconnect. Foreign claims are not
+stolen to shorten that wait.
+
 ## Verification cases
 
 - A replacement cannot publish while its incumbent is handling or cleaning up.

@@ -791,7 +791,7 @@ async fn local_demotion_discards_in_flight_promotion_retry_restore() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
 
     registry.forget_claim_locally(stream_id).await;
 
@@ -4720,7 +4720,7 @@ async fn assert_ambiguous_claim_survives_displacement(
         .pending_promotions
         .read()
         .expect("displaced sessions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(!registry
         .sessions
         .read()
@@ -4786,7 +4786,7 @@ async fn assert_ambiguous_claim_survives_displacement(
             .pending_promotions
             .read()
             .expect("pending promotions")
-            .contains(old_stream));
+            .contains_key(old_stream));
         let drained = registry.drain_expired().await.expect("drain retry session");
         assert!(drained
             .iter()
@@ -4800,7 +4800,7 @@ async fn assert_ambiguous_claim_survives_displacement(
             .pending_promotions
             .read()
             .expect("displaced sessions")
-            .contains(old_stream));
+            .contains_key(old_stream));
     }
     assert!(
         crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
@@ -4820,7 +4820,7 @@ async fn assert_ambiguous_claim_survives_displacement(
         .pending_promotions
         .read()
         .expect("displaced sessions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(!registry
         .claim_fences
         .read()
@@ -4933,7 +4933,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(!registry
         .sessions
         .read()
@@ -4971,7 +4971,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(old_stream));
+        .contains_key(old_stream));
     assert!(registry
         .claim_store
         .current_claim(&entity)
@@ -5014,7 +5014,7 @@ async fn cancelled_confirm_retains_exact_release_after_durable_delete() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
     store
         .hang_release
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -5038,7 +5038,7 @@ async fn cancelled_confirm_retains_exact_release_after_durable_delete() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert!(persistence
         .get_session(&crate::pending_delivery::SmSessionId::new(stream_id))
         .await
@@ -5190,7 +5190,7 @@ async fn reclaimed_hydration_does_not_publish_over_a_pending_promotion() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
 }
 
 #[tokio::test]
@@ -5257,7 +5257,13 @@ fn pending_promotion_blocks_cross_node_exact_repair_transfer() {
         .pending_promotions
         .write()
         .expect("pending promotions")
-        .insert(stream_id.to_string());
+        .insert(
+            stream_id.to_string(),
+            (
+                make_test_jid(),
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            ),
+        );
 
     assert!(!registry
         .transfer_reclaimed_claim_to_exact_release(&entity, &fence, reservation)
@@ -5292,7 +5298,13 @@ async fn promotion_handoff_cancels_stale_identity_reclaimed_reservation() {
         .pending_promotions
         .write()
         .expect("pending promotions")
-        .insert(stream_id.to_string());
+        .insert(
+            stream_id.to_string(),
+            (
+                make_test_jid(),
+                waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            ),
+        );
 
     let outcome = registry
         .release_reclaimed_claim(&entity, &fence, reservation)
@@ -5576,7 +5588,7 @@ async fn displace_stored_session_if_unclaimed_preserves_durable_rows() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains("stream-owner-moved"));
+        .contains_key("stream-owner-moved"));
 
     registry.confirm_drained("stream-owner-moved").await;
     assert!(storage
@@ -5596,7 +5608,7 @@ async fn displace_stored_session_if_unclaimed_preserves_durable_rows() {
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains("stream-owner-moved"));
+        .contains_key("stream-owner-moved"));
 }
 
 #[tokio::test]
@@ -8009,7 +8021,7 @@ async fn defer_claimed_resume_release_unwinds_expired_claimed_session() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert_eq!(
         registry
             .pending_promotion_retries
@@ -8089,7 +8101,7 @@ async fn release_claim_moves_expired_claimed_session_to_promotion() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert_eq!(
         registry
             .pending_promotion_retries
@@ -8160,7 +8172,7 @@ async fn stale_deferred_release_keeps_existing_promotion_ownership() {
         .pending_promotions
         .read()
         .expect("pending_promotions lock")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert_eq!(
         registry
             .pending_promotion_retries
@@ -8218,7 +8230,7 @@ async fn stale_deferred_release_after_local_demotion_falls_back_without_reparkin
         .pending_promotions
         .read()
         .expect("pending promotions")
-        .contains(stream_id));
+        .contains_key(stream_id));
     assert!(!registry
         .pending_promotion_retries
         .read()
@@ -8351,7 +8363,7 @@ async fn detached_occupancy_retirement_rejects_foreign_or_reacquired_claim() {
                 .pending_promotions
                 .read()
                 .unwrap()
-                .contains(stream_id.as_str()));
+                .contains_key(stream_id.as_str()));
             assert!(registry
                 .detached_snapshot_matching(&stream_id, |_| true)
                 .unwrap()
@@ -8363,4 +8375,124 @@ async fn detached_occupancy_retirement_rejects_foreign_or_reacquired_claim() {
             assert_eq!(current.claim_epoch, epoch);
         }
     }
+}
+
+#[tokio::test]
+async fn occupancy_custody_survives_claim_and_leased_promotion_without_persistence() {
+    let registry = InMemorySmSessionRegistry::new();
+    let jid: FullJid = "alice@example.com/custody-proof".parse().unwrap();
+    let other_jid: FullJid = "alice@example.com/other".parse().unwrap();
+    let session = realistic_test_session_for_jid("custody-proof", jid.clone());
+    let generation = session.occupancy_session;
+    registry.store_session(session).await.unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    assert!(!registry
+        .has_occupancy_session_custody(&other_jid, generation)
+        .await
+        .unwrap());
+    assert!(!registry
+        .has_occupancy_session_custody(&jid, waddle_xmpp_core::OccupancySessionGeneration::mint())
+        .await
+        .unwrap());
+    registry
+        .claim_session("custody-proof")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    registry.release_claim("custody-proof").await.unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    let leased = registry
+        .invalidate_sessions_for_generation(&jid, generation)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(registry.detached_occupancy_inventory().unwrap().is_empty());
+    assert!(registry
+        .occupancy_generations_for_full_jid(&jid)
+        .unwrap()
+        .is_empty());
+    assert!(
+        registry
+            .has_occupancy_session_custody(&jid, generation)
+            .await
+            .unwrap(),
+        "the active promotion lease retains occupancy metadata outside every payload map"
+    );
+    registry.reinsert_for_retry(leased).await.unwrap();
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    let retried = registry.drain_expired().await.unwrap();
+    assert_eq!(retried.len(), 1);
+    assert!(registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+    registry.confirm_drained("custody-proof").await;
+    assert!(!registry
+        .has_occupancy_session_custody(&jid, generation)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn occupancy_custody_includes_expired_foreign_durable_rows_and_read_failures() {
+    use super::super::persistence::SmPersistenceStorage;
+    let storage = std::sync::Arc::new(ScopedProbePersistence::new());
+    let jid: FullJid = "alice@example.com/expired-custody".parse().unwrap();
+    let mut session = realistic_test_session_for_jid("expired-custody", jid.clone());
+    session.max_resume_time = Some(0);
+    let generation = session.occupancy_session;
+    let persisted = super::persistence_codec::detached_to_persisted(&session).unwrap();
+    storage.upsert_session(persisted.clone()).await.unwrap();
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_occupancy(&jid, generation)
+            .await,
+        ResumableSessionProbe::Absent,
+        "expiry ends resumption only"
+    );
+    assert!(
+        registry
+            .has_occupancy_session_custody(&jid, generation)
+            .await
+            .unwrap(),
+        "a foreign durable payload cannot be ignored because its resume window ended"
+    );
+    assert_eq!(
+        storage
+            .get_session(&persisted.stream_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .occupancy_session,
+        generation
+    );
+    assert!(!registry
+        .has_occupancy_session_custody(&jid, waddle_xmpp_core::OccupancySessionGeneration::mint())
+        .await
+        .unwrap());
+    storage
+        .fail_scoped
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        registry
+            .has_occupancy_session_custody(&jid, generation)
+            .await
+            .is_err(),
+        "a storage outage is not proof of completed retirement"
+    );
 }

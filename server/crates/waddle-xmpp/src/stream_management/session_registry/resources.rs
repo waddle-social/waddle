@@ -45,6 +45,61 @@ impl DetachedPresenceState {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Whether any exact-generation SM payload still awaits resumption or
+    /// terminal promotion. This is custody discovery, not ownership authority:
+    /// foreign and expired durable snapshots also prevent a retirement ACK.
+    pub async fn has_occupancy_session_custody(
+        &self,
+        jid: &FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> Result<bool, SmRegistryError> {
+        let in_memory = {
+            // Hold all transfer endpoints together, in their mutation order.
+            // Separate reads could miss a claimed -> detached release or a
+            // detached -> leased-promotion handoff between the two scans.
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let promotions = self
+                .pending_promotions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let retries = self
+                .pending_promotion_retries
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let matches = |session: &DetachedSession| {
+                session.jid == *jid && session.occupancy_session == generation
+            };
+            sessions.values().any(matches)
+                || claimed.values().any(matches)
+                || promotions
+                    .values()
+                    .any(|(resource, session)| resource == jid && *session == generation)
+                || retries.values().any(matches)
+        };
+        if in_memory {
+            return Ok(true);
+        }
+        let Some(persistence) = &self.persistence else {
+            return Ok(false);
+        };
+        // Expiry ends resumption, not custody: the payload must still complete
+        // the owner-fenced promote/confirm protocol before retirement succeeds.
+        let persisted = persistence
+            .list_sessions_for_full_jid(jid)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+        Ok(persisted
+            .iter()
+            .any(|session| session.occupancy_session == generation))
+    }
+
     /// Snapshot exact local detached identities. This is discovery only: a
     /// caller must recheck backend ownership under the stream shard before
     /// transferring any candidate to promotion. Claimed resumes are excluded.

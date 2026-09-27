@@ -150,7 +150,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
                 &room,
                 &sender,
                 occupancy_session,
-                iq,
+                participant_registration,
             )
             .await
             {

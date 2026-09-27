@@ -341,9 +341,7 @@ fn ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
     // Mirrors the grants the websocket layer's Muji gate derives for
     // a voiced (role ≥ participant) occupant.
     StanzaContext {
-        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation {
-            occupant: None,
-        }),
+        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation::absent()),
         domain: TEST_DOMAIN,
         full_jid: jid,
         occupant_session: Some(test_occupant_session()),
@@ -979,9 +977,7 @@ fn ctx_with_caps<'a>(
     caps: Option<waddle_sfu::MediaCapabilities>,
 ) -> StanzaContext<'a> {
     StanzaContext {
-        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation {
-            occupant: None,
-        }),
+        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation::absent()),
         domain: TEST_DOMAIN,
         full_jid: jid,
         occupant_session: Some(test_occupant_session()),
@@ -995,9 +991,7 @@ fn ctx_with_caps_and_session<'a>(
     occupant_session: Option<OccupancySessionGeneration>,
 ) -> StanzaContext<'a> {
     StanzaContext {
-        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation {
-            occupant: None,
-        }),
+        participant_registration: Some(waddle_sfu::ParticipantRegistrationExpectation::absent()),
         domain: TEST_DOMAIN,
         full_jid: jid,
         occupant_session,
@@ -1226,12 +1220,10 @@ fn muji_session_initiate_is_rate_limited_per_bare_jid() {
             &format!("muji-rate-{attempt}"),
         );
         let mut context = ctx(&jid);
-        context.participant_registration = Some(waddle_sfu::ParticipantRegistrationExpectation {
-            occupant: sfu.participant_occupant_session(
-                &CallId::new("room@muc.waddle.test").expect("call"),
-                &Identity::from_jid(jid.clone()),
-            ),
-        });
+        context.participant_registration = sfu.participant_registration_expectation(
+            &CallId::new("room@muc.waddle.test").expect("call"),
+            &Identity::from_jid(jid.clone()),
+        );
         let events = handler.handle(&iq, &context);
         conditions.push(first_error_condition(&events));
     }
@@ -1436,7 +1428,7 @@ fn empty_muji_session_initiate_preserves_registration_and_issues_no_token() {
                 waddle_sfu::MediaCapabilities::direct_call_peer(),
                 &incumbent_sid,
                 incumbent,
-                waddle_sfu::ParticipantRegistrationExpectation { occupant: None },
+                waddle_sfu::ParticipantRegistrationExpectation::absent(),
             )
             .expect("incumbent token")
             .expect("incumbent registration")
@@ -1444,9 +1436,8 @@ fn empty_muji_session_initiate_preserves_registration_and_issues_no_token() {
         let issued_before = sfu.issued_count(&call, &identity);
         let mut context = ctx(&jid);
         context.occupant_session = Some(OccupancySessionGeneration::mint());
-        context.participant_registration = Some(waddle_sfu::ParticipantRegistrationExpectation {
-            occupant: has_incumbent.then_some(incumbent),
-        });
+        context.participant_registration =
+            sfu.participant_registration_expectation(&call, &identity);
         let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("empty".into()));
         jingle.initiator = Some(jid.clone().into());
         let mut payload: Element = jingle.into();
@@ -1530,9 +1521,8 @@ fn stale_authorization_cannot_overwrite_the_replacement_muji_registration() {
     let second = OccupancySessionGeneration::mint();
     let mut old_context = ctx(&jid);
     old_context.occupant_session = Some(first);
-    old_context.participant_registration = Some(waddle_sfu::ParticipantRegistrationExpectation {
-        occupant: sfu.participant_occupant_session(&call, &identity),
-    });
+    old_context.participant_registration =
+        sfu.participant_registration_expectation(&call, &identity);
     let replacement_sid = waddle_sfu::SessionBinding::new("replacement").expect("session");
     let replacement_token = sfu
         .issue_join_token_with_session(

@@ -190,8 +190,11 @@ pub struct InMemorySmSessionRegistry {
     /// promote-then-confirm lifecycle. Their exact claim must remain held
     /// across displacement, expiry, shutdown, invalidation, retry
     /// reinsertion, and caller cancellation until durable deletion is
-    /// confirmed.
-    pub(super) pending_promotions: RwLock<HashSet<String>>,
+    /// confirmed. Keep exact occupancy metadata while the payload is leased
+    /// outside the maps so retirement probes cannot mistake that gap for loss
+    /// of custody, including when persistence is disabled.
+    pub(super) pending_promotions:
+        RwLock<HashMap<String, (jid::FullJid, waddle_xmpp_core::OccupancySessionGeneration)>>,
     /// Full payloads handed back by cancellation guards. They remain outside
     /// the resumable map until `drain_expired` reconciles them against the
     /// durable row, preventing stale pre-tombstone queues from being
@@ -342,7 +345,7 @@ impl InMemorySmSessionRegistry {
                 "cross-node repair could not inspect exact-release bookkeeping".to_string(),
             ));
         };
-        let promotion_pending = promotions.contains(&entity.id);
+        let promotion_pending = promotions.contains_key(&entity.id);
         let stream_live = sessions.contains_key(&entity.id)
             || claimed.contains_key(&entity.id)
             || promotion_pending;
@@ -866,7 +869,7 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
-            pending_promotions: RwLock::new(HashSet::new()),
+            pending_promotions: RwLock::new(HashMap::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
@@ -894,7 +897,7 @@ impl InMemorySmSessionRegistry {
             claim_fences: RwLock::new(HashMap::new()),
             pending_claim_releases: RwLock::new(HashSet::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
-            pending_promotions: RwLock::new(HashSet::new()),
+            pending_promotions: RwLock::new(HashMap::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
@@ -1429,7 +1432,7 @@ impl InMemorySmSessionRegistry {
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
             sessions.contains_key(&stream_id)
                 || claimed.contains_key(&stream_id)
-                || promotions.contains(&stream_id)
+                || promotions.contains_key(&stream_id)
         };
         if present {
             match tokio::time::timeout(
