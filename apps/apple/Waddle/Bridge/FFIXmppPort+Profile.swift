@@ -3,14 +3,16 @@ import WaddleKit
 
 extension FFIXmppPort {
     /// `knownID` lets the core skip the data IQ for an unchanged avatar
-    /// (XEP-0084 §4.2). The core answers nil both for "no avatar" and for
-    /// a failed lookup; an error event during the call tells them apart.
+    /// (XEP-0084 §4.2). The core throws for a failed lookup and answers
+    /// nil only when the peer definitively has no avatar.
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
-        guard signals.isConnected else { return .failed }
-        let window = signals.beginErrorWindow(.avatar)
-        let result = await client.requestAvatar(jid: jid.description, knownIds: knownID.map { [$0] } ?? [])
-        let sawError = signals.endErrorWindow(window)
-        return FFIInbound.avatarFetch(result, knownID: knownID, sawError: sawError)
+        do {
+            let result = try await client.requestAvatar(jid: jid.description, knownIds: knownID.map { [$0] } ?? [])
+            return FFIInbound.avatarFetch(result, knownID: knownID)
+        } catch {
+            BridgeLog.debug("avatar lookup failed: \(error)")
+            return .failed
+        }
     }
 
     func publishAvatar(_ image: AvatarImage) async throws {

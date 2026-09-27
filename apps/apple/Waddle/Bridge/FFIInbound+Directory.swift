@@ -79,8 +79,8 @@ extension FFIInbound {
     /// A `request_avatar` answer. The core returns in-band bytes only;
     /// an id without bytes means the id was the known one. Dimensions are
     /// unknown on fetch.
-    static func avatarFetch(_ result: WaddleAvatarResult?, knownID: String?, sawError: Bool) -> AvatarFetch {
-        guard let result else { return sawError ? .failed : .absent }
+    static func avatarFetch(_ result: WaddleAvatarResult?, knownID: String?) -> AvatarFetch {
+        guard let result else { return .absent }
         guard let avatar = result.avatar else {
             return result.id == knownID ? .unchanged : .failed
         }

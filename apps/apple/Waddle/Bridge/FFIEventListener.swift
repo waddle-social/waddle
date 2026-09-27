@@ -59,7 +59,7 @@ final class FFIEventListener: WaddleEventListener {
         case let .error(description):
             // Diagnostics stay at the logging boundary. Verbs that answer a
             // failure with an empty value consult the signal instead.
-            signals.recordError(description)
+            signals.recordError()
             BridgeLog.error(description)
             return nil
         }
