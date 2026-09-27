@@ -498,9 +498,12 @@ public final class SessionCoordinator {
             return
         }
         trackChatState(message, route: route)
-        if route.conversation.isRoom, message.authorRealJID == nil, let nick = message.from?.resource {
-            // The sender is present as it speaks: pin the row to that
-            // occupant, so a later holder of the nick never takes it over.
+        // An undelayed live message is being spoken now by the present
+        // occupant: pin the row to them, so a later holder of the nick never
+        // takes it over. A delayed one (XEP-0203: room history, replay) may
+        // predate a handover, so it keeps only what the room vouched for.
+        if route.conversation.isRoom, message.isLive, message.timestamp == nil,
+           message.authorRealJID == nil, let nick = message.from?.resource {
             message.authorRealJID = presence.occupant(named: nick, in: route.conversation.jid)?.realJID
         }
         let result = timelines.ingest(message, route: route)

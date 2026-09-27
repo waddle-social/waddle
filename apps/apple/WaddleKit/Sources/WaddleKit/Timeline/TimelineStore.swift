@@ -248,7 +248,8 @@ public final class TimelineStore {
             let timestamp = incoming.timestamp ?? existing.item.timestamp
             var message = incoming.message
             message.timestamp = timestamp
-            message.authorRealJID = message.authorRealJID ?? existing.item.message.authorRealJID
+            // A stamp is never replaced by a later copy's.
+            message.authorRealJID = existing.item.message.authorRealJID ?? message.authorRealJID
             replaced.item = TimelineItem(
                 id: existing.item.id,
                 conversation: incoming.conversation,

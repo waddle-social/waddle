@@ -77,6 +77,47 @@ struct RoomAuthorTests {
         #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
     }
 
+    @Test func delayedReplayAfterAHandoverShowsInitials() {
+        let coordinator = coordinator()
+        coordinator.handle(.presence(occupantPresence("sam", realJID: dave)))
+        coordinator.handle(.presence(occupantPresence("sam", realJID: dave, kind: .unavailable)))
+        coordinator.handle(.presence(occupantPresence("sam", realJID: erin)))
+        // Dave's message, redelivered with a XEP-0203 delay after Erin took the nick.
+        coordinator.handle(.message(roomMessage("from dave", from: "sam", stanzaID: "s1", at: date(1))))
+        #expect(row(coordinator, "s1")?.message.authorRealJID == nil)
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == nil)
+    }
+
+    @Test func delayedReplayKeepsTheArchivedJID() {
+        let coordinator = coordinator()
+        var archived = roomMessage("from dave", from: "sam", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1"))
+        archived.authorRealJID = dave
+        coordinator.timelines.ingest(archived)
+        coordinator.handle(.presence(occupantPresence("sam", realJID: erin)))
+        coordinator.handle(.message(roomMessage("from dave", from: "sam", stanzaID: "s1", at: date(1))))
+        #expect(row(coordinator, "s1")?.message.source == .live)
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
+    }
+
+    @Test func undelayedLiveMessageIsStampedWithThePresentOccupant() {
+        let coordinator = coordinator()
+        coordinator.handle(.presence(occupantPresence("sam", realJID: erin)))
+        coordinator.handle(.message(roomMessage("now", from: "sam", stanzaID: "s1")))
+        #expect(row(coordinator, "s1")?.message.authorRealJID == erin)
+    }
+
+    @Test func firstStampSurvivesALaterCopy() {
+        let coordinator = coordinator()
+        var archived = roomMessage("hi", from: "sam", stanzaID: "s1", at: date(1), source: .archive(mamID: "s1"))
+        archived.authorRealJID = dave
+        coordinator.timelines.ingest(archived)
+        var live = roomMessage("hi", from: "sam", stanzaID: "s1", at: date(1))
+        live.authorRealJID = erin
+        coordinator.timelines.ingest(live)
+        #expect(row(coordinator, "s1")?.message.source == .live)
+        #expect(row(coordinator, "s1")?.message.authorRealJID == dave)
+    }
+
     @Test func nickIsNeverTurnedIntoAJID() {
         let coordinator = coordinator()
         // `bob` is a known contact, but nothing ties the room nick to him.
