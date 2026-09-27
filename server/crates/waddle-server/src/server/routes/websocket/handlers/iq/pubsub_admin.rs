@@ -394,6 +394,22 @@ pub(super) async fn handle_pubsub_admin_request(
             } else {
                 config
             };
+            // Record the owner's explicit choice BEFORE writing it, so a
+            // concurrent legacy-avatar repair (a conditional write that
+            // skips marked nodes) can never land after it.
+            if let Err(error) = state
+                .deps
+                .protocol
+                .pubsub_storage
+                .mark_owner_configured(target_jid, &node)
+                .await
+            {
+                warn!(node = %node, error = %error, "Failed to record owner-configured PubSub node");
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
             match state
                 .deps
                 .protocol
@@ -402,21 +418,6 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
             {
                 Ok(_) => {
-                    // Record the owner's explicit choice so server-side
-                    // default repairs (legacy avatar nodes) never undo it.
-                    if let Err(error) = state
-                        .deps
-                        .protocol
-                        .pubsub_storage
-                        .mark_owner_configured(target_jid, &node)
-                        .await
-                    {
-                        warn!(node = %node, error = %error, "Failed to record owner-configured PubSub node");
-                        return vec![iq_to_xml(build_pubsub_error(
-                            iq,
-                            PubSubError::InternalServerError,
-                        ))];
-                    }
                     vec![iq_to_xml(build_pubsub_success(iq))]
                 }
                 Err(_) => {

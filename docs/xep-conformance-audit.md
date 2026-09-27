@@ -52,7 +52,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0077 | In-Band Registration                                 | jabber:iq:register                 |  -  |  Y   |   -   | unaudited  | |
 | 0080 | User Location                                        | http://jabber.org/protocol/geoloc  |  -  |  Y   |   Y   | unaudited  | PEP node |
 | 0082 | XMPP Date and Time Profiles                          | (profiles only)                    |  -  |  Y   |   -   | unaudited  | Profile usage, no advert |
-| 0084 | User Avatar                                          | urn:xmpp:avatar:metadata           |  Y  |  Y   |   Y   | unaudited  | PEP node + notify; avatar nodes default `open` (not XEP-0163 `presence`) so non-roster peers resolve avatars |
+| 0084 | User Avatar                                          | urn:xmpp:avatar:metadata           |  Y  |  Y   |   Y   | unaudited  | PEP node + notify; avatar nodes default `open` (not XEP-0163 `presence`) so non-roster peers resolve avatars; legacy `presence` avatar nodes without an owner-configure marker are reopened at startup/publish (pre-marker explicit `presence` choices are indistinguishable and are reset) |
 | 0085 | Chat State Notifications                             | http://jabber.org/protocol/chatstates |  Y |  Y   |   Y   | unaudited  | |
 | 0092 | Software Version                                     | jabber:iq:version                  |  Y  |  Y   |   Y   | unaudited  | |
 | 0106 | JID Escaping                                         | (no namespace, escape rules)       |  -  |  Y   |   -   | unaudited  | |

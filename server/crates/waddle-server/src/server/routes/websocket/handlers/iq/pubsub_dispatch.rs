@@ -579,6 +579,14 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
         return;
     }
     let storage = &state.deps.protocol.pubsub_storage;
+    if node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+        || node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
+    {
+        if let Err(error) = storage.repair_legacy_avatar_node(owner, node).await {
+            warn!(node, error = %error, "Failed to repair legacy avatar node on publish");
+        }
+        return;
+    }
     let existing = match storage.get_node(owner, node).await {
         Ok(Some(node)) => node,
         Ok(None) => return,
@@ -592,18 +600,7 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
             return;
         }
     };
-    let owner_configured = match storage.is_owner_configured(owner, node).await {
-        Ok(configured) => configured,
-        Err(error) => {
-            warn!(node, error = %error, "Failed to read owner-configured marker; skipping reconcile");
-            return;
-        }
-    };
-    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(
-        node,
-        &existing.config,
-        owner_configured,
-    ) {
+    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(node, &existing.config) {
         return;
     }
     let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);

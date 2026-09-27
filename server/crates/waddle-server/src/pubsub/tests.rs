@@ -2179,3 +2179,56 @@ async fn startup_reopens_legacy_presence_avatar_nodes_but_keeps_owner_choices() 
         .expect("marker"));
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn repair_legacy_avatar_node_is_conditional_on_presence_and_no_owner_marker() {
+    use waddle_xmpp::pubsub::{AccessModel, NodeConfig};
+    let storage = DatabasePubSubStorage::open(None).await.expect("storage");
+    let owner = jid("alice@example.com");
+    let node = "urn:xmpp:avatar:metadata";
+    storage
+        .get_or_create_node(&owner, node)
+        .await
+        .expect("node");
+
+    // Legacy Presence node without a marker: repaired.
+    storage
+        .update_node_config(&owner, node, &NodeConfig::pep_default())
+        .await
+        .expect("legacy");
+    assert!(storage
+        .repair_legacy_avatar_node(&owner, node)
+        .await
+        .expect("repair"));
+    let repaired = storage
+        .get_node(&owner, node)
+        .await
+        .expect("read")
+        .expect("node");
+    assert_eq!(repaired.config.access_model, AccessModel::Open);
+    // Already open: nothing to do.
+    assert!(!storage
+        .repair_legacy_avatar_node(&owner, node)
+        .await
+        .expect("repair"));
+
+    // The owner marks (before writing) and chooses Presence: never undone.
+    storage
+        .mark_owner_configured(&owner, node)
+        .await
+        .expect("mark");
+    storage
+        .update_node_config(&owner, node, &NodeConfig::pep_default())
+        .await
+        .expect("owner choice");
+    assert!(!storage
+        .repair_legacy_avatar_node(&owner, node)
+        .await
+        .expect("repair"));
+    let kept = storage
+        .get_node(&owner, node)
+        .await
+        .expect("read")
+        .expect("node");
+    assert_eq!(kept.config.access_model, AccessModel::Presence);
+}

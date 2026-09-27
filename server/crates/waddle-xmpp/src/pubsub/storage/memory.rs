@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription, SubscriptionState};
 
-use crate::pubsub::node::NodeConfig;
+use crate::pubsub::node::{AccessModel, NodeConfig};
 use crate::pubsub::stanzas::PubSubItem;
 use crate::XmppError;
 
@@ -343,6 +343,23 @@ impl PubSubStorage for InMemoryPubSubStorage {
     ) -> Result<(), XmppError> {
         self.owner_configured.insert(Self::key(owner, node_name));
         Ok(())
+    }
+
+    async fn repair_legacy_avatar_node(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError> {
+        let key = Self::key(owner, node_name);
+        let Some(mut node) = self.nodes.get_mut(&key) else {
+            return Ok(false);
+        };
+        if node.config.access_model != AccessModel::Presence || self.owner_configured.contains(&key)
+        {
+            return Ok(false);
+        }
+        node.config.access_model = AccessModel::Open;
+        Ok(true)
     }
 
     async fn is_owner_configured(

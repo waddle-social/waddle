@@ -132,6 +132,14 @@ impl PubSubStorage for DatabasePubSubStorage {
         self.mark_owner_configured_impl(owner, node_name).await
     }
 
+    async fn repair_legacy_avatar_node(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError> {
+        self.repair_legacy_avatar_node_impl(owner, node_name).await
+    }
+
     async fn is_owner_configured(
         &self,
         owner: &BareJid,

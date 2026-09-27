@@ -140,6 +140,17 @@ pub trait PubSubStorage: Send + Sync + 'static {
         node_name: &str,
     ) -> Result<(), XmppError>;
 
+    /// Atomically reopen a legacy XEP-0084 avatar node: set its access
+    /// model to `open` only if it is still on the Presence default AND the
+    /// owner never configured it. Returns whether the node was changed.
+    /// A single conditional write, so a concurrent owner configure (which
+    /// marks before it writes) always wins.
+    async fn repair_legacy_avatar_node(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError>;
+
     /// Whether the owner has explicitly configured this node.
     async fn is_owner_configured(
         &self,

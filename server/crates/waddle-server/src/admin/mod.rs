@@ -375,6 +375,14 @@ mod tests {
                 boom("mark_owner_configured")
             }
 
+            async fn repair_legacy_avatar_node(
+                &self,
+                _owner: &BareJid,
+                _node_name: &str,
+            ) -> Result<bool, XmppError> {
+                boom("repair_legacy_avatar_node")
+            }
+
             async fn is_owner_configured(
                 &self,
                 _owner: &BareJid,

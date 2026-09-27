@@ -925,6 +925,14 @@ mod tests {
             Ok(())
         }
 
+        async fn repair_legacy_avatar_node(
+            &self,
+            _owner: &BareJid,
+            _node_name: &str,
+        ) -> Result<bool, XmppError> {
+            Ok(false)
+        }
+
         async fn is_owner_configured(
             &self,
             _owner: &BareJid,
