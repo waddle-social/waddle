@@ -76,11 +76,17 @@ extension FFIInbound {
         return UploadSlot(putURL: put, getURL: get, headers: headers)
     }
 
-    /// XEP-0084 bytes. An avatar published only as an external URL has
-    /// no bytes to show and is treated as absent.
-    static func avatarImage(_ avatar: WaddleAvatar) -> AvatarImage? {
-        guard !avatar.data.isEmpty else { return nil }
-        return AvatarImage(data: avatar.data, mediaType: avatar.mimeType, width: 0, height: 0)
+    /// A `request_avatar` answer. The core returns in-band bytes only;
+    /// an id without bytes means the id was the known one. Dimensions are
+    /// unknown on fetch.
+    static func avatarFetch(_ result: WaddleAvatarResult?, knownID: String?, sawError: Bool) -> AvatarFetch {
+        guard let result else { return sawError ? .failed : .absent }
+        guard let avatar = result.avatar else {
+            return result.id == knownID ? .unchanged : .failed
+        }
+        guard !avatar.data.isEmpty else { return .absent }
+        let image = AvatarImage(data: avatar.data, mediaType: avatar.mimeType, width: 0, height: 0)
+        return .published(id: result.id, image: image)
     }
 
     static func mood(_ mood: WaddleMood) -> UserMood {

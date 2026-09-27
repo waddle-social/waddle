@@ -141,6 +141,9 @@ public final class SessionCoordinator {
         self.readCursors = ReadCursorStore()
         self.threadHistory = ThreadHistoryStore()
         self.unreadOverview = UnreadOverviewStore()
+        avatars.fetch = { [port] jid, knownID in
+            await port.fetchAvatar(of: jid, knownID: knownID)
+        }
         timelines.account = account
         timelines.onArchiveTrimmed = { [weak self] conversation, cursor in
             self?.archiveTrimmed(conversation, cursor: cursor)
@@ -322,7 +325,7 @@ public final class SessionCoordinator {
     private func clearStores() {
         timelines.clear()
         directory.clear()
-        presence.clear()
+        presence.reset()
         typing.clear()
         unread.clearAll()
         deliveries.clear()
@@ -374,6 +377,9 @@ public final class SessionCoordinator {
             reconnectTask?.cancel()
             reconnectTask = nil
             status.connection = .online
+            // Avatars may have changed while we were away; rows on screen
+            // ask again.
+            avatars.markAllStale()
             // Runs beside the event loop: the pipeline awaits server
             // round-trips whose answers arrive as events.
             readyTask?.cancel()
@@ -415,6 +421,8 @@ public final class SessionCoordinator {
             sentMessageFailed(stanzaID, bounced: false)
         case let .messageRejected(stanzaID, from, to):
             messageRejected(stanzaID, from: from, to: to)
+        case let .avatarChanged(jid, id):
+            avatars.avatarChanged(jid, id: id)
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
@@ -462,6 +470,12 @@ public final class SessionCoordinator {
         // Errors only change send state through the typed rejection event,
         // where the outbound id and addresses are checked together.
         guard message.type != .error else { return }
+        // PEP notifications (avatar, mood…) are headlines without a body;
+        // their typed payloads arrive as their own events.
+        if message.type == .headline, message.body == nil, message.displayedCursors == nil, message.pinEvent == nil {
+            return
+        }
+        var message = message
         if let cursors = message.displayedCursors {
             // A sibling device's XEP-0490 notification is read-state
             // metadata only, and only trusted from our own account.
@@ -484,6 +498,11 @@ public final class SessionCoordinator {
             return
         }
         trackChatState(message, route: route)
+        if route.conversation.isRoom, message.authorRealJID == nil, let nick = message.from?.resource {
+            // The sender is present as it speaks: pin the row to that
+            // occupant, so a later holder of the nick never takes it over.
+            message.authorRealJID = presence.occupant(named: nick, in: route.conversation.jid)?.realJID
+        }
         let result = timelines.ingest(message, route: route)
         if route.isMine {
             // Our own copy back from the server confirms an unacked send,

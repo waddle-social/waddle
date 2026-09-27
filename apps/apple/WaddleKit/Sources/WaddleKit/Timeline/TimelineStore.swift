@@ -248,6 +248,7 @@ public final class TimelineStore {
             let timestamp = incoming.timestamp ?? existing.item.timestamp
             var message = incoming.message
             message.timestamp = timestamp
+            message.authorRealJID = message.authorRealJID ?? existing.item.message.authorRealJID
             replaced.item = TimelineItem(
                 id: existing.item.id,
                 conversation: incoming.conversation,
@@ -266,6 +267,7 @@ public final class TimelineStore {
         if existing.item.timestamp == nil, let timestamp = incoming.timestamp {
             var replaced = existing
             replaced.item.message.timestamp = timestamp
+            replaced.item.message.authorRealJID = replaced.item.message.authorRealJID ?? incoming.message.authorRealJID
             replaced.sortDate = timestamp
             return replaced
         }

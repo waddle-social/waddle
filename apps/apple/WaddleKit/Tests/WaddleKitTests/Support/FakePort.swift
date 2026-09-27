@@ -30,6 +30,8 @@ final class FakePort: XmppPort {
     var connectCount = 0
     var probeConnectionResult = true
     var probeConnectionCount = 0
+    var avatarLookups: [BareJID] = []
+    var avatarLookup: (BareJID, String?) -> AvatarFetch = { _, _ in .absent }
 
     init() {
         var captured: AsyncStream<XmppEvent>.Continuation!
@@ -189,7 +191,10 @@ final class FakePort: XmppPort {
 
     func setNotifyMode(_ mode: NotifyMode, for conversation: ConversationID) async throws {}
     func fetchNotifyModes() async throws -> [ConversationID: NotifyMode] { [:] }
-    func fetchAvatar(of jid: BareJID) async -> AvatarImage? { nil }
+    func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
+        avatarLookups.append(jid)
+        return avatarLookup(jid, knownID)
+    }
     func publishAvatar(_ image: AvatarImage) async throws {}
     func removeAvatar() async throws {}
     func fetchMood(of jid: BareJID) async throws -> UserMood? { nil }

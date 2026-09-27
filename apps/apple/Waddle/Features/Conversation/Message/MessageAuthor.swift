@@ -41,19 +41,16 @@ struct MessageAuthor: Hashable {
     let avatarJID: BareJID?
     let badge: MessageRoleBadge?
 
-    /// `occupant` is the room occupant for the row's nick, when present.
-    static func resolve(_ item: TimelineItem, occupant: Occupant?) -> MessageAuthor {
+    /// `occupant` is the room occupant for the row's nick, when present;
+    /// `authorJID` is `SessionCoordinator.authorJID(of:)`. Callers that
+    /// only need the name may omit both.
+    static func resolve(_ item: TimelineItem, occupant: Occupant?, authorJID: BareJID? = nil) -> MessageAuthor {
         let name = item.authorName.isEmpty ? "Unknown" : item.authorName
-        if item.conversation.isRoom {
-            let jid = occupant?.realJID
-            return MessageAuthor(
-                name: name,
-                colorKey: jid?.description ?? name,
-                avatarJID: jid,
-                badge: MessageRoleBadge.of(occupant)
-            )
-        }
-        let jid = item.from?.bare
-        return MessageAuthor(name: name, colorKey: jid?.description ?? name, avatarJID: jid, badge: nil)
+        return MessageAuthor(
+            name: name,
+            colorKey: authorJID?.description ?? name,
+            avatarJID: authorJID,
+            badge: item.conversation.isRoom ? MessageRoleBadge.of(occupant) : nil
+        )
     }
 }

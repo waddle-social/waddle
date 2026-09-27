@@ -43,8 +43,11 @@ final class FFIEventListener: WaddleEventListener {
             let recipient = to.flatMap(JID.init(parsing:))
             guard to == nil || recipient != nil else { return nil }
             return .messageRejected(stanzaID: stanzaId, from: sender, to: recipient)
-        case .avatarChanged(_, _):
-            return nil
+        case let .avatarChanged(jid, avatarId):
+            // XEP-0084 metadata belongs to an account: a full JID is not a
+            // valid publisher, so it is dropped rather than truncated.
+            guard let owner = FFIInbound.bareJID(jid) else { return nil }
+            return .avatarChanged(jid: owner, id: avatarId)
         case .call:
             BridgeLog.debug("dropped call event: calls are not bridged")
             return nil

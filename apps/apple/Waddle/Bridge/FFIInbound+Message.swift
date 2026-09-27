@@ -60,7 +60,10 @@ extension FFIInbound {
     /// are not part of the timeline surface.
     static func wireMessage(_ archived: WaddleArchivedMessage) -> WireMessage? {
         guard archived.callEvent == nil else { return nil }
-        return wireMessage(fields: archived, source: .archive(mamID: archived.mamId))
+        guard var wire = wireMessage(fields: archived, source: .archive(mamID: archived.mamId)) else { return nil }
+        // The room's XEP-0045 item names the account, not a resource.
+        wire.authorRealJID = jid(archived.authorRealJid)?.bare
+        return wire
     }
 
     static func archivePage(_ page: WaddleMamPage) -> ArchivePage {

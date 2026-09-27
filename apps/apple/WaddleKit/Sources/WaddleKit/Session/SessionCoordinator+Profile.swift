@@ -1,24 +1,35 @@
 import Foundation
 
 extension SessionCoordinator {
-    /// Fetches `jid`'s XEP-0084 avatar once per session.
+    /// A row showing `jid` rendered: look up its XEP-0084 avatar unless a
+    /// current one is held. Offline rows wait for the next session, which
+    /// marks every avatar stale.
     public func loadAvatarIfNeeded(_ jid: BareJID) {
-        guard avatars.beginFetchIfNeeded(jid) else { return }
-        let port = self.port
-        Task { [weak self] in
-            let image = await port.fetchAvatar(of: jid)
-            self?.avatars.finishFetch(jid, image: image)
+        guard connection == .online else { return }
+        avatars.request(jid)
+    }
+
+    /// The real JID behind a row's author, for its avatar. A room nick is
+    /// never turned into a JID: only the room's word counts (the archived
+    /// or live occupant JID, else the last one seen for that nick).
+    public func authorJID(of item: TimelineItem) -> BareJID? {
+        guard item.conversation.isRoom else { return item.from?.bare }
+        if let jid = item.message.authorRealJID { return jid }
+        if let nick = item.from?.resource,
+           let jid = presence.realJID(ofNick: nick, in: item.conversation.jid) {
+            return jid
         }
+        return item.isMine ? account.jid : nil
     }
 
     public func publishAvatar(_ image: AvatarImage) async throws {
         try await port.publishAvatar(image)
-        avatars.finishFetch(account.jid, image: image)
+        avatars.set(account.jid, image: image)
     }
 
     public func removeAvatar() async throws {
         try await port.removeAvatar()
-        avatars.finishFetch(account.jid, image: nil)
+        avatars.set(account.jid, image: nil)
     }
 
     /// RFC 6121 availability with an optional status message.
