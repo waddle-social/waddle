@@ -1406,7 +1406,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 55862) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 2785) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
@@ -2485,9 +2485,10 @@ public interface WaddleClientInterface {
      * whose bytes the caller already caches: when the advertised
      * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
      * retrieve the image data") and the result carries the id alone.
-     * Returns `None` when the target JID hasn't published an avatar or
-     * the fetch failed; errors are reported on the event listener so
-     * the caller can treat `None` as "fall back to initials".
+     *
+     * `Ok(None)` is a definitive "no readable avatar" (fall back to
+     * initials). `Err` is a failed lookup (not connected, timeout,
+     * transient stanza error): callers keep any avatar they already show.
      */
     suspend fun `requestAvatar`(`jid`: kotlin.String, `knownIds`: List<kotlin.String>): WaddleAvatarResult?
 
@@ -4269,10 +4270,12 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * whose bytes the caller already caches: when the advertised
      * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
      * retrieve the image data") and the result carries the id alone.
-     * Returns `None` when the target JID hasn't published an avatar or
-     * the fetch failed; errors are reported on the event listener so
-     * the caller can treat `None` as "fall back to initials".
+     *
+     * `Ok(None)` is a definitive "no readable avatar" (fall back to
+     * initials). `Err` is a failed lookup (not connected, timeout,
+     * transient stanza error): callers keep any avatar they already show.
      */
+    @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `requestAvatar`(`jid`: kotlin.String, `knownIds`: List<kotlin.String>) : WaddleAvatarResult? {
         return uniffiRustCallAsync(
@@ -4288,7 +4291,7 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         // lift function
         { FfiConverterOptionalTypeWaddleAvatarResult.lift(it) },
         // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
+        WaddleException.ErrorHandler,
     )
     }
 

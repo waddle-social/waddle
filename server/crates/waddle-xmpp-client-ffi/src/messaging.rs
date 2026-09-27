@@ -281,39 +281,30 @@ impl WaddleClient {
     /// whose bytes the caller already caches: when the advertised
     /// metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
     /// retrieve the image data") and the result carries the id alone.
-    /// Returns `None` when the target JID hasn't published an avatar or
-    /// the fetch failed; errors are reported on the event listener so
-    /// the caller can treat `None` as "fall back to initials".
+    ///
+    /// `Ok(None)` is a definitive "no readable avatar" (fall back to
+    /// initials). `Err` is a failed lookup (not connected, timeout,
+    /// transient stanza error): callers keep any avatar they already show.
     pub async fn request_avatar(
         &self,
         jid: String,
         known_ids: Vec<String>,
-    ) -> Option<WaddleAvatarResult> {
-        let bare: BareJid = match jid.parse() {
-            Ok(j) => j,
-            Err(e) => {
-                self.emit_error(format!("Invalid JID for avatar fetch: {e}"));
-                return None;
-            }
-        };
-        let handle = self.clone_handle().await?;
-
-        match handle.request_avatar(&bare, &known_ids).await {
-            Ok(Some(fetch)) => Some(WaddleAvatarResult {
-                id: fetch.id,
-                avatar: fetch.avatar.map(|avatar| WaddleAvatar {
-                    jid: avatar.jid.to_string(),
-                    id: avatar.id,
-                    mime_type: avatar.mime_type,
-                    data: avatar.data,
-                }),
+    ) -> Result<Option<WaddleAvatarResult>, WaddleError> {
+        let bare = self.require_bare_jid(&jid)?;
+        let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
+        let fetch = handle
+            .request_avatar(&bare, &known_ids)
+            .await
+            .map_err(|e| client_error_to_waddle(&e))?;
+        Ok(fetch.map(|fetch| WaddleAvatarResult {
+            id: fetch.id,
+            avatar: fetch.avatar.map(|avatar| WaddleAvatar {
+                jid: avatar.jid.to_string(),
+                id: avatar.id,
+                mime_type: avatar.mime_type,
+                data: avatar.data,
             }),
-            Ok(None) => None,
-            Err(e) => {
-                self.emit_error(format!("request_avatar failed: {e}"));
-                None
-            }
-        }
+        }))
     }
 
     pub async fn discover_upload_service(&self) -> Option<String> {

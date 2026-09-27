@@ -932,11 +932,12 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * whose bytes the caller already caches: when the advertised
      * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
      * retrieve the image data") and the result carries the id alone.
-     * Returns `None` when the target JID hasn't published an avatar or
-     * the fetch failed; errors are reported on the event listener so
-     * the caller can treat `None` as "fall back to initials".
+     *
+     * `Ok(None)` is a definitive "no readable avatar" (fall back to
+     * initials). `Err` is a failed lookup (not connected, timeout,
+     * transient stanza error): callers keep any avatar they already show.
      */
-    func requestAvatar(jid: String, knownIds: [String]) async  -> WaddleAvatarResult?
+    func requestAvatar(jid: String, knownIds: [String]) async throws  -> WaddleAvatarResult?
 
     func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
@@ -2511,13 +2512,14 @@ open func leaveRoom(roomJid: String, nick: String)async   {
      * whose bytes the caller already caches: when the advertised
      * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
      * retrieve the image data") and the result carries the id alone.
-     * Returns `None` when the target JID hasn't published an avatar or
-     * the fetch failed; errors are reported on the event listener so
-     * the caller can treat `None` as "fall back to initials".
+     *
+     * `Ok(None)` is a definitive "no readable avatar" (fall back to
+     * initials). `Err` is a failed lookup (not connected, timeout,
+     * transient stanza error): callers keep any avatar they already show.
      */
-open func requestAvatar(jid: String, knownIds: [String])async  -> WaddleAvatarResult?  {
+open func requestAvatar(jid: String, knownIds: [String])async throws  -> WaddleAvatarResult?  {
     return
-        try!  await uniffiRustCallAsync(
+        try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(
                     self.uniffiCloneHandle(),
@@ -2528,8 +2530,7 @@ open func requestAvatar(jid: String, knownIds: [String])async  -> WaddleAvatarRe
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeWaddleAvatarResult.lift,
-            errorHandler: nil
-
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -17435,7 +17436,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 55862) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 2785) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
