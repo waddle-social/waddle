@@ -2395,6 +2395,7 @@ async fn promote_terminal_recovery_prefix(
                 blocklist: &blocklist,
                 server_domain: state.deps.auth_state.xmpp_domain.as_str(),
                 recent_tombstones: &item_tombstones,
+                allow_unfenced_effects: true,
             },
         )
         .await;

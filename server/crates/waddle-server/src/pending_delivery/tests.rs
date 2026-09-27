@@ -3922,8 +3922,8 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         crate::db_params![
             stream_id.clone(),
-            "atomic@example.com",
-            "atomic@example.com/phone",
+            recipient.clone(),
+            format!("{recipient}/phone"),
             0_i64,
             8_i64,
             0_i64,
@@ -3982,12 +3982,75 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     drop(initial_rows);
     drop(conn);
 
-    assert_eq!(
-        storage
-            .insert_fenced_and_prune_unacked(transient_row(&recipient, "promoted"), &stream_id, 7)
-            .await
-            .expect("promote exact replay row"),
-        InsertOutcome::Inserted
+    let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(std::sync::Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+                .await
+                .expect("open promotion SM persistence"),
+        ));
+    let live_registry = waddle_xmpp::registry::ConnectionRegistry::new();
+    let users = test_user_registry();
+    let alternate = full(&format!("{recipient}/web"));
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    live_registry.register(alternate.clone(), sender);
+    let entry = live_registry
+        .get_entry(&alternate)
+        .expect("live alternate resource");
+    users
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: alternate.clone(),
+            entry,
+        })
+        .await
+        .expect("register alternate resource");
+    live_registry.update_presence(&alternate, true, 1);
+    let session = waddle_xmpp::stream_management::DetachedSession {
+        stream_id: stream_id.clone(),
+        user_id: recipient.clone(),
+        jid: full(&format!("{recipient}/phone")),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 8,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 7,
+            stanza_xml: replay_xml.clone(),
+            original_receipt_at: chrono::Utc::now(),
+        }],
+        max_resume_time: Some(120),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    let pending: std::sync::Arc<dyn PendingDeliveryStorage> = std::sync::Arc::new(storage.clone());
+    let summary = crate::sm_promotion::promote_session_with_custody(
+        &session,
+        crate::sm_promotion::TerminalOverflowPromotionDeps {
+            sm_registry: &sm_registry,
+            registry: &live_registry,
+            user_registry: &users,
+            pending_storage: &pending,
+            blocklist: &waddle_xmpp::protocol::session_state::Blocklist::empty(),
+            server_domain: "example.com",
+            recent_tombstones: &[],
+            allow_unfenced_effects: false,
+        },
+    )
+    .await;
+    assert_eq!(summary.queued, 1);
+    assert_eq!(summary.redelivered, 0);
+    assert!(
+        receiver.try_recv().is_err(),
+        "live-eligible replay must enter durable custody first"
     );
     let conn = db.guard().await.expect("db guard");
     let mut rows = conn

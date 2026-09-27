@@ -1428,6 +1428,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     blocklist: &blocklist,
                     server_domain: state.deps.auth_state.xmpp_domain.as_str(),
                     recent_tombstones: &recent_tombstones,
+                    allow_unfenced_effects: true,
                 },
             )
             .await;
@@ -8144,13 +8145,11 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
-                // One read-only fence check avoids promoting the queue when
-                // a successor already owns this exact session. The final
-                // durable delete still performs its own write-path fence.
-                // Keep this check adjacent to promotion: live redelivery and
-                // quota bounces can precede a fenced pending insert, so a
-                // batch-wide ownership snapshot would become stale before
-                // those side effects on later sessions.
+                // One read-only fence check avoids reconciling a session
+                // that a successor already owns. Keep it adjacent to this
+                // session's work: row-backed pending releases and their
+                // independently custodied re-drive precede the final SM
+                // delete, and a batch-wide ownership snapshot can stale.
                 if abandon_shutdown_session_if_claim_lost(
                     &websocket_state.deps.protocol.sm_session_registry,
                     &mut promotion_guard,
@@ -8176,6 +8175,10 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     Ok(rows) => rows.iter().any(|row| row.outbound_sequence.is_none()),
                     Err(_) => true,
                 };
+                // This can push to a live socket in clustered shutdown, but
+                // only from independently durable pending rows. Any
+                // row-backed SM replay copy was pruned before release above;
+                // the pending row's own claim CAS governs the flush.
                 let released_redrive_aborted = (row_release.released_rows || has_unflushed_backlog)
                     && routes::websocket::redrive_terminal_pending_rows_to_live_resource(
                         &websocket_state,
@@ -8253,6 +8256,12 @@ pub(crate) async fn run_graceful_shutdown_drain(
                         blocklist: &blocklist,
                         server_domain: websocket_state.deps.auth_state.xmpp_domain.as_str(),
                         recent_tombstones: &recent_tombstones,
+                        allow_unfenced_effects: websocket_state
+                            .deps
+                            .app_state
+                            .clustering_claims
+                            .node_identity
+                            .is_none(),
                     },
                 )
                 .await;
@@ -12959,9 +12968,10 @@ mod graceful_shutdown_drain_tests {
     use super::user_reaper_tests::CountingReleaseFailureClaimStore;
     use super::{run_graceful_shutdown_drain, run_sm_expiry_sweep, HangingSmReadPersistence};
     use crate::server::routes::websocket::tests::{
-        create_test_websocket_state_with_sm_registry,
+        create_test_websocket_state_with_clustering, create_test_websocket_state_with_sm_registry,
         create_test_websocket_state_with_sm_registry_and_pending_storage,
         create_test_websocket_state_with_sm_registry_pending_and_blocking,
+        register_test_connection,
     };
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -13563,6 +13573,85 @@ mod graceful_shutdown_drain_tests {
                 .unwrap_or(0),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn clustered_shutdown_queues_live_eligible_replay_before_any_socket_send() {
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "q6-handoff"));
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(claims.clone(), identity.clone()),
+        );
+        let state = create_test_websocket_state_with_clustering(
+            crate::clustering::ClusteringHandles {
+                claim_store: Some(claims),
+                node_identity: Some(identity),
+                ..Default::default()
+            },
+            registry.clone(),
+        )
+        .await;
+        let alternate: jid::FullJid = "romeo@example.com/web".parse().expect("full jid");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        register_test_connection(&state, &alternate, sender).await;
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&alternate, true, 1);
+        let stream_id = "clustered-q6-live-eligible";
+        let recipient = alternate.to_bare();
+        let mut session = detached_session(
+            stream_id,
+            "romeo@example.com/phone".parse().expect("full jid"),
+        );
+        session.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 1,
+            stanza_xml: message_xml(&transient_message(&recipient, "durable before live")),
+            original_receipt_at: chrono::Utc::now(),
+        });
+        registry
+            .store_session(session)
+            .await
+            .expect("store detached session");
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        run_graceful_shutdown_drain(
+            state.clone(),
+            stop,
+            Arc::new(Notify::new()),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
+            Duration::from_secs(4),
+        )
+        .await;
+
+        assert!(
+            receiver.try_recv().is_err(),
+            "Q6 must not send replay directly"
+        );
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(&recipient)
+                .await
+                .expect("pending rows")
+                .len(),
+            1
+        );
+        assert!(persistence
+            .get_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("durable session")
+            .is_none());
     }
 
     #[tokio::test]

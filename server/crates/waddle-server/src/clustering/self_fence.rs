@@ -904,20 +904,6 @@ where
             return;
         }
 
-        let mark_draining = std::pin::pin!(mark_draining_bounded(
-            self.lease,
-            identity,
-            self.control_plane_budget,
-        ));
-        tokio::select! {
-            biased;
-            _ = self.fatal_fence.cancelled() => {
-                self.finish(identity, identity).await;
-                return;
-            }
-            _ = mark_draining => {}
-        }
-
         let after_rooms = async {
             if let Some(sm) = self
                 .shutdown_sm_drain
@@ -1955,6 +1941,8 @@ mod tests {
         registration_release: Option<Arc<tokio::sync::Notify>>,
         heartbeat_entered: Option<Arc<tokio::sync::Notify>>,
         heartbeat_release: Option<Arc<tokio::sync::Notify>>,
+        draining_entered: Option<Arc<tokio::sync::Notify>>,
+        draining_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl FakeLease {
@@ -1975,6 +1963,8 @@ mod tests {
                 registration_release: None,
                 heartbeat_entered: None,
                 heartbeat_release: None,
+                draining_entered: None,
+                draining_release: None,
             }
         }
     }
@@ -2034,6 +2024,12 @@ mod tests {
         }
         async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
             self.draining_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = &self.draining_entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.draining_release {
+                release.notified().await;
+            }
             Ok(())
         }
         async fn count_other_live_nodes(
@@ -3816,6 +3812,69 @@ mod tests {
             .await
             .expect("renewed lease permits completed Q6 work");
         assert_eq!(result, ShutdownDrainOutcome::Completed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_renews_while_mark_draining_is_stalled() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let draining_entered = Arc::new(tokio::sync::Notify::new());
+        let draining_release = Arc::new(tokio::sync::Notify::new());
+        let heartbeat_entered = Arc::new(tokio::sync::Notify::new());
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        lease.draining_entered = Some(draining_entered.clone());
+        lease.draining_release = Some(draining_release.clone());
+        lease.heartbeat_entered = Some(heartbeat_entered.clone());
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: completion.clone(),
+            budget: Duration::from_secs(2),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(100),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+        let shutdown = context.shutdown(
+            &claims,
+            &owner,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            tokio::time::Instant::now() - Duration::from_millis(80),
+        );
+        tokio::pin!(shutdown);
+        tokio::select! {
+            result = &mut shutdown => panic!("shutdown ended before marking draining: {result:?}"),
+            _ = draining_entered.notified() => {}
+        }
+        tokio::select! {
+            result = &mut shutdown => panic!("shutdown ended before lease renewal: {result:?}"),
+            observed = tokio::time::timeout(Duration::from_millis(10), heartbeat_entered.notified()) => {
+                observed.expect("lease must renew while mark_draining is pending");
+            }
+        }
+        assert!(live_identity.current().is_active());
+        draining_release.notify_one();
+        completion.cancel();
+        tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("healthy shutdown completes after marking draining and Q6");
+        assert!(!live_identity.current().is_active());
+        assert_eq!(lease.draining_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

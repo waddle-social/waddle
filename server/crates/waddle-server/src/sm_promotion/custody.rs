@@ -4,8 +4,9 @@ use waddle_xmpp::stream_management::DetachedSession;
 use waddle_xmpp::Stanza;
 
 use super::{
-    promote_iq, promote_one, promote_presence, promote_session_unacked, PromotedOutcome,
-    PromotionContext, PromotionSummary, TerminalOverflowPromotionDeps, TOMBSTONE_CLOCK_SKEW_SLACK,
+    promote_iq, promote_one, promote_presence, promote_session_unacked_with_policy,
+    PromotedOutcome, PromotionContext, PromotionSummary, StreamPromotionDeps,
+    TerminalOverflowPromotionDeps, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
 
 /// Promote ledger-backed entries through the atomic custody handoff. Replay
@@ -31,6 +32,14 @@ pub(crate) async fn promote_session_with_custody(
             }
         };
         let typed = super::stanza::parse_stanza(&entry.stanza_xml);
+        if !deps.allow_unfenced_effects
+            && matches!(typed.as_ref(), Some(Stanza::Iq(_) | Stanza::Presence(_)))
+        {
+            // A clustered Q6 drain cannot atomically retire SM replay with
+            // a direct socket send for these stanza kinds.
+            summary.record(entry.sequence, &PromotedOutcome::StorageFailure);
+            break;
+        }
         let matching: Vec<_> = candidates
             .into_iter()
             .filter(|append| {
@@ -43,14 +52,17 @@ pub(crate) async fn promote_session_with_custody(
             .collect();
         if matching.is_empty() {
             let one = super::detached_session_for_terminal_entry(session, entry.clone());
-            let single = promote_session_unacked(
+            let single = promote_session_unacked_with_policy(
                 &one,
-                deps.registry,
-                deps.user_registry,
-                deps.pending_storage,
-                deps.blocklist,
-                deps.server_domain,
-                deps.recent_tombstones,
+                StreamPromotionDeps {
+                    registry: deps.registry,
+                    user_registry: deps.user_registry,
+                    pending_storage: deps.pending_storage,
+                    blocklist: deps.blocklist,
+                    server_domain: deps.server_domain,
+                    recent_tombstones: deps.recent_tombstones,
+                    allow_unfenced_effects: deps.allow_unfenced_effects,
+                },
             )
             .await;
             summary.redelivered += single.redelivered;
@@ -137,12 +149,16 @@ pub(crate) async fn promote_ingress_custody(
                     pending_storage: deps.pending_storage,
                     original_receipt_fallback: append.original_receipt_at,
                     server_domain: deps.server_domain,
+                    allow_unfenced_effects: deps.allow_unfenced_effects,
                     origin: super::pending::PromotionOrigin::IngressCustody(append),
                 },
             )
             .await
         }
-        Stanza::Iq(iq) => promote_iq(*iq, deps.registry).await,
-        Stanza::Presence(presence) => promote_presence(presence, deps.registry).await,
+        Stanza::Iq(iq) if deps.allow_unfenced_effects => promote_iq(*iq, deps.registry).await,
+        Stanza::Presence(presence) if deps.allow_unfenced_effects => {
+            promote_presence(presence, deps.registry).await
+        }
+        Stanza::Iq(_) | Stanza::Presence(_) => PromotedOutcome::StorageFailure,
     }
 }

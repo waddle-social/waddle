@@ -147,6 +147,7 @@ async fn drain_page(
                 blocklist: &blocklist,
                 server_domain: state.deps.auth_state.xmpp_domain.as_str(),
                 recent_tombstones: &tombstones,
+                allow_unfenced_effects: true,
             },
         )
         .await;
