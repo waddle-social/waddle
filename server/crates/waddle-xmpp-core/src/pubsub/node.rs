@@ -543,10 +543,11 @@ impl NodeConfig {
     /// XEP-0084 user avatar (`urn:xmpp:avatar:data` / `:metadata`) PEP
     /// node defaults.
     ///
-    /// Avatars are resolved by peers that share only a room with the
-    /// owner, so the nodes are `open` like vCard4 — the Presence
-    /// default admits only the owner. `max_items = 1` so a new avatar
-    /// replaces the previous one.
+    /// XEP-0084 leaves the access model to the service. Waddle policy is
+    /// `open`, the shape clients request via publish-options (which the
+    /// Publish arm does not enforce), because peers who share only a room
+    /// with the owner must resolve the avatar. `max_items = 1` so a new
+    /// avatar replaces the previous one.
     pub fn avatar_defaults() -> Self {
         Self {
             access_model: AccessModel::Open,

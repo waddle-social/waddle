@@ -139,8 +139,8 @@ impl PepHandler {
             return AccessModel::Open;
         }
         if node == PEP_NODE_AVATAR_DATA || node == PEP_NODE_AVATAR_METADATA {
-            // XEP-0084: peers resolve avatars without a roster
-            // relationship, so the avatar nodes are publicly readable.
+            // Waddle policy (XEP-0084 is silent): peers resolve avatars
+            // without a roster relationship, so the nodes are open.
             return AccessModel::Open;
         }
         if node == PEP_NODE_STICKERS {

@@ -355,7 +355,7 @@ async fn publish_avatar_data(
 ) -> Result<(), ProfileSyncError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
-    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_DATA).await?;
+    ensure_canonical_pep_node(state, jid, NODE_AVATAR_DATA).await?;
 
     let payload = build_avatar_data(&BASE64.encode(&bytes.bytes));
     let item = PubSubItem {
@@ -372,7 +372,7 @@ async fn publish_avatar_metadata(
     item_id: &str,
     bytes: &AvatarBytes,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_METADATA).await?;
+    ensure_canonical_pep_node(state, jid, NODE_AVATAR_METADATA).await?;
 
     let info = AvatarInfo {
         id: item_id.to_string(),
@@ -398,7 +398,7 @@ async fn publish_empty_avatar_metadata(
     state: &Arc<WebSocketState>,
     jid: &BareJid,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_METADATA).await?;
+    ensure_canonical_pep_node(state, jid, NODE_AVATAR_METADATA).await?;
 
     let payload = Element::builder("metadata", NS_AVATAR_METADATA).build();
     let item = PubSubItem {
@@ -456,7 +456,7 @@ async fn publish_vcard4(
     jid: &BareJid,
     vcard: &Element,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(state, jid, PEP_NODE_VCARD4).await?;
+    ensure_canonical_pep_node(state, jid, PEP_NODE_VCARD4).await?;
 
     let item = PubSubItem {
         id: Some(VCARD4_ITEM_ID.to_string()),
@@ -508,7 +508,7 @@ fn vcard4_photo_pep_uri(jid: &BareJid, sha1_hex: &str) -> String {
 /// (Open access, `max_items=1`) BEFORE the first publish. Closing the
 /// auto-create-then-flip race where a peer fetching between the two
 /// would have been denied by `pep_default()`'s Presence access.
-async fn ensure_node_with_oidc_config(
+async fn ensure_canonical_pep_node(
     state: &Arc<WebSocketState>,
     jid: &BareJid,
     node: &str,

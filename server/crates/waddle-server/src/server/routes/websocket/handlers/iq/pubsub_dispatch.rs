@@ -564,9 +564,8 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// non-roster peers. We reconcile the config in-place so the next
 /// publish lands on a spec-conformant node.
 ///
-/// The XEP-0084 avatar nodes had the same history: client-published
-/// avatars auto-created them on the Presence default, which admits
-/// only the owner, so the avatar was invisible to every peer.
+/// The canonical config wins over an owner's own `configure`: the next
+/// publish to one of these nodes resets it.
 ///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
 /// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
