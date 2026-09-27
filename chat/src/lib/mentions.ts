@@ -165,7 +165,6 @@ export function mergeMentionMembers({
         mergedMembers.push({
           jid: jidFromPresence,
           username: nick,
-          avatar_url: null,
           affiliation: "member",
           joined_at: "",
         });

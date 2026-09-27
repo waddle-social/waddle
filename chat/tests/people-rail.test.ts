@@ -24,7 +24,7 @@ function conversation(peerJid: string, presenceShow?: DmConversation["presenceSh
 }
 
 function member(jid: string, affiliation: MemberSummary["affiliation"] = "member"): MemberSummary {
-  return { jid, username: jid.split("@")[0] ?? jid, avatar_url: null, affiliation, joined_at: "" };
+  return { jid, username: jid.split("@")[0] ?? jid, affiliation, joined_at: "" };
 }
 
 function sources(overrides: Partial<PeopleRailSources> = {}): PeopleRailSources {

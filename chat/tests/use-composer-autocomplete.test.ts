@@ -72,7 +72,7 @@ function makeEditor(paragraphs: string[], cursor: { para: number; offset: number
 }
 
 function candidate(username: string): MentionCandidate {
-  return { username, jid: `${username}@example.com`, avatar_url: null, kind: "member" };
+  return { username, jid: `${username}@example.com`, kind: "member" };
 }
 
 function command(overrides: Partial<DiscoveredExtensionCommand> = {}): DiscoveredExtensionCommand {

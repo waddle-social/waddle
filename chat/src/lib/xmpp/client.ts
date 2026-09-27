@@ -2791,7 +2791,7 @@ export class BrowserXmppClient {
   async adminChannelsAffiliations(opts: { channelJid: string; filter?: string | null; pageSize?: number | null; afterCursor?: string | null }): Promise<WasmAdminChannelsAffiliationsResult> { return this.mucAdmin.adminChannelsAffiliations(opts); }
   async adminChannelsSetAffiliation(opts: { channelJid: string; memberJid: string; affiliation: "owner" | "admin" | "member" | "none" | "outcast"; reason?: string | null }): Promise<WasmAdminChannelsSetAffiliationResult> { return this.mucAdmin.adminChannelsSetAffiliation(opts); }
   async adminChannelsKick(opts: { channelJid: string; occupantJid: string; reason?: string | null }): Promise<WasmAdminChannelsKickResult> { return this.mucAdmin.adminChannelsKick(opts); }
-  async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? jidLocalpart(user.jid), display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
+  async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? jidLocalpart(user.jid), display_name: user.display_name ?? user.name ?? null })); }
   async fetchUserAvatar(jid: string): Promise<string | null> { return this.vcard.fetchUserAvatar(jid); }
   get agent(): XmppClientInstance | null { return this.xmpp; }
 

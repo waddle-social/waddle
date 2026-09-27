@@ -41,8 +41,8 @@ describe("MucAdmin.listRoomMembers", () => {
 
     expect(queried).toEqual(["owner", "admin", "member", "outcast"]);
     expect(members).toEqual([
-      { jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "owner", joined_at: "" },
-      { jid: "bob@example.com", username: "bob", avatar_url: null, affiliation: "member", joined_at: "" },
+      { jid: "alice@example.com", username: "alice", affiliation: "owner", joined_at: "" },
+      { jid: "bob@example.com", username: "bob", affiliation: "member", joined_at: "" },
     ]);
     expect(errors).toEqual([]);
   });

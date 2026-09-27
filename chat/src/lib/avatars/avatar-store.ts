@@ -59,7 +59,8 @@ function avatarKey(jid: string): string {
 }
 
 export class AvatarStore {
-  private readonly urls = shallowReactive(new Map<string, string>());
+  /** Bare JID → image URL, or `null` once the peer is known to have no avatar. */
+  private readonly urls = shallowReactive(new Map<string, string | null>());
   private readonly entries = new Map<string, Entry>();
   private readonly queue: string[] = [];
   private inFlightCount = 0;
@@ -72,6 +73,16 @@ export class AvatarStore {
   urlFor(jid: string | null | undefined): string | null {
     if (!jid) return null;
     return this.urls.get(avatarKey(jid)) ?? null;
+  }
+
+  /**
+   * Reactive: whether `jid` is known to have no avatar (a definitive
+   * "none" answer or a disable), as opposed to not yet resolved.
+   */
+  isKnownAbsent(jid: string | null | undefined): boolean {
+    if (!jid) return false;
+    const key = avatarKey(jid);
+    return this.urls.has(key) && this.urls.get(key) === null;
   }
 
   /**
@@ -126,7 +137,7 @@ export class AvatarStore {
     }
     const entry = this.entry(key);
     entry.epoch += 1;
-    this.urls.delete(key);
+    this.urls.set(key, null);
     this.settle(key, entry, "miss");
   }
 
@@ -221,7 +232,7 @@ export class AvatarStore {
       } else {
         // A transport failure keeps the last known face; a definitive
         // "no avatar" clears it. Both retry on the negative TTL.
-        if (!failed) this.urls.delete(key);
+        if (!failed) this.urls.set(key, null);
         this.settle(key, entry, "miss");
       }
     }

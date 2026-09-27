@@ -62,7 +62,6 @@ describe("mention helpers", () => {
       members: [{
         jid: "alice@example.com",
         username: "alice",
-        avatar_url: null,
         affiliation: "owner",
         joined_at: "",
       }],
@@ -88,7 +87,7 @@ describe("mention helpers", () => {
 
   test("autocomplete includes merged presence occupants alongside broadcast mentions", () => {
     const merged = mergeMentionMembers({
-      members: [{ jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "owner", joined_at: "" }],
+      members: [{ jid: "alice@example.com", username: "alice", affiliation: "owner", joined_at: "" }],
       roomPresence: { alice: "online", bob: "online" },
       memberJidsByNick: { Bob: "bob@example.com" },
     });
@@ -101,7 +100,7 @@ describe("mention helpers", () => {
 
   test("displayed member counts include affiliation members and live occupants", () => {
     const merged = mergeMentionMembers({
-      members: [{ jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "owner", joined_at: "" }],
+      members: [{ jid: "alice@example.com", username: "alice", affiliation: "owner", joined_at: "" }],
       roomPresence: { alice: "online", bob: "online", carol: "offline" },
       memberJidsByNick: { Bob: "bob@example.com" },
     });
@@ -113,8 +112,8 @@ describe("mention helpers", () => {
   test("autocomplete candidates include registered offline members once", () => {
     const merged = mergeMentionMembers({
       members: [
-        { jid: "alice@example.com", username: "alice", avatar_url: "https://example.com/alice.png", affiliation: "owner", joined_at: "" },
-        { jid: "bob@example.com", username: "bob", avatar_url: null, affiliation: "member", joined_at: "" },
+        { jid: "alice@example.com", username: "alice", affiliation: "owner", joined_at: "" },
+        { jid: "bob@example.com", username: "bob", affiliation: "member", joined_at: "" },
       ],
       roomPresence: {},
       memberJidsByNick: {},
@@ -133,10 +132,10 @@ describe("mention helpers", () => {
 
   test("autocomplete candidates exclude non-participating affiliations and broadcast collisions", () => {
     const candidates = mentionAutocompleteCandidates([
-      { jid: "here@example.com", username: "here", avatar_url: null, affiliation: "member", joined_at: "" },
-      { jid: "mallory@example.com", username: "mallory", avatar_url: null, affiliation: "outcast", joined_at: "" },
-      { jid: "nobody@example.com", username: "nobody", avatar_url: null, affiliation: "none", joined_at: "" },
-      { jid: "alice@example.com", username: "alice", avatar_url: null, affiliation: "admin", joined_at: "" },
+      { jid: "here@example.com", username: "here", affiliation: "member", joined_at: "" },
+      { jid: "mallory@example.com", username: "mallory", affiliation: "outcast", joined_at: "" },
+      { jid: "nobody@example.com", username: "nobody", affiliation: "none", joined_at: "" },
+      { jid: "alice@example.com", username: "alice", affiliation: "admin", joined_at: "" },
     ]);
 
     expect(candidates.map((candidate) => candidate.username)).toEqual(["everyone", "here", "alice"]);

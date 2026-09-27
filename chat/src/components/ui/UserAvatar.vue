@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import { avatarStore } from "@/lib/avatars/avatar-store";
 import { useAvatarUrl } from "@/lib/avatars/use-avatar-url";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
@@ -11,6 +13,11 @@ import type { OccupantPresence } from "@/lib/xmpp-client";
 const props = defineProps<{
   jid?: string | null;
   name: string;
+  /**
+   * Shown only while the store has not resolved `jid` (e.g. the sign-in
+   * provider's picture); a known "no avatar" still renders initials.
+   */
+  fallbackSrc?: string | null;
   size?: "xs" | "sm" | "md" | "lg" | "xl" | "message";
   presence?: OccupantPresence;
   lastSeen?: number;
@@ -19,7 +26,12 @@ const props = defineProps<{
   speaking?: boolean;
 }>();
 
-const src = useAvatarUrl(() => props.jid);
+const storeSrc = useAvatarUrl(() => props.jid);
+const src = computed(() => {
+  if (storeSrc.value) return storeSrc.value;
+  if (avatarStore.isKnownAbsent(props.jid)) return null;
+  return props.fallbackSrc ?? null;
+});
 </script>
 
 <template>

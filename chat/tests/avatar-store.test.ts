@@ -281,6 +281,21 @@ describe("AvatarStore", () => {
     expect(store.urlFor("alice@example.com")).toBeNull();
   });
 
+  test("isKnownAbsent separates a definitive none from not-yet-resolved and failures", async () => {
+    const { store, remote } = setup();
+    expect(store.isKnownAbsent("alice@example.com")).toBe(false);
+    store.retain("alice@example.com");
+    store.retain("bob@example.com");
+    remote.calls[0]!.resolve(null);
+    remote.calls[1]!.reject(new Error("timeout"));
+    await flush();
+    expect(store.isKnownAbsent("alice@example.com")).toBe(true);
+    expect(store.isKnownAbsent("bob@example.com")).toBe(false);
+
+    store.handleAvatarChanged("carol@example.com");
+    expect(store.isKnownAbsent("carol@example.com")).toBe(true);
+  });
+
   test("avatarChanged for a JID nobody has shown is not fetched eagerly", () => {
     const { store, remote } = setup();
     store.handleAvatarChanged("stranger@example.com", "sha1");

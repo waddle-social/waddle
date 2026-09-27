@@ -94,3 +94,16 @@ export function conversationPeerAvatarJid(peerJid: string): string | null {
   if (resourceOf(peerJid)) return occupantRealJid(occupantJidDirectory, peerJid);
   return bare(peerJid);
 }
+
+/**
+ * Avatar JID for a MUC call participant nick: the Muji owner's real JID
+ * when the call presence carried one, else the room's disclosure.
+ */
+export function callParticipantAvatarJid(
+  roomJid: string,
+  nick: string,
+  owners: readonly { nick: string; realJid?: string }[],
+): string | null {
+  const owner = owners.find((entry) => entry.nick === nick);
+  return owner?.realJid ? bare(owner.realJid) : roomOccupantAvatarJid(roomJid, nick);
+}

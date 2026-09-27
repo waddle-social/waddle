@@ -69,7 +69,6 @@ describe("BrowserXmppClient.listRoomMembers", () => {
     expect(members).toEqual([{
       jid: "bob@example.com",
       username: "bob",
-      avatar_url: null,
       affiliation: "member",
       joined_at: "",
     }]);

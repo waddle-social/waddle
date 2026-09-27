@@ -16,7 +16,7 @@ import {
   type DmCallActivity,
 } from "@/lib/calls/dm-call-activity";
 import { $mucCallParticipantOwners, $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
-import { conversationPeerAvatarJid, roomOccupantAvatarJid } from "@/lib/avatars/author-jid";
+import { callParticipantAvatarJid, conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
 import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
@@ -107,8 +107,7 @@ function avatarJidFor(label: string): string | null {
     return props.dmPeerJid ? conversationPeerAvatarJid(props.dmPeerJid) : null;
   }
   const roomJid = normalizedRoomJid.value;
-  const owner = (mucCallParticipantOwners.value[roomJid] ?? []).find((entry) => entry.nick === label);
-  return owner?.realJid ? barePeerJid(owner.realJid).toLowerCase() : roomOccupantAvatarJid(roomJid, label);
+  return callParticipantAvatarJid(roomJid, label, mucCallParticipantOwners.value[roomJid] ?? []);
 }
 
 const avatarUrlFor = useAvatarUrls(() => (banner.value?.avatarLabels.slice(0, 3) ?? []).map(avatarJidFor));
