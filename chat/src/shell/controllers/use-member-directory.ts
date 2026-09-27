@@ -1,31 +1,24 @@
-import { computed, type ComputedRef, type Ref, ref, watch } from "vue";
+import { computed, type Ref, watch } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
-import type { useDirectMessages } from "@/dms/messages";
 import type { useWaddleDirectory, MemberLoadState } from "@/waddles/directory";
-import type { BrowserXmppClient } from "@/lib/xmpp-client";
-import type { WaddleSession } from "@/lib/server-auth";
 import type { MemberSummary } from "@/lib/chat-types";
-import { avatarLookupCandidatesAcrossContexts, mentionAutocompleteCandidates, mergeMentionMembers } from "@/lib/mentions";
+import { mentionAutocompleteCandidates, mergeMentionMembers } from "@/lib/mentions";
 
 interface MemberDirectoryDeps {
-  xmppClient: ComputedRef<BrowserXmppClient | null>;
-  session: ComputedRef<WaddleSession | null>;
   waddles: ReturnType<typeof useWaddleDirectory>;
   messaging: ReturnType<typeof useChannelMessages>;
-  dmMessaging: ReturnType<typeof useDirectMessages>;
   memberJidByNick: Ref<Record<string, string>>;
   mentionJidsByNickForSend: Ref<Record<string, string>>;
-  selfDomain: ComputedRef<string>;
 }
 
 /**
- * Member roster, mention-autocomplete, and avatar bookkeeping for the
- * active channel: merges authoritative affiliation lists with live MUC
- * presence, keeps the outbound mention JID map in sync, and lazily
- * fetches avatars for every author the timelines surface.
+ * Member roster and mention-autocomplete for the active channel: merges
+ * authoritative affiliation lists with live MUC presence and keeps the
+ * outbound mention JID map in sync. Avatars are not tracked here — every
+ * surface reads the JID-keyed avatar store (`@/lib/avatars`).
  */
 export function useMemberDirectory(deps: MemberDirectoryDeps) {
-  const { xmppClient, session, waddles, messaging, dmMessaging, memberJidByNick, mentionJidsByNickForSend, selfDomain } = deps;
+  const { waddles, messaging, memberJidByNick, mentionJidsByNickForSend } = deps;
 
   const mergedMentionMembers = computed(() =>
     mergeMentionMembers({
@@ -38,17 +31,7 @@ export function useMemberDirectory(deps: MemberDirectoryDeps) {
   watch(authorJidByNick, (value) => {
     mentionJidsByNickForSend.value = value;
   }, { immediate: true });
-  const fetchedAvatarUrlByJid = ref<Record<string, string | null>>({});
-  const avatarFetchStateByJid = ref<Record<string, "pending" | "done">>({});
-  const mentionCandidates = computed(() =>
-    mentionAutocompleteCandidates(mergedMentionMembers.value.members).map((candidate) => {
-      if (candidate.kind === "broadcast" || !candidate.jid) return candidate;
-      return {
-        ...candidate,
-        avatar_url: fetchedAvatarUrlByJid.value[candidate.jid] ?? candidate.avatar_url,
-      };
-    }),
-  );
+  const mentionCandidates = computed(() => mentionAutocompleteCandidates(mergedMentionMembers.value.members));
   const mentionSourceDiagnostic = computed(() =>
     mergedMentionMembers.value.diagnostics.join(" "),
   );
@@ -82,60 +65,6 @@ export function useMemberDirectory(deps: MemberDirectoryDeps) {
     return "0";
   });
 
-  // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
-  // candidate set. Without this, avatars in DM views never resolve
-  // (the peer never appears in `messaging.messages` because that's
-  // the channel-message timeline). After #435 (workspace roster
-  // bridge) lands, push delivery covers both axes and this fallback
-  // can be slimmed back down.
-  const avatarCandidates = computed(() =>
-    avatarLookupCandidatesAcrossContexts({
-      channelMembers: mergedMentionMembers.value.members,
-      channelMessages: messaging.messages.value,
-      channelAuthorJidByNick: authorJidByNick.value,
-      dmMessages: dmMessaging.messages.value,
-      selfDomain: selfDomain.value,
-    }),
-  );
-  const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
-    const avatars: Record<string, string | null> = {};
-
-    if (session.value) {
-      avatars[session.value.username] = session.value.avatar_url;
-    }
-
-    for (const member of waddles.members.value) {
-      const fetched = fetchedAvatarUrlByJid.value[member.jid];
-      const avatar = fetched ?? member.avatar_url;
-      if (!(member.username in avatars) || avatar) {
-        avatars[member.username] = avatar;
-      }
-    }
-
-    for (const member of mergedMentionMembers.value.members) {
-      const fetched = fetchedAvatarUrlByJid.value[member.jid];
-      const avatar = fetched ?? member.avatar_url;
-      if (!(member.username in avatars) || avatar) {
-        avatars[member.username] = avatar;
-      }
-    }
-
-    for (const candidate of avatarCandidates.value) {
-      const fetched = fetchedAvatarUrlByJid.value[candidate.jid];
-      const avatar = fetched ?? candidate.avatar_url;
-      if (!(candidate.nick in avatars) || avatar) {
-        avatars[candidate.nick] = avatar;
-      }
-    }
-
-    return avatars;
-  });
-  const membersWithAvatars = computed<MemberSummary[]>(() =>
-    displayedMembers.value.map((member) => ({
-      ...member,
-      avatar_url: fetchedAvatarUrlByJid.value[member.jid] ?? member.avatar_url,
-    })),
-  );
   // XEP-0317 hats are server-emitted descriptive metadata only.
   // No client-side fabrication: owner / admin / moderator state
   // flows separately as `authorAuthorityByNick` below (XEP-0045
@@ -150,29 +79,6 @@ export function useMemberDirectory(deps: MemberDirectoryDeps) {
   // that render OWNER / ADMIN / MOD chips read from here.
   const authorAuthorityByNick = computed(() => messaging.roomAuthority.value);
 
-  watch(
-    () => [xmppClient.value, avatarCandidates.value.map((candidate) => candidate.jid).join("\n")] as const,
-    ([client]) => {
-      if (!client) return;
-      for (const candidate of avatarCandidates.value) {
-        const jid = candidate.jid;
-        if (!jid || candidate.avatar_url || avatarFetchStateByJid.value[jid]) continue;
-        avatarFetchStateByJid.value = { ...avatarFetchStateByJid.value, [jid]: "pending" };
-        void client.fetchUserAvatar(jid)
-          .then((avatarUrl) => {
-            fetchedAvatarUrlByJid.value = { ...fetchedAvatarUrlByJid.value, [jid]: avatarUrl };
-          })
-          .catch(() => {
-            fetchedAvatarUrlByJid.value = { ...fetchedAvatarUrlByJid.value, [jid]: null };
-          })
-          .finally(() => {
-            avatarFetchStateByJid.value = { ...avatarFetchStateByJid.value, [jid]: "done" };
-          });
-      }
-    },
-    { immediate: true },
-  );
-
   return {
     authorJidByNick,
     mentionCandidates,
@@ -180,8 +86,7 @@ export function useMemberDirectory(deps: MemberDirectoryDeps) {
     displayedMemberCount,
     displayedMemberState,
     memberCountLabel,
-    avatarUrlByAuthor,
-    membersWithAvatars,
+    displayedMembers,
     authorHatsByNick,
     authorAuthorityByNick,
   };

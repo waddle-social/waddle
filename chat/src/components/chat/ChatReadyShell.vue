@@ -48,7 +48,7 @@ import { toast } from "@/ui/toaster";
 import RoomsPage from "@/components/community/pages/RoomsPage.vue";
 import MembersPage from "@/components/community/pages/MembersPage.vue";
 import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
@@ -128,7 +128,6 @@ const {
   notifications,
   appUpdate,
   version,
-  avatarUrlByAuthor,
   authorHatsByNick,
   authorAuthorityByNick,
   activeActionError,
@@ -943,8 +942,6 @@ async function recoverSupersededFromShell() {
               :current-user="connectionStore.session?.username"
               :current-user-jid="connectionStore.session?.jid"
               :self-full-jid="selfFullJid"
-              :self-domain="selfDomain"
-              :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :mention-candidates="mentionCandidates"
               :room-hats="authorHatsByNick"
@@ -1073,7 +1070,6 @@ async function recoverSupersededFromShell() {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :current-user-jid="connectionStore.session?.jid"
-              :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-authority="authorAuthorityByNick"
@@ -1117,7 +1113,6 @@ async function recoverSupersededFromShell() {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :current-user-jid="connectionStore.session?.jid"
-              :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-authority="authorAuthorityByNick"
@@ -1229,7 +1224,7 @@ async function recoverSupersededFromShell() {
                   :aria-label="`Message ${person.name}`"
                   @click="handleOpenDm(person.jid)"
                 >
-                  <AppAvatar :name="person.name" :src="person.avatarUrl" :presence="person.presence" size="md" />
+                  <UserAvatar :name="person.name" :jid="person.jid" :presence="person.presence" size="md" />
                 </button>
               </div>
               <span v-else class="context-card__text">Nobody around right now. Start a huddle and they will find you.</span>

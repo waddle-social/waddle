@@ -72,7 +72,8 @@ describe("threadPreviewFor", () => {
 });
 
 describe("threadParticipantsFor", () => {
-  const avatars = { alice: "alice.png", bob: null } as Record<string, string | null>;
+  const jids: Record<string, string> = { alice: "alice@example.com" };
+  const avatars = (m: TimelineMessage) => jids[m.author] ?? null;
   const presence = { alice: "online" } as Record<string, "online" | "away" | "dnd" | "offline">;
 
   test("orders unique reply authors newest-first and appends the root author", () => {
@@ -86,8 +87,8 @@ describe("threadParticipantsFor", () => {
     });
     const participants = threadParticipantsFor(e, avatars, presence);
     expect(participants.map((p) => p.nick)).toEqual(["alice", "bob", "root-author"]);
-    expect(participants[0]).toEqual({ nick: "alice", avatarUrl: "alice.png", presence: "online" });
-    expect(participants[1]).toEqual({ nick: "bob", avatarUrl: null, presence: "offline" });
+    expect(participants[0]).toEqual({ nick: "alice", jid: "alice@example.com", presence: "online" });
+    expect(participants[1]).toEqual({ nick: "bob", jid: null, presence: "offline" });
   });
 
   test("does not duplicate a root author who also replied", () => {

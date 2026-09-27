@@ -40,6 +40,7 @@ onBeforeUnmount(() => {
         v-if="tile"
         :key="tile.key"
         :label="tile.label"
+        :avatar-jid="tile.identity"
         :attach-key="`pip:${tile.key}`"
         :is-self="tile.isSelf"
         :mirror-video="tile.mirrorVideo"

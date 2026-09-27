@@ -7,6 +7,7 @@ import MessageComposer from "@/components/chat/MessageComposer.vue";
 import ThreadPanelHeader from "@/components/chat/ThreadPanelHeader.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import { authorAvatarJid } from "@/lib/avatars/author-jid";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import type { OccupantAuthority, OccupantHat, OccupantPresence, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
@@ -54,7 +55,6 @@ const props = defineProps<{
   resolveEntry: (threadId: string) => MessageThreadEntry | undefined;
   currentUser?: string;
   currentUserJid?: string;
-  avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
   roomHats: RoomHats;
   roomAuthority: RoomAuthority;
@@ -347,8 +347,12 @@ const threadCallAnchorState = useCallAnchorCardState(
 );
 const threadRootAuthor = computed(() => activeEntry.value?.root?.author ?? null);
 const threadPreview = computed(() => threadPreviewFor(activeEntry.value));
+/** Avatar JID for a thread row's author; `null` renders initials. */
+function avatarJidFor(message: TimelineMessage): string | null {
+  return authorAvatarJid(message, props.currentUserJid);
+}
 const threadParticipants = computed(() =>
-  threadParticipantsFor(activeEntry.value, props.avatarUrlByAuthor, props.roomPresence),
+  threadParticipantsFor(activeEntry.value, avatarJidFor, props.roomPresence),
 );
 const threadLastActivityLabel = computed(() =>
   formatThreadLastActivity(threadLastActivityFor(activeEntry.value)),
@@ -490,7 +494,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             :message="message"
             :current-user="currentUser"
             :current-user-jid="currentUserJid"
-            :avatar-url="avatarUrlByAuthor[message.author] ?? null"
+            :avatar-jid="avatarJidFor(message)"
             :hats="hatsFor(message.author)"
             :authority="authorityFor(message.author)"
             :presence="presenceFor(message.author)"
@@ -541,7 +545,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :message="message"
               :current-user="currentUser"
               :current-user-jid="currentUserJid"
-              :avatar-url="avatarUrlByAuthor[message.author] ?? null"
+              :avatar-jid="avatarJidFor(message)"
               :hats="hatsFor(message.author)"
               :authority="authorityFor(message.author)"
               :presence="presenceFor(message.author)"

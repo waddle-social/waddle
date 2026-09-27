@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { X, ChevronRight, ChevronLeft } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 import type { CallAnchorCardState } from "@/lib/call-thread-anchor";
@@ -122,9 +122,9 @@ const overflowParticipants = computed(() => overflowThreadParticipantCount(props
             class="chat-thread-header__avatar-wrap"
             :title="`${participant.nick}`"
           >
-            <AppAvatar
+            <UserAvatar
               :name="participant.nick"
-              :src="participant.avatarUrl ?? null"
+              :jid="participant.jid"
               :presence="participant.presence"
               size="xs"
             />

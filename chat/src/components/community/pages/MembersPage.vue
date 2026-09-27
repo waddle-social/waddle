@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Menu } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
 import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
@@ -28,10 +28,9 @@ const {
   messaging,
   rosterContacts,
   dmConversations,
-  membersWithAvatars,
+  displayedMembers,
   displayedMemberState,
   authorJidByNick,
-  avatarUrlByAuthor,
   activeChannelRoomJid,
   activeRoomChannel,
   handleOpenDm,
@@ -67,10 +66,9 @@ const speakingJids = computed<ReadonlySet<string>>(() => new Set(
 const cards = computed<MemberCardModel[]>(() =>
   buildMemberCards({
     roomActive: roomActive.value,
-    members: membersWithAvatars.value,
+    members: displayedMembers.value,
     roomPresence: messaging.roomPresence.value,
     authorJidByNick: authorJidByNick.value,
-    avatarUrlByAuthor: avatarUrlByAuthor.value,
     contacts: rosterContacts.contacts.value,
     conversations: dmConversations.conversations.value,
     huddleJids: huddleJids.value,
@@ -230,9 +228,9 @@ function cardLabel(card: MemberCardModel): string {
           @click="selectCard(card)"
         >
           <span :class="ringClass(card)">
-            <AppAvatar
+            <UserAvatar
               :name="card.name"
-              :src="card.avatarUrl"
+              :jid="card.jid"
               :presence="card.presence"
               :in-call="card.inCall"
               size="lg"

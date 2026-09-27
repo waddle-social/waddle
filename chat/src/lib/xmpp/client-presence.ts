@@ -220,6 +220,7 @@ export class PresenceManager {
       if (presence.muc_jid) {
         const bare = barePeerJid(presence.muc_jid);
         roomMemberJids[nick] = bare;
+        this.deps.events.emitSafe("occupantRealJid", room, nick, bare);
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, bare);
       }
       if (isFocusedRoom) {

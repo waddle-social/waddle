@@ -31,8 +31,6 @@ function contentAreaBaseProps() {
     currentUser: "alice",
     currentUserJid: "alice@example.com",
     selfFullJid: "alice@example.com/web",
-    selfDomain: "example.com",
-    avatarUrlByAuthor: {},
     authorJidByNick: {},
     mentionCandidates: [],
     roomHats: {},

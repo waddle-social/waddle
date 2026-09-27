@@ -270,7 +270,6 @@ export function useDirectMessageConversations(
     return {
       peerJid: bare,
       peerUsername: existing?.peerUsername || peerUsername(bare),
-      ...(existing?.peerAvatarUrl !== undefined ? { peerAvatarUrl: existing.peerAvatarUrl } : {}),
       ...(lastMessageBody ? { lastMessageBody } : {}),
       ...(lastMessageAt ? { lastMessageAt } : {}),
       unreadCount: localReadAt >= entry.lastUpdated

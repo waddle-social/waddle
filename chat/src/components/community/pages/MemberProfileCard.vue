@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { MessageCircle, X } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { formatPepKeyword } from "@/lib/status-publication-ui";
 import type { BrowserXmppClient, UserPepProfile } from "@/lib/xmpp-client";
@@ -90,9 +90,9 @@ const ringClass = computed(() => {
 
     <div class="member-profile__header">
       <span :class="ringClass">
-        <AppAvatar
+        <UserAvatar
           :name="member.name"
-          :src="member.avatarUrl"
+          :jid="member.jid"
           :presence="member.presence"
           :in-call="member.inCall"
           size="lg"

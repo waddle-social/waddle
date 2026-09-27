@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Loader2, X, Search } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableAffiliation } from "@/lib/chat-ui";
 import type { RoomPresence } from "@/lib/xmpp-client";
@@ -95,7 +95,7 @@ function affiliationLabel(affiliation: EditableAffiliation): string {
           type="button"
           @click="emit('addMember', user.id)"
         >
-          <AppAvatar :name="user.display_name || user.username" :src="user.avatar_url" size="sm" />
+          <UserAvatar :name="user.display_name || user.username" :jid="user.jid" size="sm" />
           <div class="flex-1 min-w-0">
             <div class="type-control truncate">{{ user.display_name || user.username }}</div>
             <div class="type-caption text-muted-foreground">@{{ user.username }}</div>
@@ -129,7 +129,7 @@ function affiliationLabel(affiliation: EditableAffiliation): string {
         :key="member.jid"
         class="chat-list-row flex min-h-12 items-center gap-2.5 p-2 hover:bg-muted/50"
       >
-        <AppAvatar :name="member.username" :src="member.avatar_url" :presence="roomPresence?.[member.username] ?? 'offline'" :last-seen="roomLastSeen?.[member.username]" size="sm" />
+        <UserAvatar :name="member.username" :jid="member.jid" :presence="roomPresence?.[member.username] ?? 'offline'" :last-seen="roomLastSeen?.[member.username]" size="sm" />
         <div class="flex-1 min-w-0">
           <div class="type-control truncate">{{ member.username }}</div>
           <div class="type-caption text-muted-foreground capitalize">

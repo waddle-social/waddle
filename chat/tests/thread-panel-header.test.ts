@@ -65,7 +65,7 @@ describe("ThreadPanelHeader", () => {
   test("participant stack caps at four avatars with an overflow chip", async () => {
     const participants: ThreadParticipant[] = ["a", "b", "c", "d", "e", "f"].map((nick) => ({
       nick,
-      avatarUrl: null,
+      jid: null,
       presence: "offline",
     }));
     const html = await render({ participants });

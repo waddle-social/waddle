@@ -1,6 +1,5 @@
 import type { MemberSummary } from "@/lib/chat-types";
 import type { TimelineMessage } from "@/lib/chat-ui";
-import { jidDomainOrEmpty } from "@/lib/xmpp/jid";
 
 const BROADCAST_MENTION_SET = new Set(["everyone", "here"]);
 const MENTIONABLE_MEMBER_AFFILIATIONS = new Set<MemberSummary["affiliation"]>(["owner", "admin", "member"]);
@@ -11,14 +10,7 @@ const BROADCAST_MENTIONS = ["everyone", "here"] as const;
 export interface MentionCandidate {
   username: string;
   jid: string | null;
-  avatar_url: string | null;
   kind: "broadcast" | "member";
-}
-
-interface AvatarLookupCandidate {
-  nick: string;
-  jid: string;
-  avatar_url: string | null;
 }
 
 function canonicalMentionIdentifier(value: string): string {
@@ -28,17 +20,6 @@ function canonicalMentionIdentifier(value: string): string {
 function bareJid(value?: string | null): string | null {
   if (!value || !value.includes("@")) return null;
   return value.split("/")[0] || null;
-}
-
-function isMucOccupantJid(jid: string): boolean {
-  const bare = bareJid(jid) ?? jid;
-  return jid.includes("/") && jidDomainOrEmpty(bare).startsWith("muc.");
-}
-
-function inferLocalUserJid(nick: string, selfDomain: string): string | null {
-  const canonical = canonicalMentionIdentifier(nick);
-  if (!canonical || canonical.includes("@") || !selfDomain) return null;
-  return `${canonical}@${selfDomain}`;
 }
 
 export function mentionMatchesUsername(mention: string, username?: string | null): boolean {
@@ -79,7 +60,6 @@ export function mentionAutocompleteCandidates(
   const candidates: MentionCandidate[] = BROADCAST_MENTIONS.map((username) => ({
     username,
     jid: null,
-    avatar_url: null,
     kind: "broadcast",
   }));
   const seen = new Set<string>(BROADCAST_MENTIONS);
@@ -92,125 +72,12 @@ export function mentionAutocompleteCandidates(
     candidates.push({
       username: member.username,
       jid: member.jid,
-      avatar_url: member.avatar_url,
       kind: "member",
     });
     seen.add(canonical);
   }
 
   return candidates;
-}
-
-export function avatarLookupCandidates({
-  members,
-  messages,
-  authorJidByNick,
-  selfDomain,
-}: {
-  members: readonly MemberSummary[];
-  messages: readonly Pick<TimelineMessage, "author" | "authorJid" | "authorRealJid">[];
-  authorJidByNick: Readonly<Record<string, string>>;
-  selfDomain: string;
-}): AvatarLookupCandidate[] {
-  const candidates: AvatarLookupCandidate[] = [];
-  const seenJids = new Set<string>();
-  const memberAvatarByJid = new Map<string, string | null>();
-  const mappedJidByNick = new Map<string, string>();
-
-  for (const member of members) {
-    const jid = bareJid(member.jid);
-    if (!jid) continue;
-    memberAvatarByJid.set(jid, member.avatar_url);
-    mappedJidByNick.set(canonicalMentionIdentifier(member.username), jid);
-  }
-  for (const [nick, jid] of Object.entries(authorJidByNick)) {
-    const bare = bareJid(jid);
-    if (bare) mappedJidByNick.set(canonicalMentionIdentifier(nick), bare);
-  }
-
-  function add(nick: string, jid: string, avatar_url: string | null): void {
-    const bare = bareJid(jid);
-    if (!bare || seenJids.has(bare)) return;
-    seenJids.add(bare);
-    candidates.push({ nick, jid: bare, avatar_url });
-  }
-
-  for (const member of members) {
-    const jid = bareJid(member.jid);
-    if (jid) add(member.username, jid, member.avatar_url);
-  }
-
-  const bestMessageCandidateByNick = new Map<string, { nick: string; jid: string; rank: number }>();
-  for (const message of messages) {
-    const nick = message.author;
-    const mappedJid = mappedJidByNick.get(canonicalMentionIdentifier(nick));
-    const realJid = bareJid(message.authorRealJid);
-    const messageJid = message.authorJid && !isMucOccupantJid(message.authorJid)
-      ? bareJid(message.authorJid)
-      : null;
-    const resolved = realJid
-      ? { jid: realJid, rank: 0 }
-      : mappedJid
-        ? { jid: mappedJid, rank: 1 }
-        : messageJid
-          ? { jid: messageJid, rank: 2 }
-          : (() => {
-              const inferred = inferLocalUserJid(nick, selfDomain);
-              return inferred ? { jid: inferred, rank: 3 } : null;
-            })();
-    if (!resolved) continue;
-    const key = canonicalMentionIdentifier(nick);
-    const previous = bestMessageCandidateByNick.get(key);
-    if (!previous || resolved.rank < previous.rank) {
-      bestMessageCandidateByNick.set(key, { nick, ...resolved });
-    }
-  }
-
-  for (const { nick, jid } of bestMessageCandidateByNick.values()) {
-    if (!jid) continue;
-    add(nick, jid, memberAvatarByJid.get(jid) ?? null);
-  }
-
-  return candidates;
-}
-
-/**
- * RFC 363 PR 6: avatar candidate set spanning channel + DM contexts.
- *
- * DM messages MUST NOT be resolved through the channel-only nick→JID
- * map (`authorJidByNick` / member presence): a DM from
- * `alice@other.example` whose nick collides with a channel member
- * `alice@waddle.social` would otherwise rank-1 to the channel JID
- * and the real DM peer would never be queued for `fetchUserAvatar`.
- *
- * The resolution: invoke `avatarLookupCandidates` once per context
- * (channel context with members + nick map; DM context with empty
- * members + empty nick map) and concatenate the results. The DM
- * pass falls through to rank 2 (`message.authorJid`), the
- * authoritative DM peer JID. Downstream consumers dedupe by JID via
- * `avatarFetchStateByJid`.
- */
-export function avatarLookupCandidatesAcrossContexts(params: {
-  channelMembers: readonly MemberSummary[];
-  channelMessages: readonly Pick<TimelineMessage, "author" | "authorJid" | "authorRealJid">[];
-  channelAuthorJidByNick: Readonly<Record<string, string>>;
-  dmMessages: readonly Pick<TimelineMessage, "author" | "authorJid" | "authorRealJid">[];
-  selfDomain: string;
-}): AvatarLookupCandidate[] {
-  return [
-    ...avatarLookupCandidates({
-      members: params.channelMembers,
-      messages: params.channelMessages,
-      authorJidByNick: params.channelAuthorJidByNick,
-      selfDomain: params.selfDomain,
-    }),
-    ...avatarLookupCandidates({
-      members: [],
-      messages: params.dmMessages,
-      authorJidByNick: {},
-      selfDomain: params.selfDomain,
-    }),
-  ];
 }
 
 export function resolveMentionUri(

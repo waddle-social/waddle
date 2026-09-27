@@ -32,7 +32,6 @@ function sources(overrides: Partial<PeopleRailSources> = {}): PeopleRailSources 
     selfJid: "alice@example.com",
     roomPresence: {},
     authorJidByNick: {},
-    avatarUrlByAuthor: {},
     members: [],
     activeRoomJid: null,
     callParticipants: {},
@@ -53,7 +52,6 @@ describe("buildPeopleRail", () => {
       activeRoomJid: ROOM,
       roomPresence: { bob: "online", carol: "away", alice: "online" },
       authorJidByNick: { bob: "bob@example.com", carol: "carol@example.com", alice: "alice@example.com" },
-      avatarUrlByAuthor: { bob: "https://cdn.example/bob.png" },
       callParticipants: { [ROOM]: ["carol", "bob", "alice"] },
       speakingJids: new Set(["carol@example.com"]),
     }));
@@ -62,7 +60,6 @@ describe("buildPeopleRail", () => {
       ["carol@example.com", "speaking", "speaking"],
       ["bob@example.com", "in-huddle", "in the huddle"],
     ]);
-    expect(groups.huddle[1]?.avatarUrl).toBe("https://cdn.example/bob.png");
     expect(groups.huddle.every((p) => p.inCall)).toBe(true);
     // Self never appears, and huddle members are not repeated in the room group.
     expect(groups.room).toEqual([]);
@@ -82,7 +79,7 @@ describe("buildPeopleRail", () => {
 
   test("lists accepted DM calls in the huddle group", () => {
     const groups = buildPeopleRail(sources({
-      conversations: [conversation("erin@example.com", "available", { peerAvatarUrl: "https://cdn.example/erin.png" })],
+      conversations: [conversation("erin@example.com", "available")],
       dmCallActivities: {
         "erin@example.com": {
           peerJid: "erin@example.com",
@@ -104,7 +101,6 @@ describe("buildPeopleRail", () => {
     }));
 
     expect(groups.huddle.map((p) => p.jid)).toEqual(["erin@example.com"]);
-    expect(groups.huddle[0]?.avatarUrl).toBe("https://cdn.example/erin.png");
     expect(groups.around).toEqual([]);
   });
 
@@ -192,7 +188,6 @@ describe("buildMemberCards", () => {
   const base = {
     roomPresence: {},
     authorJidByNick: {},
-    avatarUrlByAuthor: {},
     contacts: [],
     conversations: [],
     huddleJids: new Set<string>(),
@@ -207,7 +202,6 @@ describe("buildMemberCards", () => {
       members: [member("owner@example.com", "owner"), member("bob@example.com"), member("zoe@example.com", "admin")],
       roomPresence: { bob: "online", zoe: "dnd" },
       authorJidByNick: { bob: "bob@example.com", zoe: "zoe@example.com" },
-      avatarUrlByAuthor: { zoe: "https://cdn.example/zoe.png" },
       huddleJids: new Set(["owner@example.com"]),
     });
 
@@ -216,7 +210,6 @@ describe("buildMemberCards", () => {
       ["bob", "member", "available", "online", false],
       ["zoe", "admin", "dnd", "dnd", false],
     ]);
-    expect(cards[2]?.avatarUrl).toBe("https://cdn.example/zoe.png");
   });
 
   test("without a room the roster is the directory and affiliation is unknown", () => {
@@ -256,7 +249,7 @@ describe("one rule for around", () => {
         contact("eve@example.com"),
       ],
       [
-        conversation("BOB@example.com/phone", "dnd", { peerAvatarUrl: "https://cdn.example/bob.png" }),
+        conversation("BOB@example.com/phone", "dnd"),
         conversation("amy@example.com", "available"),
         conversation("fay@example.com", "xa"),
         conversation("room@conference.example.com/nick", "available", { mucPm: true }),
@@ -264,11 +257,11 @@ describe("one rule for around", () => {
     );
 
     // A DM peer who is not on the roster counts; the conversation's
-    // presence and avatar win over the roster's, the roster name wins.
-    expect(around.map((p) => [p.jid, p.name, p.presence, p.presenceShow, p.avatarUrl])).toEqual([
-      ["amy@example.com", "amy", "online", "available", null],
-      ["bob@example.com", "Bob B", "dnd", "dnd", "https://cdn.example/bob.png"],
-      ["dan@example.com", "dan", "dnd", "dnd", null],
+    // presence wins over the roster's, the roster name wins.
+    expect(around.map((p) => [p.jid, p.name, p.presence, p.presenceShow])).toEqual([
+      ["amy@example.com", "amy", "online", "available"],
+      ["bob@example.com", "Bob B", "dnd", "dnd"],
+      ["dan@example.com", "dan", "dnd", "dnd"],
     ]);
     expect(awayAndOffline.map((p) => [p.jid, p.presence])).toEqual([
       ["carol@example.com", "away"],
@@ -292,7 +285,6 @@ describe("usePeopleRail", () => {
       selfJid: ref<string | null>("alice@example.com"),
       roomPresence: ref({}),
       authorJidByNick: ref({}),
-      avatarUrlByAuthor: ref({}),
       members: ref<MemberSummary[]>([]),
       activeRoomJid: ref<string | null>(null),
       callParticipants: ref({}),

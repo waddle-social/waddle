@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { Megaphone, Radio } from "lucide-vue-next";
 import type { MentionCandidate } from "@/lib/mentions";
+import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
 
-defineProps<{
+const props = defineProps<{
   results: MentionCandidate[];
   selectedIndex: number;
   isTopPinned?: boolean;
@@ -11,6 +12,8 @@ defineProps<{
 const emit = defineEmits<{
   pick: [candidate: MentionCandidate];
 }>();
+
+const avatarUrlFor = useAvatarUrls(() => props.results.map((candidate) => candidate.jid));
 </script>
 
 <template>
@@ -52,8 +55,8 @@ const emit = defineEmits<{
           class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary type-caption"
         >@</span>
         <img
-          v-else-if="candidate.avatar_url"
-          :src="candidate.avatar_url"
+          v-else-if="avatarUrlFor(candidate.jid)"
+          :src="avatarUrlFor(candidate.jid) ?? undefined"
           :alt="candidate.username"
           class="h-5 w-5 rounded object-cover bg-muted"
           loading="lazy"

@@ -127,7 +127,8 @@ const props = defineProps<{
   linkPreviewScope?: string | null;
   /** The active call's XEP-0201 thread messages, rendered in the Chat tab. */
   callChatMessages?: readonly TimelineMessage[];
-  avatarUrlByAuthor?: Record<string, string | null>;
+  /** Real bare JID behind a call-chat author, for the avatar; `null` = initials. */
+  avatarJidFor?: (message: TimelineMessage) => string | null;
   xmppClient?: BrowserXmppClient | null;
   spaceId?: string | null;
   channelId?: string | null;
@@ -808,7 +809,7 @@ onBeforeUnmount(() => {
               v-model:draft="callChatDraft"
               :messages="callChatMessages ?? []"
               :visible="chatOpen"
-              :avatar-url-by-author="avatarUrlByAuthor ?? {}"
+              :avatar-jid-for="avatarJidFor ?? (() => null)"
               :is-sending="!!isSending"
               :disabled="!!disabled || !callThreadOverride"
               :mention-candidates="mentionCandidates ?? []"

@@ -124,19 +124,14 @@ describe("BrowserXmppClient.fetchUserAvatar", () => {
     expect(requestAvatar).toHaveBeenCalledWith("bob@example.com");
   });
 
-  test("returns external avatar URLs from the Rust client", async () => {
+  test("returns in-band avatar data from the Rust client as a data URL", async () => {
     const requestAvatar = mock(async (jid: string) => {
       expect(jid).toBe("dana@example.com");
-      return {
-        jid,
-        id: "vcard-extval",
-        mime_type: "image/png",
-        url: "https://avatars.example.com/dana.png",
-      };
+      return { jid, id: "sha1", mime_type: "image/png", data: new Uint8Array([137, 80, 78, 71]) };
     });
     const client = clientWithXmpp({ request_avatar: requestAvatar });
 
-    await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBe("https://avatars.example.com/dana.png");
+    await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBe("data:image/png;base64,iVBORw==");
   });
 
   test("returns null when the Rust client has no avatar", async () => {

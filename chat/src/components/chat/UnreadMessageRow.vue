@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { formatTimelineStamp } from "@/channels/timeline";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { authorAvatarJid } from "@/lib/avatars/author-jid";
 import MessageBody from "@/components/chat/MessageBody.vue";
 
 // Read-only message row for the Unread digest. Reuses `MessageBody`
@@ -16,7 +17,9 @@ defineProps<{
 
 <template>
   <div class="flex gap-2.5 rounded-[10px] px-2 py-2">
-    <AppAvatar :name="message.author" size="sm" class="mt-0.5 flex-shrink-0" />
+    <span class="mt-0.5 flex-shrink-0">
+      <UserAvatar :name="message.author" :jid="authorAvatarJid(message)" size="sm" />
+    </span>
     <div class="min-w-0 flex-1">
       <div class="flex items-baseline justify-between gap-2">
         <span class="type-control truncate font-semibold text-foreground">{{ message.author }}</span>

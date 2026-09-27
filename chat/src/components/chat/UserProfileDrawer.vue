@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { MessageCircle } from "lucide-vue-next";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { formatPepKeyword } from "@/lib/status-publication-ui";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -14,7 +14,8 @@ const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{
   username: string;
   jid: string;
-  avatarUrl?: string | null;
+  /** Real bare JID to show the avatar for; `null` = initials. */
+  avatarJid?: string | null;
   presence?: OccupantPresence;
   presenceText?: string;
   hats?: OccupantHat[];
@@ -97,7 +98,7 @@ const hasVCardSection = computed(
     <div class="chat-dialog-stack p-4">
       <!-- Header -->
       <div class="flex flex-col items-center gap-2 pt-2 text-center">
-        <AppAvatar :name="username" :src="avatarUrl ?? null" size="lg" :presence="presence" />
+        <UserAvatar :name="username" :jid="avatarJid ?? null" size="lg" :presence="presence" />
         <div>
           <div class="type-card-title">{{ username }}</div>
           <div class="type-caption text-muted-foreground">{{ presenceText ?? "offline" }}</div>

@@ -35,6 +35,7 @@ import {
 import { bareJidKey, barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, resourceOf, roomBareJidFor } from "./jid";
 import { TypedEventBus } from "./client-events";
 import type {
+  AvatarChangedEvent,
   CatchupConversationFailure,
   CatchupHookInfo,
   ClientEvents,
@@ -195,6 +196,7 @@ import type {
   WasmPinEvent,
   WasmPresence,
   WasmPubsubEvent,
+  WasmAvatarChanged,
   WasmRoomMember,
   WasmRosterContact,
   WasmSendMessageOutcome,
@@ -363,6 +365,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
+  set_on_avatar_changed?: (cb: (event: WasmAvatarChanged) => void) => void;
   set_on_stream_management?: (cb: (event: StreamManagementTelemetry) => void) => void;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
@@ -2125,6 +2128,24 @@ export class BrowserXmppClient {
     this.events.set("pubsubEvent", handler);
   }
 
+  /** XEP-0084: a peer published new avatar metadata or disabled their avatar. */
+  addAvatarChangedHandler(handler: (event: AvatarChangedEvent) => void): () => void {
+    return this.events.on("avatarChanged", handler);
+  }
+
+  /**
+   * XEP-0045 §7.2.4: a room occupant's real JID was disclosed, for any
+   * joined room (not only the focused one).
+   */
+  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string) => void): () => void {
+    return this.events.on("occupantRealJid", handler);
+  }
+
+  /** Our own profile (vCard4, incl. photo) was republished from this client. */
+  addOwnProfilePublishedHandler(handler: (ownBareJid: string) => void): () => void {
+    return this.events.on("ownProfilePublished", handler);
+  }
+
   private async resolveUploadService(): Promise<string> {
     if (this.uploadServiceJid) return this.uploadServiceJid;
     const xmpp = await this.requireConnectedXmpp();
@@ -2604,7 +2625,10 @@ export class BrowserXmppClient {
   async retractTune(): Promise<void> { return this.pubsub.retractTune(); }
   async fetchUserPepProfile(jid: string): Promise<UserPepProfile> { return this.pubsub.fetchUserPepProfile(jid); }
   async fetchVCard4(jid: string): Promise<VCard4Profile | null> { return this.vcard.fetchVCard4(jid); }
-  async publishVCard4(profile: VCard4Profile): Promise<void> { return this.vcard.publishVCard4(profile); }
+  async publishVCard4(profile: VCard4Profile): Promise<void> {
+    await this.vcard.publishVCard4(profile);
+    this.events.emitSafe("ownProfilePublished", barePeerJid(this.session.jid));
+  }
 
   async queryMam(spaceId: string, channelId: string, max = 50): Promise<LiveRoomMessage[]> { return this.mam.queryMam(spaceId, channelId, max); }
   async queryMamPage(spaceId: string, channelId: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> { return this.mam.queryMamPage(spaceId, channelId, max, pageParam); }
@@ -3626,6 +3650,13 @@ export class BrowserXmppClient {
     xmpp.set_on_pubsub_event?.((event: WasmPubsubEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.events.emit("pubsubEvent", event);
+    });
+    xmpp.set_on_avatar_changed?.((event: WasmAvatarChanged) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.events.emitSafe("avatarChanged", {
+        jid: event.jid,
+        ...(event.avatar_id ? { avatarId: event.avatar_id } : {}),
+      });
     });
     xmpp.set_on_call?.((event: CallEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;

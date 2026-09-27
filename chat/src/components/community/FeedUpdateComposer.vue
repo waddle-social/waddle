@@ -10,7 +10,7 @@ import {
   Send,
   Smile,
 } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import StoryComposer from "@/components/community/StoryComposer.vue";
 import { connectionStore } from "@/lib/connection-store";
 import {
@@ -373,7 +373,7 @@ async function publishProfile() {
     aria-label="Create feed update"
   >
     <div class="flex items-center gap-3">
-      <AppAvatar :name="authorLabel(selfJid ?? '')" :src="null" size="md" />
+      <UserAvatar :name="authorLabel(selfJid ?? '')" :jid="selfJid ?? null" size="md" />
       <div class="min-w-0 flex-1">
         <div class="flex flex-wrap items-center gap-1" role="tablist" aria-label="Feed update type">
           <button

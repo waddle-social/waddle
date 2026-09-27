@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { ChevronDown } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import type { PeopleRailPerson } from "@/shell/controllers/use-people-rail";
 
 const props = defineProps<{
@@ -66,9 +66,9 @@ function ringClass(person: PeopleRailPerson): string {
           @click="emit('select', person.jid)"
         >
           <span :class="ringClass(person)">
-            <AppAvatar
+            <UserAvatar
               :name="person.name"
-              :src="person.avatarUrl"
+              :jid="person.jid"
               :presence="person.presence"
               :in-call="person.inCall && person.status !== 'in-huddle' && person.status !== 'speaking'"
               size="sm"

@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { Hand, MicOff, ScreenShare } from "lucide-vue-next";
 import { consistentColor } from "@/lib/chat-ui";
+import { useAvatarUrl } from "@/lib/avatars/use-avatar-url";
 import type { TileAttachable } from "@/lib/calls/tile-attach";
 
 /**
@@ -24,6 +25,8 @@ import type { TileAttachable } from "@/lib/calls/tile-attach";
 const props = withDefaults(defineProps<{
   /** Human label rendered in the nameplate and derived into initials. */
   label: string;
+  /** Participant JID whose avatar fills the placeholder disc; initials otherwise. */
+  avatarJid?: string | null;
   /** Stable identity-derived key namespace for `TileAttachments.sync`. */
   attachKey: string;
   /** Whether this tile represents the local participant. */
@@ -55,6 +58,8 @@ const props = withDefaults(defineProps<{
   speaking: false,
   raisedHand: false,
 });
+
+const avatarUrl = useAvatarUrl(() => props.avatarJid);
 
 const initials = computed<string>(() => {
   return props.label
@@ -115,7 +120,8 @@ const emit = defineEmits<{
       :style="{ background: placeholderBackground }"
     >
       <span class="call-tile__avatar-disc" aria-hidden="true">
-        {{ initials }}
+        <img v-if="avatarUrl" :src="avatarUrl" alt="" class="call-tile__avatar-image" />
+        <template v-else>{{ initials }}</template>
       </span>
     </div>
 
@@ -272,6 +278,13 @@ const emit = defineEmits<{
   font-size: clamp(1.25rem, 14cqmin, 4rem);
   text-shadow: 0 1px 2px color-mix(in oklab, black 40%, transparent);
   user-select: none;
+}
+
+.call-tile__avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  object-fit: cover;
 }
 
 .call-tile__video {

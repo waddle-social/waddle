@@ -143,7 +143,7 @@ describe("call-chat composer", () => {
         slowModeCooldown: 0,
         uploadProgress: { uploading: false, progress: 0, filename: "" },
         callChatMessages: [],
-        avatarUrlByAuthor: {},
+        avatarJidFor: () => null,
       },
       import.meta.url,
     );
@@ -167,7 +167,7 @@ describe("call-chat composer", () => {
         callThreadId: "dm-sid-1",
         uploadProgress: { uploading: false, progress: 0, filename: "" },
         callChatMessages: [],
-        avatarUrlByAuthor: {},
+        avatarJidFor: () => null,
       },
       import.meta.url,
     );
@@ -187,7 +187,7 @@ describe("call-chat composer", () => {
         callThreadId: "   ",
         uploadProgress: { uploading: false, progress: 0, filename: "" },
         callChatMessages: [],
-        avatarUrlByAuthor: {},
+        avatarJidFor: () => null,
       },
       import.meta.url,
     );

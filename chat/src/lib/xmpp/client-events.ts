@@ -40,6 +40,15 @@ import type { InboxEntry } from "./inbox-types";
 import type { TerminalMucJoinCondition } from "./room-auto-join-policy";
 import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
 
+/**
+ * XEP-0084 peer avatar metadata transition. `avatarId` is the new
+ * avatar's id; absent when the peer disabled their avatar.
+ */
+export interface AvatarChangedEvent {
+  jid: string;
+  avatarId?: string;
+}
+
 /** Event name → payload tuple. */
 export type ClientEventMap = Record<string, ReadonlyArray<unknown>>;
 
@@ -119,6 +128,9 @@ export type ClientEvents = {
   displayed: [event: { roomJid: string; nick: string; messageId: string }];
   mdsDisplayed: [entry: MdsDisplayedEntry];
   pubsubEvent: [event: PubsubEvent];
+  avatarChanged: [event: AvatarChangedEvent];
+  occupantRealJid: [roomJid: string, nick: string, bareJid: string];
+  ownProfilePublished: [ownBareJid: string];
   chatState: [event: ChatStateEvent];
   dmChatState: [event: DmChatStateEvent];
   dmReaction: [event: DmReactionEvent];

@@ -4151,8 +4151,6 @@ function contentAreaBaseProps(): Record<string, unknown> {
     currentUser: "alice",
     currentUserJid: "alice@example.com",
     selfFullJid: "alice@example.com/web",
-    selfDomain: "example.com",
-    avatarUrlByAuthor: {},
     authorJidByNick: {},
     mentionCandidates: [],
     roomHats: {},

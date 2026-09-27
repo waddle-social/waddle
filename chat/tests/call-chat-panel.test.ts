@@ -21,7 +21,7 @@ describe("CallChatPanel", () => {
       {
         messages: [message("m1", "hello call"), message("m2", "second")],
         draft: "",
-        avatarUrlByAuthor: {},
+        avatarJidFor: () => null,
       },
       import.meta.url,
     );
@@ -38,7 +38,7 @@ describe("CallChatPanel", () => {
   test("shows an empty state when the call thread has no messages yet", async () => {
     const html = await renderVueComponent(
       "../src/components/calls/CallChatPanel.vue",
-      { messages: [], draft: "", avatarUrlByAuthor: {} },
+      { messages: [], draft: "", avatarJidFor: () => null },
       import.meta.url,
     );
 

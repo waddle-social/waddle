@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
 defineProps<{
   typingUsers: string[];
-  avatarUrlByAuthor: Record<string, string | null>;
+  /** Real bare JID behind a typing nick, for the avatar; `null` = initials. */
+  avatarJidFor: (nick: string) => string | null;
   roomPresence: Record<string, OccupantPresence>;
   /** social = top-pinned feed (bordered), chat = classic bottom composer. */
   variant: "social" | "chat";
@@ -25,9 +26,9 @@ defineProps<{
           :key="`typing-avatar:${variant}:${nick}`"
           class="chat-typing-indicator__avatar-wrap"
         >
-          <AppAvatar
+          <UserAvatar
             :name="nick"
-            :src="avatarUrlByAuthor[nick] ?? null"
+            :jid="avatarJidFor(nick)"
             :presence="roomPresence[nick] ?? 'offline'"
             size="xs"
           />

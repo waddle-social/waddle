@@ -18,6 +18,8 @@ import {
 import type { connectionStore as ConnectionStore } from "@/lib/connection-store";
 import type { NotifySettingsStore } from "@/lib/notify-settings";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import { avatarStore } from "@/lib/avatars/avatar-store";
+import { bindAvatarClient, resetAvatars } from "@/lib/avatars/bind-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid } from "@/lib/xmpp-client";
 import { bareJidKey, fullJidIdentityKey, resourceOf } from "@/lib/xmpp/jid";
@@ -156,11 +158,15 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     }
   }
 
+  let unbindAvatars: (() => void) | null = null;
   watch(xmppClient, (client) => {
+    unbindAvatars?.();
+    unbindAvatars = null;
     if (!client || !session.value) {
       presence.onClientCleared();
       return;
     }
+    unbindAvatars = bindAvatarClient(client);
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);
@@ -234,6 +240,8 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       // otherwise restart hydrate against the about-to-disconnect
       // client. Round-12 reviewer P1.
       if (!connectionStore.session) return;
+      // A reconnect without resume: every cached avatar may be outdated.
+      if (event.type === "fresh") avatarStore.beginSession();
       presence.onSessionReady(event, client);
       // #754: one bootstrap fire per session-ready, fresh or resumed —
       // the choreographer replaces the old multi-subscriber fan-out
@@ -399,6 +407,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
 
   async function handleLogout() {
     clearPendingChannelRoomJidSelection();
+    resetAvatars();
     ui.activePage.value = "dashboard";
     messaging.disconnect();
     dmMessaging.disconnect();

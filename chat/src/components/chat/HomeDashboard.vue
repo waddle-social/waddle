@@ -14,7 +14,8 @@ import {
 } from "lucide-vue-next";
 import { button, card, count, kicker } from "styled-system/recipes";
 import type { ChannelSummary } from "@/lib/chat-types";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { conversationPeerAvatarJid, roomOccupantAvatarJid } from "@/lib/avatars/author-jid";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { isForumChannel } from "@/lib/channel-types";
 import {
@@ -744,7 +745,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
                   :key="`${entry.key}:${label}`"
                   class="-ml-1.5 first:ml-0 rounded-full ring-2 ring-card"
                 >
-                  <AppAvatar :name="label" size="xs" />
+                  <UserAvatar :name="label" :jid="roomOccupantAvatarJid(entry.roomJid, label)" size="xs" />
                 </span>
               </span>
               <span class="type-caption min-w-0 truncate text-muted-foreground">
@@ -869,7 +870,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
             @click="emit('selectContact', conversation.peerJid)"
           >
             <span class="relative shrink-0">
-              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="md" :in-call="peerInCall(conversation.peerJid)" />
+              <UserAvatar :name="conversation.peerUsername" :jid="conversationPeerAvatarJid(conversation.peerJid)" size="md" :in-call="peerInCall(conversation.peerJid)" />
               <span class="absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-card" :class="dotClass(conversation.presenceShow)" />
               <span class="sr-only">{{ dmPresenceLabel(conversation.presenceShow) }}</span>
             </span>
@@ -935,7 +936,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
             :aria-label="`${person.name}, ${dmPresenceLabel(person.presenceShow)}, open direct message`"
             @click="emit('selectContact', person.jid)"
           >
-            <AppAvatar :name="person.name" :src="person.avatarUrl" size="md" :presence="person.presence" :in-call="peerInCall(person.jid)" />
+            <UserAvatar :name="person.name" :jid="person.jid" size="md" :presence="person.presence" :in-call="peerInCall(person.jid)" />
             <span class="min-w-0 flex-1">
               <span class="type-control block truncate text-foreground">{{ person.name }}</span>
               <span class="type-meta block truncate text-muted-foreground">{{ dmPresenceLabel(person.presenceShow) }}</span>
@@ -973,7 +974,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
               :aria-label="`${person.name}, ${dmPresenceLabel(person.presenceShow)}, open direct message`"
               @click="emit('selectContact', person.jid)"
             >
-              <AppAvatar :name="person.name" :src="person.avatarUrl" size="sm" :presence="person.presence" />
+              <UserAvatar :name="person.name" :jid="person.jid" size="sm" :presence="person.presence" />
               <span class="min-w-0 flex-1">
                 <span class="type-control block truncate">{{ person.name }}</span>
                 <span class="type-meta block truncate">{{ dmPresenceLabel(person.presenceShow) }}</span>

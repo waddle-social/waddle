@@ -457,7 +457,6 @@ export interface DmConversation {
    */
   mucPm?: boolean;
   mucPmRoomJid?: string;
-  peerAvatarUrl?: string | null;
   lastMessageBody?: string;
   lastMessageAt?: string;
   unreadCount: number;

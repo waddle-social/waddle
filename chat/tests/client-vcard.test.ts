@@ -54,22 +54,21 @@ describe("VCardManager", () => {
     expect(published).toEqual([{ nickname: "alice", note: "hi" }]);
   });
 
-  test("fetchUserAvatar prefers the URL, falls back to inline data, and resolves the bare JID", async () => {
+  test("fetchUserAvatar returns in-band data as a data URL and resolves the bare JID", async () => {
     const requested: string[] = [];
     const manager = createManager({
       request_avatar: async (jid) => {
         requested.push(jid);
-        return { jid, id: "a1", mime_type: "image/png", url: "https://cdn.example/a.png" };
+        return { jid, id: "a2", mime_type: "image/png", data: new Uint8Array([1, 2, 3]) };
       },
     });
+    expect(await manager.fetchUserAvatar("bob@example.com/phone")).toStartWith("data:image/png;base64,");
+    expect(requested).toEqual(["bob@example.com"]);
 
-    expect(await manager.fetchUserAvatar("alice@example.com/phone")).toBe("https://cdn.example/a.png");
-    expect(requested).toEqual(["alice@example.com"]);
-
-    const inline = createManager({
-      request_avatar: async (jid) => ({ jid, id: "a2", mime_type: "image/png", data: new Uint8Array([1, 2, 3]) }),
+    const metadataOnly = createManager({
+      request_avatar: async (jid) => ({ jid, id: "a3", mime_type: "image/png" }),
     });
-    expect(await inline.fetchUserAvatar("bob@example.com")).toStartWith("data:image/png;base64,");
+    expect(await metadataOnly.fetchUserAvatar("bob@example.com")).toBeNull();
 
     const none = createManager({});
     expect(await none.fetchUserAvatar("bob@example.com")).toBeNull();

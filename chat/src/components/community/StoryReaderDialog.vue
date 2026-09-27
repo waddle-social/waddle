@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { ChevronLeft, ChevronRight, X } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 import type { Story, StoryReactionSummary } from "@/lib/xmpp-client";
 import { jidLocalpart } from "@/lib/xmpp/jid";
@@ -141,7 +141,7 @@ function onKeydown(event: KeyboardEvent) {
         @keydown="onKeydown"
       >
         <header class="flex items-center gap-3 border-b border-border px-4 py-3">
-          <AppAvatar :name="authorLabel(story.author)" :src="null" size="sm" />
+          <UserAvatar :name="authorLabel(story.author)" :jid="story.author ?? null" size="sm" />
           <div class="min-w-0 flex-1">
             <p class="type-control truncate text-foreground">{{ authorLabel(story.author) }}</p>
             <p v-if="listedAgo(story)" class="type-caption text-muted-foreground">

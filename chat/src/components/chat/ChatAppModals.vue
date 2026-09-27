@@ -17,7 +17,7 @@ const {
   waddles,
   messaging,
   members,
-  membersWithAvatars,
+  displayedMembers,
   inferredMemberJids,
   displayedMemberState,
   handleNewDm,
@@ -88,7 +88,7 @@ const {
 
     <MemberManagement
       v-model:open="ui.showMembers.value"
-      :members="membersWithAvatars"
+      :members="displayedMembers"
       :inferred-member-jids="inferredMemberJids"
       :member-state="displayedMemberState"
       :member-query="members.memberQuery.value"

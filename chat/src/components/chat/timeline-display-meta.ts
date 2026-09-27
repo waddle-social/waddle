@@ -39,7 +39,8 @@ const THREAD_CHIP_MAX_PARTICIPANTS = 5;
 
 export interface ThreadChipParticipant {
   nick: string;
-  avatarUrl?: string | null;
+  /** Real bare JID behind the author, for the avatar; `null` = initials. */
+  jid: string | null;
   presence: OccupantPresence;
 }
 
@@ -56,7 +57,7 @@ export interface ThreadChipParticipant {
 export function threadChipParticipants(
   threadIndex: MessageThreadIndex,
   messageId: string,
-  avatarUrlByAuthor: Record<string, string | null>,
+  authorJid: (message: TimelineMessage) => string | null,
   roomPresence: Record<string, OccupantPresence>,
 ): ThreadChipParticipant[] {
   const entry = threadIndex.get(messageId);
@@ -71,7 +72,7 @@ export function threadChipParticipants(
     seen.add(c.author);
     ordered.push({
       nick: c.author,
-      avatarUrl: avatarUrlByAuthor[c.author] ?? null,
+      jid: authorJid(c),
       presence: roomPresence[c.author] ?? "offline",
     });
     if (ordered.length >= THREAD_CHIP_MAX_PARTICIPANTS) break;

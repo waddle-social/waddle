@@ -12,7 +12,7 @@ import {
   PinOff,
   Trash2,
 } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 import MessageBody from "@/components/chat/MessageBody.vue";
@@ -53,7 +53,8 @@ const props = defineProps<{
    * OWNER / ADMIN / MOD chip on the meta row. Distinct from `hats`,
    * which carries XEP-0317 descriptive metadata only. */
   authority?: OccupantAuthority | null;
-  avatarUrl?: string | null;
+  /** Real bare JID behind the author, for the avatar; `null` = initials. */
+  avatarJid?: string | null;
   presence?: OccupantPresence;
   lastSeen?: number;
   authorJid?: string;
@@ -61,7 +62,7 @@ const props = defineProps<{
   /** Unique participants in this thread (capped, current user excluded
    * by the caller). Rendered as a tiny avatar stack on the thread chip
    * so the eye can triage threads without opening them. */
-  threadParticipants?: { nick: string; avatarUrl?: string | null; presence: OccupantPresence }[];
+  threadParticipants?: { nick: string; jid: string | null; presence: OccupantPresence }[];
   /** ISO timestamp of the most-recent reply in this thread, used to
    * suffix the chip with a relative-time hint ("· 2 min ago"). */
   threadLastReplyAt?: string;
@@ -100,7 +101,7 @@ const emit = defineEmits<{
   react: [messageId: string, emoji: string];
   reply: [message: TimelineMessage];
   scrollToMessage: [messageId: string];
-  avatarClick: [author: string];
+  avatarClick: [author: string, jid: string | null];
   openThread: [threadId: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   pin: [messageId: string];
@@ -277,7 +278,7 @@ function submitEdit(
 }
 
 function emitAvatarClick() {
-  emit("avatarClick", props.message.author);
+  emit("avatarClick", props.message.author, props.avatarJid ?? null);
 }
 
 const bubbleEl = ref<HTMLElement | null>(null);
@@ -422,11 +423,11 @@ const swipe = gestures.swipe;
     <div v-if="grouped" class="chat-message-avatar-cell chat-message-time-gutter">
       <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
     </div>
-    <AppAvatar
+    <UserAvatar
       v-else
       class="chat-message-avatar-cell"
       :name="message.author"
-      :src="avatarUrl"
+      :jid="avatarJid"
       :presence="presence"
       :last-seen="lastSeen"
       size="message"
@@ -498,7 +499,7 @@ const swipe = gestures.swipe;
       :aria-label="`Open profile for ${message.author}`"
       @click.stop="emitAvatarClick"
     >
-      <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="message" />
+      <UserAvatar :name="message.author" :jid="avatarJid" :presence="presence" :last-seen="lastSeen" size="message" />
     </button>
     <!-- Thread rail glyph — a small "messages-stack" icon centred in the
          avatar column, vertically aligned with the in-body chip's
@@ -651,9 +652,9 @@ const swipe = gestures.swipe;
           :key="`thread-chip-avatar:${message.id}:${participant.nick}`"
           class="chat-thread-chip__avatar-wrap"
         >
-          <AppAvatar
+          <UserAvatar
             :name="participant.nick"
-            :src="participant.avatarUrl ?? null"
+            :jid="participant.jid"
             :presence="participant.presence"
             size="xs"
           />
