@@ -290,6 +290,43 @@ impl InMemorySmSessionRegistry {
         fences.get(stream_id).cloned()
     }
 
+    /// Whether shutdown can no longer confirm this session under its recorded
+    /// owner and epoch. A disabled identity is terminal even without a local
+    /// fence; otherwise an absent fence or failed lookup is uncertain.
+    pub async fn shutdown_drain_claim_lost(&self, stream_id: &str) -> Result<bool, ClaimError> {
+        let stream_lock = self
+            .stream_lock(stream_id)
+            .map_err(|_| ClaimError::Poisoned)?;
+        let _stream_guard = stream_lock.lock().await;
+        if !self.node_identity.current().is_active() {
+            return Ok(true);
+        }
+        let fence = self
+            .claim_fences
+            .read()
+            .map_err(|_| ClaimError::Poisoned)?
+            .get(stream_id)
+            .cloned();
+        let Some(fence) = fence else {
+            return Ok(false);
+        };
+        if self.node_identity.current() != *fence.owner() {
+            return Ok(true);
+        }
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store
+                .fence(&sm_session_entity(stream_id), fence.owner(), fence.epoch()),
+        )
+        .await
+        {
+            Ok(result) => result.map(|owned| !owned),
+            Err(_) => Err(ClaimError::Backend(
+                "shutdown drain claim fence lookup timed out".to_string(),
+            )),
+        }
+    }
+
     /// End the exact claim held by an attached SM stream that will not enter
     /// the detached resumable pool. The live fence is first converted into
     /// the registry's existing terminal retry inventory, so a failed or

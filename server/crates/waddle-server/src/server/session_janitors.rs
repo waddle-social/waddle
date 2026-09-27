@@ -4466,6 +4466,10 @@ async fn idle_room_registry_death_self_fences_the_node() {
 struct HangingSmReadPersistence {
     inner: waddle_xmpp::stream_management::persistence::InMemorySmPersistence,
     read_started: tokio::sync::Notify,
+    allow_reads: std::sync::atomic::AtomicBool,
+    delete_failures_remaining: std::sync::atomic::AtomicUsize,
+    delete_attempts: std::sync::atomic::AtomicUsize,
+    delete_times: std::sync::Mutex<Vec<std::time::Instant>>,
 }
 
 #[cfg(all(test, feature = "clustering"))]
@@ -4482,11 +4486,14 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
 
     async fn get_session(
         &self,
-        _stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
     ) -> Result<
         Option<waddle_xmpp::stream_management::persistence::PersistedSession>,
         waddle_xmpp::stream_management::persistence::SmPersistenceError,
     > {
+        if self.allow_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return self.inner.get_session(stream_id).await;
+        }
         drop(tracing::info_span!("orphan.worker.hydration.test"));
         self.read_started.notify_one();
         std::future::pending().await
@@ -4496,6 +4503,27 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         &self,
         stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.delete_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.delete_times
+            .lock()
+            .expect("record delete attempt")
+            .push(std::time::Instant::now());
+        if self
+            .delete_failures_remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(
+                waddle_xmpp::stream_management::persistence::SmPersistenceError::Other(
+                    "injected transient delete failure".to_string(),
+                ),
+            );
+        }
         self.inner.delete_session(stream_id).await
     }
 
@@ -7821,6 +7849,34 @@ fn record_sm_drain_outcome(released: bool) {
     }
 }
 
+async fn abandon_shutdown_session_if_claim_lost(
+    registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+) -> bool {
+    let session = promotion_guard.session();
+    let stream_id = session.stream_id.clone();
+    let jid = session.jid.clone();
+    let lost = match registry.shutdown_drain_claim_lost(&stream_id).await {
+        Ok(lost) => lost,
+        Err(waddle_xmpp::ownership::ClaimError::AuthorityDisabled) => true,
+        Err(error) => {
+            debug!(%stream_id, %error, "Graceful shutdown: SM claim lookup is uncertain; retaining session for retry");
+            false
+        }
+    };
+    if !lost {
+        return false;
+    }
+    if !registry.forget_claim_locally(&stream_id).await {
+        warn!(%stream_id, "Graceful shutdown: lost SM claim but could not retire local promotion inventory");
+        return false;
+    }
+    promotion_guard.complete();
+    record_sm_drain_outcome(false);
+    warn!(%jid, %stream_id, "Graceful shutdown: abandoning SM session after loss of claim authority");
+    true
+}
+
 pub(crate) fn spawn_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,
@@ -8009,6 +8065,14 @@ async fn run_graceful_shutdown_drain(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
+                if abandon_shutdown_session_if_claim_lost(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    &mut promotion_guard,
+                )
+                .await
+                {
+                    return;
+                }
                 let row_release = crate::sm_promotion::release_row_backed_replay_copies(
                     &websocket_state.deps.protocol.sm_session_registry,
                     &websocket_state.deps.protocol.pending_delivery_storage,
@@ -8037,6 +8101,14 @@ async fn run_graceful_shutdown_drain(
                     || row_release.release_failed_known_rows
                     || released_redrive_aborted
                 {
+                    if abandon_shutdown_session_if_claim_lost(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        &mut promotion_guard,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     warn!(
                         jid = %session.jid,
                         stream_id = %session.stream_id,
@@ -8046,7 +8118,6 @@ async fn run_graceful_shutdown_drain(
                         "Graceful shutdown: row ownership could not be reconciled; \
                          preserving the session and its claim for retry"
                     );
-                    record_sm_drain_outcome(false);
                     return;
                 }
                 let blocklist = match websocket_state
@@ -8058,6 +8129,14 @@ async fn run_graceful_shutdown_drain(
                 {
                     Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
                     Err(error) => {
+                        if abandon_shutdown_session_if_claim_lost(
+                            &websocket_state.deps.protocol.sm_session_registry,
+                            &mut promotion_guard,
+                        )
+                        .await
+                        {
+                            return;
+                        }
                         warn!(
                             jid = %session.jid,
                             error = %error,
@@ -8065,7 +8144,6 @@ async fn run_graceful_shutdown_drain(
                              promotion to preserve fail-closed XEP-0191 policy. \
                              Durable SM row will be retried on next startup."
                         );
-                        record_sm_drain_outcome(false);
                         return;
                     }
                 };
@@ -8115,13 +8193,20 @@ async fn run_graceful_shutdown_drain(
                     "Graceful shutdown: Q6 promotion completed for session"
                 );
                 if summary.has_storage_failure() {
+                    if abandon_shutdown_session_if_claim_lost(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        &mut promotion_guard,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     warn!(
                         jid = %session.jid,
                         storage_failed = summary.storage_failed,
                         "Graceful shutdown: promotion had storage failures; \
                          preserving durable SM row for restart-time retry"
                     );
-                    record_sm_drain_outcome(false);
                     if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
                         session.clone(),
@@ -8144,8 +8229,15 @@ async fn run_graceful_shutdown_drain(
                 // deletes the durable row and releases the `ClaimStore`
                 // claim only on success (see that method's own doc
                 // comment).
-                record_sm_drain_outcome(confirmed);
                 if !confirmed {
+                    if abandon_shutdown_session_if_claim_lost(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        &mut promotion_guard,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     warn!(
                         jid = %session.jid,
                         stream_id = %session.stream_id,
@@ -8163,6 +8255,7 @@ async fn run_graceful_shutdown_drain(
                     }
                     return;
                 }
+                record_sm_drain_outcome(true);
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
                 if let Err(error) = websocket_state
@@ -12994,6 +13087,191 @@ mod graceful_shutdown_drain_tests {
     }
 
     #[tokio::test]
+    async fn graceful_shutdown_abandons_terminally_disabled_identity_without_deleting_durable_row()
+    {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let claims = Arc::new(InProcessClaimStore::new());
+        let identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "disabled"));
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(claims, identity.clone()),
+        );
+        let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+        let stream_id = "shutdown-disabled-identity";
+        registry
+            .store_session(detached_session(
+                stream_id,
+                "romeo@example.com/phone".parse().expect("full jid"),
+            ))
+            .await
+            .expect("store detached session");
+        identity.disable().await;
+
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let started = Instant::now();
+        run_graceful_shutdown_drain(
+            state,
+            token,
+            Arc::new(Notify::new()),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(
+            registry.live_session_ids().expect("live inventory"),
+            Vec::<String>::new()
+        );
+        assert!(persistence
+            .get_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("durable session read")
+            .is_some());
+        assert_eq!(
+            metrics.counter_sum("waddle.clustering.claims_abandoned_on_drain", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("xmpp.sm.drain_timeout", &[])
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_abandons_session_taken_over_by_successor() {
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let claims = Arc::new(InProcessClaimStore::new());
+        let local = NodeIdentity::new("sm-node", "old");
+        let successor = NodeIdentity::new("sm-node", "successor");
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(claims.clone(), SharedNodeIdentity::new(local.clone())),
+        );
+        let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+        let stream_id = "shutdown-successor-takeover";
+        registry
+            .store_session(detached_session(
+                stream_id,
+                "romeo@example.com/phone".parse().expect("full jid"),
+            ))
+            .await
+            .expect("store detached session");
+        let entity = Entity::new(EntityType::SmSession, stream_id);
+        let local_epoch = claims
+            .current_claim(&entity)
+            .await
+            .expect("current claim")
+            .expect("local claim")
+            .claim_epoch;
+        claims
+            .release(&entity, &local, local_epoch)
+            .await
+            .expect("release local claim");
+        let successor_epoch = claims
+            .acquire(&entity, &successor)
+            .await
+            .expect("successor claim");
+
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        run_graceful_shutdown_drain(
+            state,
+            token,
+            Arc::new(Notify::new()),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert!(registry
+            .live_session_ids()
+            .expect("live inventory")
+            .is_empty());
+        assert!(persistence
+            .get_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("durable session read")
+            .is_some());
+        assert!(claims
+            .fence(&entity, &successor, successor_epoch)
+            .await
+            .expect("successor fence"));
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_retries_transient_confirmation_after_backoff() {
+        let persistence = Arc::new(HangingSmReadPersistence::default());
+        persistence
+            .allow_reads
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let registry =
+            Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+        let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+        let stream_id = "shutdown-transient-confirmation";
+        registry
+            .store_session(detached_session(
+                stream_id,
+                "romeo@example.com/phone".parse().expect("full jid"),
+            ))
+            .await
+            .expect("store detached session");
+        persistence
+            .delete_failures_remaining
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        persistence
+            .delete_attempts
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        persistence
+            .delete_times
+            .lock()
+            .expect("delete attempt times")
+            .clear();
+
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        run_graceful_shutdown_drain(
+            state,
+            token,
+            Arc::new(Notify::new()),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let delete_times = persistence
+            .delete_times
+            .lock()
+            .expect("delete attempt times");
+        assert_eq!(delete_times.len(), 2);
+        assert!(
+            delete_times[1].duration_since(delete_times[0]) >= Duration::from_millis(250),
+            "non-empty retry pass must pause before the next confirmation"
+        );
+        assert_eq!(
+            persistence
+                .delete_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the transient confirmation failure should retry once"
+        );
+        assert!(registry
+            .live_session_ids()
+            .expect("live inventory")
+            .is_empty());
+        assert!(persistence
+            .get_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("durable session read")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn graceful_shutdown_successful_confirm_drains_and_retires_ingress_stream() {
         let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
         let state = create_test_websocket_state_with_sm_registry(Arc::clone(&sm_registry)).await;
@@ -13308,6 +13586,11 @@ mod graceful_shutdown_drain_tests {
             "the shutdown drain must re-check its deadline instead of hanging on stalled promotion retry IO"
         );
         assert_eq!(metrics.counter_sum("xmpp.sm.drain_timeout", &[]), Some(1));
+        assert_eq!(
+            metrics.counter_sum("waddle.clustering.claims_abandoned_on_drain", &[]),
+            Some(1),
+            "the stalled session is counted once when the deadline expires"
+        );
         assert_eq!(
             sm_registry
                 .live_session_ids()
