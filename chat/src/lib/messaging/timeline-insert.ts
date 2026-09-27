@@ -49,6 +49,9 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
     createdAt: authoritativeTimestamp.createdAt,
     createdAtSource: authoritativeTimestamp.createdAtSource,
   };
+  // The first avatar attribution wins: a redelivered copy (catch-up
+  // re-emission, SM replay) arrives after the nick may have changed hands.
+  if (existing.authorAvatarJid) updated.authorAvatarJid = existing.authorAvatarJid;
   if (!Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
     delete updated.linkPreviews;
   }

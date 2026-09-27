@@ -239,8 +239,10 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       // otherwise restart hydrate against the about-to-disconnect
       // client. Round-12 reviewer P1.
       if (!connectionStore.session) return;
-      // A reconnect without resume: every cached avatar may be outdated.
+      // A fresh session (reconnect without resume) may have outdated any
+      // cached avatar; a resumed one only retries transport failures.
       if (event.type === "fresh") avatarStore.beginSession();
+      else avatarStore.resumeSession();
       presence.onSessionReady(event, client);
       // #754: one bootstrap fire per session-ready, fresh or resumed —
       // the choreographer replaces the old multi-subscriber fan-out

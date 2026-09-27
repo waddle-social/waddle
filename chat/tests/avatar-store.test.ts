@@ -241,6 +241,21 @@ describe("AvatarStore", () => {
     expect(remote.calls.map((call) => call.jid).slice(3)).toEqual(["alice@example.com", "bob@example.com"]);
   });
 
+  test("a resumed session retries transport-failed misses but keeps definitive ones", async () => {
+    const { store, remote } = setup();
+    store.beginSession();
+    store.retain("alice@example.com");
+    store.retain("bob@example.com");
+    store.retain("carol@example.com");
+    remote.calls[0]!.resolve("data:a");
+    remote.calls[1]!.resolve(null);
+    remote.calls[2]!.reject(new Error("socket closed"));
+    await flush();
+
+    store.resumeSession();
+    expect(remote.calls.map((call) => call.jid).slice(3)).toEqual(["carol@example.com"]);
+  });
+
   test("an entry nobody retains is evicted when its timer fires, and the eviction hook runs", async () => {
     const { store, time, remote } = setup();
     const evicted: string[] = [];

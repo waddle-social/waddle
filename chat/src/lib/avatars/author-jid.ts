@@ -17,7 +17,7 @@ import type { TimelineMessage } from "@/lib/chat-ui";
 
 export type AuthorRef = Partial<Pick<
   TimelineMessage,
-  "authorJid" | "authorOccupantJid" | "authorRealJid" | "authorAvatarJid" | "isSelf" | "createdAt"
+  "authorJid" | "authorOccupantJid" | "authorRealJid" | "authorAvatarJid" | "isSelf" | "createdAt" | "createdAtSource"
 >>;
 
 function bare(jid: string | null | undefined): string | null {
@@ -134,13 +134,20 @@ export function roomOccupantAvatarJidAt(roomJid: string | null | undefined, nick
 }
 
 /**
- * Pin a live room row to the person behind its nick right now, so a later
- * reuse of the nick cannot change whose face (and profile) it shows.
+ * Pin a room row delivered on the live path to the person behind its nick,
+ * so a later reuse of the nick cannot change whose face (and profile) it
+ * shows. An undelayed row is pinned to the current occupant; a delayed or
+ * archive-stamped row (SM replay, MUC history, catch-up re-emission) was
+ * sent in the past, so only the mapping in effect at its timestamp may
+ * name it.
  */
 export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string): T {
   if (row.isSelf || row.authorRealJid || row.authorAvatarJid) return row;
-  const current = occupantJidDirectory.lookup(roomJid, nick);
-  return current ? { ...row, authorAvatarJid: current } : row;
+  const past = row.createdAtSource === "archive" || row.createdAtSource === "delay";
+  const author = past
+    ? occupantJidDirectory.lookupAt(roomJid, nick, Date.parse(row.createdAt ?? ""))
+    : occupantJidDirectory.lookup(roomJid, nick);
+  return author ? { ...row, authorAvatarJid: author } : row;
 }
 
 /**

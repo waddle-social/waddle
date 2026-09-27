@@ -34,6 +34,8 @@ export interface AvatarStoreClock {
 interface Settled {
   /** `ok` = the peer has an avatar; `miss` = none or the fetch failed. */
   kind: "ok" | "miss";
+  /** A `miss` caused by a transport failure, not a definitive "no avatar". */
+  failed: boolean;
   settledAt: number;
   stale: boolean;
 }
@@ -124,6 +126,14 @@ export class AvatarStore {
   beginSession(): void {
     this.markStale(this.hadSession ? () => true : (settled) => settled.kind === "miss");
     this.hadSession = true;
+  }
+
+  /**
+   * A session resumed (XEP-0198): cached answers are still current, but
+   * misses caused by transport failures while disconnected are retried.
+   */
+  resumeSession(): void {
+    this.markStale((settled) => settled.failed);
   }
 
   private markStale(which: (settled: Settled) => boolean): void {
@@ -241,14 +251,14 @@ export class AvatarStore {
         // A transport failure keeps the last known face; a definitive
         // "no avatar" clears it. Both retry on the negative TTL.
         if (!failed) this.urls.set(key, null);
-        this.settle(key, entry, "miss");
+        this.settle(key, entry, "miss", failed);
       }
     }
     this.pump();
   }
 
-  private settle(key: string, entry: Entry, kind: Settled["kind"]): void {
-    entry.settled = { kind, settledAt: this.clock.now(), stale: false };
+  private settle(key: string, entry: Entry, kind: Settled["kind"], failed = false): void {
+    entry.settled = { kind, failed, settledAt: this.clock.now(), stale: false };
     if (entry.timer) this.clock.clearTimer(entry.timer);
     const ttl = kind === "ok" ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
     entry.timer = this.clock.setTimer(() => {
