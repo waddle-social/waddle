@@ -1282,6 +1282,10 @@ schema.#Project & {
 	env: {
 		CARGO_TERM_COLOR: "always"
 		RUST_BACKTRACE:   "1"
+		// cuenv's hermetic Cargo tasks omit HOME. cuengine's build script
+		// invokes Go, which requires explicit module and build caches then.
+		GOMODCACHE: "/tmp/waddle-server-go-mod-cache"
+		GOCACHE:     "/tmp/waddle-server-go-build-cache"
 		environment: test: {
 			WADDLE_CERTS_EPHEMERAL:             "true"
 			WADDLE_TEST_FIXED_ACCOUNT_ENABLED:  "true"
