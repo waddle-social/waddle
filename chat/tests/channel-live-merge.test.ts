@@ -835,3 +835,29 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
   });
 });
+
+describe("live row author stamping (nick reuse)", () => {
+  test("a live row keeps the occupant behind its nick at ingest after the nick is reused", async () => {
+    const { occupantJidDirectory, authorAvatarJid } = await import("../src/lib/avatars/author-jid");
+    occupantJidDirectory.clear();
+    try {
+      const h = harness();
+      occupantJidDirectory.record("room@muc.example.com", "sam", "alice@example.com");
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "from-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from alice",
+        createdAt: new Date().toISOString(),
+      }));
+      occupantJidDirectory.record("room@muc.example.com", "sam", "bob@example.com");
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "from-bob", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from bob",
+        createdAt: new Date().toISOString(),
+      }));
+
+      const byId = new Map(h.messages.value.map((row) => [row.id, row]));
+      expect(authorAvatarJid(byId.get("from-alice")!)).toBe("alice@example.com");
+      expect(authorAvatarJid(byId.get("from-bob")!)).toBe("bob@example.com");
+    } finally {
+      occupantJidDirectory.clear();
+    }
+  });
+});

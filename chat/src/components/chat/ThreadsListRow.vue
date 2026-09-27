@@ -8,7 +8,7 @@ import type { CallMedia } from "@/lib/calls/types";
 import { threadDisplayTitle } from "@/lib/threads-view-filters";
 import { useCallAnchorCardState, wasmThreadEntryToAnchorMessage } from "@/lib/call-thread-anchor";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
-import { roomOccupantAvatarJid } from "@/lib/avatars/author-jid";
+import { roomOccupantAvatarJidAt } from "@/lib/avatars/author-jid";
 import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 
 const props = defineProps<{
@@ -64,7 +64,7 @@ const rootAuthor = computed(() => props.entry.root_author?.trim() ?? "");
 const rootAuthorJid = computed(() =>
   rootAuthor.value.includes("@")
     ? barePeerJid(rootAuthor.value).toLowerCase()
-    : roomOccupantAvatarJid(props.entry.channel, rootAuthor.value),
+    : roomOccupantAvatarJidAt(props.entry.channel, rootAuthor.value, props.entry.last_activity),
 );
 
 const isDmCallThread = computed(() => props.entry.callThread?.kind === "dm");

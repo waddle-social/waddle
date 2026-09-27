@@ -15,7 +15,10 @@ import { shallowReactive } from "vue";
 import { barePeerJid, resourceOf } from "@/lib/xmpp/jid";
 import type { TimelineMessage } from "@/lib/chat-ui";
 
-export type AuthorRef = Pick<TimelineMessage, "authorJid" | "authorOccupantJid" | "authorRealJid" | "isSelf">;
+export type AuthorRef = Partial<Pick<
+  TimelineMessage,
+  "authorJid" | "authorOccupantJid" | "authorRealJid" | "authorAvatarJid" | "isSelf" | "createdAt"
+>>;
 
 function bare(jid: string | null | undefined): string | null {
   if (!jid || !jid.includes("@")) return null;
@@ -26,29 +29,59 @@ function occupantKey(roomJid: string, nick: string): string {
   return `${barePeerJid(roomJid).toLowerCase()}/${nick}`;
 }
 
-/** Last-known real JID per room occupant (room + nick), kept across leaves. */
+interface OccupantMapping {
+  realJid: string;
+  /** Local clock when this real JID was first seen behind the nick. */
+  since: number;
+}
+
+/**
+ * Real JIDs seen behind each room occupant (room + nick), kept across
+ * leaves. A nick can be reused by someone else, so the directory keeps
+ * the history: live occupant surfaces read the current mapping, while a
+ * past row may only use the mapping that was in effect when it was sent.
+ */
 export class OccupantJidDirectory {
-  private readonly realJids = shallowReactive(new Map<string, string>());
+  private readonly history = shallowReactive(new Map<string, readonly OccupantMapping[]>());
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
 
   record(roomJid: string, nick: string, realJid: string): void {
     const real = bare(realJid);
     if (!roomJid || !nick || !real) return;
     const key = occupantKey(roomJid, nick);
-    if (this.realJids.get(key) !== real) this.realJids.set(key, real);
+    const previous = this.history.get(key) ?? [];
+    if (previous.at(-1)?.realJid === real) return;
+    this.history.set(key, [...previous, { realJid: real, since: this.now() }]);
   }
 
-  /** Reactive lookup. */
+  /** Reactive: who is behind `nick` right now (the latest mapping). */
   lookup(roomJid: string | null | undefined, nick: string | null | undefined): string | null {
     if (!roomJid || !nick) return null;
-    return this.realJids.get(occupantKey(roomJid, nick)) ?? null;
+    return this.history.get(occupantKey(roomJid, nick))?.at(-1)?.realJid ?? null;
+  }
+
+  /**
+   * Reactive: who was behind `nick` at `atMs`. A mapping first seen after
+   * that instant never re-attributes an earlier row; no mapping yet means
+   * `null` (initials).
+   */
+  lookupAt(roomJid: string | null | undefined, nick: string | null | undefined, atMs: number): string | null {
+    if (!roomJid || !nick || !Number.isFinite(atMs)) return null;
+    const mappings = this.history.get(occupantKey(roomJid, nick)) ?? [];
+    for (let i = mappings.length - 1; i >= 0; i -= 1) {
+      const mapping = mappings[i]!;
+      if (mapping.since <= atMs) return mapping.realJid;
+    }
+    return null;
   }
 
   clear(): void {
-    this.realJids.clear();
+    this.history.clear();
   }
 }
 
-/** Real bare JID of a room occupant JID (`room@service/nick`), if known. */
+/** Current real bare JID of a room occupant JID (`room@service/nick`), if known. */
 function occupantRealJid(directory: OccupantJidDirectory, occupantJid: string): string | null {
   return directory.lookup(barePeerJid(occupantJid), resourceOf(occupantJid));
 }
@@ -65,9 +98,19 @@ export function resolveAuthorJid(
   if (author.isSelf && selfJid) return bare(selfJid);
   const real = bare(author.authorRealJid);
   if (real) return real;
-  // Room rows (and MUC private messages) carry the occupant JID: only the
-  // room's disclosure of the real JID may name the person behind a nick.
-  if (author.authorOccupantJid) return occupantRealJid(directory, author.authorOccupantJid);
+  // Stamped at live ingest from the occupant mapping in effect then.
+  const stamped = bare(author.authorAvatarJid);
+  if (stamped) return stamped;
+  // Other room rows (and MUC private messages) carry only the occupant
+  // JID: use the room's disclosure that was in effect when the row was
+  // sent, so a later reuse of the nick never re-attributes it.
+  if (author.authorOccupantJid) {
+    return directory.lookupAt(
+      barePeerJid(author.authorOccupantJid),
+      resourceOf(author.authorOccupantJid),
+      Date.parse(author.createdAt ?? ""),
+    );
+  }
   // 1:1 rows: the sender's own JID.
   return bare(author.authorJid);
 }
@@ -80,9 +123,24 @@ export function authorAvatarJid(author: AuthorRef, selfJid?: string | null): str
   return resolveAuthorJid(author, occupantJidDirectory, selfJid);
 }
 
-/** Real JID behind `nick` in `roomJid`, from the process-wide directory. */
+/** Real JID currently behind `nick` in `roomJid` (live occupant surfaces). */
 export function roomOccupantAvatarJid(roomJid: string | null | undefined, nick: string): string | null {
   return occupantJidDirectory.lookup(roomJid, nick);
+}
+
+/** Real JID that was behind `nick` in `roomJid` at `at` (RFC 3339), for past rows. */
+export function roomOccupantAvatarJidAt(roomJid: string | null | undefined, nick: string, at: string | undefined): string | null {
+  return occupantJidDirectory.lookupAt(roomJid, nick, Date.parse(at ?? ""));
+}
+
+/**
+ * Pin a live room row to the person behind its nick right now, so a later
+ * reuse of the nick cannot change whose face (and profile) it shows.
+ */
+export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string): T {
+  if (row.isSelf || row.authorRealJid || row.authorAvatarJid) return row;
+  const current = occupantJidDirectory.lookup(roomJid, nick);
+  return current ? { ...row, authorAvatarJid: current } : row;
 }
 
 /**

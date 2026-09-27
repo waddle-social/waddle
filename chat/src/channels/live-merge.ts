@@ -3,6 +3,7 @@ import type { WaddleSession } from "@/lib/server-auth";
 import type { LiveRoomMessage } from "@/lib/xmpp-client";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { findMessageById } from "@/lib/message-ids";
+import { stampLiveRoomAuthor } from "@/lib/avatars/author-jid";
 import { applyForumContext, isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "@/channels/timeline";
 import {
   channelReactedRow,
@@ -245,9 +246,11 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
         break;
       case "live":
         if (session.value) {
-          mergeLiveMessage(
+          mergeLiveMessage(stampLiveRoomAuthor(
             mapLiveRoomMessageToTimeline(session.value, msg, (id) => findMessageById(messages.value, id)),
-          );
+            msg.roomJid,
+            msg.nick,
+          ));
         }
         break;
       case "ignore":

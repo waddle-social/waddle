@@ -23,7 +23,7 @@ import {
 } from "@/lib/scroll-direction";
 import { extractDroppedFiles } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
-import { authorAvatarJid, conversationPeerAvatarJid, roomOccupantAvatarJid } from "@/lib/avatars/author-jid";
+import { authorAvatarJid, conversationPeerAvatarJid, roomOccupantAvatarJid, roomOccupantAvatarJidAt } from "@/lib/avatars/author-jid";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { CallMedia } from "@/lib/calls/types";
@@ -445,7 +445,11 @@ function typingAvatarJid(nick: string): string | null {
 }
 
 function searchResultAvatarJid(result: MessageSearchResult): string | null {
-  return avatarJidForNick(result.nick, result.peerJid ? { peerJid: result.peerJid } : { roomJid: result.roomJid ?? props.roomJid });
+  if (result.nick === props.currentUser || result.peerJid) {
+    return avatarJidForNick(result.nick, { peerJid: result.peerJid ?? null });
+  }
+  // A past row: only the mapping in effect when it was sent may name its author.
+  return roomOccupantAvatarJidAt(result.roomJid ?? props.roomJid, result.nick, result.createdAt);
 }
 const isForumChannel = computed(() => detectForumChannel(props.channel));
 
@@ -600,7 +604,9 @@ function presenceTextForAuthor(username: string): string {
 }
 
 function onAvatarClick(author: string, avatarJid: string | null) {
-  const authorJid = avatarJid ?? props.authorJidByNick?.[author] ?? null;
+  // Only the row's own resolved author: the current nick map may name
+  // someone who reused the nick after this row was sent.
+  const authorJid = avatarJid;
   if (!authorJid) return;
   popoverAuthor.value = { username: author, jid: authorJid, avatarJid };
 }

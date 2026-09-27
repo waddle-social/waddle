@@ -66,6 +66,7 @@ export class AvatarStore {
   private inFlightCount = 0;
   private fetcher: AvatarFetcher | null = null;
   private hadSession = false;
+  private onEvict: ((bareJid: string) => void) | null = null;
 
   constructor(private readonly clock: AvatarStoreClock = systemClock) {}
 
@@ -110,19 +111,25 @@ export class AvatarStore {
     if (fetcher) this.pump();
   }
 
+  /** Called with the bare JID of every entry the store forgets through idle eviction. */
+  setEvictionHandler(handler: ((bareJid: string) => void) | null): void {
+    this.onEvict = handler;
+  }
+
   /**
-   * A new (non-resumed) XMPP session is ready. The first one only starts
-   * the store; every later one is a reconnect, so all results go stale.
+   * A new (non-resumed) XMPP session is ready. Misses always go stale —
+   * they may only reflect a connection that was still failing. Positive
+   * results go stale on every session after the first (a reconnect).
    */
   beginSession(): void {
-    if (this.hadSession) this.markAllStale();
+    this.markStale(this.hadSession ? () => true : (settled) => settled.kind === "miss");
     this.hadSession = true;
   }
 
-  /** Nothing cached can be trusted as current. */
-  markAllStale(): void {
+  private markStale(which: (settled: Settled) => boolean): void {
     for (const [key, entry] of this.entries) {
-      if (entry.settled) entry.settled.stale = true;
+      if (!entry.settled || !which(entry.settled)) continue;
+      entry.settled.stale = true;
       if (entry.retainers > 0) this.enqueue(key, true);
     }
   }
@@ -145,7 +152,8 @@ export class AvatarStore {
   invalidate(jid: string): void {
     const key = avatarKey(jid);
     if (!key) return;
-    const entry = this.entry(key);
+    const entry = this.entries.get(key);
+    if (!entry) return;
     entry.epoch += 1;
     if (entry.settled) entry.settled.stale = true;
     if (entry.retainers > 0 || entry.settled) this.enqueue(key, true);
@@ -245,7 +253,15 @@ export class AvatarStore {
     const ttl = kind === "ok" ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
     entry.timer = this.clock.setTimer(() => {
       entry.timer = null;
-      if (entry.retainers > 0 && !this.isFresh(entry)) this.enqueue(key);
+      if (entry.retainers > 0) {
+        if (!this.isFresh(entry)) this.enqueue(key);
+        return;
+      }
+      // Nobody shows this JID any more: forget it instead of revalidating.
+      if (entry.inFlight || entry.queued || this.entries.get(key) !== entry) return;
+      this.entries.delete(key);
+      this.urls.delete(key);
+      this.onEvict?.(key);
     }, ttl);
   }
 }

@@ -203,8 +203,9 @@ describe("AvatarStore", () => {
     expect(store.urlFor("alice@example.com")).toBeNull();
   });
 
-  test("a new session marks everything stale: retained JIDs refetch, others on next retain", async () => {
+  test("a reconnect session marks everything stale: retained JIDs refetch, others on next retain", async () => {
     const { store, remote } = setup();
+    store.beginSession();
     store.retain("alice@example.com");
     const releaseBob = store.retain("bob@example.com");
     remote.calls[0]!.resolve("data:a");
@@ -212,7 +213,7 @@ describe("AvatarStore", () => {
     await flush();
     releaseBob();
 
-    store.markAllStale();
+    store.beginSession();
     expect(remote.calls.map((call) => call.jid).slice(2)).toEqual(["alice@example.com"]);
     // Stale positive results keep rendering until the refetch answers.
     expect(store.urlFor("alice@example.com")).toBe("data:a");
@@ -221,16 +222,49 @@ describe("AvatarStore", () => {
     expect(remote.calls.map((call) => call.jid).slice(2)).toEqual(["alice@example.com", "bob@example.com"]);
   });
 
-  test("the first session starts the store; only a later fresh session marks results stale", async () => {
+  test("the first session keeps positives but retries misses; later sessions mark everything stale", async () => {
     const { store, remote } = setup();
     store.retain("alice@example.com");
+    store.retain("bob@example.com");
     remote.calls[0]!.resolve("data:a");
+    // Recorded while the first connect was still failing.
+    remote.calls[1]!.reject(new Error("not connected"));
     await flush();
 
     store.beginSession();
-    expect(remote.calls).toHaveLength(1);
+    expect(remote.calls.map((call) => call.jid).slice(2)).toEqual(["bob@example.com"]);
+    remote.calls[2]!.resolve("data:b");
+    await flush();
+    expect(store.urlFor("bob@example.com")).toBe("data:b");
+
     store.beginSession();
-    expect(remote.calls).toHaveLength(2);
+    expect(remote.calls.map((call) => call.jid).slice(3)).toEqual(["alice@example.com", "bob@example.com"]);
+  });
+
+  test("an entry nobody retains is evicted when its timer fires, and the eviction hook runs", async () => {
+    const { store, time, remote } = setup();
+    const evicted: string[] = [];
+    store.setEvictionHandler((jid) => evicted.push(jid));
+    const releaseAlice = store.retain("alice@example.com");
+    store.retain("bob@example.com");
+    remote.calls[0]!.resolve("data:a");
+    remote.calls[1]!.resolve(null);
+    await flush();
+    releaseAlice();
+
+    time.advance(NEGATIVE_TTL_MS);
+    // Bob is still shown: revalidated, not evicted.
+    expect(evicted).toEqual([]);
+    expect(remote.calls.map((call) => call.jid).slice(2)).toEqual(["bob@example.com"]);
+
+    time.advance(POSITIVE_TTL_MS - NEGATIVE_TTL_MS);
+    expect(evicted).toEqual(["alice@example.com"]);
+    expect(store.urlFor("alice@example.com")).toBeNull();
+    expect(store.isKnownAbsent("alice@example.com")).toBe(false);
+
+    // Showing Alice again starts from scratch.
+    store.retain("alice@example.com");
+    expect(remote.calls.map((call) => call.jid).at(-1)).toBe("alice@example.com");
   });
 
   test("avatarChanged with an id refetches that JID", async () => {

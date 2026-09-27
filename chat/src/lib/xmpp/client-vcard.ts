@@ -51,6 +51,11 @@ export class VCardManager {
     await xmpp.publish_vcard4?.(payload);
   }
 
+  /** Drop the known-id entry for `jid` once no surface shows it. */
+  forgetUserAvatar(jid: string): void {
+    this.avatarCache.delete(barePeerJid(jid));
+  }
+
   async fetchUserAvatar(jid: string): Promise<string | null> {
     const xmpp = await this.deps.requireConnectedXmpp();
     const bareJid = barePeerJid(jid);

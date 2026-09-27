@@ -88,4 +88,18 @@ describe("VCardManager", () => {
     expect(changed).not.toBe(first);
     expect(requested).toEqual([[], ["a1"], ["a1"]]);
   });
+
+  test("forgetUserAvatar drops the known id so the next fetch downloads again", async () => {
+    const requested: string[][] = [];
+    const manager = createManager({
+      request_avatar: async (jid, knownIds) => {
+        requested.push(knownIds);
+        return { id: "a1", avatar: { jid, id: "a1", mime_type: "image/png", data: new Uint8Array([1]) } };
+      },
+    });
+    await manager.fetchUserAvatar("bob@example.com");
+    manager.forgetUserAvatar("bob@example.com/phone");
+    await manager.fetchUserAvatar("bob@example.com");
+    expect(requested).toEqual([[], []]);
+  });
 });

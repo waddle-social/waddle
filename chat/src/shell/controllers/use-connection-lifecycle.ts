@@ -19,7 +19,7 @@ import type { connectionStore as ConnectionStore } from "@/lib/connection-store"
 import type { NotifySettingsStore } from "@/lib/notify-settings";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { avatarStore } from "@/lib/avatars/avatar-store";
-import { bindAvatarClient, resetAvatars } from "@/lib/avatars/bind-client";
+import { createAvatarBinding } from "@/lib/avatars/bind-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid } from "@/lib/xmpp-client";
 import { bareJidKey, fullJidIdentityKey, resourceOf } from "@/lib/xmpp/jid";
@@ -158,15 +158,14 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     }
   }
 
-  let unbindAvatars: (() => void) | null = null;
+  const avatars = createAvatarBinding();
   watch(xmppClient, (client) => {
-    unbindAvatars?.();
-    unbindAvatars = null;
+    avatars.unbind();
     if (!client || !session.value) {
       presence.onClientCleared();
       return;
     }
-    unbindAvatars = bindAvatarClient(client);
+    avatars.bind(client);
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);
@@ -407,7 +406,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
 
   async function handleLogout() {
     clearPendingChannelRoomJidSelection();
-    resetAvatars();
+    avatars.logout();
     ui.activePage.value = "dashboard";
     messaging.disconnect();
     dmMessaging.disconnect();
