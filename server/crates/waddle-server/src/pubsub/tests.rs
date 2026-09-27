@@ -2102,3 +2102,70 @@ async fn dm_bookmark_node_delete_clears_only_direct_projection_rows() {
         "deleting the DM node must NOT touch XEP-0402 MUC projection rows"
     );
 }
+
+#[tokio::test]
+async fn avatar_nodes_open_fixup_reopens_legacy_presence_nodes_once() {
+    use waddle_xmpp::pubsub::{AccessModel, NodeConfig};
+    let artifacts = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
+    )
+    .join("target/test-artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let path = artifacts.join(format!("pubsub-fixup-{}.db", uuid::Uuid::new_v4()));
+    let url = format!("sqlite://{}", path.display());
+    let owner = jid("alice@example.com");
+    let avatar_nodes = ["urn:xmpp:avatar:data", "urn:xmpp:avatar:metadata"];
+
+    // A pre-fixup database: legacy Presence avatar nodes, fixup not yet recorded.
+    {
+        let storage = DatabasePubSubStorage::open(Some(&url))
+            .await
+            .expect("storage");
+        for node in avatar_nodes {
+            storage
+                .get_or_create_node(&owner, node)
+                .await
+                .expect("node");
+            storage
+                .update_node_config(&owner, node, &NodeConfig::pep_default())
+                .await
+                .expect("legacy config");
+        }
+        storage
+            .execute("DELETE FROM pubsub_data_fixups", ())
+            .await
+            .expect("forget fixup");
+    }
+    // Startup applies the fixup once.
+    {
+        let storage = DatabasePubSubStorage::open(Some(&url))
+            .await
+            .expect("storage");
+        for node in avatar_nodes {
+            let stored = storage
+                .get_node(&owner, node)
+                .await
+                .expect("read")
+                .expect("node");
+            assert_eq!(stored.config.access_model, AccessModel::Open, "{node}");
+            // After the fixup, the owner deliberately restricts the node again.
+            storage
+                .update_node_config(&owner, node, &NodeConfig::pep_default())
+                .await
+                .expect("owner choice");
+        }
+    }
+    // A later startup must not undo the owner's choice.
+    let storage = DatabasePubSubStorage::open(Some(&url))
+        .await
+        .expect("storage");
+    for node in avatar_nodes {
+        let stored = storage
+            .get_node(&owner, node)
+            .await
+            .expect("read")
+            .expect("node");
+        assert_eq!(stored.config.access_model, AccessModel::Presence, "{node}");
+    }
+    let _ = std::fs::remove_file(&path);
+}

@@ -281,6 +281,19 @@ pub fn parse_metadata_response(iq: &Element) -> Option<AvatarInfo> {
     parse_metadata_info(item.get_child("metadata", NS_AVATAR_METADATA)?)
 }
 
+/// Whether a metadata items result is the XEP-0084 §4.3 "disable" shape:
+/// the current item is an empty `<metadata/>`. The owner has explicitly
+/// switched avatars off, so no other source (e.g. an old vCard PHOTO)
+/// may resurrect one.
+fn is_metadata_disabled(iq: &Element) -> bool {
+    iq.get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+        .filter(|items| items.attr("node") == Some(NS_AVATAR_METADATA))
+        .and_then(|items| items.get_child("item", NS_PUBSUB))
+        .and_then(|item| item.get_child("metadata", NS_AVATAR_METADATA))
+        .is_some_and(|metadata| metadata_info_elements(metadata).next().is_none())
+}
+
 /// Parse an XEP-0084 metadata PEP event into one typed avatar transition.
 ///
 /// XEP-0084 metadata is a singleton node in normal operation. A retraction
@@ -438,6 +451,9 @@ where
     };
 
     if let Some(meta_response) = meta_response {
+        if is_metadata_disabled(&meta_response) {
+            return Ok(None);
+        }
         if let Some(info) = parse_metadata_response(&meta_response) {
             if known_ids.iter().any(|known| known == &info.id) {
                 return Ok(Some(AvatarFetch {

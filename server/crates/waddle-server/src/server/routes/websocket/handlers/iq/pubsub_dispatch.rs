@@ -564,16 +564,14 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// non-roster peers. We reconcile the config in-place so the next
 /// publish lands on a spec-conformant node.
 ///
-/// Avatar nodes are only repaired from the untouched legacy default, so
-/// an owner's own `configure` survives (see `NodeConfig::needs_reconcile`).
+/// Avatar nodes are not reconciled: legacy Presence avatar nodes are
+/// repaired once by the pubsub data fixup, and any later config is the
+/// owner's choice.
 ///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
-/// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
-/// nodes, DND) — we don't bulk-rewrite arbitrary user node configs here.
+/// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, DND) — we don't bulk-rewrite arbitrary user node configs here.
 async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
     if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
-        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
-        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
     {
         return;

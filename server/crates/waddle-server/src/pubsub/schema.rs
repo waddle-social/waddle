@@ -1,5 +1,8 @@
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use waddle_xmpp::XmppError;
+
+use waddle_xmpp::pubsub::AccessModel;
+use waddle_xmpp_core::pubsub::{PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA};
 
 use super::DatabasePubSubStorage;
 
@@ -99,6 +102,52 @@ impl DatabasePubSubStorage {
             )
             .await?;
         }
+        self.run_data_fixups().await
+    }
+
+    /// One-shot data fixups, each applied at most once per database and
+    /// recorded in `pubsub_data_fixups`.
+    ///
+    /// `avatar_nodes_open_v1`: client-published XEP-0084 avatar nodes used
+    /// to be auto-created on the Presence default, which Waddle's authz
+    /// admits only the owner to, so the avatar was invisible to every
+    /// peer. Presence was the default then, so no owner chose it; every
+    /// such node is reopened once. Afterwards a Presence avatar node is
+    /// an owner choice and is left alone.
+    async fn run_data_fixups(&self) -> Result<(), XmppError> {
+        const AVATAR_NODES_OPEN_V1: &str = "avatar_nodes_open_v1";
+        let mut applied = self
+            .query(
+                "SELECT 1 FROM pubsub_data_fixups WHERE name = ?",
+                crate::db_params![AVATAR_NODES_OPEN_V1],
+            )
+            .await?;
+        if applied
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let reopened = self
+            .execute(
+                "UPDATE pubsub_nodes SET access_model = ? \
+                 WHERE access_model = ? AND node_name IN (?, ?)",
+                crate::db_params![
+                    AccessModel::Open.to_string(),
+                    AccessModel::Presence.to_string(),
+                    PEP_NODE_AVATAR_DATA,
+                    PEP_NODE_AVATAR_METADATA
+                ],
+            )
+            .await?;
+        self.execute(
+            "INSERT INTO pubsub_data_fixups (name) VALUES (?) ON CONFLICT (name) DO NOTHING",
+            crate::db_params![AVATAR_NODES_OPEN_V1],
+        )
+        .await?;
+        info!(reopened, "pubsub data fixup avatar_nodes_open_v1 applied");
         Ok(())
     }
 
@@ -405,6 +454,11 @@ impl DatabasePubSubStorage {
         self.execute(affs_ddl, ()).await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_pubsub_affs_entity ON pubsub_affiliations (owner_jid, entity_jid)",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS pubsub_data_fixups (name TEXT NOT NULL PRIMARY KEY)",
             (),
         )
         .await?;

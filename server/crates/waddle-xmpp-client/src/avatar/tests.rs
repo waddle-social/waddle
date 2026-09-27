@@ -751,3 +751,39 @@ fn request_avatar_rejects_plaintext_vcard_extval() {
 
     assert!(avatar.is_none());
 }
+
+#[test]
+fn request_avatar_disabled_metadata_skips_vcard_fallback() {
+    // XEP-0084 §4.3: an empty <metadata/> item disables the avatar; an old
+    // vCard PHOTO must not bring it back.
+    let jid: BareJid = "alice@example.com".parse().expect("valid bare JID");
+    let mut requested = Vec::new();
+    let fetch = futures::executor::block_on(request_avatar_with_iq_skipping(
+        &jid,
+        &[],
+        |stanza: Element| {
+            let is_vcard = stanza.get_child("vCard", NS_VCARD_TEMP).is_some();
+            requested.push(is_vcard);
+            async move {
+                if is_vcard {
+                    Ok::<Element, AvatarRequestFailure<()>>(
+                        "<iq xmlns='jabber:client' type='result'><vCard xmlns='vcard-temp'><PHOTO><TYPE>image/png</TYPE><BINVAL>AQID</BINVAL></PHOTO></vCard></iq>"
+                            .parse()
+                            .expect("valid vcard"),
+                    )
+                } else {
+                    Ok("<iq xmlns='jabber:client' type='result'><pubsub xmlns='http://jabber.org/protocol/pubsub'><items node='urn:xmpp:avatar:metadata'><item id='current'><metadata xmlns='urn:xmpp:avatar:metadata'/></item></items></pubsub></iq>"
+                        .parse()
+                        .expect("valid metadata"))
+                }
+            }
+        },
+    ))
+    .expect("fetch");
+    assert!(fetch.is_none());
+    assert_eq!(
+        requested,
+        vec![false],
+        "vCard must not be queried after a disable"
+    );
+}
