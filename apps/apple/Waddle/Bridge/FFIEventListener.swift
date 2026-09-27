@@ -44,8 +44,8 @@ final class FFIEventListener: WaddleEventListener {
             guard to == nil || recipient != nil else { return nil }
             return .messageRejected(stanzaID: stanzaId, from: sender, to: recipient)
         case let .avatarChanged(jid, avatarId):
-            // XEP-0084 metadata belongs to an account: a full JID is not a
-            // valid publisher, so it is dropped rather than truncated.
+            // The core emits this only for a bare `from`; the strict parse
+            // just refuses anything else rather than truncating it.
             guard let owner = FFIInbound.bareJID(jid) else { return nil }
             return .avatarChanged(jid: owner, id: avatarId)
         case .call:
@@ -59,7 +59,7 @@ final class FFIEventListener: WaddleEventListener {
         case let .error(description):
             // Diagnostics stay at the logging boundary. Verbs that answer a
             // failure with an empty value consult the signal instead.
-            signals.recordError()
+            signals.recordError(description)
             BridgeLog.error(description)
             return nil
         }

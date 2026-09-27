@@ -7,7 +7,7 @@ extension FFIXmppPort {
     /// a failed lookup; an error event during the call tells them apart.
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
         guard signals.isConnected else { return .failed }
-        let window = signals.beginErrorWindow()
+        let window = signals.beginErrorWindow(.avatar)
         let result = await client.requestAvatar(jid: jid.description, knownIds: knownID.map { [$0] } ?? [])
         let sawError = signals.endErrorWindow(window)
         return FFIInbound.avatarFetch(result, knownID: knownID, sawError: sawError)
