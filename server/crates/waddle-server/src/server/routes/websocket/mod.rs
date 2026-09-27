@@ -103,6 +103,7 @@ pub(crate) use cleanup::redrive_local_muc_cleanup;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
+pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource_with_cancel;
 pub(crate) use cleanup::retain_abandoned_muc_occupancy_sweep;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::retire_occupancy_before_bind;

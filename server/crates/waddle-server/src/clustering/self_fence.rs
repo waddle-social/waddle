@@ -972,6 +972,21 @@ where
         // Disabled is a typed terminal state: publication guards and claim
         // stores both reject it for the rest of this clustering lifetime.
         self.live_identity.disable().await;
+        if let Some(sm) = self
+            .shutdown_sm_drain
+            .filter(|sm| sm.process_stop.is_cancelled())
+        {
+            // Q6 drops its in-flight guards and records unfinished claims
+            // when fatal fencing wakes it. Keep local inventory available
+            // for that accounting after publication has been disabled, then
+            // demote it. Bound the wait so a stuck Q6 cannot hold shutdown.
+            if tokio::time::timeout(Duration::from_secs(1), sm.complete.cancelled())
+                .await
+                .is_err()
+            {
+                tracing::warn!("clustering: Q6 did not settle after fatal fencing; demoting local claims with incomplete drain accounting");
+            }
+        }
         self.local_claims.demote_owned_by(prior_identity).await;
         if registered_identity != prior_identity {
             self.local_claims.demote_owned_by(registered_identity).await;
@@ -3760,7 +3775,7 @@ mod tests {
         process_stop.cancel();
 
         tokio::time::timeout(
-            Duration::from_millis(500),
+            Duration::from_millis(1_500),
             context.shutdown(
                 &claims,
                 &owner,
@@ -4025,10 +4040,73 @@ mod tests {
         assert!(live_identity.current().is_active());
 
         fatal_fence.cancel();
-        tokio::time::timeout(Duration::from_millis(500), &mut shutdown)
+        tokio::time::timeout(Duration::from_millis(1_500), &mut shutdown)
             .await
             .expect("fatal fence preempts the Q6 wait");
         assert!(!live_identity.current().is_active());
+    }
+
+    #[tokio::test]
+    async fn fatal_finish_waits_for_q6_accounting_before_local_demotion() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let demoted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(BlockingSealLocalClaims {
+            entity: Entity::new(
+                waddle_xmpp::ownership::EntityType::SmSession,
+                "q6-accounting",
+            ),
+            seal_started: Arc::new(tokio::sync::Notify::new()),
+            seal_release: Arc::new(tokio::sync::Notify::new()),
+            exact_demoted_owners: demoted.clone(),
+        });
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let completion = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: completion.clone(),
+            budget: Duration::from_secs(2),
+            started: Arc::new(std::sync::OnceLock::new()),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(20),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+        fatal_fence.cancel();
+        let shutdown = context.shutdown(
+            &claims,
+            &owner,
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+            tokio::time::Instant::now(),
+        );
+        tokio::pin!(shutdown);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(40)) => {}
+            _ = &mut shutdown => panic!("local claims demoted before Q6 accounted for them"),
+        }
+        assert!(!live_identity.current().is_active());
+        assert!(demoted.lock().expect("demotion log").is_empty());
+        completion.cancel();
+        tokio::time::timeout(Duration::from_millis(500), &mut shutdown)
+            .await
+            .expect("demotion follows Q6 completion");
+        assert_eq!(
+            demoted.lock().expect("demotion log").as_slice(),
+            std::slice::from_ref(&owner)
+        );
     }
 
     #[tokio::test]
