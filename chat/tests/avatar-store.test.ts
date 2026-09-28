@@ -256,6 +256,49 @@ describe("AvatarStore", () => {
     expect(remote.calls.map((call) => call.jid).slice(3)).toEqual(["carol@example.com"]);
   });
 
+  test("a first fetch in flight across a fresh session is rerun once it settles", async () => {
+    const { store, remote } = setup();
+    store.beginSession();
+    store.retain("alice@example.com");
+    expect(remote.calls).toHaveLength(1);
+
+    store.beginSession();
+    // No duplicate while the first fetch is still in flight.
+    expect(remote.calls).toHaveLength(1);
+    remote.calls[0]!.resolve("data:old-session");
+    await flush();
+    expect(remote.calls.map((call) => call.jid)).toEqual(["alice@example.com", "alice@example.com"]);
+    remote.calls[1]!.resolve("data:new-session");
+    await flush();
+    expect(store.urlFor("alice@example.com")).toBe("data:new-session");
+  });
+
+  test("a first fetch that fails across a resume is retried; a successful one is kept", async () => {
+    const { store, remote } = setup();
+    store.beginSession();
+    store.retain("alice@example.com");
+    store.retain("bob@example.com");
+
+    store.resumeSession();
+    remote.calls[0]!.reject(new Error("old socket closed"));
+    remote.calls[1]!.resolve("data:b");
+    await flush();
+    expect(remote.calls.map((call) => call.jid).slice(2)).toEqual(["alice@example.com"]);
+  });
+
+  test("an unretained fetch that straddled a fresh session refetches on the next retain", async () => {
+    const { store, remote } = setup();
+    store.beginSession();
+    const release = store.retain("alice@example.com");
+    release();
+    store.beginSession();
+    remote.calls[0]!.resolve("data:old");
+    await flush();
+    expect(remote.calls).toHaveLength(1);
+    store.retain("alice@example.com");
+    expect(remote.calls).toHaveLength(2);
+  });
+
   test("an entry nobody retains is evicted when its timer fires, and the eviction hook runs", async () => {
     const { store, time, remote } = setup();
     const evicted: string[] = [];

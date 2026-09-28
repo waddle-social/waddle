@@ -68,6 +68,9 @@ export class AvatarStore {
   private inFlightCount = 0;
   private fetcher: AvatarFetcher | null = null;
   private hadSession = false;
+  /** Bumped per fresh session / resume, so an in-flight fetch can tell it straddled one. */
+  private freshSessions = 0;
+  private resumes = 0;
   private onEvict: ((bareJid: string) => void) | null = null;
 
   constructor(private readonly clock: AvatarStoreClock = systemClock) {}
@@ -124,6 +127,8 @@ export class AvatarStore {
    * results go stale on every session after the first (a reconnect).
    */
   beginSession(): void {
+    // Bump first: refetches started by markStale belong to the new session.
+    this.freshSessions += 1;
     this.markStale(this.hadSession ? () => true : (settled) => settled.kind === "miss");
     this.hadSession = true;
   }
@@ -133,6 +138,7 @@ export class AvatarStore {
    * misses caused by transport failures while disconnected are retried.
    */
   resumeSession(): void {
+    this.resumes += 1;
     this.markStale((settled) => settled.failed);
   }
 
@@ -232,6 +238,8 @@ export class AvatarStore {
     entry.inFlight = true;
     this.inFlightCount += 1;
     const epoch = entry.epoch;
+    const freshSessions = this.freshSessions;
+    const resumes = this.resumes;
     let url: string | null = null;
     let failed = false;
     try {
@@ -252,6 +260,15 @@ export class AvatarStore {
         // "no avatar" clears it. Both retry on the negative TTL.
         if (!failed) this.urls.set(key, null);
         this.settle(key, entry, "miss", failed);
+      }
+      // The fetch straddled a session change: its answer may come from (or
+      // have failed with) the old socket. Any answer is suspect across a
+      // fresh session; across a resume only a transport failure is.
+      const straddledFresh = this.freshSessions !== freshSessions;
+      const straddledResume = this.resumes !== resumes;
+      if (entry.settled && (straddledFresh || (straddledResume && failed))) {
+        entry.settled.stale = true;
+        if (entry.retainers > 0) this.enqueue(key, true);
       }
     }
     this.pump();
