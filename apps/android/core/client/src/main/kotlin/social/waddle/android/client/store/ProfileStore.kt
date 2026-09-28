@@ -116,14 +116,22 @@ class ProfileStore(
         markUsed(owner)
     }
 
-    /** [jid] is in use (rendered or refreshed): last to be evicted. */
+    /**
+     * [jid] is in use (rendered or refreshed): last to be evicted. Only
+     * JIDs with cached bytes are ordered — avatarless ones have nothing
+     * to evict, and tracking them would grow the order without bound.
+     */
     fun markUsed(jid: String) {
         val owner = normalizedBareJid(jid)
+        if (owner !in cacheById.value) return
         synchronized(useOrder) {
             useOrder.remove(owner)
             useOrder.add(owner)
         }
     }
+
+    /** Test seam: JIDs in the eviction recency order. */
+    internal fun trackedUseCount(): Int = synchronized(useOrder) { useOrder.size }
 
     /** Encoded bytes held across every JID and cached item id. */
     fun cachedAvatarBytes(): Long = cacheById.value.values.sumOf(::bytesOf)

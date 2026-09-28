@@ -473,4 +473,57 @@ class PeerAvatarRepositoryTest {
         assertNull(h.store.avatars.value[alice])
         assertEquals(emptyList<Call>(), h.resolver.calls)
     }
+
+    @Test
+    fun `many unwatched avatarless JIDs do not accumulate`() = runTest {
+        val h = Harness(this)
+        repeat(200) { i ->
+            val jid = "member$i@waddle.test"
+            h.resolver.answer(jid, AvatarLookup.Absent)
+            val release = h.repository.watch(jid)
+            runCurrent()
+            if (i % 2 == 0) {
+                // Scrolled past before the lookup finished.
+                release()
+                h.resolver.releaseAll()
+                runCurrent()
+            } else {
+                h.resolver.releaseAll()
+                runCurrent()
+                release()
+            }
+        }
+
+        assertEquals(0, h.repository.trackedJidCount())
+        assertEquals(0, h.store.trackedUseCount())
+    }
+
+    @Test
+    fun `a fresh held avatar survives release but a pruned miss refetches on re-watch`() = runTest {
+        val h = Harness(this)
+        h.resolver.answer(alice, AvatarLookup.Found(testAvatar(jid = alice, id = "id-1")))
+        h.resolver.answer("bob@waddle.test", AvatarLookup.Absent)
+        listOf(alice, "bob@waddle.test").forEach { jid ->
+            val release = h.repository.watch(jid)
+            runCurrent()
+            h.resolver.releaseAll()
+            runCurrent()
+            release()
+        }
+        assertEquals(1, h.repository.trackedJidCount())
+        assertEquals(1, h.store.trackedUseCount())
+
+        // Well inside both TTLs: the held avatar is still fresh, the
+        // pruned miss is simply asked again.
+        h.now = PeerAvatarRepository.RETRY_TTL_MILLIS - 1
+        val releaseAlice = h.repository.watch(alice)
+        val releaseBob = h.repository.watch("bob@waddle.test")
+        runCurrent()
+        assertEquals(1, h.resolver.calls.count { it.jid == alice })
+        assertEquals(2, h.resolver.calls.count { it.jid == "bob@waddle.test" })
+        h.resolver.releaseAll()
+        runCurrent()
+        releaseAlice()
+        releaseBob()
+    }
 }

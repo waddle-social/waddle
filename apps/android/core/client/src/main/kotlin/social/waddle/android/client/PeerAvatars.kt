@@ -89,6 +89,9 @@ internal class PeerAvatarRepository(
         var settled: Settled? = null
         var rerun = false
         var rerunKnownId: String? = null
+
+        /** Released by its last watcher mid-flight: prune once settled. */
+        var pruneWhenSettled = false
     }
 
     override val avatars: StateFlow<Map<String, WaddleAvatar>> = store.avatars
@@ -111,6 +114,7 @@ internal class PeerAvatarRepository(
         val key = keyOf(jid) ?: return {}
         synchronized(lock) {
             watchers[key] = (watchers[key] ?: 0) + 1
+            entries[key]?.pruneWhenSettled = false
             store.markUsed(key)
             if (ticker == null) ticker = scope.launch { revalidateWatched() }
             ensureLocked(key)
@@ -129,7 +133,10 @@ internal class PeerAvatarRepository(
     private suspend fun revalidateWatched() {
         while (true) {
             delay(REVALIDATE_TICK_MILLIS)
-            synchronized(lock) { watchers.keys.toList().forEach(::ensureLocked) }
+            synchronized(lock) {
+                watchers.keys.toList().forEach(::ensureLocked)
+                entries.keys.toList().forEach(::pruneIfIdleLocked)
+            }
         }
     }
 
@@ -140,8 +147,11 @@ internal class PeerAvatarRepository(
             return
         }
         watchers -= key
-        // Off screen now: its bytes may go if the cache is over budget.
+        // Off screen now: its bytes may go if the cache is over budget,
+        // and a result worth nothing more is forgotten.
         evictOverBudgetLocked()
+        entries[key]?.let { entry -> if (entry.attempt != null) entry.pruneWhenSettled = true }
+        pruneIfIdleLocked(key)
         if (watchers.isEmpty()) {
             ticker?.cancel()
             ticker = null
@@ -255,8 +265,30 @@ internal class PeerAvatarRepository(
                 entry.settled = null
                 entry.attempt?.evicted = true
             }
+            pruneIfIdleLocked(jid)
         }
     }
+
+    /**
+     * Caller holds [lock]. Forget [key]'s entry when nothing depends on
+     * it: no watcher, no fetch in flight or queued, and no held avatar
+     * whose fresh result spares a refetch (a miss, an eviction, or an
+     * expired result is worth nothing). Unshown avatarless JIDs thus do
+     * not accumulate; a pruned JID simply fetches again when shown.
+     */
+    private fun pruneIfIdleLocked(key: String) {
+        val entry = entries[key] ?: return
+        if (key in watchers || entry.attempt != null || entry.rerun) return
+        val settled = entry.settled
+        val keepsFreshAvatar = settled != null &&
+            key in store.avatars.value &&
+            settled.epoch == currentEpoch &&
+            clock() - settled.at < settled.ttl
+        if (!keepsFreshAvatar) entries -= key
+    }
+
+    /** Test seam: JIDs the repository currently tracks. */
+    internal fun trackedJidCount(): Int = synchronized(lock) { entries.size }
 
     private fun commit(key: String, attempt: Attempt, projection: () -> Unit): Boolean = synchronized(lock) {
         if (entries[key]?.attempt !== attempt || attempt.superseded) return@synchronized false
@@ -281,6 +313,9 @@ internal class PeerAvatarRepository(
                 entry.rerun = false
                 entry.rerunKnownId = null
                 start(key, entry, knownId)
+            } else if (entry.pruneWhenSettled) {
+                entry.pruneWhenSettled = false
+                pruneIfIdleLocked(key)
             }
         }
     }
