@@ -33,6 +33,17 @@ export function consumeKeystrokEvent(event: KeyboardEvent) {
   event.stopPropagation();
 }
 
+/**
+ * Cmd+K on Apple platforms, Ctrl+K elsewhere (Ctrl+K on macOS deletes to the
+ * end of the line). A non-Latin layout reports the typed letter (e.g. "л"),
+ * so the physical K key counts there — keystrok matches `event.key` only.
+ */
+export function isQuickSwitcherShortcut(event: KeyboardEvent, isApplePlatform: boolean): boolean {
+  const modifier = isApplePlatform ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  if (!modifier || event.altKey || event.shiftKey) return false;
+  return /^[a-z]$/i.test(event.key) ? event.key.toLowerCase() === "k" : event.code === "KeyK";
+}
+
 interface ChatKeyboardDeps {
   ui: ChatShellState;
   keystrok: KeystrokHandle;
@@ -89,7 +100,10 @@ export function useChatKeyboard(deps: ChatKeyboardDeps) {
     consumeKeystrokEvent(event);
   }
 
-  function handleQuickSwitcherShortcut(event: KeyboardEvent) {
+  const isApplePlatform = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+  function handleQuickSwitcherKeyDown(event: KeyboardEvent) {
+    if (!isQuickSwitcherShortcut(event, isApplePlatform)) return;
     if (ui.showQuickSwitcher.value) {
       consumeKeystrokEvent(event);
       if (!event.repeat) ui.showQuickSwitcher.value = false;
@@ -105,10 +119,7 @@ export function useChatKeyboard(deps: ChatKeyboardDeps) {
   function bindChatKeystrokShortcuts() {
     const chatKeystrok = createKeystrok();
     keystrok.current = chatKeystrok;
-    // keystrok has no "mod" alias; Ctrl+K on macOS is delete-to-end-of-line.
-    const quickSwitcherShortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "meta+k" : "ctrl+k";
     chatKeystrok
-      .bind(quickSwitcherShortcut, handleQuickSwitcherShortcut, { scope: CHAT_KEYSTROK_SCOPE })
       .bind("escape", handleChatEscape, { scope: CHAT_KEYSTROK_SCOPE })
       .bind("escape", reactionMode.handleReactionModeEscape, { scope: REACTION_MODE_KEYSTROK_SCOPE })
       .bind("up", (event) => reactionMode.handleReactionModeMove(event, "previous"), { scope: REACTION_MODE_KEYSTROK_SCOPE })
@@ -128,10 +139,12 @@ export function useChatKeyboard(deps: ChatKeyboardDeps) {
     // handled directly while the rest of reaction mode remains scoped there.
     window.addEventListener("keydown", reactionMode.handleLiteralPlusKeyDown, true);
     bindChatKeystrokShortcuts();
+    window.addEventListener("keydown", handleQuickSwitcherKeyDown);
   });
 
   onUnmounted(() => {
     window.removeEventListener("keydown", reactionMode.handleLiteralPlusKeyDown, true);
+    window.removeEventListener("keydown", handleQuickSwitcherKeyDown);
     keystrok.current?.destroy();
     keystrok.current = null;
   });
