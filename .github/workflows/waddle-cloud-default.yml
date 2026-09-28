@@ -59,7 +59,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.2"
+        cuenv_version="0.56.6"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -72,7 +72,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Setup 1Password
-      run: cuenv exec -- cuenv secrets setup onepassword
+      run: cuenv secrets setup onepassword
       env:
         OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
     - name: 'Run pipeline: default'
