@@ -3,6 +3,8 @@ package namespace
 import "github.com/cuenv/cuenv/schema"
 
 let _serverRustInputs = [
+	"flake.lock",
+	"flake.nix",
 	"server/Cargo.toml",
 	"server/Cargo.lock",
 	"server/README.md",

@@ -845,6 +845,10 @@
         in
         {
           default = pkgs.mkShell {
+            buildInputs = [
+              pkgs.openssl
+              pkgs.sqlite
+            ];
             packages = [
               rustToolchain
               pkgs.bun
