@@ -166,7 +166,10 @@ export class PresenceManager {
     const from = presence.from ?? "";
     if (this.deps.handleMucPresenceError(presence)) return;
     if (isMucPresence(presence)) {
-      const [room, nick = ""] = from.split("/");
+      // XEP-0045: a nick may itself contain '/'; the resource is everything
+      // after the FIRST slash.
+      const room = barePeerJid(from);
+      const nick = resourceOf(from);
       if (!room) return;
       // XEP-0045 §7.2.2: our own available self-presence (status 110,
       // or, as a fallback, our disclosed real JID) completes the join.

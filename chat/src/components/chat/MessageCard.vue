@@ -29,7 +29,7 @@ import type {
   MessageReference,
 } from "@/lib/chat-ui";
 import { messageMentionsBareJid } from "@/lib/mentions";
-import { jidLocalpart } from "@/lib/xmpp/jid";
+import { jidLocalpart, resourceOf } from "@/lib/xmpp/jid";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import type { OccupantAuthority, OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimelineTimeOfDay } from "@/channels/timeline";
@@ -122,7 +122,7 @@ const renderAsSystemBand = computed(() => rendersAsSystemBand(eventBands.value))
 const replyAuthorName = computed(() => {
   const author = props.message.replyTo?.author;
   if (!author) return "";
-  return author.includes("/") ? author.split("/").pop() ?? author : jidLocalpart(author);
+  return author.includes("/") ? resourceOf(author) || author : jidLocalpart(author);
 });
 
 const deliveryStatusLabel = computed(() => {

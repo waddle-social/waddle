@@ -247,3 +247,34 @@ describe("ContentArea wiring", () => {
     expect(source).toContain("typingAuthorAvatarJid(");
   });
 });
+
+describe("nicks containing '/'", () => {
+  test("live rows by 'sam/phone' and 'sam/tablet' are stamped with their own holders", async () => {
+    const { roomMessageFromArchived } = await import("../src/lib/xmpp/wasm-message-codecs");
+    occupantJidDirectory.record(ROOM, "sam/phone", "alice@waddle.social");
+    occupantJidDirectory.record(ROOM, "sam/tablet", "bob@waddle.social");
+    const decoded = (from: string) => roomMessageFromArchived({
+      mam_id: `m-${from}`, id: `m-${from}`, from, to: SELF, body: "hi", message_type: "groupchat", is_muc: true,
+      reaction_emojis: [], markup_spans: [], mention_uris: [], references: [], is_sticker: false, shared_files: [], link_previews: [],
+    }, "live");
+    const alice = decoded(`${ROOM}/sam/phone`)!;
+    const bob = decoded(`${ROOM}/sam/tablet`)!;
+    expect(alice.nick).toBe("sam/phone");
+    expect(bob.nick).toBe("sam/tablet");
+
+    const aliceRow = stampLiveRoomAuthor(liveRow(alice.nick), ROOM, alice.nick);
+    const bobRow = stampLiveRoomAuthor(liveRow(bob.nick), ROOM, bob.nick);
+    expect(authorAvatarJid(aliceRow)).toBe("alice@waddle.social");
+    expect(authorAvatarJid(bobRow)).toBe("bob@waddle.social");
+  });
+
+  test("our own nick 'me/laptop' matches only our own reflections", () => {
+    occupantJidDirectory.recordOwnNick(ROOM, "me/laptop");
+    const own = stampLiveRoomAuthor(liveRow("me/laptop"), ROOM, "me/laptop", SELF);
+    const other = stampLiveRoomAuthor(liveRow("me/phone"), ROOM, "me/phone", SELF);
+    expect(own.authorAvatarJid).toBe("me@waddle.social");
+    expect(other.authorAvatarJid).toBeUndefined();
+    expect(authorAvatarJid(other, SELF)).toBeNull();
+  });
+});
+

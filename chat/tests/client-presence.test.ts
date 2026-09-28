@@ -131,6 +131,23 @@ describe("PresenceManager MUC occupant tracking", () => {
     expect(ownNicks).toEqual([[ROOM, "alice_2"], [ROOM, null]]);
   });
 
+  test("nicks containing '/' keep their whole resource: two such occupants never collapse", () => {
+    const { manager, events } = createManager();
+    const occupantJids: unknown[] = [];
+    const ownNicks: unknown[] = [];
+    events.on("occupantRealJid", (room, nick, bare) => occupantJids.push([room, nick, bare]));
+    events.on("ownOccupantNick", (room, nick) => ownNicks.push([room, nick]));
+    manager.handle(directPresence({ from: `${ROOM}/sam/phone`, muc_affiliation: "member", muc_role: "participant", muc_jid: "alice@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/sam/tablet`, muc_affiliation: "member", muc_role: "participant", muc_jid: "bob@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/me/laptop`, muc_affiliation: "member", muc_role: "participant", muc_status_codes: [110] }));
+    expect(occupantJids).toEqual([
+      [ROOM, "sam/phone", "alice@example.com"],
+      [ROOM, "sam/tablet", "bob@example.com"],
+      [ROOM, "me/laptop", null],
+    ]);
+    expect(ownNicks).toEqual([[ROOM, "me/laptop"]]);
+  });
+
   test("a JID-less presence for a nick still mapped clears the member JID too", () => {
     const { manager, events } = createManager();
     const memberJids: unknown[] = [];

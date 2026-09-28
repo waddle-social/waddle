@@ -845,7 +845,8 @@ export class BrowserXmppClient {
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
     if (presence.presence_type !== "error") return false;
-    const [rawRoom = "", errorNick = ""] = presence.from?.split("/") ?? [];
+    const rawRoom = barePeerJid(presence.from ?? "");
+    const errorNick = resourceOf(presence.from ?? "");
     const room = rawRoom.trim();
     const key = this.roomJoinKey(room);
     if (!room || !key) return false;
@@ -3347,7 +3348,7 @@ export class BrowserXmppClient {
       if (!message.body && !message.subject) return;
     }
     if (message.chat_state && !message.body) {
-      if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
+      if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
       else {
         // XEP-0045 §7.5 (#1256): a chat state from a MUC
         // occupant JID belongs to that occupant's PM conversation, not
@@ -3391,9 +3392,9 @@ export class BrowserXmppClient {
    * in `completeResumeBarrier` — it never re-enters the buffer.
    */
   private dispatchLiveMessage(message: InboundWasmMessage) {
-    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else { const occupant = this.mucPmOccupant(message); this.events.emit("dmDisplayed", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); } return; }
+    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else { const occupant = this.mucPmOccupant(message); this.events.emit("dmDisplayed", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); } return; }
     if (!message.is_muc && message.safety_scores) { this.dispatchDmSafetyScores(message); return; }
-    if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const occupant = this.mucPmOccupant(message); const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = occupant?.occupantJid ?? (fromBare === selfBare ? toBare : fromBare); const reactorJid = (occupant && fromBare !== selfBare ? occupant.occupantJid : fromBare) || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
+    if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const occupant = this.mucPmOccupant(message); const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = occupant?.occupantJid ?? (fromBare === selfBare ? toBare : fromBare); const reactorJid = (occupant && fromBare !== selfBare ? occupant.occupantJid : fromBare) || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
     this.dispatchLiveBodyMessage(message);
     // Rejections settle the retry queue immediately, even during catch-up.
     // A sent carbon can reach the timeline later when the resume buffer drains.
