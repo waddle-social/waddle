@@ -134,9 +134,11 @@ class OccupantJidStoreTest {
         assertNull(store.jidFor(room, "Alice"))
     }
 
-    private fun twinLive(timestamp: String?) = testMessage(
-        id = "t1",
-        stanzaId = "t1",
+    private fun twinLive(timestamp: String?, stanzaId: String = "t1", originId: String? = null) = testMessage(
+        id = stanzaId,
+        stanzaId = stanzaId,
+        stanzaIdBy = room,
+        originId = originId,
         from = "$room/alice",
         to = self,
         messageType = "groupchat",
@@ -144,14 +146,20 @@ class OccupantJidStoreTest {
         timestamp = timestamp,
     )
 
-    private fun twinArchived() = testArchivedMessage(
-        mamId = "m1",
-        id = "t1",
-        stanzaId = "t1",
+    private fun twinArchived(
+        stanzaId: String = "t1",
+        originId: String? = null,
+        authorRealJid: String = "alice@waddle.test/web",
+    ) = testArchivedMessage(
+        mamId = "m-$stanzaId",
+        id = stanzaId,
+        stanzaId = stanzaId,
+        stanzaIdBy = room,
+        originId = originId,
         from = "$room/alice",
         to = self,
         messageType = "groupchat",
-        authorRealJid = "alice@waddle.test/web",
+        authorRealJid = authorRealJid,
     )
 
     @Test
@@ -187,5 +195,47 @@ class OccupantJidStoreTest {
         store.onArchivedMessage(twinArchived())
 
         assertEquals("alice.live@waddle.test", store.timeline(room).value.single().authorJid)
+    }
+
+    @Test
+    fun `a reused origin id never lends a stamp`() {
+        val store = TimelineStore()
+        store.setOwnBareJid(self)
+        // Alice's message as delayed room history: no stamp.
+        store.onLiveMessage(twinLive(timestamp = "2026-07-15T10:00:00Z", stanzaId = "s1", originId = "x"), null)
+        // Mallory takes the nick and reuses Alice's origin id, live and archived.
+        store.onLiveMessage(twinLive(timestamp = null, stanzaId = "s2", originId = "x"), "mallory@waddle.test")
+        store.onArchivedMessage(twinArchived(stanzaId = "s3", originId = "x", authorRealJid = "mallory@waddle.test"))
+
+        // Both merged into Alice's row on the shared origin id, unstamped.
+        val rows = store.timeline(room).value
+        assertEquals(listOf("s1"), rows.map { it.id })
+        assertNull(rows.single().authorJid)
+
+        // The genuine archive copy (the room's own stanza id) still stamps it.
+        store.onArchivedMessage(twinArchived(stanzaId = "s1", originId = "x", authorRealJid = "alice@waddle.test"))
+        assertEquals("alice@waddle.test", store.timeline(room).value.single().authorJid)
+    }
+
+    @Test
+    fun `a live twin never fills an archived row's stamp`() {
+        val store = TimelineStore()
+        store.setOwnBareJid(self)
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "m-s1",
+                id = "s1",
+                stanzaId = "s1",
+                stanzaIdBy = room,
+                from = "$room/alice",
+                to = self,
+                messageType = "groupchat",
+            ),
+        )
+        store.onLiveMessage(twinLive(timestamp = "2026-07-15T10:00:00Z", stanzaId = "s1"), "erin@waddle.test")
+
+        val row = store.timeline(room).value.single()
+        assertTrue(row.source is TimelineSource.Live)
+        assertNull(row.authorJid)
     }
 }

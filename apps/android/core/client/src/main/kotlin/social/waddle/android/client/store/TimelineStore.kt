@@ -264,9 +264,10 @@ class TimelineStore(
             val merged = item.copy(
                 timestamp = item.timestamp ?: existing.item.timestamp,
                 rejected = existing.item.rejected,
-                // The archived muc#user JID was stamped first and is
-                // authoritative for this row.
-                authorJid = existing.item.authorJid ?: item.authorJid,
+                // A stamp is never replaced by a later copy's, and a
+                // missing one is filled only from a room-vouched archive
+                // twin — never from this live copy.
+                authorJid = existing.item.authorJid ?: vouchedStamp(item, existing.item),
             )
             // The sort key must follow the adopted timestamp or the row
             // keeps its stale placement forever.
@@ -278,10 +279,11 @@ class TimelineStore(
         // The archived copy of a timestampless local echo brings the
         // server timestamp; adopt it in place — including the sort key,
         // else the echo stays pinned at the newest edge above
-        // later-arriving messages. It also attributes a live row that
-        // arrived unstamped (delayed, or no occupant presence yet).
+        // later-arriving messages. It also attributes a row that arrived
+        // unstamped (delayed, or no occupant presence yet) — but only
+        // from its room-vouched archive twin.
         val adoptedTimestamp = item.timestamp?.takeIf { existing.item.timestamp == null }
-        val adoptedAuthor = item.authorJid?.takeIf { existing.item.authorJid == null }
+        val adoptedAuthor = if (existing.item.authorJid == null) vouchedStamp(item, existing.item) else null
         if (adoptedTimestamp == null && adoptedAuthor == null) return null
         return existing.copy(
             item = existing.item.copy(
@@ -290,6 +292,20 @@ class TimelineStore(
             ),
             sortInstant = adoptedTimestamp?.let(::parseInstant) ?: existing.sortInstant,
         )
+    }
+
+    /**
+     * The author stamp [existing] may take from its twin [incoming]: only
+     * an ARCHIVE copy carrying the row's own room-assigned XEP-0359
+     * stanza id. Rows also merge on the sender-controlled origin id,
+     * which a later holder of the nick could reuse to lend the row their
+     * identity; a live copy's stamp is just whoever holds the nick now.
+     */
+    private fun vouchedStamp(incoming: TimelineItem, existing: TimelineItem): String? {
+        if (incoming.source !is TimelineSource.Archived) return null
+        val room = existing.conversationJid
+        val roomId = existing.assignedStanzaId(room)?.id ?: return null
+        return incoming.authorJid.takeIf { incoming.assignedStanzaId(room)?.id == roomId }
     }
 
     private fun applyMutation(
