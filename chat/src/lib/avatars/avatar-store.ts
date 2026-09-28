@@ -186,6 +186,10 @@ export class AvatarStore {
     this.inFlightCount = 0;
     this.fetcher = null;
     this.hadSession = false;
+    // A new login starts its own session history, so the straddle rule in
+    // run() matches beginSession's first-session semantics again.
+    this.freshSessions = 0;
+    this.resumes = 0;
   }
 
   private entry(key: string): Entry {

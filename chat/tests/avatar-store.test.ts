@@ -291,6 +291,21 @@ describe("AvatarStore", () => {
     expect(remote.calls.map((call) => call.jid).slice(3)).toEqual(["bob@example.com", "carol@example.com"]);
   });
 
+  test("after logout and a new login, a fetch waiting on the first connect keeps its avatar", async () => {
+    const { store, remote } = setup();
+    store.beginSession();
+    store.reset();
+    store.setFetcher(remote.fetcher);
+
+    store.retain("alice@example.com");
+    store.beginSession();
+    remote.calls[0]!.resolve("data:a");
+    await flush();
+
+    expect(store.urlFor("alice@example.com")).toBe("data:a");
+    expect(remote.calls).toHaveLength(1);
+  });
+
   test("a first fetch that fails across a resume is retried; a successful one is kept", async () => {
     const { store, remote } = setup();
     store.beginSession();
