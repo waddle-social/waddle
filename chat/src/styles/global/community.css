@@ -238,6 +238,10 @@
     display: inline;
   }
 
+  .community-header__action--jump {
+    display: none;
+  }
+
   .community-shell__rail {
     display: flex;
     width: var(--community-rail-width);
