@@ -321,3 +321,18 @@ describe("room-assigned nick (XEP-0045 210)", () => {
   });
 });
 
+
+describe("fresh session forgets our own nicks", () => {
+  test("a new holder of our old nick is not us between reconnect and our rejoin self-presence", () => {
+    const { directory } = directoryAt();
+    const selfJid = "me@waddle.social/web";
+    directory.recordOwnNick(ROOM, "me");
+    // Offline: a peer takes "me"; after our fresh reconnect their presence
+    // arrives before our own self-presence re-records a nick.
+    directory.forgetOwnNicks();
+    directory.record(ROOM, "me", "peer@elsewhere.example");
+    const peerRow = { isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAtSource: "fallback" as const, createdAt: at(5) };
+    expect(resolveAuthorJid(peerRow, directory, selfJid)).toBe("peer@elsewhere.example");
+    expect(directory.ownNick(ROOM)).toBeNull();
+  });
+});

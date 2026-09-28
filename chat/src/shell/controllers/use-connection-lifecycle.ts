@@ -18,6 +18,7 @@ import {
 import type { connectionStore as ConnectionStore } from "@/lib/connection-store";
 import type { NotifySettingsStore } from "@/lib/notify-settings";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import { occupantJidDirectory } from "@/lib/avatars/author-jid";
 import { avatarStore } from "@/lib/avatars/avatar-store";
 import { createAvatarBinding } from "@/lib/avatars/bind-client";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -247,8 +248,10 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       if (!connectionStore.session) return;
       // A fresh session (reconnect without resume) may have outdated any
       // cached avatar; a resumed one only retries transport failures.
-      if (event.type === "fresh") avatarStore.beginSession();
-      else avatarStore.resumeSession();
+      if (event.type === "fresh") {
+        occupantJidDirectory.forgetOwnNicks();
+        avatarStore.beginSession();
+      } else avatarStore.resumeSession();
       presence.onSessionReady(event, client);
       // #754: one bootstrap fire per session-ready, fresh or resumed —
       // the choreographer replaces the old multi-subscriber fan-out

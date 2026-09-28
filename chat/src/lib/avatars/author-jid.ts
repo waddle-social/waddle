@@ -100,6 +100,16 @@ export class OccupantJidDirectory {
     return this.ownNicks.get(barePeerJid(roomJid).toLowerCase()) ?? null;
   }
 
+  /**
+   * A fresh session (no stream resumption) must rejoin every room, and a
+   * nick we held may have changed hands while we were offline: forget our
+   * own nicks until the new self-presence (110) re-records them. Author
+   * history is kept for time-scoped lookups.
+   */
+  forgetOwnNicks(): void {
+    this.ownNicks.clear();
+  }
+
   clear(): void {
     this.history.clear();
     this.ownNicks.clear();
