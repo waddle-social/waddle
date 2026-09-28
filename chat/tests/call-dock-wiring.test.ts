@@ -136,6 +136,21 @@ describe("call surfaces use the Participants dock", () => {
     expect(guard).toContain("closeCallDock()");
   });
 
+  test("Expanded Escape defers to another open modal dialog (e.g. the quick switcher) instead of collapsing", () => {
+    const source = surfaceSource("CallExpandedSurface.vue");
+    const start = source.indexOf("function onKeydown");
+    const settingsGuardIndex = source.indexOf("if (settingsOpen.value)", start);
+    const modalGuardIndex = source.indexOf("document.querySelector(\"[aria-modal='true']\")", start);
+    const dockGuardIndex = source.indexOf("if (dockOpen.value)", start);
+    // Order matters: the own settings dialog closes itself first, then any
+    // other open modal (e.g. the quick switcher) gets Escape, and only then
+    // do the dock/PiP branches run — those call preventDefault() and would
+    // otherwise collapse the call or close the dock out from under the dialog.
+    expect(settingsGuardIndex).toBeGreaterThan(start);
+    expect(modalGuardIndex).toBeGreaterThan(settingsGuardIndex);
+    expect(dockGuardIndex).toBeGreaterThan(modalGuardIndex);
+  });
+
   test("Immersive keeps the stage edge-to-edge and overlays the dock", () => {
     const source = surfaceSource("CallExpandedSurface.vue");
     expect(source).toContain('uiMode.value === "immersive"');

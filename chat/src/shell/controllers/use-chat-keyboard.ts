@@ -36,6 +36,7 @@ export function consumeKeystrokEvent(event: KeyboardEvent) {
 interface ChatKeyboardDeps {
   ui: ChatShellState;
   keystrok: KeystrokHandle;
+  appReady: () => boolean;
   activeRightPanel: Ref<ActiveRightPanel | null>;
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   activeThreadStack: Ref<string[]>;
@@ -52,12 +53,14 @@ interface ChatKeyboardDeps {
 
 /**
  * Chat-page keyboard shortcuts: the Escape ladder over the right-rail
- * panels and the keystrok scopes that host reaction mode's bindings.
+ * panels, the quick switcher toggle, and the keystrok scopes that host
+ * reaction mode's bindings.
  */
 export function useChatKeyboard(deps: ChatKeyboardDeps) {
   const {
     ui,
     keystrok,
+    appReady,
     activeRightPanel,
     activeExtensionRouteKey,
     activeThreadStack,
@@ -86,10 +89,26 @@ export function useChatKeyboard(deps: ChatKeyboardDeps) {
     consumeKeystrokEvent(event);
   }
 
+  function handleQuickSwitcherShortcut(event: KeyboardEvent) {
+    if (ui.showQuickSwitcher.value) {
+      consumeKeystrokEvent(event);
+      if (!event.repeat) ui.showQuickSwitcher.value = false;
+      return;
+    }
+    // The immersive call stage paints above modal dialogs, so a switcher
+    // opened there would trap focus while staying invisible.
+    if (event.repeat || !appReady() || anyModalOpen(ui) || document.querySelector(".call-expanded--immersive")) return;
+    consumeKeystrokEvent(event);
+    ui.showQuickSwitcher.value = true;
+  }
+
   function bindChatKeystrokShortcuts() {
     const chatKeystrok = createKeystrok();
     keystrok.current = chatKeystrok;
+    // keystrok has no "mod" alias; Ctrl+K on macOS is delete-to-end-of-line.
+    const quickSwitcherShortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "meta+k" : "ctrl+k";
     chatKeystrok
+      .bind(quickSwitcherShortcut, handleQuickSwitcherShortcut, { scope: CHAT_KEYSTROK_SCOPE })
       .bind("escape", handleChatEscape, { scope: CHAT_KEYSTROK_SCOPE })
       .bind("escape", reactionMode.handleReactionModeEscape, { scope: REACTION_MODE_KEYSTROK_SCOPE })
       .bind("up", (event) => reactionMode.handleReactionModeMove(event, "previous"), { scope: REACTION_MODE_KEYSTROK_SCOPE })

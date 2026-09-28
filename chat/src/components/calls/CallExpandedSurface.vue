@@ -657,6 +657,9 @@ function onKeydown(event: KeyboardEvent): void {
     settingsOpen.value = false;
     return;
   }
+  // Another modal dialog (e.g. the quick switcher) owns Escape while open:
+  // let it close itself instead of collapsing the call underneath it.
+  if (typeof document !== "undefined" && document.querySelector("[aria-modal='true']")) return;
   // The dock is non-modal but still a layer the user opened on top of the
   // stage; Escape closes it before it collapses the call.
   if (dockOpen.value) {

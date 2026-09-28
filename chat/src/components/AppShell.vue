@@ -3,6 +3,7 @@ import { onBeforeUnmount } from "vue";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import CallAudioSink from "@/components/calls/CallAudioSink.vue";
+import QuickSwitcherDialog from "@/components/modals/QuickSwitcherDialog.vue";
 import { useChatAppController } from "@/shell/chat-app-controller";
 import { appController } from "@/stores/app-controller";
 
@@ -54,6 +55,7 @@ onBeforeUnmount(() => {
   -->
   <template v-else>
     <CallAudioSink />
+    <QuickSwitcherDialog :controller="controller" />
     <slot />
   </template>
 </template>

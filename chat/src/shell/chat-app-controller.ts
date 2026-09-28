@@ -344,6 +344,7 @@ export function useChatAppController() {
   useChatKeyboard({
     ui,
     keystrok,
+    appReady: () => connectionStore.appState === "ready",
     activeRightPanel,
     activeExtensionRouteKey,
     activeThreadStack,
