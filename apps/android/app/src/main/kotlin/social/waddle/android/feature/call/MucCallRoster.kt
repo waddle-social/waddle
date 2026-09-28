@@ -58,7 +58,8 @@ private data class LiveParticipant(val nick: String, val jid: String?, val owned
 
 /**
  * Map LiveKit identities (full JIDs) to roster participants via the Muji
- * owner map (nick → real JID), used only on an exact identity match.
+ * owner map (nick → real JID), used only on an exact identity match —
+ * or for another device of the same account whose identity did match.
  * Identities without one degrade to their JID localpart until the next
  * presence render resolves them (web `identitiesToNicks`). One person on
  * two sessions (same label and JID) collapses to one participant.
@@ -72,11 +73,18 @@ private fun liveParticipantsOf(
         val key = fullJidIdentityKey(realJid)
         if (key.isNotEmpty()) ownerNickByIdentity[key] = nick
     }
+    // Another device of an owner-matched LIVE identity is the same
+    // account: it takes that owner's label instead of its localpart.
+    val ownerNickByBareJid = HashMap<String, String>()
+    for (identity in identities) {
+        val nick = ownerNickByIdentity[fullJidIdentityKey(identity)] ?: continue
+        ownerNickByBareJid.putIfAbsent(normalizedBareJid(identity), nick)
+    }
     val out = LinkedHashMap<Pair<String, String?>, LiveParticipant>()
     for (identity in identities) {
         val key = fullJidIdentityKey(identity)
         if (key.isEmpty()) continue
-        val ownerNick = ownerNickByIdentity[key]
+        val ownerNick = ownerNickByIdentity[key] ?: ownerNickByBareJid[normalizedBareJid(identity)]
         val participant = LiveParticipant(
             nick = ownerNick ?: localpartOf(identity),
             jid = normalizedBareJid(identity).takeIf { '@' in it },

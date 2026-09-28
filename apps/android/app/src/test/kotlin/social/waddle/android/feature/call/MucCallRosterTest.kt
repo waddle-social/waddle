@@ -303,6 +303,33 @@ class MucCallRosterTest {
     }
 
     @Test
+    fun aSecondDeviceTakesTheOwnerNickEvenWhenItDiffersFromTheLocalpart() {
+        val presence = MucPresenceRosterView(
+            participants = emptyMap(),
+            owners = mapOf(room to mapOf("ally" to "alice@x.test/phone")),
+            raisedHands = mapOf(room to setOf("ally")),
+            mutedNicks = emptyMap(),
+        )
+        val identities = listOf("alice@x.test/web", "alice@x.test/phone", "carol@x.test/web")
+        for (order in listOf(identities, identities.reversed())) {
+            val roster = mucRosterOf(
+                room,
+                presence,
+                LiveRosterView(participants = mapOf(room to order), leavingRooms = emptyMap()),
+            ).sortedBy { it.nick }
+
+            assertEquals(
+                listOf(
+                    MucRosterEntry("ally", handRaised = true, muted = false, jid = "alice@x.test"),
+                    // No owner match for this account: localpart fallback.
+                    MucRosterEntry("carol", handRaised = false, muted = false, jid = "carol@x.test"),
+                ),
+                roster,
+            )
+        }
+    }
+
+    @Test
     fun storeSnapshotsDedupeAndNormalizeIdentities() {
         val store = MucCallLiveParticipantsStore()
         store.setParticipants(room, listOf("Alice@Waddle.Test/web", "alice@waddle.test/web", ""))
