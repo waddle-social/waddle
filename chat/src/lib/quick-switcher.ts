@@ -66,13 +66,19 @@ const PAGE_ENTRIES: readonly QuickSwitcherEntry[] = ([
   target: { kind: "page", page },
 }));
 
-/** Rooms by waddle, then group chats, DMs (newest first), contacts without a DM, and pages. */
+/**
+ * Rooms by waddle, then group chats, account DMs (newest first), contacts
+ * without a DM, and pages. MUC private chats are left out: a room nick is not
+ * a person we know by JID (#1256), and a nick like `alice@example.com` would
+ * otherwise outrank the real account.
+ */
 export function buildQuickSwitcherEntries(sources: QuickSwitcherSources): QuickSwitcherEntry[] {
+  const accountConversations = sources.conversations.filter((conversation) => !conversation.mucPm);
   return [
     ...channelEntries(sources),
     ...sources.groupDms.map(groupDmEntry),
-    ...sources.conversations.map(conversationEntry),
-    ...contactEntries(sources.contacts, sources.conversations),
+    ...accountConversations.map(conversationEntry),
+    ...contactEntries(sources.contacts, accountConversations),
     ...PAGE_ENTRIES,
   ];
 }
@@ -121,14 +127,12 @@ function conversationEntry(conversation: DmConversation): QuickSwitcherEntry {
   };
 }
 
-/** Roster contacts with no account DM yet; a MUC private chat is not that person. */
+/** Roster contacts with no account DM yet. */
 function contactEntries(
   contacts: readonly RosterContact[],
   conversations: readonly DmConversation[],
 ): QuickSwitcherEntry[] {
-  const withConversation = new Set(
-    conversations.filter((conversation) => !conversation.mucPm).map((conversation) => bareJidKey(conversation.peerJid)),
-  );
+  const withConversation = new Set(conversations.map((conversation) => bareJidKey(conversation.peerJid)));
   return contacts
     .filter((contact) => !withConversation.has(bareJidKey(contact.jid)))
     .map((contact): QuickSwitcherEntry => ({

@@ -81,21 +81,32 @@ describe("buildQuickSwitcherEntries", () => {
     expect(entries[0]).toMatchObject({ unread: 3, mentionsMe: true });
   });
 
-  test("lists a contact once, matching an existing DM case-insensitively, but not a MUC private chat", () => {
+  test("lists a contact once, matching an existing DM case-insensitively", () => {
     const entries = build({
       channels: [],
-      conversations: [
-        conversation("Bob@Example.com", "bob"),
-        conversation("room@muc.example.com/carol", "carol (room)", { mucPm: true }),
-      ],
+      conversations: [conversation("Bob@Example.com", "bob")],
       contacts: [contact("bob@example.com", "bob", "Bob B."), contact("carol@example.com", "carol")],
     });
     const people = entries.filter((entry) => entry.target.kind === "dm");
-    expect(people.map((entry) => entry.id)).toEqual([
-      "dm:Bob@Example.com",
-      "dm:room@muc.example.com/carol",
+    expect(people.map((entry) => entry.id)).toEqual(["dm:Bob@Example.com", "contact:carol@example.com"]);
+  });
+
+  test("leaves out MUC private chats so a room nick cannot pose as an account (#1256)", () => {
+    const entries = build({
+      channels: [],
+      conversations: [
+        conversation("lobby@muc.example.com/alice@example.com", "alice@example.com (lobby)", { mucPm: true, unreadCount: 1 }),
+        conversation("alice@example.com", "alice"),
+      ],
+      contacts: [contact("alice@example.com", "alice"), contact("carol@example.com", "carol")],
+    });
+    expect(entries.filter((entry) => entry.target.kind === "dm").map((entry) => entry.id)).toEqual([
+      "dm:alice@example.com",
       "contact:carol@example.com",
     ]);
+    for (const query of ["alice@example.com", "alice"]) {
+      expect(rankQuickSwitcherEntries(entries, query)[0]?.target).toEqual({ kind: "dm", peerJid: "alice@example.com" });
+    }
   });
 
   test("names contacts by roster name, then username, sorted by name", () => {
