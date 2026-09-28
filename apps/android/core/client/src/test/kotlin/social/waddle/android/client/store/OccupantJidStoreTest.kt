@@ -89,8 +89,9 @@ class OccupantJidStoreTest {
     }
 
     @Test
-    fun `own rows and 1-1 rows resolve without a stamp`() {
-        assertEquals("me@waddle.test", authorBareJidOf(liveRow("$room/me", mine = true), "Me@waddle.test/phone"))
+    fun `unstamped own room rows stay unknown while 1-1 rows resolve without a stamp`() {
+        // The mine flag alone (a nick match) never earns our face.
+        assertNull(authorBareJidOf(liveRow("$room/me", mine = true), "Me@waddle.test/phone"))
         val dm = TimelineItem(
             id = "d1",
             conversationJid = "bob@waddle.test",
@@ -277,11 +278,33 @@ class OccupantJidStoreTest {
     }
 
     @Test
-    fun `only an undelayed live reflection from our nick resolves to us without a stamp`() {
+    fun `only a self-presence-verified undelayed reflection is stamped as us`() {
         val own = "me@waddle.test"
-        assertEquals(own, authorBareJidOf(liveRow("$room/me", mine = true), own))
-        val delayedHistory = liveRow("$room/me", mine = true).copy(timestamp = "2026-07-01T10:00:00Z")
-        assertNull(authorBareJidOf(delayedHistory, own))
+        val occupants = OccupantJidStore()
+        val store = TimelineStore(actualOwnNickIn = occupants::ownNickIn)
+        store.setOwnBareJid(own)
+        fun live(id: String, nick: String, timestamp: String? = null) = testMessage(
+            id = id,
+            stanzaId = id,
+            from = "$room/$nick",
+            to = own,
+            messageType = "groupchat",
+            isMuc = true,
+            timestamp = timestamp,
+        )
+        // Fresh session, no self-presence yet: someone holding our
+        // configured nick "me" must not get our face.
+        store.onLiveMessage(live("early", "me"))
+        occupants.onPresence(
+            testPresence(from = "$room/me", mucRole = WaddleMucRole.PARTICIPANT, mucStatusCodes = listOf(110u)),
+        )
+        store.onLiveMessage(live("ours", "me"))
+        store.onLiveMessage(live("history", "me", timestamp = "2026-07-01T10:00:00Z"))
+
+        val rows = store.timeline(room).value.associateBy { it.id }
+        assertNull(authorBareJidOf(rows.getValue("early"), own))
+        assertEquals(own, authorBareJidOf(rows.getValue("ours"), own))
+        assertNull(authorBareJidOf(rows.getValue("history"), own))
     }
 
     @Test

@@ -7,6 +7,7 @@ import social.waddle.android.client.bareJid
 import social.waddle.android.client.conversationKeyOf
 import social.waddle.android.client.liveOwnNickOf
 import social.waddle.android.client.normalizedBareJid
+import social.waddle.android.client.resourcepart
 import social.waddle.android.client.stripReplyFallback
 import social.waddle.android.client.withLiveAuthor
 import social.waddle.client.ffi.WaddleArchivedMessage
@@ -104,6 +105,13 @@ class TimelineStore(
      */
     fun onLiveMessage(message: WaddleMessage, authorJid: String? = null): Boolean {
         val isGroupchat = message.isMuc || message.messageType == "groupchat"
+        // The avatar identity of this row, fixed at ingest: the disclosed
+        // occupant JID, else — for OUR undelayed reflection only, proven
+        // by the room's own self-presence — the account. The configured
+        // nick alone never earns our face (see [verifiedOwnReflection]).
+        val stamp = authorJid ?: ownBareJid?.let(::normalizedBareJid)?.takeIf {
+            isGroupchat && verifiedOwnReflection(message)
+        }
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
             ownNick = if (isGroupchat) liveOwnNickOf(message.from, ownNick, actualOwnNickIn) else ownNick,
@@ -130,11 +138,24 @@ class TimelineStore(
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Live(message),
-                authorJid = authorJid,
+                authorJid = stamp,
             ),
             isGroupchat = isGroupchat,
             initialTombstone = null,
         )
+    }
+
+    /**
+     * An undelayed room message from the nick the room's self-presence
+     * (XEP-0045 110/210) says is ours right now. Without that presence
+     * (e.g. right after a fresh session) the configured nick proves
+     * nothing: someone else may hold it.
+     */
+    private fun verifiedOwnReflection(message: WaddleMessage): Boolean {
+        if (message.timestamp != null) return false
+        val from = message.from ?: return false
+        val nick = resourcepart(from) ?: return false
+        return actualOwnNickIn(bareJid(from)) == nick
     }
 
     fun onArchivedMessage(message: WaddleArchivedMessage) {

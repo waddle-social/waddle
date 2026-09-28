@@ -103,12 +103,11 @@ class OccupantJidStore {
 /**
  * The real bare JID behind a timeline row's author, or `null` when it
  * is unknown (the row then renders initials — a wrong face is worse).
- * Room rows resolve through the JID stamped when stored
- * ([TimelineItem.authorJid]) — even over the nick-based mine flag. An
- * unstamped room row is the account only when it is a confirmed own
- * send: an undelayed live reflection from our nick while we hold it.
- * Delayed history and archive rows that merely match our current nick
- * may be a previous holder's, so they stay unknown. 1:1 rows are the
+ * Room rows resolve ONLY through the JID stamped when stored
+ * ([TimelineItem.authorJid]) — never the nick-based mine flag. Our own
+ * reflections are stamped at ingest only when the room's self-presence
+ * verified the nick; delayed history, archive rows and anything that
+ * merely matches our configured nick stay unknown. 1:1 rows are the
  * account or the sender.
  */
 fun authorBareJidOf(item: TimelineItem, ownBareJid: String?): String? {
@@ -118,10 +117,7 @@ fun authorBareJidOf(item: TimelineItem, ownBareJid: String?): String? {
     }
     val own = ownBareJid?.let(::normalizedBareJid)
     // Room rows: the stored stamp wins over the nick-based mine flag.
-    if (isGroupchat) {
-        val confirmedOwnSend = item.isMine && item.source is TimelineSource.Live && item.timestamp == null
-        return item.authorJid ?: own?.takeIf { confirmedOwnSend }
-    }
+    if (isGroupchat) return item.authorJid
     if (item.isMine && own != null) return own
     return item.from?.let(::normalizedBareJid)
 }
