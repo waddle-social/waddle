@@ -381,7 +381,7 @@ pub(crate) async fn publish_avatar_iqs<F, Fut>(
     width: u32,
     height: u32,
     mut send: F,
-) -> Result<(), WaddleError>
+) -> Result<String, WaddleError>
 where
     F: FnMut(Element) -> Fut,
     Fut: Future<Output = Result<Element, WaddleError>>,
@@ -397,13 +397,13 @@ where
     send(build_publish_avatar_data_iq(&item_id, data)).await?;
     let info = AvatarPublishInfo {
         bytes,
-        id: item_id,
+        id: item_id.clone(),
         mime_type: mime_type.to_string(),
         width: (width > 0).then_some(width),
         height: (height > 0).then_some(height),
     };
     send(build_publish_avatar_metadata_iq(&info)).await?;
-    Ok(())
+    Ok(item_id)
 }
 
 // ── Exported verbs ───────────────────────────────────────────────────
@@ -434,7 +434,7 @@ impl WaddleClient {
         mime_type: String,
         width: u32,
         height: u32,
-    ) -> Result<(), WaddleError> {
+    ) -> Result<String, WaddleError> {
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
         publish_avatar_iqs(&data, &mime_type, width, height, |iq| {
             let handle = handle.clone();

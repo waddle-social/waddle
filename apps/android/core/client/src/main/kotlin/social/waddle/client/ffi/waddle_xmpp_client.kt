@@ -1511,7 +1511,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 59372) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 15067) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 4753) {
@@ -2761,7 +2761,7 @@ public interface WaddleClientInterface {
      * pipelines always encode PNG) and dimensions must fit
      * `xs:unsignedShort`, else `InvalidArgument`.
      */
-    suspend fun `publishAvatar`(`data`: kotlin.ByteArray, `mimeType`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt)
+    suspend fun `publishAvatar`(`data`: kotlin.ByteArray, `mimeType`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt): kotlin.String
 
     /**
      * XEP-0107: publish a user mood. `kind` must be one of the 84
@@ -5201,7 +5201,7 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishAvatar`(`data`: kotlin.ByteArray, `mimeType`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt) {
+    override suspend fun `publishAvatar`(`data`: kotlin.ByteArray, `mimeType`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt) : kotlin.String {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_avatar(
@@ -5209,12 +5209,11 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
                 FfiConverterByteArray.lower(`data`),FfiConverterString.lower(`mimeType`),FfiConverterUInt.lower(`width`),FfiConverterUInt.lower(`height`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-
+        { FfiConverterString.lift(it) },
         // Error FFI converter
         WaddleException.ErrorHandler,
     )

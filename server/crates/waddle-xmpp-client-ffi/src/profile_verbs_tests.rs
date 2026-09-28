@@ -96,7 +96,7 @@ mod xep0084 {
         mime: &str,
         width: u32,
         height: u32,
-    ) -> (Result<(), WaddleError>, Vec<Element>) {
+    ) -> (Result<String, WaddleError>, Vec<Element>) {
         let sent = RefCell::new(Vec::new());
         let result = publish_avatar_iqs(data, mime, width, height, |iq| {
             sent.borrow_mut().push(iq);
@@ -110,11 +110,13 @@ mod xep0084 {
     async fn publish_sends_data_then_metadata_at_sha1_item_id() {
         let data = b"hello".as_slice();
         let (result, sent) = record_publish(data, "image/png", 64, 48).await;
-        result.expect("publish succeeds");
+        let published_id = result.expect("publish succeeds");
         assert_eq!(sent.len(), 2);
 
         // First on the wire MUST be the data item (XEP-0084 §3.2).
         let item_id = compute_avatar_item_id(data);
+        // The caller gets the published item id, for §4.2 known-id revalidation.
+        assert_eq!(published_id, item_id);
         let data_item = publish_item(&sent[0], NS_AVATAR_DATA);
         assert_eq!(data_item.attr("id"), Some(item_id.as_str()));
         assert_eq!(

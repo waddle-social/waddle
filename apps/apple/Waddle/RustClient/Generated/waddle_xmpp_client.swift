@@ -1208,7 +1208,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * pipelines always encode PNG) and dimensions must fit
      * `xs:unsignedShort`, else `InvalidArgument`.
      */
-    func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32) async throws
+    func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32) async throws  -> String
 
     /**
      * XEP-0107: publish a user mood. `kind` must be one of the 84
@@ -3332,7 +3332,7 @@ open func publishActivity(general: String, specific: String?, text: String?)asyn
      * pipelines always encode PNG) and dimensions must fit
      * `xs:unsignedShort`, else `InvalidArgument`.
      */
-open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32)async throws   {
+open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32)async throws  -> String  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -3341,10 +3341,10 @@ open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UIn
                     FfiConverterData.lower(data),FfiConverterString.lower(mimeType),FfiConverterUInt32.lower(width),FfiConverterUInt32.lower(height)
                 )
             },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -17541,7 +17541,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 59372) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 15067) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 4753) {
