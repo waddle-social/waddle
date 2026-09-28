@@ -64,6 +64,15 @@ function mergeMissingThreadMetadata(
   );
   if (ids.id !== next.id || !sameStringList(ids.wireIds, next.wireIds)) next = ids;
 
+  // The row may only take the archive's real JID when the room itself vouches
+  // that both copies are one message (same room-assigned stanza-id). A match
+  // made on a sender-chosen id (origin-id) could be a later holder of the
+  // same nick, who must never lend their JID to an earlier row.
+  const realJidVouched = !!canonicalRoomMessage
+    && (canonicalRoomMessage === existing
+      || (existing.stanzaId === canonicalRoomMessage.stanzaId
+        && !!existing.stanzaIdBy
+        && barePeerJid(existing.stanzaIdBy).toLowerCase() === barePeerJid(canonicalRoomMessage.stanzaIdBy ?? "").toLowerCase()));
   if (canonicalRoomMessage) {
     assign({
       stanzaId: canonicalRoomMessage.stanzaId,
@@ -78,7 +87,7 @@ function mergeMissingThreadMetadata(
       ...(canonicalRoomMessage.correctionTargetId
         ? { correctionTargetId: canonicalRoomMessage.correctionTargetId }
         : {}),
-      ...(canonicalRoomMessage.authorRealJid
+      ...(canonicalRoomMessage.authorRealJid && realJidVouched
         ? {
             authorJid: canonicalRoomMessage.authorRealJid,
             authorRealJid: canonicalRoomMessage.authorRealJid,

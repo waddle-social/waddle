@@ -1,6 +1,7 @@
 import { applyDeliveryEvent } from "@/lib/xmpp/delivery-lifecycle";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { mergeMessageIds } from "@/lib/message-ids";
+import { barePeerJid } from "@/lib/xmpp/jid";
 import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { consumeReconciledEchoIds, findLiveMergeTarget } from "@/lib/messaging/self-echo";
@@ -21,6 +22,30 @@ export interface LiveInsertResult {
   messages: TimelineMessage[];
   /** `false` when the message reconciled into an existing row instead. */
   appended: boolean;
+}
+
+/**
+ * Whether `incoming` is the room archive's copy of `existing`: an
+ * archive-stamped row carrying the same XEP-0359 stanza-id, assigned by
+ * the same room. Only such a copy may vouch for who sent the row.
+ */
+function isVouchedArchiveTwin(existing: TimelineMessage, incoming: TimelineMessage): boolean {
+  if (incoming.createdAtSource !== "archive") return false;
+  if (!existing.stanzaId || !existing.stanzaIdBy || !incoming.stanzaId || !incoming.stanzaIdBy) return false;
+  return existing.stanzaId === incoming.stanzaId
+    && barePeerJid(existing.stanzaIdBy).toLowerCase() === barePeerJid(incoming.stanzaIdBy).toLowerCase();
+}
+
+function keepAuthorField(
+  updated: TimelineMessage,
+  existing: TimelineMessage,
+  incoming: TimelineMessage,
+  field: "authorAvatarJid" | "authorRealJid",
+  vouched: boolean,
+): void {
+  const value = existing[field] ?? (vouched ? incoming[field] : undefined);
+  if (value) updated[field] = value;
+  else delete updated[field];
 }
 
 /**
@@ -49,9 +74,13 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
     createdAt: authoritativeTimestamp.createdAt,
     createdAtSource: authoritativeTimestamp.createdAtSource,
   };
-  // The first avatar attribution wins: a redelivered copy (catch-up
-  // re-emission, SM replay) arrives after the nick may have changed hands.
-  if (existing.authorAvatarJid) updated.authorAvatarJid = existing.authorAvatarJid;
+  // Author identity is never lent across a twin match made on sender-chosen
+  // ids (origin-id, client id): a later holder of the same nick can reuse
+  // them. The first attribution wins; a missing one is filled only from an
+  // archive copy vouched by the same room-assigned stanza-id.
+  const vouched = isVouchedArchiveTwin(existing, incoming);
+  keepAuthorField(updated, existing, incoming, "authorAvatarJid", vouched);
+  keepAuthorField(updated, existing, incoming, "authorRealJid", vouched);
   if (!Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
     delete updated.linkPreviews;
   }
