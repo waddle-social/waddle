@@ -34,7 +34,6 @@ export interface QuickSwitcherEntry {
   unread: number;
   mentionsMe: boolean;
   target: QuickSwitcherTarget;
-  avatarUrl?: string | null;
   forum?: boolean;
 }
 
@@ -123,7 +122,6 @@ function conversationEntry(conversation: DmConversation): QuickSwitcherEntry {
     unread: conversation.unreadCount,
     mentionsMe: false,
     target: { kind: "dm", peerJid: conversation.peerJid },
-    avatarUrl: conversation.peerAvatarUrl ?? null,
   };
 }
 
