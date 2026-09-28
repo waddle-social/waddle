@@ -35,6 +35,16 @@ class OccupantJidStore {
         return jids.map { rooms -> rooms[room].orEmpty() }.distinctUntilChanged()
     }
 
+    /** room → OUR actual occupant nick (self-presence, status 110). */
+    private val ownNicks = HashMap<String, String>()
+
+    /**
+     * Our actual nick in [roomJid] per the room's self-presence (XEP-0045
+     * status 110, including a 210 room-assigned rename), or `null` when
+     * we have none this session.
+     */
+    fun ownNickIn(roomJid: String): String? = synchronized(ownNicks) { ownNicks[normalizedBareJid(roomJid)] }
+
     /** Who is behind `roomJid/nick` right now, if known. */
     fun jidFor(roomJid: String, nick: String): String? = jids.value[normalizedBareJid(roomJid)]?.get(nick)
 
@@ -43,6 +53,7 @@ class OccupantJidStore {
         val nick = resourcepart(from) ?: return
         val realJid = presence.mucJid?.let(::normalizedBareJid)?.takeIf { '@' in it }
         val room = normalizedBareJid(from)
+        if (SELF_PRESENCE in presence.mucStatusCodes) trackOwnNick(room, nick, presence.presenceType)
         when {
             realJid != null -> _jids.update { rooms ->
                 val known = rooms[room].orEmpty()
@@ -67,10 +78,25 @@ class OccupantJidStore {
 
     fun clear() {
         _jids.value = emptyMap()
+        synchronized(ownNicks) { ownNicks.clear() }
+    }
+
+    private fun trackOwnNick(room: String, nick: String, presenceType: String) {
+        synchronized(ownNicks) {
+            if (presenceType !in NOT_AVAILABLE) {
+                ownNicks[room] = nick
+            } else if (ownNicks[room] == nick) {
+                // We left (or are changing nick; the new self-presence follows).
+                ownNicks -= room
+            }
+        }
     }
 
     private companion object {
         val NOT_AVAILABLE = setOf("unavailable", "error")
+
+        /** XEP-0045 status 110: this presence is about the recipient itself. */
+        const val SELF_PRESENCE: UShort = 110u
     }
 }
 

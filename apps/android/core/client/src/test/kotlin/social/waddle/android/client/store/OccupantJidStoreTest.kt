@@ -283,4 +283,24 @@ class OccupantJidStoreTest {
         val delayedHistory = liveRow("$room/me", mine = true).copy(timestamp = "2026-07-01T10:00:00Z")
         assertNull(authorBareJidOf(delayedHistory, own))
     }
+
+    @Test
+    fun `self-presence tracks our actual nick and a fresh session forgets it`() {
+        val store = OccupantJidStore()
+        store.onPresence(
+            testPresence(from = "$room/me", mucRole = WaddleMucRole.PARTICIPANT, mucStatusCodes = listOf(110u)),
+        )
+        assertEquals("me", store.ownNickIn("ROOM@muc.waddle.test"))
+        // The room renames us (210).
+        store.onPresence(
+            testPresence(from = "$room/me2", mucRole = WaddleMucRole.PARTICIPANT, mucStatusCodes = listOf(110u, 210u)),
+        )
+        assertEquals("me2", store.ownNickIn(room))
+        // Someone else's presence never moves it.
+        store.onPresence(testPresence(from = "$room/me", mucRole = WaddleMucRole.PARTICIPANT))
+        assertEquals("me2", store.ownNickIn(room))
+
+        store.clear()
+        assertNull(store.ownNickIn(room))
+    }
 }

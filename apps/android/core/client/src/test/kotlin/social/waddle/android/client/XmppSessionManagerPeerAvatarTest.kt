@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,6 +16,7 @@ import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.store.authorBareJidOf
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleException
+import social.waddle.client.ffi.WaddleMucRole
 
 /** Peer avatars end to end: lazy fetch, AvatarChanged, reconnect, authors. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -273,6 +275,81 @@ class XmppSessionManagerPeerAvatarTest {
 
         assertEquals(alice, harness.manager.authorOf("s1"))
         assertEquals("bob@waddle.test", harness.manager.authorOf("s2"))
+        harness.manager.logout()
+    }
+
+    private fun XmppSessionManager.row(id: String) = timelineStore.timeline(room).value.single { it.id == id }
+
+    @Test
+    fun `a room-assigned nick decides our live rows, not the configured one`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        // XEP-0045 210: the room renamed us; someone else holds our configured nick.
+        harness.factory.emit(
+            WaddleClientEvent.Presence(
+                testPresence(
+                    from = "$room/icepuma2",
+                    mucJid = "icepuma@waddle.test/android",
+                    mucRole = WaddleMucRole.PARTICIPANT,
+                    mucStatusCodes = listOf(110u, 210u),
+                ),
+            ),
+        )
+        harness.factory.emit(
+            WaddleClientEvent.Presence(
+                testPresence(
+                    from = "$room/icepuma",
+                    mucJid = "peer@waddle.test/web",
+                    mucRole = WaddleMucRole.PARTICIPANT,
+                ),
+            ),
+        )
+        harness.factory.emit(roomMessage("p1", "icepuma"))
+        harness.factory.emit(roomMessage("o1", "icepuma2"))
+        runCurrent()
+
+        assertFalse(harness.manager.row("p1").isMine)
+        assertEquals("peer@waddle.test", harness.manager.authorOf("p1"))
+        assertTrue(harness.manager.row("o1").isMine)
+        assertEquals("icepuma@waddle.test", harness.manager.authorOf("o1"))
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `without disclosed JIDs the actual nick alone decides ownership`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.factory.emit(
+            WaddleClientEvent.Presence(
+                testPresence(
+                    from = "$room/icepuma2",
+                    mucRole = WaddleMucRole.PARTICIPANT,
+                    mucStatusCodes = listOf(110u, 210u),
+                ),
+            ),
+        )
+        harness.factory.emit(roomMessage("p1", "icepuma"))
+        harness.factory.emit(roomMessage("o1", "icepuma2"))
+        runCurrent()
+
+        assertFalse(harness.manager.row("p1").isMine)
+        assertNull(harness.manager.authorOf("p1"))
+        assertTrue(harness.manager.row("o1").isMine)
+        assertEquals("icepuma@waddle.test", harness.manager.authorOf("o1"))
+
+        // Our unavailable self-presence ends the assignment.
+        harness.factory.emit(
+            WaddleClientEvent.Presence(
+                testPresence(
+                    from = "$room/icepuma2",
+                    presenceType = "unavailable",
+                    mucRole = WaddleMucRole.NONE,
+                    mucStatusCodes = listOf(110u),
+                ),
+            ),
+        )
+        runCurrent()
+        assertNull(harness.manager.occupantJidStore.ownNickIn(room))
         harness.manager.logout()
     }
 

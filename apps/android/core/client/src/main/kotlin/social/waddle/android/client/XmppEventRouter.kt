@@ -105,17 +105,24 @@ internal class XmppEventRouter(
         // or create DM-list entries.
         val hasContent = message.body != null
         if (!isMutation && hasContent) persistDmRecency(message)
-        val newlyInserted = stores.timelineStore.onLiveMessage(message, liveAuthorJidOf(message))
+        val authorJid = liveAuthorJidOf(message)
+        val newlyInserted = stores.timelineStore.onLiveMessage(message, authorJid)
         if (!isMutation && hasContent) {
             stores.dmStore.onChatMessage(activeSession.ownBareJid, message)
         }
+        val isGroupchat = message.isMuc || message.messageType == "groupchat"
+        val configuredNick = activeSession.ownBareJid?.substringBefore('@')
         val key = conversationKeyOf(
             ownBareJid = activeSession.ownBareJid,
-            ownNick = activeSession.ownBareJid?.substringBefore('@'),
+            ownNick = if (isGroupchat) {
+                liveOwnNickOf(message.from, configuredNick, stores.occupantJidStore::ownNickIn)
+            } else {
+                configuredNick
+            },
             from = message.from,
             to = message.to,
-            isGroupchat = message.isMuc || message.messageType == "groupchat",
-        ) ?: return
+            isGroupchat = isGroupchat,
+        )?.withLiveAuthor(isGroupchat, authorJid, activeSession.ownBareJid) ?: return
         trackChatState(key, message)
         if (message.body != null) recordActivity(key, message, newlyInserted)
     }

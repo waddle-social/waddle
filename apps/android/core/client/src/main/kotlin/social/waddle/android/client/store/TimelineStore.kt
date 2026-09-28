@@ -5,8 +5,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import social.waddle.android.client.bareJid
 import social.waddle.android.client.conversationKeyOf
+import social.waddle.android.client.liveOwnNickOf
 import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.stripReplyFallback
+import social.waddle.android.client.withLiveAuthor
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSafetyScores
@@ -55,6 +57,8 @@ import java.time.OffsetDateTime
 class TimelineStore(
     private val maxItemsPerConversation: Int = MAX_ITEMS_PER_CONVERSATION,
     private val maxPendingMutationsPerConversation: Int = MAX_PENDING_MUTATIONS,
+    /** Our actual occupant nick per room (self-presence); see [liveOwnNickOf]. */
+    private val actualOwnNickIn: (roomJid: String) -> String? = { null },
 ) {
     private val lock = Any()
     private val flows = HashMap<String, MutableStateFlow<List<TimelineItem>>>()
@@ -102,11 +106,11 @@ class TimelineStore(
         val isGroupchat = message.isMuc || message.messageType == "groupchat"
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
-            ownNick = ownNick,
+            ownNick = if (isGroupchat) liveOwnNickOf(message.from, ownNick, actualOwnNickIn) else ownNick,
             from = message.from,
             to = message.to,
             isGroupchat = isGroupchat,
-        ) ?: return false
+        )?.withLiveAuthor(isGroupchat, authorJid, ownBareJid) ?: return false
         mutationOf(message, isGroupchat = isGroupchat, mine = key.isMine)?.let { mutation ->
             applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
             return false
