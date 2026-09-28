@@ -66,23 +66,18 @@ describe("search hits resolve avatars like their timeline rows", () => {
     expect(authorAvatarJid(byArchive.get("theirs")!, SELF_FULL)).toBe("bob@example.com");
   });
 
-  test("a MUC-PM hit uses the occupant mapping in effect when it was sent, not the nick's current holder", async () => {
-    // Record Alice behind "sam", then (later on the local clock) Bob.
-    occupantJidDirectory.record(ROOM, "sam", "alice@example.com");
-    await Bun.sleep(5);
-    const sentByAlice = new Date().toISOString();
-    await Bun.sleep(5);
+  test("a MUC-PM hit never resolves to the nick's current holder: initials", async () => {
+    // Alice sent this as "sam"; Bob holds "sam" now.
     occupantJidDirectory.record(ROOM, "sam", "bob@example.com");
-
     const xmpp: MamWasmClient = {
       search_dm_history: async () => page([
-        archived({ mam_id: "pm", from: `${ROOM}/sam`, to: SELF, timestamp: sentByAlice }),
+        archived({ mam_id: "pm", from: `${ROOM}/sam`, to: SELF, timestamp: "2026-09-27T10:00:00Z" }),
       ]),
     };
     const [hit] = await pager(xmpp).searchDmMessages(`${ROOM}/sam`, "matching");
 
     expect(hit?.authorOccupantJid).toBe(`${ROOM}/sam`);
-    expect(authorAvatarJid(hit!, SELF_FULL)).toBe("alice@example.com");
+    expect(authorAvatarJid(hit!, SELF_FULL)).toBeNull();
   });
 
   test("room hits carry the archive real JID, which wins over a reused nick", async () => {
@@ -104,7 +99,7 @@ describe("search hits resolve avatars like their timeline rows", () => {
     const byArchive = new Map(results.map((result) => [result.archiveId, result]));
 
     expect(authorAvatarJid(byArchive.get("room-hit")!, SELF_FULL)).toBe("carol@example.com");
-    // No real JID and no mapping when it was sent: initials, never a guess.
+    // No real JID and no ingest stamp: initials, never a guess.
     expect(authorAvatarJid(byArchive.get("anon-hit")!, SELF_FULL)).toBeNull();
   });
 });

@@ -944,7 +944,7 @@ export class BrowserXmppClient {
   onMessageAcked(hook: (meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.events.on("messageAcked", hook); }
   onMessageDeliveryFailed(hook: (meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
   onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
-  onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void): () => void { return this.events.on("statusHook", hook); }
+  onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
   onSendEnqueued(hook: (info: {
     kind: "room" | "dm";
     reason: "offline" | "disposed" | "destroying" | "no-client" | "reconnecting" | "not-ready";

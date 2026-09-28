@@ -21,7 +21,6 @@ function fakeClient() {
     addOccupantRealJidHandler: (handler) => on(occupants, handler),
     addOwnProfilePublishedHandler: (handler) => on(ownProfile, handler),
     addOwnOccupantNickHandler: () => () => undefined,
-    onStatus: () => () => undefined,
   };
   return {
     client,
@@ -84,18 +83,6 @@ describe("avatar binding", () => {
     release();
     for (const fire of timers.splice(0)) fire();
     expect(user.forgotten).toEqual(["alice@example.com"]);
-  });
-
-  test("a non-online status marks a presence gap that a fresh session turns into unknown holders", () => {
-    const directory = new OccupantJidDirectory();
-    const binding = createAvatarBinding(new AvatarStore(), directory);
-    const statusHooks: Array<(status: { state: "online" | "offline" | "reconnecting" | "error"; detail: string }) => void> = [];
-    const user = fakeClient();
-    binding.bind({ ...user.client, onStatus: (hook) => { statusHooks.push(hook); return () => undefined; } });
-    user.emitOccupant("room@muc.example.com", "sam", "alice@example.com");
-    for (const hook of statusHooks) hook({ state: "reconnecting", detail: "" });
-    directory.beginFreshSession();
-    expect(directory.lookup("room@muc.example.com", "sam")).toBeNull();
   });
 });
 

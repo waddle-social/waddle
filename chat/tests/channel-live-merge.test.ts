@@ -887,29 +887,26 @@ describe("live row author stamping (nick reuse)", () => {
     }
   });
 
-  test("an unseen catch-up row sent before the handover is attributed to the earlier occupant", async () => {
+  test("an unseen catch-up or replayed row is never stamped with the nick's current holder", async () => {
     const { occupantJidDirectory, authorAvatarJid } = await import("../src/lib/avatars/author-jid");
     occupantJidDirectory.clear();
     try {
       const h = harness();
-      occupantJidDirectory.record("room@muc.example.com", "sam", "alice@example.com");
-      await Bun.sleep(5);
-      const sentByAlice = new Date().toISOString();
-      await Bun.sleep(5);
+      // Alice held "sam" when these were sent; Bob holds it by the time they arrive.
       occupantJidDirectory.record("room@muc.example.com", "sam", "bob@example.com");
       h.liveMerge.handleRoomMessage(makeLive({
         id: "missed-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "sent while we were away",
-        createdAt: sentByAlice, createdAtSource: "archive",
+        createdAt: new Date().toISOString(), createdAtSource: "archive",
       }));
       h.liveMerge.handleRoomMessage(makeLive({
         id: "delayed-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "SM replay",
-        createdAt: sentByAlice, createdAtSource: "delay",
+        createdAt: new Date().toISOString(), createdAtSource: "delay",
       }));
 
       const byId = new Map(h.messages.value.map((row) => [row.id, row]));
-      expect(byId.get("missed-alice")?.authorAvatarJid).toBe("alice@example.com");
-      expect(authorAvatarJid(byId.get("missed-alice")!)).toBe("alice@example.com");
-      expect(authorAvatarJid(byId.get("delayed-alice")!)).toBe("alice@example.com");
+      expect(byId.get("missed-alice")?.authorAvatarJid).toBeUndefined();
+      expect(authorAvatarJid(byId.get("missed-alice")!)).toBeNull();
+      expect(authorAvatarJid(byId.get("delayed-alice")!)).toBeNull();
     } finally {
       occupantJidDirectory.clear();
     }

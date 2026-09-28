@@ -1,15 +1,18 @@
 /**
  * Author → real bare JID resolution for avatars.
  *
- * Sources, in order: our own JID for self-authored rows, the XEP-0313 MUC
- * archive real JID (`authorRealJid`), the occupant's real JID from live
- * XEP-0045 presence (`muc_jid`) — retained after the occupant leaves so
- * history keeps its faces — and, for 1:1 chats, the peer's own JID.
- * There is no `nick@domain` guessing: an unresolved author renders
- * initials, because initials beat a wrong face.
+ * A room row's avatar comes only from identity the row itself carries:
+ * the archive's disclosed real JID (`authorRealJid`), or the stamp
+ * (`authorAvatarJid`) put on it at arrival — an undelayed live row is
+ * pinned to the nick's current disclosed holder, our own reflections and
+ * local echoes to our JID. Anything else renders initials: a nick is
+ * never resolved later against whoever holds it then, and no timestamps
+ * or clocks are compared. 1:1 rows use the sender's own JID.
  *
- * XEP-0421 occupant ids are not surfaced by the client yet, so the
- * retained mapping is keyed by room + nick.
+ * Live occupant surfaces (typing, presence stacks, call tiles) use the
+ * current holder of a nick, tracked from XEP-0045 presence. XEP-0421
+ * occupant ids are not surfaced by the client yet, so it is keyed by
+ * room + nick.
  */
 import { shallowReactive } from "vue";
 import { barePeerJid, resourceOf } from "@/lib/xmpp/jid";
@@ -29,69 +32,38 @@ function occupantKey(roomJid: string, nick: string): string {
   return `${barePeerJid(roomJid).toLowerCase()}/${nick}`;
 }
 
-interface OccupantMapping {
-  /** `null`: the nick was held by an occupant whose real JID we cannot see. */
-  realJid: string | null;
-  /** Local clock when this holder was first seen behind the nick. */
-  since: number;
-}
-
 /**
- * Real JIDs seen behind each room occupant (room + nick), kept across
- * leaves. A nick can be reused by someone else, so the directory keeps
- * the history: live occupant surfaces read the current mapping, while a
- * past row may only use the mapping that was in effect when it was sent.
+ * The current disclosed holder of each room nick, plus our own actual
+ * occupant nick per room. Departures do not forget a holder (their
+ * already-stamped rows are unaffected either way); a JID-less holder
+ * taking the nick does.
  */
 export class OccupantJidDirectory {
-  private readonly history = shallowReactive(new Map<string, readonly OccupantMapping[]>());
-  /** When the presence stream was last seen to break, until a session outcome is known. */
-  private presenceGapSince: number | null = null;
-
-  constructor(private readonly now: () => number = () => Date.now()) {}
+  private readonly holders = shallowReactive(new Map<string, string>());
+  /** Our actual occupant nick per room (XEP-0045 self-presence; 210 may rename us). */
+  private readonly ownNicks = shallowReactive(new Map<string, string>());
 
   /**
-   * Record who holds `nick` from now on. `realJid` null means an occupant
-   * whose real JID is not disclosed: the nick's previous holder stops being
-   * its current holder, while earlier rows keep their earlier mapping.
-   * Departures are never recorded; they do not change who sent past rows.
+   * Record who holds `nick` now. `realJid` null means an occupant whose
+   * real JID is not disclosed to us: the previous holder no longer names
+   * the nick.
    */
   record(roomJid: string, nick: string, realJid: string | null): void {
     if (!roomJid || !nick) return;
-    const real = realJid === null ? null : bare(realJid);
-    if (realJid !== null && !real) return;
     const key = occupantKey(roomJid, nick);
-    const previous = this.history.get(key) ?? [];
-    const last = previous.at(-1);
-    // During a possible presence gap, a re-disclosure of the same holder is
-    // new evidence (it post-dates the gap), so it is not deduped away.
-    const lastPredatesGap = !!last && this.presenceGapSince !== null && last.since <= this.presenceGapSince;
-    if (last ? last.realJid === real && !lastPredatesGap : real === null) return;
-    this.history.set(key, [...previous, { realJid: real, since: this.now() }]);
+    const real = realJid === null ? null : bare(realJid);
+    if (real) {
+      if (this.holders.get(key) !== real) this.holders.set(key, real);
+    } else if (realJid === null) {
+      this.holders.delete(key);
+    }
   }
 
-  /** Reactive: who is behind `nick` right now (the latest mapping). */
+  /** Reactive: the disclosed real JID currently behind `nick`, if any. */
   lookup(roomJid: string | null | undefined, nick: string | null | undefined): string | null {
     if (!roomJid || !nick) return null;
-    return this.history.get(occupantKey(roomJid, nick))?.at(-1)?.realJid ?? null;
+    return this.holders.get(occupantKey(roomJid, nick)) ?? null;
   }
-
-  /**
-   * Reactive: who was behind `nick` at `atMs`. A mapping first seen after
-   * that instant never re-attributes an earlier row; no mapping yet means
-   * `null` (initials).
-   */
-  lookupAt(roomJid: string | null | undefined, nick: string | null | undefined, atMs: number): string | null {
-    if (!roomJid || !nick || !Number.isFinite(atMs)) return null;
-    const mappings = this.history.get(occupantKey(roomJid, nick)) ?? [];
-    for (let i = mappings.length - 1; i >= 0; i -= 1) {
-      const mapping = mappings[i]!;
-      if (mapping.since <= atMs) return mapping.realJid;
-    }
-    return null;
-  }
-
-  /** Our actual occupant nick per room (XEP-0045 self-presence; 210 may rename us). */
-  private readonly ownNicks = shallowReactive(new Map<string, string>());
 
   recordOwnNick(roomJid: string, nick: string | null): void {
     const room = barePeerJid(roomJid).toLowerCase();
@@ -108,50 +80,15 @@ export class OccupantJidDirectory {
   /**
    * A fresh session (no stream resumption) must rejoin every room, and a
    * nick we held may have changed hands while we were offline: forget our
-   * own nicks until the new self-presence (110) re-records them. Author
-   * history is kept for time-scoped lookups.
+   * own nicks until the new self-presence (110) re-records them.
    */
   forgetOwnNicks(): void {
     this.ownNicks.clear();
   }
 
-  /**
-   * The connection dropped: presence may stop flowing from now. The first
-   * drop of an outage is kept (later retries don't move the boundary).
-   */
-  noteDisconnect(): void {
-    this.presenceGapSince ??= this.now();
-  }
-
-  /**
-   * A session resumed (XEP-0198): the room presence stream had no gap, so
-   * every recorded holder is still accurate.
-   */
-  resumeSession(): void {
-    this.presenceGapSince = null;
-  }
-
-  /**
-   * A fresh session: presence was not delivered while we were offline, so
-   * any nick may have changed hands unseen. From the disconnect onward
-   * every nick's holder is unknown until new presence re-establishes it;
-   * rows sent before the disconnect keep their holder.
-   */
-  beginFreshSession(): void {
-    const since = this.presenceGapSince ?? this.now();
-    this.presenceGapSince = null;
-    for (const [key, mappings] of this.history) {
-      let index = mappings.length;
-      while (index > 0 && mappings[index - 1]!.since > since) index -= 1;
-      if (index > 0 && mappings[index - 1]!.realJid === null) continue;
-      this.history.set(key, [...mappings.slice(0, index), { realJid: null, since }, ...mappings.slice(index)]);
-    }
-  }
-
   clear(): void {
-    this.history.clear();
+    this.holders.clear();
     this.ownNicks.clear();
-    this.presenceGapSince = null;
   }
 }
 
@@ -194,21 +131,14 @@ export function resolveAuthorJid(
   const stamped = bare(author.authorAvatarJid);
   if (stamped) return stamped;
   if (selfJid && isOwnSend(author, directory)) return bare(selfJid);
-  // Other room rows (and MUC private messages) carry only the occupant
-  // JID: use the room's disclosure that was in effect when the row was
-  // sent, so a later reuse of the nick never re-attributes it.
-  if (author.authorOccupantJid) {
-    return directory.lookupAt(
-      barePeerJid(author.authorOccupantJid),
-      resourceOf(author.authorOccupantJid),
-      Date.parse(author.createdAt ?? ""),
-    );
-  }
+  // Any other room row (or MUC private message) carries only a nick, which
+  // may have changed hands: initials rather than a possibly wrong face.
+  if (author.authorOccupantJid) return null;
   // 1:1 rows: the sender's own JID.
   return bare(author.authorJid);
 }
 
-/** Process-wide retained occupant mapping fed by MUC presence. */
+/** Process-wide occupant directory fed by MUC presence. */
 export const occupantJidDirectory = new OccupantJidDirectory();
 
 /** {@link resolveAuthorJid} against the process-wide directory. */
@@ -222,12 +152,12 @@ export function roomOccupantAvatarJid(roomJid: string | null | undefined, nick: 
 }
 
 /**
- * Pin a room row delivered on the live path to the person behind its nick,
- * so a later reuse of the nick cannot change whose face (and profile) it
- * shows. An undelayed row is pinned to the current occupant; a delayed or
- * archive-stamped row (SM replay, MUC history, catch-up re-emission) was
- * sent in the past, so only the mapping in effect at its timestamp may
- * name it.
+ * Pin a row delivered on the live path to the person behind its nick, so
+ * a later reuse of the nick cannot change whose face (and profile) it
+ * shows. Only an undelayed row is pinned to the current holder; a delayed
+ * or archive-stamped row (SM replay, MUC history, catch-up re-emission)
+ * was sent at some past moment whose holder we cannot know, so it keeps
+ * only the identity it carries (initials otherwise).
  */
 export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string, selfJid?: string | null): T {
   if (row.authorRealJid || row.authorAvatarJid) return row;
@@ -237,10 +167,8 @@ export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string
     const self = bare(selfJid);
     return self ? { ...row, authorAvatarJid: self } : row;
   }
-  const past = row.createdAtSource === "archive" || row.createdAtSource === "delay";
-  const author = past
-    ? occupantJidDirectory.lookupAt(roomJid, nick, Date.parse(row.createdAt ?? ""))
-    : occupantJidDirectory.lookup(roomJid, nick);
+  if (row.createdAtSource === "archive" || row.createdAtSource === "delay") return row;
+  const author = occupantJidDirectory.lookup(roomJid, nick);
   return author ? { ...row, authorAvatarJid: author } : row;
 }
 

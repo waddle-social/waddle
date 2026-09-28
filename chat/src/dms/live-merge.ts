@@ -3,6 +3,8 @@ import type { WaddleSession } from "@/lib/server-auth";
 import type { LiveDmMessage } from "@/lib/xmpp-client";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { findMessageById, findMessageIndexById } from "@/lib/message-ids";
+import { stampLiveRoomAuthor } from "@/lib/avatars/author-jid";
+import { barePeerJid, resourceOf } from "@/lib/xmpp/jid";
 import {
   dmReactedRow,
   fromLiveDmMessage,
@@ -181,9 +183,13 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
       return;
     }
     if (!session.value) return;
-    mergeLiveMessage(
-      fromLiveDmMessage(session.value, msg, (id) => findMessageById(messages.value, id)),
-    );
+    const row = fromLiveDmMessage(session.value, msg, (id) => findMessageById(messages.value, id));
+    // XEP-0045 §7.5: a MUC private message from an occupant carries only a
+    // nick; pin it to the nick's disclosed holder on arrival.
+    const occupant = row.authorOccupantJid;
+    mergeLiveMessage(occupant
+      ? stampLiveRoomAuthor(row, barePeerJid(occupant), resourceOf(occupant), session.value.jid)
+      : row);
   }
 
   return {

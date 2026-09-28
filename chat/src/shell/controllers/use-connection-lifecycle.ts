@@ -250,12 +250,8 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       // cached avatar; a resumed one only retries transport failures.
       if (event.type === "fresh") {
         occupantJidDirectory.forgetOwnNicks();
-        occupantJidDirectory.beginFreshSession();
         avatarStore.beginSession();
-      } else {
-        occupantJidDirectory.resumeSession();
-        avatarStore.resumeSession();
-      }
+      } else avatarStore.resumeSession();
       presence.onSessionReady(event, client);
       // #754: one bootstrap fire per session-ready, fresh or resumed —
       // the choreographer replaces the old multi-subscriber fan-out
