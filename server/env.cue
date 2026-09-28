@@ -19,6 +19,27 @@ let _rustInputs = [
 	"wit/**",
 ]
 
+// The Namespace Rust tasks delegate from this server project to the root
+// namespace package, which stages repository-level fixtures into its sandbox
+// through a declared cross-project input.
+let _namespaceRustTaskInputs = list.Concat([_rustInputs, [
+	".cargo/**",
+	"README.md",
+	"capabilities.toml",
+	"charts/waddle-server/**",
+	"../.rules.cue",
+	"../cue.mod/module.cue",
+	"../cuenv.lock",
+	"../env.cue",
+	"../flake.lock",
+	"../flake.nix",
+	"../namespace.cue",
+	"../ci/contributors/*.cue",
+	"../infrastructure/waddle.cloud/env.cue",
+	"../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+	"../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
+]])
+
 let _nixInputs = [
 	"../flake.nix",
 	"../flake.lock",
@@ -177,6 +198,22 @@ schema.#Project & {
 				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
+		}
+		namespaceRustChecks: {
+			mode: "expanded"
+			derivePaths: true
+			when: {
+				pullRequest: true
+				manual:      true
+			}
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.clippy, _t.test, _t.doctest]
 		}
 		// Rust archives and shards are generated from ci/rust-tests/workflow.cue.
 		rootSync: {
@@ -493,19 +530,26 @@ schema.#Project & {
 			inputs: _rustInputs
 		}
 
-		clippy: xRust.#Clippy & {
-			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
-			inputs: _rustInputs
+		clippy: schema.#Task & {
+			hermetic: false
+			command: "bash"
+			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace clippy"]
+			inputs: _namespaceRustTaskInputs
 		}
 
-		test: _nextestTask & {
-			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]
+		test: schema.#Task & {
+			hermetic: false
+			command: "bash"
+			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace test"]
+			inputs: _namespaceRustTaskInputs
 		}
 
 		// nextest cannot run doctests; keep them verified via cargo test --doc.
-		doctest: xRust.#Test & {
-			args: ["test", "--doc", "--workspace", "--all-features", "--locked"]
-			inputs: _rustInputs
+		doctest: schema.#Task & {
+			hermetic: false
+			command: "bash"
+			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace doctest"]
+			inputs: _namespaceRustTaskInputs
 		}
 
 		checkXmppClientFfiBindings: schema.#Task & {
