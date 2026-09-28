@@ -358,6 +358,29 @@ pub(super) async fn handle_pubsub_admin_request(
                 spaces_service_bare_jid(spaces_domain),
                 Ok(spaces_jid) if target_jid == &spaces_jid
             );
+            // A legacy Presence avatar node is repaired BEFORE the read, so
+            // a configure that omits `pubsub#access_model` never carries
+            // the legacy default forward and marks it as the owner's choice.
+            if is_pep
+                && (node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+                    || node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA)
+            {
+                if let Err(error) = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .repair_legacy_avatar_node(target_jid, &node)
+                    .await
+                {
+                    // Fail closed: writing the marker over an unrepaired
+                    // legacy node would block its repair forever.
+                    warn!(node = %node, error = %error, "Failed to repair legacy avatar node before configure");
+                    return vec![iq_to_xml(build_pubsub_error(
+                        iq,
+                        PubSubError::InternalServerError,
+                    ))];
+                }
+            }
             let existing_node = match state
                 .deps
                 .protocol
