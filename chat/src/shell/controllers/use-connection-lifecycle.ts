@@ -202,6 +202,12 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     client.addPubsubEventHandler(presence.handleActivityPubsubEvent);
     client.addPubsubEventHandler(presence.handleStatusPreferencePubsubEvent);
     client.setMemberJidHandler((nick, bareJid) => {
+      if (bareJid === null) {
+        if (!(nick in memberJidByNick.value)) return;
+        const { [nick]: _dropped, ...rest } = memberJidByNick.value;
+        memberJidByNick.value = rest;
+        return;
+      }
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
     });
     // XEP-0198 fan-out: the same message ID only ever appears in one timeline

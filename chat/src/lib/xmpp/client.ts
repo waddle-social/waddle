@@ -926,7 +926,7 @@ export class BrowserXmppClient {
   setDisplayedHandler(h: (event: { roomJid: string; nick: string; messageId: string }) => void) { this.events.set("displayed", h); }
   setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.events.set("dmDisplayed", h); }
   setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.events.set("presenceUpdate", h); }
-  setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.events.set("memberJid", h); }
+  setMemberJidHandler(h: (nick: string, bareJid: string | null) => void) { this.events.set("memberJid", h); }
   setHatsHandler(h: (hats: RoomHats) => void) { this.events.set("hats", h); }
   setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.events.set("authority", h); }
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.events.set("activity", h); }
@@ -2137,7 +2137,7 @@ export class BrowserXmppClient {
    * XEP-0045 §7.2.4: a room occupant's real JID was disclosed, for any
    * joined room (not only the focused one).
    */
-  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string) => void): () => void {
+  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string | null) => void): () => void {
     return this.events.on("occupantRealJid", handler);
   }
 

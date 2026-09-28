@@ -7,7 +7,7 @@ export interface AvatarClient {
   fetchUserAvatar: (jid: string) => Promise<string | null>;
   forgetUserAvatar: (jid: string) => void;
   addAvatarChangedHandler: (handler: (event: AvatarChangedEvent) => void) => () => void;
-  addOccupantRealJidHandler: (handler: (roomJid: string, nick: string, bareJid: string) => void) => () => void;
+  addOccupantRealJidHandler: (handler: (roomJid: string, nick: string, bareJid: string | null) => void) => () => void;
   addOwnProfilePublishedHandler: (handler: (ownBareJid: string) => void) => () => void;
 }
 

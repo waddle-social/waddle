@@ -30,8 +30,9 @@ function occupantKey(roomJid: string, nick: string): string {
 }
 
 interface OccupantMapping {
-  realJid: string;
-  /** Local clock when this real JID was first seen behind the nick. */
+  /** `null`: the nick was held by an occupant whose real JID we cannot see. */
+  realJid: string | null;
+  /** Local clock when this holder was first seen behind the nick. */
   since: number;
 }
 
@@ -46,12 +47,20 @@ export class OccupantJidDirectory {
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
-  record(roomJid: string, nick: string, realJid: string): void {
-    const real = bare(realJid);
-    if (!roomJid || !nick || !real) return;
+  /**
+   * Record who holds `nick` from now on. `realJid` null means an occupant
+   * whose real JID is not disclosed: the nick's previous holder stops being
+   * its current holder, while earlier rows keep their earlier mapping.
+   * Departures are never recorded; they do not change who sent past rows.
+   */
+  record(roomJid: string, nick: string, realJid: string | null): void {
+    if (!roomJid || !nick) return;
+    const real = realJid === null ? null : bare(realJid);
+    if (realJid !== null && !real) return;
     const key = occupantKey(roomJid, nick);
     const previous = this.history.get(key) ?? [];
-    if (previous.at(-1)?.realJid === real) return;
+    const last = previous.at(-1);
+    if (last ? last.realJid === real : real === null) return;
     this.history.set(key, [...previous, { realJid: real, since: this.now() }]);
   }
 

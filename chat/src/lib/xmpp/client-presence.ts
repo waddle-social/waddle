@@ -222,6 +222,15 @@ export class PresenceManager {
         roomMemberJids[nick] = bare;
         this.deps.events.emitSafe("occupantRealJid", room, nick, bare);
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, bare);
+      } else {
+        // An occupant whose real JID is not disclosed to us holds this nick
+        // now (e.g. someone else took it in a semi-anonymous room): the
+        // previous holder's JID must stop naming the nick's current holder.
+        // The shell's nick map keeps a JID across the holder's departure,
+        // so it is told even when this manager already dropped it.
+        delete roomMemberJids[nick];
+        this.deps.events.emitSafe("occupantRealJid", room, nick, null);
+        if (isFocusedRoom) this.deps.events.emit("memberJid", nick, null);
       }
       if (isFocusedRoom) {
         this.deps.events.emit("hats", { ...roomHats });

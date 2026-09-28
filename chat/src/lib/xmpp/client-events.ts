@@ -129,7 +129,8 @@ export type ClientEvents = {
   mdsDisplayed: [entry: MdsDisplayedEntry];
   pubsubEvent: [event: PubsubEvent];
   avatarChanged: [event: AvatarChangedEvent];
-  occupantRealJid: [roomJid: string, nick: string, bareJid: string];
+  /** `bareJid` null: the nick is held by an occupant whose real JID is not disclosed. */
+  occupantRealJid: [roomJid: string, nick: string, bareJid: string | null];
   ownProfilePublished: [ownBareJid: string];
   chatState: [event: ChatStateEvent];
   dmChatState: [event: DmChatStateEvent];
@@ -137,7 +138,8 @@ export type ClientEvents = {
   dmSafetyScores: [fastening: SafetyScoresFastening];
   dmDisplayed: [event: DmDisplayedEvent];
   presenceUpdate: [event: PresenceUpdateEvent];
-  memberJid: [nick: string, bareJid: string];
+  /** `bareJid` null: the nick's current holder no longer has a known real JID. */
+  memberJid: [nick: string, bareJid: string | null];
   hats: [hats: RoomHats];
   authority: [authority: RoomAuthority];
   activity: [event: RoomActivityEvent];

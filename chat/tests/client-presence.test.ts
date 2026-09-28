@@ -100,6 +100,35 @@ describe("PresenceManager MUC occupant tracking", () => {
     expect(emitted.memberJid).toEqual([["bob", "bob@example.com"]]);
   });
 
+  test("a JID-less holder taking a nick clears the previous holder's real JID", () => {
+    const { manager, events } = createManager();
+    const occupantJids: unknown[] = [];
+    const memberJids: unknown[] = [];
+    events.on("occupantRealJid", (room, nick, bare) => occupantJids.push([room, nick, bare]));
+    events.on("memberJid", (nick, bare) => memberJids.push([nick, bare]));
+
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "member", muc_role: "participant", muc_jid: "alice@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/sam`, presence_type: "unavailable", muc_affiliation: "member", muc_role: "none" }));
+    // Bob takes the nick; this room does not disclose his real JID to us.
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "none", muc_role: "participant" }));
+
+    expect(occupantJids).toEqual([
+      [ROOM, "sam", "alice@example.com"],
+      [ROOM, "sam", null],
+    ]);
+    // The shell's nick map still holds Alice after her departure, so it is told to drop her.
+    expect(memberJids).toEqual([["sam", "alice@example.com"], ["sam", null]]);
+  });
+
+  test("a JID-less presence for a nick still mapped clears the member JID too", () => {
+    const { manager, events } = createManager();
+    const memberJids: unknown[] = [];
+    events.on("memberJid", (nick, bare) => memberJids.push([nick, bare]));
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "member", muc_role: "participant", muc_jid: "alice@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "none", muc_role: "participant" }));
+    expect(memberJids).toEqual([["sam", "alice@example.com"], ["sam", null]]);
+  });
+
   test("unfocused-room presence is cached but not emitted; dispatchFocusedRoom replays it after a switch", () => {
     let focused: string | null = "other@muc.example.com";
     const { manager, events } = createManager({ currentRoom: () => focused });

@@ -195,3 +195,45 @@ describe("self attribution never comes from nick equality alone", () => {
   });
 });
 
+describe("handover to an occupant whose real JID is hidden", () => {
+  test("the current holder becomes unknown while earlier rows keep the earlier holder", () => {
+    const { directory, setMinutes } = directoryAt();
+    directory.record(ROOM, "sam", "alice@waddle.social");
+    const alicesRow = { authorOccupantJid: `${ROOM}/sam`, createdAt: at(1) };
+
+    setMinutes(10);
+    directory.record(ROOM, "sam", null);
+
+    expect(directory.lookup(ROOM, "sam")).toBeNull();
+    expect(resolveAuthorJid(alicesRow, directory)).toBe("alice@waddle.social");
+    const hiddenHoldersRow = { authorOccupantJid: `${ROOM}/sam`, createdAt: at(11) };
+    expect(resolveAuthorJid(hiddenHoldersRow, directory)).toBeNull();
+
+    // A later disclosed holder is recorded as usual.
+    setMinutes(20);
+    directory.record(ROOM, "sam", "carol@waddle.social");
+    expect(directory.lookup(ROOM, "sam")).toBe("carol@waddle.social");
+    expect(resolveAuthorJid(hiddenHoldersRow, directory)).toBeNull();
+    expect(resolveAuthorJid(alicesRow, directory)).toBe("alice@waddle.social");
+  });
+
+  test("new live rows by the hidden holder stay unstamped; Alice's stamped rows keep Alice", () => {
+    occupantJidDirectory.record(ROOM, "sam", "alice@waddle.social");
+    const alicesLive = stampLiveRoomAuthor({ authorOccupantJid: `${ROOM}/sam`, createdAtSource: "fallback" }, ROOM, "sam");
+    occupantJidDirectory.record(ROOM, "sam", null);
+    const hiddenLive = stampLiveRoomAuthor({ authorOccupantJid: `${ROOM}/sam`, createdAtSource: "fallback" }, ROOM, "sam");
+
+    expect(alicesLive.authorAvatarJid).toBe("alice@waddle.social");
+    expect(hiddenLive.authorAvatarJid).toBeUndefined();
+    expect(authorAvatarJid(alicesLive)).toBe("alice@waddle.social");
+  });
+
+  test("a JID-less presence for a nick never seen before records nothing", () => {
+    const { directory } = directoryAt();
+    directory.record(ROOM, "ghost", null);
+    expect(directory.lookup(ROOM, "ghost")).toBeNull();
+    directory.record(ROOM, "ghost", "ghost@waddle.social");
+    expect(directory.lookup(ROOM, "ghost")).toBe("ghost@waddle.social");
+  });
+});
+
