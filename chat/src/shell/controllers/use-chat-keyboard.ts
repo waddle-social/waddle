@@ -33,9 +33,22 @@ export function consumeKeystrokEvent(event: KeyboardEvent) {
   event.stopPropagation();
 }
 
+/**
+ * Cmd+K on Apple platforms, Ctrl+K elsewhere (Ctrl+K on macOS deletes to the
+ * end of the line). A non-Latin layout reports the typed letter (e.g. "л"),
+ * so the physical K key counts there — keystrok matches `event.key` only.
+ */
+export function isQuickSwitcherShortcut(event: KeyboardEvent, isApplePlatform: boolean): boolean {
+  if (event.isComposing || Reflect.get(event, "keyCode") === 229) return false;
+  const modifier = isApplePlatform ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  if (!modifier || event.altKey || event.shiftKey) return false;
+  return /^[a-z]$/i.test(event.key) ? event.key.toLowerCase() === "k" : event.code === "KeyK";
+}
+
 interface ChatKeyboardDeps {
   ui: ChatShellState;
   keystrok: KeystrokHandle;
+  appReady: () => boolean;
   activeRightPanel: Ref<ActiveRightPanel | null>;
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   activeThreadStack: Ref<string[]>;
@@ -52,12 +65,14 @@ interface ChatKeyboardDeps {
 
 /**
  * Chat-page keyboard shortcuts: the Escape ladder over the right-rail
- * panels and the keystrok scopes that host reaction mode's bindings.
+ * panels, the quick switcher toggle, and the keystrok scopes that host
+ * reaction mode's bindings.
  */
 export function useChatKeyboard(deps: ChatKeyboardDeps) {
   const {
     ui,
     keystrok,
+    appReady,
     activeRightPanel,
     activeExtensionRouteKey,
     activeThreadStack,
@@ -86,6 +101,22 @@ export function useChatKeyboard(deps: ChatKeyboardDeps) {
     consumeKeystrokEvent(event);
   }
 
+  const isApplePlatform = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+  function handleQuickSwitcherKeyDown(event: KeyboardEvent) {
+    if (!isQuickSwitcherShortcut(event, isApplePlatform)) return;
+    if (ui.showQuickSwitcher.value) {
+      consumeKeystrokEvent(event);
+      if (!event.repeat) ui.showQuickSwitcher.value = false;
+      return;
+    }
+    // The immersive call stage paints above modal dialogs, so a switcher
+    // opened there would trap focus while staying invisible.
+    if (event.repeat || !appReady() || anyModalOpen(ui) || document.querySelector(".call-expanded--immersive")) return;
+    consumeKeystrokEvent(event);
+    ui.showQuickSwitcher.value = true;
+  }
+
   function bindChatKeystrokShortcuts() {
     const chatKeystrok = createKeystrok();
     keystrok.current = chatKeystrok;
@@ -109,10 +140,12 @@ export function useChatKeyboard(deps: ChatKeyboardDeps) {
     // handled directly while the rest of reaction mode remains scoped there.
     window.addEventListener("keydown", reactionMode.handleLiteralPlusKeyDown, true);
     bindChatKeystrokShortcuts();
+    window.addEventListener("keydown", handleQuickSwitcherKeyDown);
   });
 
   onUnmounted(() => {
     window.removeEventListener("keydown", reactionMode.handleLiteralPlusKeyDown, true);
+    window.removeEventListener("keydown", handleQuickSwitcherKeyDown);
     keystrok.current?.destroy();
     keystrok.current = null;
   });

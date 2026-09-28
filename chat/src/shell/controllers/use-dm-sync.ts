@@ -58,6 +58,7 @@ export function useDmSync(deps: DmSyncDeps) {
     if (options.intent !== "automatic") cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
+    ui.activeCommunitySurface.value = null;
     ui.sidebarMode.value = "dms";
     activeExtensionRouteKey.value = null;
     // A rejected target must not retain a previous account or group as send target.

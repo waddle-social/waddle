@@ -34,6 +34,8 @@ export function useChatShellState() {
   const confirmDeleteChannel = ref(false);
   const showNewDm = ref(false);
   const showNewGroupDm = ref(false);
+  /** Cmd+K / Ctrl+K quick switcher. */
+  const showQuickSwitcher = ref(false);
   const groupDmSeedPeerJid = ref<string | null>(null);
   const confirmRemoveMember = ref<string | null>(null);
   const actionError = ref("");
@@ -65,6 +67,7 @@ export function useChatShellState() {
     confirmDeleteWaddle,
     showNewDm,
     showNewGroupDm,
+    showQuickSwitcher,
     groupDmSeedPeerJid,
     confirmDeleteChannel,
     confirmRemoveMember,

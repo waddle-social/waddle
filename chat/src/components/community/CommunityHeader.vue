@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { ChevronDown, Radio, Search } from "lucide-vue-next";
+import { ChevronDown, Compass, Radio, Search } from "lucide-vue-next";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import { buildHref, type RouteMatch } from "@/router";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -107,6 +107,15 @@ const threadsUnread = computed(() => channelUnread.totalThreadUnreadCount.value)
     </nav>
 
     <div class="community-header__actions">
+      <!-- Phones have no Cmd+K; desktop hides this (community.css). -->
+      <button
+        type="button"
+        class="community-header__action community-header__action--icon community-header__action--jump"
+        aria-label="Jump to a room, person or page"
+        @click="ui.showQuickSwitcher.value = true"
+      >
+        <Compass class="h-4 w-4" aria-hidden="true" />
+      </button>
       <button
         v-if="canSearch"
         type="button"

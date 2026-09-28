@@ -396,7 +396,6 @@ function onSelectCommunitySurface(surface: "feed" | "events") {
 }
 
 function onSelectChannelFromSidebar(id: string | null, roomJid?: string) {
-  ui.activeCommunitySurface.value = null;
   if (id) {
     selectChannel(id, roomJid ? { roomJid } : undefined);
     return;

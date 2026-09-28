@@ -45,6 +45,7 @@ export function usePageNavigation(deps: PageNavigationDeps) {
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "settings";
+    ui.activeCommunitySurface.value = null;
   }
 
   /**
