@@ -277,6 +277,30 @@ class XmppSessionManagerPeerAvatarTest {
     }
 
     @Test
+    fun `a new session forgets nick holders but keeps stored stamps`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.factory.emit(WaddleClientEvent.Presence(testPresence(from = "$room/alice", mucJid = "$alice/phone")))
+        harness.factory.emit(roomMessage("s1", "alice"))
+        runCurrent()
+
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        advanceTimeBy(RECONNECT_DELAY_MILLIS)
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        // "alice" changed hands while we were away; a message races the
+        // rejoin presence that would say who holds it now.
+        harness.factory.emit(roomMessage("s2", "alice"))
+        runCurrent()
+
+        assertEquals(alice, harness.manager.authorOf("s1"))
+        assertNull(harness.manager.authorOf("s2"))
+        harness.manager.logout()
+    }
+
+    @Test
     fun `archive authors and delayed rows never label a nick's later holder`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)

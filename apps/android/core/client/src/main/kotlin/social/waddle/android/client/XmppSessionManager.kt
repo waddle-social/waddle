@@ -550,7 +550,16 @@ class XmppSessionManager(
         lease: ActiveSession.OwnerLease,
     ) {
         // Every (re)connect: peer avatars revalidate on next render.
-        if (activeSession.isCurrent(lease)) avatarRepository.markStale()
+        if (activeSession.isCurrent(lease)) {
+            avatarRepository.markStale()
+            // A new transport session (not an SM resume): nicks may have
+            // changed hands while we were away. Forget who held them until
+            // the rejoin presence says so, or a live message racing it
+            // would be stamped with the former holder. Stamps already
+            // stored on rows are kept. Synchronous: it lands before the
+            // stream's first post-ready event is dispatched.
+            if (freshStream) stores.occupantJidStore.clear()
+        }
         // Topology discovery now heads the sequential ready pipeline:
         // the bookmark-driven rejoin derives its join set from it.
         attemptScope.launch {

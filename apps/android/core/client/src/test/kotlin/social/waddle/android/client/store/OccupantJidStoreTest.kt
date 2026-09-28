@@ -265,12 +265,22 @@ class OccupantJidStoreTest {
         assertEquals("bob@waddle.test", authorBareJidOf(rows.getValue("b1"), own))
         assertEquals(true, rows.getValue("a1").isMine)
         assertEquals(true, rows.getValue("n1").isMine)
-        assertEquals(own, authorBareJidOf(rows.getValue("n1"), own))
+        // …but a nick match is no identity: a prior holder of our nick
+        // must not get our face.
+        assertNull(authorBareJidOf(rows.getValue("n1"), own))
     }
 
     @Test
     fun `a room row's stamp wins over the nick-based mine flag`() {
         val stampedByOther = liveRow("$room/me", mine = true, authorJid = "bob@waddle.test")
         assertEquals("bob@waddle.test", authorBareJidOf(stampedByOther, self))
+    }
+
+    @Test
+    fun `only an undelayed live reflection from our nick resolves to us without a stamp`() {
+        val own = "me@waddle.test"
+        assertEquals(own, authorBareJidOf(liveRow("$room/me", mine = true), own))
+        val delayedHistory = liveRow("$room/me", mine = true).copy(timestamp = "2026-07-01T10:00:00Z")
+        assertNull(authorBareJidOf(delayedHistory, own))
     }
 }
