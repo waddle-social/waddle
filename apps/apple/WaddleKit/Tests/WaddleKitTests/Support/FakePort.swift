@@ -196,7 +196,7 @@ final class FakePort: XmppPort {
         avatarLookups.append(jid)
         return avatarLookup(jid, knownID)
     }
-    func publishAvatar(_ image: AvatarImage) async throws -> String {
+    func publishAvatar(_: AvatarImage) async throws -> String {
         publishedAvatarID
     }
     func removeAvatar() async throws {}
