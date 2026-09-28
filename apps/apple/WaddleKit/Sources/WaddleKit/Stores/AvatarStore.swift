@@ -155,7 +155,10 @@ public final class AvatarStore {
             entries[jid] = Entry(id: current?.id, dueAt: now().addingTimeInterval(Self.retryAfter))
         }
         if ticket.generation != generation {
+            // Started before the reconnect: its row's own request after the
+            // reconnect was absorbed by this lookup, so ask again now.
             entries[jid]?.isStale = true
+            queue.append(jid)
         }
     }
 }

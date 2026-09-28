@@ -163,14 +163,36 @@ struct AvatarStoreTests {
         #expect(Set(lookups.calls[2...]) == [.init(jid: bob, knownID: "b1"), .init(jid: carol, knownID: nil)])
     }
 
-    @Test func lookupSpanningAReconnectStaysStale() async {
+    @Test func lookupSpanningAReconnectIsRepeatedWithoutAnotherRequest() async {
         let (store, lookups, _) = store()
         store.request(bob)
         await lookups.waitForCalls(1)
+        await lookups.answer(bob, with: .published(id: "b1", image: image(1)))
+
         store.markAllStale()
-        await lookups.answer(bob, with: .failed)
         store.request(bob)
         await lookups.waitForCalls(2)
+        // Reconnect while the lookup is in flight; nothing asks again.
+        store.markAllStale()
+        await lookups.answer(bob, with: .failed)
+        await lookups.waitForCalls(3)
+        #expect(lookups.calls.count == 3)
+        #expect(lookups.calls[2] == .init(jid: bob, knownID: "b1"))
+        await lookups.answer(bob, with: .unchanged)
+        #expect(store.image(for: bob) == image(1))
+        // Current again: nothing more until it is due.
+        store.request(bob)
+        await Task.yield()
+        #expect(lookups.calls.count == 3)
+    }
+
+    @Test func lookupFinishingInTheSameGenerationIsNotRepeated() async {
+        let (store, lookups, _) = store()
+        store.request(bob)
+        await lookups.waitForCalls(1)
+        await lookups.answer(bob, with: .absent)
+        for _ in 0..<5 { await Task.yield() }
+        #expect(lookups.calls.count == 1)
     }
 
     @Test func avatarChangedRefetchesWithTheKnownID() async {
