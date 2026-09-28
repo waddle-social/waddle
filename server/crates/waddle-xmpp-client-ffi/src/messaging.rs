@@ -292,15 +292,19 @@ impl WaddleClient {
     ) -> Result<Option<WaddleAvatarResult>, WaddleError> {
         let bare = self.require_bare_jid(&jid)?;
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
+        let known_ids: Vec<_> = known_ids
+            .into_iter()
+            .filter_map(waddle_xmpp_client::AvatarItemId::new)
+            .collect();
         let fetch = handle
             .request_avatar(&bare, &known_ids)
             .await
             .map_err(|e| client_error_to_waddle(&e))?;
         Ok(fetch.map(|fetch| WaddleAvatarResult {
-            id: fetch.id,
+            id: fetch.id.to_string(),
             avatar: fetch.avatar.map(|avatar| WaddleAvatar {
                 jid: avatar.jid.to_string(),
-                id: avatar.id,
+                id: avatar.id.to_string(),
                 mime_type: avatar.mime_type,
                 data: avatar.data,
             }),

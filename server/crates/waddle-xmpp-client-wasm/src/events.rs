@@ -184,7 +184,7 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
 fn avatar_changed_to_js(change: waddle_xmpp_client::AvatarChanged) -> WaddleAvatarChanged {
     WaddleAvatarChanged {
         jid: change.jid.to_string(),
-        avatar_id: change.avatar_id,
+        avatar_id: change.avatar_id.map(|id| id.to_string()),
     }
 }
 
@@ -236,11 +236,13 @@ mod tests {
     fn avatar_changed_callback_payload_uses_bare_jid_and_optional_id() {
         let payload = avatar_changed_to_js(waddle_xmpp_client::AvatarChanged {
             jid: "bob@waddle.test".parse().expect("valid bare JID"),
-            avatar_id: Some("avatar-1".to_string()),
+            avatar_id: waddle_xmpp_client::AvatarItemId::new(
+                "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+            ),
         });
         assert_eq!(
             serde_json::to_value(payload).expect("serializable payload"),
-            serde_json::json!({ "jid": "bob@waddle.test", "avatar_id": "avatar-1" })
+            serde_json::json!({ "jid": "bob@waddle.test", "avatar_id": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d" })
         );
     }
 }

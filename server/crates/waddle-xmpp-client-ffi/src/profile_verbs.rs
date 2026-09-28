@@ -403,7 +403,7 @@ where
         height: (height > 0).then_some(height),
     };
     send(build_publish_avatar_metadata_iq(&info)).await?;
-    Ok(item_id)
+    Ok(item_id.to_string())
 }
 
 // ── Exported verbs ───────────────────────────────────────────────────

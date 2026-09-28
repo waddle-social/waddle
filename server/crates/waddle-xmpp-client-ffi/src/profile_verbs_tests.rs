@@ -116,7 +116,7 @@ mod xep0084 {
         // First on the wire MUST be the data item (XEP-0084 §3.2).
         let item_id = compute_avatar_item_id(data);
         // The caller gets the published item id, for §4.2 known-id revalidation.
-        assert_eq!(published_id, item_id);
+        assert_eq!(published_id, item_id.to_string());
         let data_item = publish_item(&sent[0], NS_AVATAR_DATA);
         assert_eq!(data_item.attr("id"), Some(item_id.as_str()));
         assert_eq!(

@@ -291,7 +291,7 @@ internal class PeerAvatarRepository(
     internal fun trackedJidCount(): Int = synchronized(lock) { entries.size }
 
     private fun commit(key: String, attempt: Attempt, projection: () -> Unit): Boolean = synchronized(lock) {
-        if (entries[key]?.attempt !== attempt || attempt.superseded) return@synchronized false
+        if (entries[key]?.attempt !== attempt || attempt.superseded || attempt.evicted) return@synchronized false
         projection()
         true
     }

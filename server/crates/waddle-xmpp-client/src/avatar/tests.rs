@@ -1,6 +1,13 @@
 use super::*;
 use crate::pubsub_event::{PubsubEvent, PubsubEventItem, PubsubEventPayload};
 
+const HELLO_ID: &str = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
+const WORLD_ID: &str = "7c211433f02071597741e6ff5a8ea34789abbf43";
+
+fn item_id(value: &str) -> AvatarItemId {
+    AvatarItemId::new(value).expect("valid SHA-1 item id")
+}
+
 fn make_metadata_iq(id: &str, mime: &str) -> Element {
     let info = Element::builder("info", NS_AVATAR_METADATA)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
@@ -122,9 +129,9 @@ fn make_vcard_extval_iq(url: &str) -> Element {
 
 #[test]
 fn parse_metadata_extracts_info() {
-    let iq = make_metadata_iq("deadbeef", "image/png");
+    let iq = make_metadata_iq(HELLO_ID, "image/png");
     let info = parse_metadata_response(&iq).expect("info");
-    assert_eq!(info.id, "deadbeef");
+    assert_eq!(info.id, item_id(HELLO_ID));
     assert_eq!(info.mime_type, "image/png");
     assert_eq!(info.width, Some(64));
     assert_eq!(info.height, Some(64));
@@ -133,24 +140,28 @@ fn parse_metadata_extracts_info() {
 
 #[test]
 fn parse_metadata_ignores_url_only_info() {
-    let iq = make_metadata_url_iq("deadbeef", "image/png", "https://example.test/a.png");
+    let iq = make_metadata_url_iq(HELLO_ID, "image/png", "https://example.test/a.png");
     assert!(parse_metadata_response(&iq).is_none());
 }
 
 #[test]
-fn parse_metadata_prefers_in_band_info_over_url_info() {
+fn parse_metadata_skips_malformed_and_url_info_for_in_band() {
+    let malformed_info = Element::builder("info", NS_AVATAR_METADATA)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "not-a-hash")
+        .build();
     let url_info = Element::builder("info", NS_AVATAR_METADATA)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "remote")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), WORLD_ID)
         .attr(
             minidom::rxml::xml_ncname!("url").to_owned(),
             "https://example.test/avatar.png",
         )
         .build();
     let in_band_info = Element::builder("info", NS_AVATAR_METADATA)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "in-band")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), HELLO_ID)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "image/png")
         .build();
     let metadata = Element::builder("metadata", NS_AVATAR_METADATA)
+        .append(malformed_info)
         .append(url_info)
         .append(in_band_info)
         .build();
@@ -168,8 +179,16 @@ fn parse_metadata_prefers_in_band_info_over_url_info() {
 
     assert_eq!(
         parse_metadata_response(&iq).map(|info| info.id),
-        Some("in-band".to_string())
+        Some(item_id(HELLO_ID))
     );
+}
+
+#[test]
+fn avatar_item_id_validates_sha1_hex_without_changing_wire_case() {
+    assert!(AvatarItemId::new("not-a-hash").is_none());
+    assert!(AvatarItemId::new("z".repeat(40)).is_none());
+    let upper = HELLO_ID.to_ascii_uppercase();
+    assert_eq!(item_id(&upper).as_str(), upper);
 }
 
 #[test]
@@ -179,13 +198,13 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
         from: Some(owner.clone()),
         node: NS_AVATAR_METADATA.to_string(),
         items: vec![PubsubEventItem {
-            id: Some("avatar-1".to_string()),
+            id: Some(HELLO_ID.to_string()),
             retracted: false,
             payload: PubsubEventPayload::Opaque {
                 element: Element::builder("metadata", NS_AVATAR_METADATA)
                     .append(
                         Element::builder("info", NS_AVATAR_METADATA)
-                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "avatar-1")
+                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), HELLO_ID)
                             .build(),
                     )
                     .build(),
@@ -196,7 +215,7 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
         parse_metadata_event(&set),
         Some(AvatarChanged {
             jid: "alice@example.com".parse().expect("valid bare JID"),
-            avatar_id: Some("avatar-1".to_string()),
+            avatar_id: Some(item_id(HELLO_ID)),
         })
     );
 
@@ -204,13 +223,13 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
         from: Some("alice@example.com".parse().expect("valid bare JID")),
         node: NS_AVATAR_METADATA.to_string(),
         items: vec![PubsubEventItem {
-            id: Some("remote-avatar".to_string()),
+            id: Some(WORLD_ID.to_string()),
             retracted: false,
             payload: PubsubEventPayload::Opaque {
                 element: Element::builder("metadata", NS_AVATAR_METADATA)
                     .append(
                         Element::builder("info", NS_AVATAR_METADATA)
-                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "remote-avatar")
+                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), WORLD_ID)
                             .attr(
                                 minidom::rxml::xml_ncname!("url").to_owned(),
                                 "https://example.test/avatar.png",
@@ -223,7 +242,7 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
     };
     assert_eq!(
         parse_metadata_event(&url_only).and_then(|event| event.avatar_id),
-        Some("remote-avatar".to_string())
+        Some(item_id(WORLD_ID))
     );
 
     let empty_metadata = PubsubEvent {
@@ -246,7 +265,7 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
         from: Some(owner),
         node: NS_AVATAR_METADATA.to_string(),
         items: vec![PubsubEventItem {
-            id: Some("avatar-1".to_string()),
+            id: Some(HELLO_ID.to_string()),
             retracted: true,
             payload: PubsubEventPayload::Empty,
         }],
@@ -269,13 +288,13 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
                 payload: PubsubEventPayload::Empty,
             },
             PubsubEventItem {
-                id: Some("avatar-2".to_string()),
+                id: Some(WORLD_ID.to_string()),
                 retracted: false,
                 payload: PubsubEventPayload::Opaque {
                     element: Element::builder("metadata", NS_AVATAR_METADATA)
                         .append(
                             Element::builder("info", NS_AVATAR_METADATA)
-                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "avatar-2")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), WORLD_ID)
                                 .build(),
                         )
                         .build(),
@@ -285,7 +304,7 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
     };
     assert_eq!(
         parse_metadata_event(&publish_and_retract).and_then(|event| event.avatar_id),
-        Some("avatar-2".to_string())
+        Some(item_id(WORLD_ID))
     );
 }
 
@@ -305,6 +324,42 @@ fn parse_metadata_event_rejects_full_jid_senders() {
         };
         assert!(parse_metadata_event(&event).is_none(), "{from}");
     }
+}
+
+#[test]
+fn malformed_metadata_id_does_not_announce_avatar_disable() {
+    let event = PubsubEvent {
+        from: Some("alice@example.com".parse().expect("valid bare JID")),
+        node: NS_AVATAR_METADATA.to_string(),
+        items: vec![PubsubEventItem {
+            id: Some("broken".to_string()),
+            retracted: false,
+            payload: PubsubEventPayload::Opaque {
+                element: Element::builder("metadata", NS_AVATAR_METADATA)
+                    .append(
+                        Element::builder("info", NS_AVATAR_METADATA)
+                            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "broken")
+                            .build(),
+                    )
+                    .build(),
+            },
+        }],
+    };
+    assert!(parse_metadata_event(&event).is_none());
+
+    let pointer_only = PubsubEvent {
+        items: vec![PubsubEventItem {
+            id: Some("pointer".to_string()),
+            retracted: false,
+            payload: PubsubEventPayload::Opaque {
+                element: Element::builder("metadata", NS_AVATAR_METADATA)
+                    .append(Element::builder("pointer", NS_AVATAR_METADATA).build())
+                    .build(),
+            },
+        }],
+        ..event
+    };
+    assert!(parse_metadata_event(&pointer_only).is_none());
 }
 
 #[test]
@@ -429,12 +484,12 @@ fn build_metadata_request_has_correct_shape() {
 #[test]
 fn build_data_request_includes_item_id() {
     let jid: BareJid = "bob@example.com".parse().unwrap();
-    let iq = build_data_request_iq(&jid, "cafef00d");
+    let iq = build_data_request_iq(&jid, &item_id(HELLO_ID));
     let pubsub = iq.get_child("pubsub", NS_PUBSUB).expect("pubsub");
     let items = pubsub.get_child("items", NS_PUBSUB).expect("items");
     assert_eq!(items.attr("node"), Some(NS_AVATAR_DATA));
     let item = items.get_child("item", NS_PUBSUB).expect("item");
-    assert_eq!(item.attr("id"), Some("cafef00d"));
+    assert_eq!(item.attr("id"), Some(HELLO_ID));
 }
 
 #[test]
@@ -451,8 +506,8 @@ fn build_vcard_request_has_correct_shape() {
 fn request_avatar_prefers_xep_0084_data() {
     let jid: BareJid = "alice@example.com".parse().unwrap();
     let responses = std::cell::RefCell::new(vec![
-        make_metadata_iq("deadbeef", "image/png"),
-        make_data_iq("deadbeef", "aGVsbG8="),
+        make_metadata_iq(HELLO_ID, "image/png"),
+        make_data_iq(HELLO_ID, "aGVsbG8="),
         make_vcard_binval_iq("image/jpeg", "d29ybGQ="),
     ]);
 
@@ -466,17 +521,96 @@ fn request_avatar_prefers_xep_0084_data() {
     .unwrap()
     .expect("avatar");
 
-    assert_eq!(avatar.id, "deadbeef");
+    assert_eq!(avatar.id, AvatarId::Item(item_id(HELLO_ID)));
     assert_eq!(avatar.mime_type, "image/png");
     assert_eq!(avatar.data, b"hello");
     assert_eq!(responses.borrow().len(), 1);
 }
 
 #[test]
+fn request_avatar_rejects_data_that_does_not_match_advertised_hash() {
+    let jid: BareJid = "alice@example.com".parse().unwrap();
+    let responses = std::cell::RefCell::new(vec![
+        make_metadata_iq(HELLO_ID, "image/png"),
+        make_data_iq(HELLO_ID, "d29ybGQ="), // "world" under "hello"'s hash
+    ]);
+    let requests = std::cell::RefCell::new(Vec::new());
+
+    let result =
+        futures::executor::block_on(request_avatar_with_iq_skipping(&jid, &[], |stanza| {
+            let is_vcard = stanza.get_child("vCard", NS_VCARD_TEMP).is_some();
+            requests.borrow_mut().push(is_vcard);
+            let response = (!is_vcard).then(|| responses.borrow_mut().remove(0));
+            async move { response.ok_or(AvatarRequestFailure::<()>::StanzaError) }
+        }))
+        .expect("lookup succeeds");
+
+    assert!(result.is_none(), "mismatched data must not enter the cache");
+    assert_eq!(*requests.borrow(), vec![false, false, true]);
+}
+
+#[test]
+fn request_avatar_accepts_uppercase_hash_without_changing_item_lookup() {
+    let jid: BareJid = "alice@example.com".parse().unwrap();
+    let upper = HELLO_ID.to_ascii_uppercase();
+    let responses = std::cell::RefCell::new(vec![
+        make_metadata_iq(&upper, "image/png"),
+        make_data_iq(&upper, "aGVsbG8="),
+    ]);
+
+    let avatar = futures::executor::block_on(request_avatar_with_iq(&jid, |stanza| {
+        if stanza
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .is_some_and(|items| items.attr("node") == Some(NS_AVATAR_DATA))
+        {
+            let item = stanza
+                .get_child("pubsub", NS_PUBSUB)
+                .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+                .and_then(|items| items.get_child("item", NS_PUBSUB))
+                .expect("data item");
+            assert_eq!(item.attr("id"), Some(upper.as_str()));
+        }
+        let response = responses.borrow_mut().remove(0);
+        async move { Ok::<_, AvatarRequestFailure<()>>(response) }
+    }))
+    .expect("lookup succeeds")
+    .expect("avatar");
+
+    assert_eq!(avatar.id, AvatarId::Item(item_id(&upper)));
+    assert_eq!(avatar.data, b"hello");
+}
+
+#[test]
+fn vcard_fallback_id_changes_when_photo_bytes_change() {
+    let jid: BareJid = "alice@example.com".parse().unwrap();
+    let first = vcard_photo_to_avatar(
+        &jid,
+        VcardPhoto {
+            mime_type: Some("image/png".to_string()),
+            data: Some(b"hello".to_vec()),
+        },
+    )
+    .expect("first photo");
+    let second = vcard_photo_to_avatar(
+        &jid,
+        VcardPhoto {
+            mime_type: Some("image/png".to_string()),
+            data: Some(b"world".to_vec()),
+        },
+    )
+    .expect("second photo");
+
+    assert_eq!(first.id.to_string(), format!("vcard-photo:{HELLO_ID}"));
+    assert_eq!(second.id.to_string(), format!("vcard-photo:{WORLD_ID}"));
+    assert_ne!(first.id, second.id);
+}
+
+#[test]
 fn request_avatar_url_only_metadata_falls_back_to_vcard_binval() {
     let jid: BareJid = "alice@example.com".parse().unwrap();
     let responses = std::cell::RefCell::new(vec![
-        make_metadata_url_iq("deadbeef", "image/png", "https://example.test/a.png"),
+        make_metadata_url_iq(HELLO_ID, "image/png", "https://example.test/a.png"),
         make_vcard_binval_iq("image/jpeg", "d29ybGQ="),
     ]);
 
@@ -487,7 +621,7 @@ fn request_avatar_url_only_metadata_falls_back_to_vcard_binval() {
     .unwrap()
     .expect("avatar");
 
-    assert_eq!(avatar.id, "vcard-photo");
+    assert_eq!(avatar.id.to_string(), format!("vcard-photo:{WORLD_ID}"));
     assert_eq!(avatar.data, b"world");
     assert!(responses.borrow().is_empty());
 }
@@ -496,7 +630,7 @@ fn request_avatar_url_only_metadata_falls_back_to_vcard_binval() {
 fn request_avatar_url_only_metadata_and_vcard_returns_none() {
     let jid: BareJid = "alice@example.com".parse().unwrap();
     let responses = std::cell::RefCell::new(vec![
-        make_metadata_url_iq("deadbeef", "image/png", "https://example.test/a.png"),
+        make_metadata_url_iq(HELLO_ID, "image/png", "https://example.test/a.png"),
         make_vcard_extval_iq("https://example.test/vcard.png"),
     ]);
 
@@ -544,7 +678,7 @@ fn request_avatar_falls_back_to_vcard_binval() {
     .unwrap()
     .expect("avatar");
 
-    assert_eq!(avatar.id, "vcard-photo");
+    assert_eq!(avatar.id.to_string(), format!("vcard-photo:{WORLD_ID}"));
     assert_eq!(avatar.mime_type, "image/jpeg");
     assert_eq!(avatar.data, b"world");
 }
@@ -581,8 +715,8 @@ fn skipping_fetch_answers_id_only_for_a_known_metadata_id() {
     // Only the metadata response is provisioned: issuing the data IQ
     // (or the vCard fallback) would panic on the empty queue, so the
     // assertion below also proves no further IQ left the seam.
-    let responses = std::cell::RefCell::new(vec![make_metadata_iq("deadbeef", "image/png")]);
-    let known = vec!["deadbeef".to_string()];
+    let responses = std::cell::RefCell::new(vec![make_metadata_iq(HELLO_ID, "image/png")]);
+    let known = vec![item_id(HELLO_ID)];
 
     let fetch =
         futures::executor::block_on(request_avatar_with_iq_skipping(&jid, &known, |_stanza| {
@@ -592,7 +726,7 @@ fn skipping_fetch_answers_id_only_for_a_known_metadata_id() {
         .unwrap()
         .expect("fetch outcome");
 
-    assert_eq!(fetch.id, "deadbeef");
+    assert_eq!(fetch.id, AvatarId::Item(item_id(HELLO_ID)));
     assert_eq!(fetch.avatar, None);
     assert!(responses.borrow().is_empty());
 }
@@ -601,10 +735,10 @@ fn skipping_fetch_answers_id_only_for_a_known_metadata_id() {
 fn skipping_fetch_retrieves_data_for_an_unknown_metadata_id() {
     let jid: BareJid = "alice@example.com".parse().unwrap();
     let responses = std::cell::RefCell::new(vec![
-        make_metadata_iq("deadbeef", "image/png"),
-        make_data_iq("deadbeef", "aGVsbG8="),
+        make_metadata_iq(HELLO_ID, "image/png"),
+        make_data_iq(HELLO_ID, "aGVsbG8="),
     ]);
-    let known = vec!["someoldid".to_string()];
+    let known = vec![item_id(WORLD_ID)];
 
     let fetch =
         futures::executor::block_on(request_avatar_with_iq_skipping(&jid, &known, |_stanza| {
@@ -614,7 +748,7 @@ fn skipping_fetch_retrieves_data_for_an_unknown_metadata_id() {
         .unwrap()
         .expect("fetch outcome");
 
-    assert_eq!(fetch.id, "deadbeef");
+    assert_eq!(fetch.id, AvatarId::Item(item_id(HELLO_ID)));
     let avatar = fetch.avatar.expect("avatar bytes fetched");
     assert_eq!(avatar.data, b"hello");
     assert!(responses.borrow().is_empty());
@@ -640,11 +774,11 @@ fn publish_item<'a>(iq: &'a Element, node: &str) -> &'a Element {
 fn compute_avatar_item_id_matches_sha1_vectors() {
     // FIPS 180-1 "abc" vector + the empty-input digest.
     assert_eq!(
-        compute_avatar_item_id(b"abc"),
+        compute_avatar_item_id(b"abc").to_string(),
         "a9993e364706816aba3e25717850c26c9cd0d89d"
     );
     assert_eq!(
-        compute_avatar_item_id(b""),
+        compute_avatar_item_id(b"").to_string(),
         "da39a3ee5e6b4b0d3255bfef95601890afd80709"
     );
 }
@@ -664,7 +798,7 @@ fn build_publish_avatar_data_iq_carries_base64_at_sha1_item_id() {
 fn build_publish_avatar_metadata_iq_sets_required_info_attrs() {
     let info = AvatarPublishInfo {
         bytes: 5,
-        id: "a9993e364706816aba3e25717850c26c9cd0d89d".to_string(),
+        id: item_id("a9993e364706816aba3e25717850c26c9cd0d89d"),
         mime_type: "image/png".to_string(),
         width: Some(64),
         height: Some(48),
@@ -689,7 +823,7 @@ fn build_publish_avatar_metadata_iq_sets_required_info_attrs() {
 fn build_publish_avatar_metadata_iq_omits_unknown_dimensions() {
     let info = AvatarPublishInfo {
         bytes: 5,
-        id: "cafef00d".to_string(),
+        id: item_id(HELLO_ID),
         mime_type: "image/jpeg".to_string(),
         width: None,
         height: None,
@@ -818,4 +952,35 @@ fn request_avatar_disabled_metadata_skips_vcard_fallback() {
         vec![false],
         "vCard must not be queried after a disable"
     );
+}
+
+#[test]
+fn request_avatar_pointer_only_metadata_does_not_disable_vcard_fallback() {
+    let jid: BareJid = "alice@example.com".parse().expect("valid bare JID");
+    let mut requested = Vec::new();
+    let fetch = futures::executor::block_on(request_avatar_with_iq_skipping(
+        &jid,
+        &[],
+        |stanza: Element| {
+            let is_vcard = stanza.get_child("vCard", NS_VCARD_TEMP).is_some();
+            requested.push(is_vcard);
+            async move {
+                if is_vcard {
+                    Ok::<Element, AvatarRequestFailure<()>>(
+                        "<iq xmlns='jabber:client' type='result'><vCard xmlns='vcard-temp'><PHOTO><TYPE>image/png</TYPE><BINVAL>AQID</BINVAL></PHOTO></vCard></iq>"
+                            .parse()
+                            .expect("valid vcard"),
+                    )
+                } else {
+                    Ok("<iq xmlns='jabber:client' type='result'><pubsub xmlns='http://jabber.org/protocol/pubsub'><items node='urn:xmpp:avatar:metadata'><item id='current'><metadata xmlns='urn:xmpp:avatar:metadata'><pointer/></metadata></item></items></pubsub></iq>"
+                        .parse()
+                        .expect("valid metadata"))
+                }
+            }
+        },
+    ))
+    .expect("fetch")
+    .expect("vcard fallback");
+    assert!(matches!(fetch.id, AvatarId::VcardPhoto(_)));
+    assert_eq!(requested, vec![false, true]);
 }

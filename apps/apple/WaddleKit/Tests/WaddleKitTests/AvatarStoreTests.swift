@@ -50,10 +50,10 @@ private func image(_ byte: UInt8) -> AvatarImage {
 @MainActor
 @Suite("Avatar store")
 struct AvatarStoreTests {
-    private func store() -> (AvatarStore, AvatarLookups, TestClock) {
+    private func store(maxCachedBytes: Int = AvatarStore.maxCachedBytes) -> (AvatarStore, AvatarLookups, TestClock) {
         let lookups = AvatarLookups()
         let clock = TestClock()
-        let store = AvatarStore(now: { clock.now })
+        let store = AvatarStore(now: { clock.now }, maxCachedBytes: maxCachedBytes)
         store.fetch = { await lookups.fetch($0, knownID: $1) }
         return (store, lookups, clock)
     }
@@ -84,6 +84,66 @@ struct AvatarStoreTests {
         await lookups.waitForCalls(5)
         #expect(lookups.inFlight == 4)
         #expect(lookups.calls.last?.jid == peers[4])
+    }
+
+    @Test func cacheEvictsLeastRecentlyUsedBytesAndRefetchesWithoutKnownID() async {
+        let (store, lookups, _) = store(maxCachedBytes: 2)
+        store.request(bob)
+        store.request(carol)
+        await lookups.waitForCalls(2)
+        await lookups.answer(bob, with: .published(id: "b1", image: image(1)))
+        await lookups.answer(carol, with: .published(id: "c1", image: image(2)))
+        #expect(store.image(for: bob) == image(1)) // Bob is most recently used.
+
+        let dave = bare("dave@waddle.test")
+        store.request(dave)
+        await lookups.waitForCalls(3)
+        await lookups.answer(dave, with: .published(id: "d1", image: image(3)))
+        #expect(store.image(for: carol) == nil)
+        #expect(store.image(for: bob) == image(1))
+        #expect(store.image(for: dave) == image(3))
+
+        store.request(carol)
+        await lookups.waitForCalls(4)
+        #expect(lookups.calls[3] == .init(jid: carol, knownID: nil))
+    }
+
+    @Test func unchangedLookupAfterEvictionLeavesTheImageDue() async {
+        let (store, lookups, clock) = store(maxCachedBytes: 1)
+        store.request(bob)
+        await lookups.waitForCalls(1)
+        await lookups.answer(bob, with: .published(id: "b1", image: image(1)))
+
+        clock.advance(minutes: 46)
+        store.request(bob)
+        await lookups.waitForCalls(2)
+        #expect(lookups.calls[1] == .init(jid: bob, knownID: "b1"))
+        store.request(carol)
+        await lookups.waitForCalls(3)
+        await lookups.answer(carol, with: .published(id: "c1", image: image(2)))
+        #expect(store.image(for: bob) == nil)
+
+        await lookups.answer(bob, with: .unchanged)
+        store.request(bob)
+        await lookups.waitForCalls(4)
+        #expect(lookups.calls[3] == .init(jid: bob, knownID: nil))
+    }
+
+    @Test func oversizedImageDoesNotEscapeTheByteBudget() async {
+        let (store, lookups, clock) = store(maxCachedBytes: 1)
+        store.request(bob)
+        await lookups.waitForCalls(1)
+        let oversized = AvatarImage(data: Data([1, 2]), mediaType: "image/png", width: 0, height: 0)
+        await lookups.answer(bob, with: .published(id: "b1", image: oversized))
+        #expect(store.image(for: bob) == nil)
+
+        clock.advance(minutes: 9)
+        store.request(bob)
+        #expect(lookups.calls.count == 1)
+        clock.advance(minutes: 2)
+        store.request(bob)
+        await lookups.waitForCalls(2)
+        #expect(lookups.calls[1] == .init(jid: bob, knownID: nil))
     }
 
     @Test func positiveResultRevalidatesAfter45MinutesWithItsKnownID() async {

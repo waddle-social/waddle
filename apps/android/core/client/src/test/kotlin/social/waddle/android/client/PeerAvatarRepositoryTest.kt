@@ -385,13 +385,16 @@ class PeerAvatarRepositoryTest {
     }
 
     @Test
-    fun `an eviction during an in-flight fetch leaves the JID unsettled`() = runTest {
+    fun `an eviction during an in-flight fetch rejects its commit and leaves the JID unsettled`() = runTest {
         val h = Harness(this, budgetBytes = 4)
         h.load(this, "u1@waddle.test")
 
-        // u1 revalidates; its answer is parked (and will fail).
+        // u1 revalidates; its new avatar is parked while the old one is held.
         h.now = PeerAvatarRepository.POSITIVE_TTL_MILLIS
-        h.resolver.answer("u1@waddle.test", AvatarLookup.Failed)
+        h.resolver.answer(
+            "u1@waddle.test",
+            AvatarLookup.Found(testAvatar(jid = "u1@waddle.test", id = "new", data = ByteArray(4))),
+        )
         h.repository.ensure("u1@waddle.test")
         runCurrent()
         // u2 lands first and evicts u1's bytes mid-flight.
@@ -404,9 +407,12 @@ class PeerAvatarRepositoryTest {
         assertTrue("u1@waddle.test" !in h.store.avatars.value.keys)
         h.resolver.release("u1@waddle.test")
         runCurrent()
+        assertEquals(false, h.resolver.commits.last())
+        assertTrue("u1@waddle.test" !in h.store.avatars.value.keys)
+        assertEquals(4L, h.store.cachedAvatarBytes())
         val before = h.resolver.calls.count { it.jid == "u1@waddle.test" }
 
-        // No 10-minute Failed was recorded: the next watch fetches now.
+        // The rejected result recorded no TTL: the next watch fetches now.
         h.resolver.answer("u1@waddle.test", AvatarLookup.Found(testAvatar(jid = "u1@waddle.test", data = ByteArray(4))))
         val release = h.repository.watch("u1@waddle.test")
         runCurrent()

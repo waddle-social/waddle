@@ -241,6 +241,10 @@ impl WaddleClient {
             let bare: BareJid = jid
                 .parse()
                 .map_err(|err| js_error(format!("invalid JID: {err}")))?;
+            let known_ids: Vec<_> = known_ids
+                .into_iter()
+                .filter_map(waddle_xmpp_client::AvatarItemId::new)
+                .collect();
             let fetch = request_avatar_with_iq_skipping(&bare, &known_ids, |stanza| {
                 let inner = inner.clone();
                 async move { send_avatar_iq_command(inner, stanza).await }
@@ -249,10 +253,10 @@ impl WaddleClient {
 
             match fetch {
                 Some(fetch) => to_js_value(&WaddleAvatarFetch {
-                    id: fetch.id,
+                    id: fetch.id.to_string(),
                     avatar: fetch.avatar.map(|avatar| WaddleAvatar {
                         jid: avatar.jid.to_string(),
-                        id: avatar.id,
+                        id: avatar.id.to_string(),
                         mime_type: avatar.mime_type,
                         data: avatar.data,
                     }),

@@ -308,9 +308,9 @@ fn app_stanza_emits_typed_avatar_change_without_altering_pubsub_message() {
             from='alice@example.com' to='bob@example.com'>\
         <event xmlns='http://jabber.org/protocol/pubsub#event'>\
           <items node='urn:xmpp:avatar:metadata'>\
-            <item id='avatar-1'>\
+            <item id='aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'>\
               <metadata xmlns='urn:xmpp:avatar:metadata'>\
-                <info id='avatar-1' type='image/png'/>\
+                <info id='aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d' type='image/png'/>\
               </metadata>\
             </item>\
           </items>\
@@ -330,7 +330,8 @@ fn app_stanza_emits_typed_avatar_change_without_altering_pubsub_message() {
         &events[1],
         ClientEvent::AvatarChanged(change)
             if change.jid.to_string() == "alice@example.com"
-                && change.avatar_id.as_deref() == Some("avatar-1")
+                && change.avatar_id.as_ref().map(|id| id.as_str())
+                    == Some("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d")
     ));
     assert_eq!(events.len(), 2);
 }
