@@ -152,6 +152,23 @@ class XmppSessionManagerProfileTest {
     }
 
     @Test
+    fun `publishAvatar caches under the item id the FFI published`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.publishedAvatarId = "published-id"
+
+        assertEquals(
+            VerbResult.Ok,
+            harness.manager.publishAvatar(byteArrayOf(9, 9), "image/png", width = 1u, height = 1u),
+        )
+
+        assertEquals("published-id", harness.manager.profileStore.avatars.value[own]?.id)
+        // Revalidating our own avatar now names that id as known (§4.2).
+        assertEquals(listOf("published-id"), harness.manager.profileStore.knownAvatarIds(own))
+        harness.manager.logout()
+    }
+
+    @Test
     fun `a failed publishAvatar leaves the current avatar untouched`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)

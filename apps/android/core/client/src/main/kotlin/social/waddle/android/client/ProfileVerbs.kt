@@ -150,7 +150,8 @@ internal class ProfileVerbs(
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
                 -> return AvatarLookup.Failed
-                is ActiveSession.LeaseInvocation.Completed -> invocation.value
+                // `null` = definitively no avatar.
+                is ActiveSession.LeaseInvocation.Completed -> invocation.value ?: return AvatarLookup.Absent
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -158,7 +159,7 @@ internal class ProfileVerbs(
             // The FFI throws for a FAILED lookup (not connected, timeout,
             // transient stanza error): keep whatever avatar is held.
             return AvatarLookup.Failed
-        } ?: return AvatarLookup.Absent // `null` = definitively no avatar.
+        }
         // An id-only result means the FFI skipped the data fetch: the
         // bytes for that id are, by construction, in the cache we
         // handed it — re-mark them current. Keyed by the requested
@@ -222,12 +223,16 @@ internal class ProfileVerbs(
      *  their SHA-1 item id and become the account's current avatar. */
     suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt): VerbResult {
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
-        val result = unitVerb(lease) { it.publishAvatar(data, mimeType, width, height) }
+        // The FFI returns the item id it published under; caching the
+        // bytes at exactly that id makes our own revalidation send it as
+        // known (XEP-0084 §4.2) instead of re-downloading our upload.
+        var publishedId = avatarItemId(data)
+        val result = unitVerb(lease) { publishedId = it.publishAvatar(data, mimeType, width, height) }
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
             stores.profileStore.onAvatar(
                 WaddleAvatar(
                     jid = lease.ownerBareJid,
-                    id = avatarItemId(data),
+                    id = publishedId,
                     mimeType = mimeType,
                     data = data,
                 ),

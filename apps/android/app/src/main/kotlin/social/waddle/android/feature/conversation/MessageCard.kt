@@ -402,12 +402,14 @@ private fun MessageBubble(
                 isMine = isMine,
                 mentionsSelf = mentionsSelf,
                 onLongPress = onLongPress,
-                author = author,
-                authorColor = authorColor,
-                badge = badge,
-                time = time,
-                edited = edited,
-                pinned = pinned,
+                meta = BubbleMeta(
+                    author = author,
+                    authorColor = authorColor,
+                    badge = badge,
+                    time = time,
+                    edited = edited,
+                    pinned = pinned,
+                ),
                 header = header,
                 body = body,
                 extras = extras,
@@ -435,18 +437,24 @@ private fun MessageAvatarGutter(avatar: MessageAvatar, author: String) {
     }
 }
 
+/** The bubble's header line: who wrote it, when, and its status marks. */
+private data class BubbleMeta(
+    val author: String,
+    /** XEP-0392 identity color of the author name; `null` = theme primary. */
+    val authorColor: Color?,
+    val badge: AuthorBadge?,
+    val time: String?,
+    val edited: Boolean,
+    val pinned: Boolean,
+)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageSurface(
     isMine: Boolean,
     mentionsSelf: Boolean,
     onLongPress: (() -> Unit)?,
-    author: String,
-    authorColor: Color?,
-    badge: AuthorBadge?,
-    time: String?,
-    edited: Boolean,
-    pinned: Boolean,
+    meta: BubbleMeta,
     header: @Composable () -> Unit,
     body: (@Composable () -> Unit)?,
     extras: @Composable () -> Unit,
@@ -478,14 +486,14 @@ private fun MessageSurface(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = author,
+                    text = meta.author,
                     style = MaterialTheme.typography.labelMedium,
-                    color = authorColor ?: MaterialTheme.colorScheme.primary,
+                    color = meta.authorColor ?: MaterialTheme.colorScheme.primary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(end = 8.dp),
                 )
-                badge?.let {
+                meta.badge?.let {
                     Text(
                         text = it.label,
                         style = MaterialTheme.typography.labelSmall,
@@ -495,14 +503,14 @@ private fun MessageSurface(
                         modifier = Modifier.padding(end = 8.dp).widthIn(max = 120.dp),
                     )
                 }
-                time?.let {
+                meta.time?.let {
                     Text(
                         text = it,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (edited) {
+                if (meta.edited) {
                     Text(
                         text = stringResource(R.string.message_edited),
                         style = MaterialTheme.typography.labelSmall,
@@ -510,7 +518,7 @@ private fun MessageSurface(
                         modifier = Modifier.padding(start = 4.dp),
                     )
                 }
-                if (pinned) {
+                if (meta.pinned) {
                     Icon(
                         Icons.Outlined.PushPin,
                         contentDescription = stringResource(R.string.message_pinned),
