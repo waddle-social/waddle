@@ -1230,7 +1230,7 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         profileVerbFailure?.let { throw it }
     }
 
-    /** Item id [publishAvatar] reports; `null` = SHA-1 of the bytes (FFI parity). */
+    /** Item id [publishAvatar] reports; `null` = the core's id for the bytes (FFI parity). */
     @Volatile
     var publishedAvatarId: String? = null
 
@@ -1239,8 +1239,7 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         publishedAvatarBytes = data
         profileVerbs += RecordedProfileVerb.PublishAvatar(data.size, mimeType, width, height)
         profileVerbFailure?.let { throw it }
-        return publishedAvatarId ?: java.security.MessageDigest.getInstance("SHA-1").digest(data)
-            .joinToString(separator = "") { byte -> "%02x".format(byte) }
+        return publishedAvatarId ?: avatarItemId(data)
     }
 
     override suspend fun disableAvatar() {
