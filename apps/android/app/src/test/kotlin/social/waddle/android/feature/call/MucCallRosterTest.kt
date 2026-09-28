@@ -232,6 +232,44 @@ class MucCallRosterTest {
     }
 
     @Test
+    fun liveRowsTakeLabelAndFaceFromTheSameIdentity() {
+        // Muji maps nick "alice" to Bob; an unowned identity alice@x is
+        // also labeled "alice" by its localpart. Neither borrows the other's face.
+        val presence = MucPresenceRosterView(
+            participants = emptyMap(),
+            owners = mapOf(room to mapOf("alice" to "bob@y.test/phone")),
+            raisedHands = mapOf(room to setOf("alice")),
+            mutedNicks = emptyMap(),
+        )
+        val both = mucRosterOf(
+            room,
+            presence,
+            LiveRosterView(
+                participants = mapOf(room to listOf("alice@x.test/web", "bob@y.test/phone")),
+                leavingRooms = emptyMap(),
+            ),
+        )
+        assertEquals(
+            listOf(
+                MucRosterEntry("alice", handRaised = false, muted = false, jid = "alice@x.test"),
+                MucRosterEntry("alice", handRaised = true, muted = false, jid = "bob@y.test"),
+            ),
+            both,
+        )
+
+        // Bob not in the call: his owner entry never relabels Alice's face.
+        val aliceOnly = mucRosterOf(
+            room,
+            presence,
+            LiveRosterView(participants = mapOf(room to listOf("alice@x.test/web")), leavingRooms = emptyMap()),
+        )
+        assertEquals(
+            listOf(MucRosterEntry("alice", handRaised = false, muted = false, jid = "alice@x.test")),
+            aliceOnly,
+        )
+    }
+
+    @Test
     fun storeSnapshotsDedupeAndNormalizeIdentities() {
         val store = MucCallLiveParticipantsStore()
         store.setParticipants(room, listOf("Alice@Waddle.Test/web", "alice@waddle.test/web", ""))

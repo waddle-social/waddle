@@ -34,8 +34,11 @@ fun messageAvatarsOf(
             previous = null
             continue
         }
-        if (!item.isMine) {
-            val jid = authorBareJidOf(item, selfBareJid)
+        val jid = authorBareJidOf(item, selfBareJid)
+        // A row stamped with someone else's JID is theirs even if our nick
+        // matched (a nick we took over after they wrote it).
+        val ownRow = item.isMine && (jid == null || jid == selfBareJid?.let(::normalizedBareJid))
+        if (!ownRow) {
             val grouped = previous?.let { prev ->
                 // Same sender and window (continuesGroup) AND the same
                 // resolved person: a reused nick, or known vs unknown,

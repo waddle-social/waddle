@@ -142,7 +142,16 @@ class TimelineStore(
             to = message.to,
             isGroupchat = isGroupchat,
         ) ?: return
-        mutationOf(message, isGroupchat = isGroupchat, mine = key.isMine)?.let { mutation ->
+        val authorJid = message.authorRealJid?.let(::normalizedBareJid)?.takeIf { '@' in it }
+        // A room row the archive attributes is ours only if that real JID
+        // is — our nick may have been someone else's when it was written.
+        // Nick equality decides only rows without one.
+        val isMine = if (isGroupchat && authorJid != null) {
+            authorJid == ownBareJid?.let(::normalizedBareJid)
+        } else {
+            key.isMine
+        }
+        mutationOf(message, isGroupchat = isGroupchat, mine = isMine)?.let { mutation ->
             applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
             return
         }
@@ -157,9 +166,9 @@ class TimelineStore(
                 from = message.from,
                 body = stripReplyFallback(body, message.replyFallbackStart, message.replyFallbackEnd),
                 timestamp = message.timestamp,
-                isMine = key.isMine,
+                isMine = isMine,
                 source = TimelineSource.Archived(message),
-                authorJid = message.authorRealJid?.let(::normalizedBareJid)?.takeIf { '@' in it },
+                authorJid = authorJid,
             ),
             isGroupchat = isGroupchat,
             // The archive returns retracted originals as tombstones.

@@ -238,4 +238,39 @@ class OccupantJidStoreTest {
         assertTrue(row.source is TimelineSource.Live)
         assertNull(row.authorJid)
     }
+
+    @Test
+    fun `an archived room row is ours only when its real JID is`() {
+        val own = "alice@waddle.test"
+        val store = TimelineStore()
+        store.setOwnBareJid("$own/phone")
+        fun archived(id: String, realJid: String?) = testArchivedMessage(
+            mamId = "m-$id",
+            id = id,
+            stanzaId = id,
+            stanzaIdBy = room,
+            from = "$room/alice",
+            to = own,
+            messageType = "groupchat",
+            authorRealJid = realJid,
+        )
+        // Bob wrote as "alice" while Alice was away; she rejoined as "alice".
+        store.onArchivedMessage(archived("b1", "bob@waddle.test/web"))
+        store.onArchivedMessage(archived("a1", "Alice@waddle.test/phone"))
+        // No real JID in the archive: nick equality is all there is.
+        store.onArchivedMessage(archived("n1", null))
+
+        val rows = store.timeline(room).value.associateBy { it.id }
+        assertEquals(false, rows.getValue("b1").isMine)
+        assertEquals("bob@waddle.test", authorBareJidOf(rows.getValue("b1"), own))
+        assertEquals(true, rows.getValue("a1").isMine)
+        assertEquals(true, rows.getValue("n1").isMine)
+        assertEquals(own, authorBareJidOf(rows.getValue("n1"), own))
+    }
+
+    @Test
+    fun `a room row's stamp wins over the nick-based mine flag`() {
+        val stampedByOther = liveRow("$room/me", mine = true, authorJid = "bob@waddle.test")
+        assertEquals("bob@waddle.test", authorBareJidOf(stampedByOther, self))
+    }
 }

@@ -158,4 +158,14 @@ class MessageAvatarTest {
         assertEquals(MessageAvatar("dana@waddle.test", visible = true), avatarOf(avatars, known))
         assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, unknownAgain))
     }
+
+    @Test
+    fun `a row matching our nick but stamped with another JID gets their avatar`() {
+        val theirs = row("1", "me", mine = true, authorJid = "bob@waddle.test")
+        val ours = row("2", "me", mine = true, authorJid = self)
+        val avatars = messageAvatarsOf(listOf(theirs, ours), self)
+
+        assertEquals(MessageAvatar("bob@waddle.test", visible = true), avatarOf(avatars, theirs))
+        assertNull(avatarOf(avatars, ours))
+    }
 }
