@@ -261,12 +261,19 @@ export class AvatarStore {
         if (!failed) this.urls.set(key, null);
         this.settle(key, entry, "miss", failed);
       }
-      // The fetch straddled a session change: its answer may come from (or
-      // have failed with) the old socket. Any answer is suspect across a
-      // fresh session; across a resume only a transport failure is.
-      const straddledFresh = this.freshSessions !== freshSessions;
+      // The fetch straddled a session change, so its answer may come from
+      // (or have failed with) the old socket. Mirror `beginSession`: across
+      // a reconnect (any fresh session after the first) every answer is
+      // suspect; across the first session only a miss is (a fetch waiting
+      // on the initial connect answers from the new session); across a
+      // resume only a transport failure is.
+      const straddledReconnect = this.freshSessions > Math.max(freshSessions, 1);
+      const straddledFirstSession = freshSessions === 0 && this.freshSessions > 0;
       const straddledResume = this.resumes !== resumes;
-      if (entry.settled && (straddledFresh || (straddledResume && failed))) {
+      const suspect = straddledReconnect
+        || (straddledFirstSession && entry.settled?.kind === "miss")
+        || (straddledResume && failed);
+      if (entry.settled && suspect) {
         entry.settled.stale = true;
         if (entry.retainers > 0) this.enqueue(key, true);
       }

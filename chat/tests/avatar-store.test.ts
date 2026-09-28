@@ -256,7 +256,7 @@ describe("AvatarStore", () => {
     expect(remote.calls.map((call) => call.jid).slice(3)).toEqual(["carol@example.com"]);
   });
 
-  test("a first fetch in flight across a fresh session is rerun once it settles", async () => {
+  test("a first fetch in flight across a reconnect (second fresh session) is rerun once it settles", async () => {
     const { store, remote } = setup();
     store.beginSession();
     store.retain("alice@example.com");
@@ -273,6 +273,24 @@ describe("AvatarStore", () => {
     expect(store.urlFor("alice@example.com")).toBe("data:new-session");
   });
 
+  test("a fetch waiting on the initial connect keeps its avatar across the first session; misses are retried", async () => {
+    const { store, remote } = setup();
+    // Retained before the first session is ready: the fetch waits on connect().
+    store.retain("alice@example.com");
+    store.retain("bob@example.com");
+    store.retain("carol@example.com");
+
+    store.beginSession();
+    remote.calls[0]!.resolve("data:a");
+    remote.calls[1]!.resolve(null);
+    remote.calls[2]!.reject(new Error("connect failed"));
+    await flush();
+
+    // The avatar answered from the new session is kept; both misses rerun.
+    expect(store.urlFor("alice@example.com")).toBe("data:a");
+    expect(remote.calls.map((call) => call.jid).slice(3)).toEqual(["bob@example.com", "carol@example.com"]);
+  });
+
   test("a first fetch that fails across a resume is retried; a successful one is kept", async () => {
     const { store, remote } = setup();
     store.beginSession();
@@ -286,7 +304,7 @@ describe("AvatarStore", () => {
     expect(remote.calls.map((call) => call.jid).slice(2)).toEqual(["alice@example.com"]);
   });
 
-  test("an unretained fetch that straddled a fresh session refetches on the next retain", async () => {
+  test("an unretained fetch that straddled a reconnect refetches on the next retain", async () => {
     const { store, remote } = setup();
     store.beginSession();
     const release = store.retain("alice@example.com");
