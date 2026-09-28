@@ -156,6 +156,38 @@ struct RoomAuthorTests {
         #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
     }
 
+    @Test func reusedOriginIDNeverLendsAStamp() {
+        let coordinator = coordinator()
+        // Sam's message as delayed room history: no stamp.
+        coordinator.handle(.message(roomMessage("from sam", from: "sam", stanzaID: "s1", originID: "x", at: date(1))))
+        // Mallory takes the nick and reuses Sam's origin id, live and archived.
+        coordinator.handle(.presence(occupantPresence("sam", realJID: erin)))
+        coordinator.handle(.message(roomMessage("from mallory", from: "sam", stanzaID: "s2", originID: "x")))
+        var archived = roomMessage("from mallory", from: "sam", stanzaID: "s3", originID: "x", at: date(2), source: .archive(mamID: "s3"))
+        archived.authorRealJID = erin
+        coordinator.timelines.ingest(archived)
+        // Both merged into Sam's row on the shared origin id.
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.map(\.id) == ["s1"])
+        #expect(row(coordinator, "s1")?.message.authorRealJID == nil)
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == nil)
+
+        // The genuine archive copy (the room's own stanza id) still stamps it.
+        var genuine = roomMessage("from sam", from: "sam", stanzaID: "s1", originID: "x", at: date(1), source: .archive(mamID: "s1"))
+        genuine.authorRealJID = dave
+        coordinator.timelines.ingest(genuine)
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
+    }
+
+    @Test func liveTwinNeverFillsAnArchivedRowsStamp() {
+        let coordinator = coordinator()
+        coordinator.timelines.ingest(roomMessage("legacy", from: "sam", stanzaID: "s1", originID: "x", at: date(1), source: .archive(mamID: "s1")))
+        var live = roomMessage("legacy", from: "sam", stanzaID: "s1", originID: "x", at: date(1))
+        live.authorRealJID = erin
+        coordinator.timelines.ingest(live)
+        #expect(row(coordinator, "s1")?.message.source == .live)
+        #expect(row(coordinator, "s1")?.message.authorRealJID == nil)
+    }
+
     @Test func archiveTwinNeverReplacesALiveStamp() {
         let coordinator = coordinator()
         coordinator.handle(.presence(occupantPresence("sam", realJID: dave)))
