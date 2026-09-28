@@ -13,8 +13,8 @@ import {
   Settings,
   Users,
 } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { buildHomeChannelUnreadMap } from "@/home/dashboard-props";
 import {
   buildQuickSwitcherEntries,
@@ -206,7 +206,7 @@ function badgeLabel(entry: QuickSwitcherEntry): string {
         @mousedown.prevent
         @click="choose(entry)"
       >
-        <AppAvatar v-if="entry.target.kind === 'dm'" :name="entry.title" :src="entry.avatarUrl ?? null" size="sm" />
+        <UserAvatar v-if="entry.target.kind === 'dm'" :jid="entry.target.peerJid" :name="entry.title" size="sm" />
         <span
           v-else
           class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
