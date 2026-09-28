@@ -169,7 +169,11 @@ async fn resolve_photo_op(
             // publish would silently overwrite their avatar.
             let db_actor = deps.state.deps.app_state.db_pool.global_actor();
             let source = read_avatar_source(db_actor, jid).await?;
-            if source == AvatarSource::User {
+            // The guard protects an avatar the user published; a `'user'`
+            // row with no published avatar left (e.g. pubsub tables were
+            // recreated by a schema bump) is stale and must not block the
+            // OIDC picture forever.
+            if source == AvatarSource::User && avatar_metadata_present(deps, jid).await? {
                 outcome.photo_axis_guarded_by_user_managed = true;
                 return Ok(PhotoOp::None);
             }
