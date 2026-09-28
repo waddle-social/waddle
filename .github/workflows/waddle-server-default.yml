@@ -13,6 +13,8 @@ on:
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
     - .github/workflows/waddle-server-*.yml
     - .github/workflows/waddle-server-default.yml
+    - .rules.cue
+    - .rules.cue/**
     - apps/apple/**/Tests/**
     - apps/apple/Waddle/RustClient/Generated/**
     - chat/tests/**
@@ -33,27 +35,38 @@ on:
     - docs/product/gate-evidence.json/**
     - docs/product/performance-profile.json
     - docs/product/performance-profile.json/**
+    - env.cue
+    - env.cue/**
     - flake.lock
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - infrastructure/waddle.cloud/env.cue
+    - infrastructure/waddle.cloud/env.cue/**
     - infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml
     - infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server/**
+    - infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml
+    - infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml/**
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
+    - namespace.cue
+    - namespace.cue/**
     - scripts/*cache-benchmark*
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
     - server/**/env.cue
+    - server/.cargo/**
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
+    - server/README.md
+    - server/README.md/**
     - server/capabilities.toml
     - server/capabilities.toml/**
     - server/charts/waddle-server/**
