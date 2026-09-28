@@ -271,6 +271,23 @@ struct AvatarStoreTests {
         await Task.yield()
         #expect(lookups.calls.isEmpty)
     }
+
+    @Test func publishedOwnAvatarRevalidatesWithItsItemID() async {
+        let (store, lookups, clock) = store()
+        let published = image(9)
+        store.set(me.jid, image: published)
+        clock.advance(minutes: 46)
+        store.request(me.jid)
+        await lookups.waitForCalls(1)
+        #expect(lookups.calls == [.init(jid: me.jid, knownID: published.itemID)])
+        await lookups.answer(me.jid, with: .unchanged)
+        #expect(store.image(for: me.jid) == published)
+    }
+
+    @Test func itemIDIsTheLowercaseHexSHA1OfTheBytes() {
+        let abc = AvatarImage(data: Data("abc".utf8), mediaType: "image/png", width: 0, height: 0)
+        #expect(abc.itemID == "a9993e364706816aba3e25717850c26c9cd0d89d")
+    }
 }
 
 @MainActor

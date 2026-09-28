@@ -92,13 +92,14 @@ public final class AvatarStore {
         }
     }
 
-    /// Records an avatar known locally (our own, just published or removed).
+    /// Records an avatar known locally (our own, just published or removed),
+    /// with its item id so revalidation transfers no data while unchanged.
     public func set(_ jid: BareJID, image: AvatarImage?) {
         changes[jid, default: 0] += 1
         queue.removeAll { $0 == jid }
         images[jid] = image
         let wait = image == nil ? Self.retryAfter : Self.revalidateAfter
-        entries[jid] = Entry(id: nil, dueAt: now().addingTimeInterval(wait))
+        entries[jid] = Entry(id: image?.itemID, dueAt: now().addingTimeInterval(wait))
     }
 
     public func clear() {
