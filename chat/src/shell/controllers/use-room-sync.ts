@@ -117,6 +117,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
     if (options.intent !== "automatic" && !options.fromRoute) cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
+    ui.activeCommunitySurface.value = null;
     ui.sidebarMode.value = options.surface ?? "channels";
     activeExtensionRouteKey.value = null;
     if (ui.sidebarMode.value !== "dms") dmConversations.closeDm();

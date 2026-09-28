@@ -562,3 +562,32 @@ describe("cold occupant routes", () => {
     expect(matchLocation(`/dm/${encodeURIComponent("bob@external.example/mobile")}`)).toEqual({ id: "home" });
   });
 });
+
+describe("leaving an active community surface", () => {
+  // Regression for: opening a room/DM/settings from Feed or Events left the
+  // surface (and the URL) stuck on /feed because only some navigation
+  // functions cleared `ui.activeCommunitySurface`.
+  test.each(["channel", "dm", "settings"] as const)(
+    "opening %s clears the Feed surface and its URL",
+    async (target) => {
+      const h = harness();
+      h.connectionStore.appState = "ready";
+      await flush();
+
+      h.page.openCommunitySurface("feed");
+      await flush();
+      expect(h.ui.activeCommunitySurface.value).toBe("feed");
+      expect(h.location.pathname).toBe("/feed");
+
+      if (target === "channel") await h.roomSync.selectChannel("general");
+      else if (target === "dm") await h.dmSync.handleOpenDm("bob@example.com");
+      else h.page.openUserSettings();
+      await flush();
+
+      expect(h.ui.activeCommunitySurface.value).toBeNull();
+      expect(h.location.pathname).toBe(
+        target === "channel" ? "/r/general" : target === "dm" ? "/dm/bob%40example.com" : "/settings",
+      );
+    },
+  );
+});
