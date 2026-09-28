@@ -2141,6 +2141,11 @@ export class BrowserXmppClient {
     return this.events.on("occupantRealJid", handler);
   }
 
+  /** Our actual occupant nick per room, from XEP-0045 self-presence (may differ from the requested one). */
+  addOwnOccupantNickHandler(handler: (roomJid: string, nick: string | null) => void): () => void {
+    return this.events.on("ownOccupantNick", handler);
+  }
+
   /** Our own profile (vCard4, incl. photo) was republished from this client. */
   addOwnProfilePublishedHandler(handler: (ownBareJid: string) => void): () => void {
     return this.events.on("ownProfilePublished", handler);

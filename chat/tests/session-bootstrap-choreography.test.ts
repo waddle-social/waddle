@@ -74,6 +74,7 @@ function makeHarness(options: {
     addAvatarChangedHandler: () => () => {},
     addOccupantRealJidHandler: () => () => {},
     addOwnProfilePublishedHandler: () => () => {},
+    addOwnOccupantNickHandler: () => () => {},
     fetchUserAvatar: async () => null,
     forgetUserAvatar: () => {},
     setMemberJidHandler: () => {},

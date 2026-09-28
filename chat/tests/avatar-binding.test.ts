@@ -20,6 +20,7 @@ function fakeClient() {
     addAvatarChangedHandler: (handler) => on(changed, handler),
     addOccupantRealJidHandler: (handler) => on(occupants, handler),
     addOwnProfilePublishedHandler: (handler) => on(ownProfile, handler),
+    addOwnOccupantNickHandler: () => () => undefined,
   };
   return {
     client,

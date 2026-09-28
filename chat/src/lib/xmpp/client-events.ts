@@ -132,6 +132,8 @@ export type ClientEvents = {
   /** `bareJid` null: the nick is held by an occupant whose real JID is not disclosed. */
   occupantRealJid: [roomJid: string, nick: string, bareJid: string | null];
   ownProfilePublished: [ownBareJid: string];
+  /** Our actual occupant nick in a room (from self-presence), or null after leaving. */
+  ownOccupantNick: [roomJid: string, nick: string | null];
   chatState: [event: ChatStateEvent];
   dmChatState: [event: DmChatStateEvent];
   dmReaction: [event: DmReactionEvent];

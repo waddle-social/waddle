@@ -85,8 +85,24 @@ export class OccupantJidDirectory {
     return null;
   }
 
+  /** Our actual occupant nick per room (XEP-0045 self-presence; 210 may rename us). */
+  private readonly ownNicks = shallowReactive(new Map<string, string>());
+
+  recordOwnNick(roomJid: string, nick: string | null): void {
+    const room = barePeerJid(roomJid).toLowerCase();
+    if (!room) return;
+    if (nick) this.ownNicks.set(room, nick);
+    else this.ownNicks.delete(room);
+  }
+
+  /** Reactive: our current occupant nick in `roomJid`, if joined. */
+  ownNick(roomJid: string): string | null {
+    return this.ownNicks.get(barePeerJid(roomJid).toLowerCase()) ?? null;
+  }
+
   clear(): void {
     this.history.clear();
+    this.ownNicks.clear();
   }
 }
 
@@ -96,15 +112,21 @@ function occupantRealJid(directory: OccupantJidDirectory, occupantJid: string): 
 }
 
 /**
- * A row this client sent or saw echoed live under its current nick. A
- * room row's `isSelf` otherwise only means "same nick as ours now", which
- * a past occupant of that nick shares, so it never names us on its own.
+ * A row this client sent (a local echo carries a delivery status) or saw
+ * reflected live under our ACTUAL occupant nick in that room. A room row's
+ * `isSelf` compares against the nick we asked for, which a peer may hold
+ * while the room assigned us another (XEP-0045 210), so it never names us
+ * on its own; neither does a past holder of our nick.
  */
-function isOwnSend(author: AuthorRef): boolean {
-  if (!author.isSelf) return false;
-  return author.deliveryStatus !== undefined
-    || author.createdAtSource === "fallback"
-    || author.createdAtSource === "queued";
+function isOwnSend(author: AuthorRef, directory: OccupantJidDirectory): boolean {
+  if (author.isSelf && author.deliveryStatus !== undefined) return true;
+  const live = author.createdAtSource === "fallback" || author.createdAtSource === "queued";
+  if (!live) return false;
+  if (author.authorOccupantJid) {
+    const ownNick = directory.ownNick(barePeerJid(author.authorOccupantJid));
+    return !!ownNick && resourceOf(author.authorOccupantJid) === ownNick;
+  }
+  return !!author.isSelf;
 }
 
 /**
@@ -116,13 +138,13 @@ export function resolveAuthorJid(
   directory: OccupantJidDirectory,
   selfJid?: string | null,
 ): string | null {
-  // The archive's real JID is authoritative, even over a self flag.
+  // A disclosed identity always wins: the archive's real JID, then the
+  // occupant JID stamped at live ingest. Only then our own sends.
   const real = bare(author.authorRealJid);
   if (real) return real;
-  if (selfJid && isOwnSend(author)) return bare(selfJid);
-  // Stamped at live ingest from the occupant mapping in effect then.
   const stamped = bare(author.authorAvatarJid);
   if (stamped) return stamped;
+  if (selfJid && isOwnSend(author, directory)) return bare(selfJid);
   // Other room rows (and MUC private messages) carry only the occupant
   // JID: use the room's disclosure that was in effect when the row was
   // sent, so a later reuse of the nick never re-attributes it.
@@ -159,7 +181,7 @@ export function roomOccupantAvatarJid(roomJid: string | null | undefined, nick: 
  * name it.
  */
 export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string): T {
-  if (isOwnSend(row) || row.authorRealJid || row.authorAvatarJid) return row;
+  if (isOwnSend(row, occupantJidDirectory) || row.authorRealJid || row.authorAvatarJid) return row;
   const past = row.createdAtSource === "archive" || row.createdAtSource === "delay";
   const author = past
     ? occupantJidDirectory.lookupAt(roomJid, nick, Date.parse(row.createdAt ?? ""))

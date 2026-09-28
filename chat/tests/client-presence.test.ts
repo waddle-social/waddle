@@ -120,6 +120,17 @@ describe("PresenceManager MUC occupant tracking", () => {
     expect(memberJids).toEqual([["sam", "alice@example.com"], ["sam", null]]);
   });
 
+  test("self-presence reports our actual (possibly room-assigned) nick, and clears it on leave", () => {
+    const { manager, events } = createManager();
+    const ownNicks: unknown[] = [];
+    events.on("ownOccupantNick", (room, nick) => ownNicks.push([room, nick]));
+    // XEP-0045 210: we asked for "alice" and the room assigned "alice_2".
+    manager.handle(directPresence({ from: `${ROOM}/alice_2`, muc_affiliation: "member", muc_role: "participant", muc_status_codes: [110, 210] }));
+    manager.handle(directPresence({ from: `${ROOM}/alice`, muc_affiliation: "member", muc_role: "participant" }));
+    manager.handle(directPresence({ from: `${ROOM}/alice_2`, presence_type: "unavailable", muc_affiliation: "member", muc_role: "none", muc_status_codes: [110] }));
+    expect(ownNicks).toEqual([[ROOM, "alice_2"], [ROOM, null]]);
+  });
+
   test("a JID-less presence for a nick still mapped clears the member JID too", () => {
     const { manager, events } = createManager();
     const memberJids: unknown[] = [];

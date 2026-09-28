@@ -175,6 +175,9 @@ export class PresenceManager {
       // matches the waiter.
       if (this.isOwnAvailableMucSelfPresence(presence)) {
         this.deps.onOwnSelfPresence(room);
+        // XEP-0045 §7.2.9 (210): the room may have assigned a nick other
+        // than the one requested; the self-presence's nick is the real one.
+        if (nick) this.deps.events.emitSafe("ownOccupantNick", room, nick);
       }
       if (!nick && presence.vcard_avatar) this.deps.events.emit("roomAvatar", room, presence.vcard_avatar);
       if (!nick) return;
@@ -191,6 +194,7 @@ export class PresenceManager {
         const isNickChange = presence.muc_status_codes?.includes(303) ?? false;
         if (this.isOwnMucSelfPresence(presence) && !isNickChange) {
           this.deps.onOwnUnavailable(room);
+          this.deps.events.emitSafe("ownOccupantNick", room, null);
         }
         delete roomHats[nick];
         delete roomAuthority[nick];

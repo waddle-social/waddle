@@ -26,6 +26,7 @@ afterEach(() => occupantJidDirectory.clear());
 describe("resolveAuthorJid", () => {
   test("self rows resolve to our own bare JID", () => {
     const { directory } = directoryAt();
+    directory.recordOwnNick(ROOM, "me");
     expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAtSource: "fallback" }, directory, "me@waddle.social/web"))
       .toBe("me@waddle.social");
   });
@@ -178,6 +179,7 @@ describe("self attribution never comes from nick equality alone", () => {
 
   test("our own sends and live echoes still resolve to us", () => {
     const { directory } = directoryAt();
+    directory.recordOwnNick(ROOM, "me");
     const selfJid = "me@waddle.social/web";
     expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me`, deliveryStatus: "sending" }, directory, selfJid))
       .toBe("me@waddle.social");
@@ -266,6 +268,56 @@ describe("ContentArea wiring", () => {
     expect(source).not.toContain("nick === props.currentUser");
     expect(source).not.toContain("popoverAuthor?.username === currentUser");
     expect(source).toContain("typingAuthorAvatarJid(");
+  });
+});
+
+describe("room-assigned nick (XEP-0045 210)", () => {
+  // We asked for "me"; the room assigned us "me_2". A peer holds "me".
+  function assigned() {
+    const { directory } = directoryAt();
+    directory.recordOwnNick(ROOM, "me_2");
+    directory.record(ROOM, "me_2", "me@waddle.social");
+    directory.record(ROOM, "me", "peer@elsewhere.example");
+    return directory;
+  }
+  const selfJid = "me@waddle.social/web";
+
+  test("a peer on our requested nick shows the peer's face, even flagged isSelf by nick", () => {
+    const directory = assigned();
+    // timeline.ts marks this row isSelf (nick === username); it is the peer's.
+    const peerRow = { isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAtSource: "fallback" as const, createdAt: at(1) };
+    expect(resolveAuthorJid(peerRow, directory, selfJid)).toBe("peer@elsewhere.example");
+    // The peer's disclosed stamp also beats the own-send fallback.
+    expect(resolveAuthorJid({ ...peerRow, authorAvatarJid: "peer@elsewhere.example" }, directory, selfJid))
+      .toBe("peer@elsewhere.example");
+  });
+
+  test("our own reflection under the assigned nick resolves to us", () => {
+    const directory = assigned();
+    const ownReflection = { isSelf: false, authorOccupantJid: `${ROOM}/me_2`, createdAtSource: "fallback" as const, createdAt: at(1) };
+    expect(resolveAuthorJid(ownReflection, directory, selfJid)).toBe("me@waddle.social");
+    // Even in a room that does not disclose our JID.
+    const anonymous = directoryAt().directory;
+    anonymous.recordOwnNick(ROOM, "me_2");
+    expect(resolveAuthorJid(ownReflection, anonymous, selfJid)).toBe("me@waddle.social");
+  });
+
+  test("our local echo stays ours regardless of nick", () => {
+    const directory = assigned();
+    expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me`, deliveryStatus: "sending" }, directory, selfJid))
+      .toBe("me@waddle.social");
+  });
+
+  test("live stamping pins the peer on our requested nick and skips our own reflection", () => {
+    occupantJidDirectory.recordOwnNick(ROOM, "me_2");
+    occupantJidDirectory.record(ROOM, "me", "peer@elsewhere.example");
+    occupantJidDirectory.record(ROOM, "me_2", "me@waddle.social");
+    const peerRow = stampLiveRoomAuthor({ isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAtSource: "fallback" }, ROOM, "me");
+    expect(peerRow.authorAvatarJid).toBe("peer@elsewhere.example");
+    expect(authorAvatarJid(peerRow, selfJid)).toBe("peer@elsewhere.example");
+    const own = stampLiveRoomAuthor({ authorOccupantJid: `${ROOM}/me_2`, createdAtSource: "fallback" }, ROOM, "me_2");
+    expect(own.authorAvatarJid).toBeUndefined();
+    expect(authorAvatarJid(own, selfJid)).toBe("me@waddle.social");
   });
 });
 

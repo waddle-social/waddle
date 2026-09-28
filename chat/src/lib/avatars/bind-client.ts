@@ -9,6 +9,7 @@ export interface AvatarClient {
   addAvatarChangedHandler: (handler: (event: AvatarChangedEvent) => void) => () => void;
   addOccupantRealJidHandler: (handler: (roomJid: string, nick: string, bareJid: string | null) => void) => () => void;
   addOwnProfilePublishedHandler: (handler: (ownBareJid: string) => void) => () => void;
+  addOwnOccupantNickHandler: (handler: (roomJid: string, nick: string | null) => void) => () => void;
 }
 
 /**
@@ -26,10 +27,12 @@ function bindAvatarClient(
   const offChanged = client.addAvatarChangedHandler((event) => store.handleAvatarChanged(event.jid, event.avatarId));
   const offOccupant = client.addOccupantRealJidHandler((roomJid, nick, bareJid) => directory.record(roomJid, nick, bareJid));
   const offOwnProfile = client.addOwnProfilePublishedHandler((ownJid) => store.invalidate(ownJid));
+  const offOwnNick = client.addOwnOccupantNickHandler((roomJid, nick) => directory.recordOwnNick(roomJid, nick));
   return () => {
     offChanged();
     offOccupant();
     offOwnProfile();
+    offOwnNick();
     store.setFetcher(null);
     store.setEvictionHandler(null);
   };
