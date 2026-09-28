@@ -30,7 +30,11 @@ interface LinkPreviewLookupUnsupportedResult {
 
 const HTTPS_URL_RE = /https:\/\/[^\s<>"']+/gi;
 const NS_WADDLE_LINK_PREVIEW = "urn:waddle:link-preview:0";
-const LOOKUP_TIMEOUT_MS = 2_000;
+// The lookup runs while the user composes, so it can afford to wait for the
+// server's full resolve: a page phase plus an image phase (3 s each by
+// default, `WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS`) plus deferred delivery.
+// A shorter bound discards previews the server resolved successfully.
+const LOOKUP_TIMEOUT_MS = 8_000;
 const MAX_LINK_PREVIEW_TOKEN_BYTES = 4096;
 
 type LinkPreviewIqClient = {

@@ -26,7 +26,14 @@ use crate::storage::{BlobMeta, StorageError};
 const DEFAULT_MAX_HTML_HEAD_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// Per-phase budget (page, then image). Popular origins (x.com, GitHub,
+/// YouTube) routinely take 1.5-3 s to first byte from a datacenter, so a
+/// tighter budget turns most real-world previews into `failed`.
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3_000);
+/// Origins such as Wikipedia, Reddit and many CDN bot filters reject requests
+/// without a User-Agent; identify as a crawler like other link unfurlers do.
+const LINK_PREVIEW_USER_AGENT: &str =
+    "Mozilla/5.0 (compatible; WaddleBot/1.0; +https://waddle.social)";
 /// Extra bytes scanned past `</head>` for OpenGraph `<meta>` tags that
 /// streaming-SSR frameworks (Next.js, React 18, Remix) emit into the `<body>`
 /// stream rather than the head. Bounded so the resolver still stops well
@@ -537,18 +544,7 @@ async fn fetch_image_once(
     policy: &LinkPreviewResolverPolicy,
     timeout: Duration,
 ) -> Result<FetchImageOnceResult, LinkPreviewResolverStatus> {
-    let target = prepare_target(url, policy).await?;
-    let mut builder = Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .redirect(redirect::Policy::none())
-        .https_only(!policy.allow_http_loopback_for_tests);
-    if let Host::Domain(host) = target.host {
-        builder = builder.resolve_to_addrs(host, &target.addrs);
-    }
-    let client = builder
-        .build()
-        .map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    let client = pinned_client(url, policy, timeout).await?;
     let mut response = client
         .get(url.clone())
         .send()
@@ -630,22 +626,7 @@ async fn fetch_html_once(
     policy: &LinkPreviewResolverPolicy,
     timeout: Duration,
 ) -> Result<FetchOnceResult, LinkPreviewResolverStatus> {
-    let target = prepare_target(url, policy).await?;
-    // The client is per-hop because each redirect target needs a fresh DNS pin;
-    // max_redirects keeps the extra TLS/client setup cost bounded.
-    let mut builder = Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .redirect(redirect::Policy::none())
-        .https_only(!policy.allow_http_loopback_for_tests);
-    if let Host::Domain(host) = target.host {
-        // SSRF defense relies on reqwest dialing only the DNS results validated in
-        // prepare_target; dropping this pin would let reqwest re-resolve the host.
-        builder = builder.resolve_to_addrs(host, &target.addrs);
-    }
-    let client = builder
-        .build()
-        .map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    let client = pinned_client(url, policy, timeout).await?;
     let mut request = client.get(url.clone());
     if policy.max_html_head_bytes > 0 {
         request = request.header(RANGE, format!("bytes=0-{}", policy.max_html_head_bytes - 1));
@@ -914,6 +895,41 @@ fn parse_content_range(value: &str) -> ContentRangeState {
     }
 }
 
+/// Build a single-hop client pinned to the SSRF-validated DNS results for
+/// `url`. The DNS resolution shares `timeout` with the request, so a slow
+/// resolver cannot stretch a phase past its budget.
+///
+/// The client is per-hop because each redirect target needs a fresh DNS pin;
+/// max_redirects keeps the extra TLS/client setup cost bounded.
+async fn pinned_client(
+    url: &Url,
+    policy: &LinkPreviewResolverPolicy,
+    timeout: Duration,
+) -> Result<Client, LinkPreviewResolverStatus> {
+    let started = Instant::now();
+    let target = tokio::time::timeout(timeout, prepare_target(url, policy))
+        .await
+        .map_err(|_| LinkPreviewResolverStatus::Failed)??;
+    let timeout = timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(LinkPreviewResolverStatus::Failed)?;
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .user_agent(LINK_PREVIEW_USER_AGENT)
+        .redirect(redirect::Policy::none())
+        .https_only(!policy.allow_http_loopback_for_tests);
+    if let Host::Domain(host) = target.host {
+        // SSRF defense relies on reqwest dialing only the DNS results validated in
+        // prepare_target; dropping this pin would let reqwest re-resolve the host.
+        builder = builder.resolve_to_addrs(host, &target.addrs);
+    }
+    builder
+        .build()
+        .map_err(|_| LinkPreviewResolverStatus::Failed)
+}
+
 struct PreparedTarget<'a> {
     host: Host<&'a str>,
     addrs: Vec<SocketAddr>,
@@ -1127,8 +1143,20 @@ fn extract_metadata_parts_from_html(
     normalized_fallback_url: &Url,
     policy: &LinkPreviewResolverPolicy,
 ) -> Option<(ResolvedLinkMetadata, Option<RemotePreviewImage>)> {
-    let title = meta_content(html, "og:title", LINK_PREVIEW_TITLE_MAX_BYTES);
-    let description = meta_content(html, "og:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES);
+    // OpenGraph first, then Twitter cards, then plain HTML metadata: many
+    // sites ship only `<title>` and `<meta name="description">`.
+    let title = meta_content(html, "og:title", LINK_PREVIEW_TITLE_MAX_BYTES)
+        .or_else(|| meta_content(html, "twitter:title", LINK_PREVIEW_TITLE_MAX_BYTES))
+        .or_else(|| head_title(html, LINK_PREVIEW_TITLE_MAX_BYTES));
+    let description = meta_content(html, "og:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES)
+        .or_else(|| {
+            meta_content(
+                html,
+                "twitter:description",
+                LINK_PREVIEW_DESCRIPTION_MAX_BYTES,
+            )
+        })
+        .or_else(|| meta_content(html, "description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES));
     let canonical_url = meta_content(html, "og:url", usize::MAX)
         .and_then(|url| Url::parse(&url).ok())
         .filter(|url| {
@@ -1147,7 +1175,10 @@ fn extract_metadata_parts_from_html(
     }
 
     let image = meta_content(html, "og:image", usize::MAX)
-        .and_then(|url| Url::parse(&url).ok())
+        .or_else(|| meta_content(html, "twitter:image", usize::MAX))
+        // Relative image paths are legal and common; resolve them against
+        // the page that was actually fetched.
+        .and_then(|url| normalized_fallback_url.join(&url).ok())
         .filter(|url| classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready)
         .map(|url| RemotePreviewImage {
             url,
@@ -1283,6 +1314,31 @@ fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> 
         }
     }
     None
+}
+
+/// The document `<title>`, only when it appears inside `<head>` so inline
+/// SVG `<title>` elements in the body window are never mistaken for it.
+fn head_title(html: &str, max_bytes: usize) -> Option<String> {
+    let head = find_ascii_case_insensitive(html, "</head").map_or(html, |end| &html[..end]);
+    let mut offset = 0;
+    let open_end = loop {
+        let start = offset + find_ascii_case_insensitive(&head[offset..], "<title")?;
+        let after_name = start + "<title".len();
+        match head.as_bytes().get(after_name) {
+            Some(b'>') => break after_name + 1,
+            Some(byte) if byte.is_ascii_whitespace() => {
+                break after_name + head[after_name..].find('>')? + 1;
+            }
+            _ => offset = after_name,
+        }
+    };
+    let text = &head[open_end..];
+    let text = &text[..find_ascii_case_insensitive(text, "</title")?];
+    let title = html_escape::decode_html_entities(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!title.is_empty()).then(|| truncate_utf8_to_bytes(&title, max_bytes))
 }
 
 fn same_domain_host(left: &Url, right: &Url) -> bool {
@@ -1718,6 +1774,82 @@ mod tests {
         let requested_url = Url::parse("https://example.com/articles").expect("url");
 
         assert!(extract_metadata_from_html(&requested_url, "<html><head></head></html>").is_none());
+    }
+
+    #[test]
+    fn falls_back_to_title_and_standard_meta_when_open_graph_is_absent() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<html><head>
+            <TITLE>
+              Plain &amp; simple
+              page
+            </TITLE>
+            <meta name="description" content="Standard description">
+            <meta name="twitter:image" content="/cards/plain.png">
+          </head><body><svg><title>not the page title</title></svg></body></html>"#;
+
+        let (metadata, image) = extract_metadata_parts_from_html(
+            &requested_url,
+            html,
+            &requested_url,
+            &LinkPreviewResolverPolicy::default(),
+        )
+        .expect("title/description fallback is usable metadata");
+
+        assert_eq!(metadata.title.as_deref(), Some("Plain & simple page"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Standard description")
+        );
+        assert_eq!(
+            image.map(|image| image.url.to_string()).as_deref(),
+            Some("https://example.com/cards/plain.png")
+        );
+    }
+
+    #[test]
+    fn prefers_twitter_card_text_over_document_title() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<html><head><title>Doc title</title>
+            <meta name="twitter:title" content="Card title">
+            <meta name="twitter:description" content="Card description">
+            <meta name="description" content="Standard description">
+          </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(metadata.title.as_deref(), Some("Card title"));
+        assert_eq!(metadata.description.as_deref(), Some("Card description"));
+    }
+
+    #[test]
+    fn body_only_title_is_not_page_metadata() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = "<html><head></head><body><svg><title>icon</title></svg></body></html>";
+
+        assert!(extract_metadata_from_html(&requested_url, html).is_none());
+    }
+
+    #[test]
+    fn resolves_relative_open_graph_image_against_fetched_page() {
+        let requested_url = Url::parse("https://example.com/blog/post").expect("url");
+        let html = r#"<html><head>
+            <meta property="og:title" content="Post">
+            <meta property="og:image" content="../img/cover.jpg">
+          </head></html>"#;
+
+        let (_, image) = extract_metadata_parts_from_html(
+            &requested_url,
+            html,
+            &requested_url,
+            &LinkPreviewResolverPolicy::default(),
+        )
+        .expect("metadata");
+
+        assert_eq!(
+            image.map(|image| image.url.to_string()).as_deref(),
+            Some("https://example.com/img/cover.jpg")
+        );
     }
 
     #[test]
@@ -2371,6 +2503,37 @@ mod tests {
         };
         assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
         assert_eq!(metadata.description.as_deref(), Some("Fetched description"));
+    }
+
+    #[tokio::test]
+    async fn identifies_as_a_link_preview_crawler_for_origins_that_reject_anonymous_clients() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .and(wiremock::matchers::header_regex("user-agent", "WaddleBot/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head><meta property="og:title" content="Crawler ok"></head></html>"#,
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Crawler ok"));
     }
 
     fn scan_head_end_one_byte_at_a_time(html: &str) -> Option<usize> {
