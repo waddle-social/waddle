@@ -252,8 +252,40 @@ fn parse_metadata_event_reports_set_disable_and_retract() {
         }],
     };
     assert_eq!(
-        parse_metadata_event(&retract).and_then(|event| event.avatar_id),
-        None
+        parse_metadata_event(&retract),
+        None,
+        "a retract is not a disable; it must not clear the avatar"
+    );
+
+    // A node that publishes a new avatar and retracts the old item in one
+    // notification reports the new id, not a disable.
+    let publish_and_retract = PubsubEvent {
+        from: Some("alice@example.com".parse().expect("valid bare JID")),
+        node: NS_AVATAR_METADATA.to_string(),
+        items: vec![
+            PubsubEventItem {
+                id: Some("avatar-old".to_string()),
+                retracted: true,
+                payload: PubsubEventPayload::Empty,
+            },
+            PubsubEventItem {
+                id: Some("avatar-2".to_string()),
+                retracted: false,
+                payload: PubsubEventPayload::Opaque {
+                    element: Element::builder("metadata", NS_AVATAR_METADATA)
+                        .append(
+                            Element::builder("info", NS_AVATAR_METADATA)
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "avatar-2")
+                                .build(),
+                        )
+                        .build(),
+                },
+            },
+        ],
+    };
+    assert_eq!(
+        parse_metadata_event(&publish_and_retract).and_then(|event| event.avatar_id),
+        Some("avatar-2".to_string())
     );
 }
 

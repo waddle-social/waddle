@@ -297,7 +297,8 @@ fn is_metadata_disabled(iq: &Element) -> bool {
 /// Parse an XEP-0084 metadata PEP event into one typed avatar transition.
 ///
 /// XEP-0084 metadata is a singleton node in normal operation. A retraction
-/// and an empty `<metadata/>` both mean the peer has no current avatar.
+/// Only an empty `<metadata/>` means the peer disabled its avatar; a
+/// retract-only notification produces no event.
 pub fn parse_metadata_event(event: &PubsubEvent) -> Option<AvatarChanged> {
     if event.node != NS_AVATAR_METADATA {
         return None;
@@ -310,13 +311,11 @@ pub fn parse_metadata_event(event: &PubsubEvent) -> Option<AvatarChanged> {
         return None;
     }
     let jid = from.to_bare();
-    let item = event.items.first()?;
-    if item.retracted {
-        return Some(AvatarChanged {
-            jid,
-            avatar_id: None,
-        });
-    }
+    // A retract says an item went away, not that the avatar is disabled:
+    // a node may retract an OLD item after publishing a new one. Only the
+    // XEP-0084 §4.3 empty `<metadata/>` publication clears the avatar;
+    // retract-only notifications are left to revalidation.
+    let item = event.items.iter().find(|item| !item.retracted)?;
     let PubsubEventPayload::Opaque { element } = &item.payload else {
         return None;
     };
