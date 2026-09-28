@@ -44,6 +44,8 @@ interface OccupantMapping {
  */
 export class OccupantJidDirectory {
   private readonly history = shallowReactive(new Map<string, readonly OccupantMapping[]>());
+  /** When the presence stream was last seen to break, until a session outcome is known. */
+  private presenceGapSince: number | null = null;
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
@@ -60,7 +62,10 @@ export class OccupantJidDirectory {
     const key = occupantKey(roomJid, nick);
     const previous = this.history.get(key) ?? [];
     const last = previous.at(-1);
-    if (last ? last.realJid === real : real === null) return;
+    // During a possible presence gap, a re-disclosure of the same holder is
+    // new evidence (it post-dates the gap), so it is not deduped away.
+    const lastPredatesGap = !!last && this.presenceGapSince !== null && last.since <= this.presenceGapSince;
+    if (last ? last.realJid === real && !lastPredatesGap : real === null) return;
     this.history.set(key, [...previous, { realJid: real, since: this.now() }]);
   }
 
@@ -110,9 +115,43 @@ export class OccupantJidDirectory {
     this.ownNicks.clear();
   }
 
+  /**
+   * The connection dropped: presence may stop flowing from now. The first
+   * drop of an outage is kept (later retries don't move the boundary).
+   */
+  noteDisconnect(): void {
+    this.presenceGapSince ??= this.now();
+  }
+
+  /**
+   * A session resumed (XEP-0198): the room presence stream had no gap, so
+   * every recorded holder is still accurate.
+   */
+  resumeSession(): void {
+    this.presenceGapSince = null;
+  }
+
+  /**
+   * A fresh session: presence was not delivered while we were offline, so
+   * any nick may have changed hands unseen. From the disconnect onward
+   * every nick's holder is unknown until new presence re-establishes it;
+   * rows sent before the disconnect keep their holder.
+   */
+  beginFreshSession(): void {
+    const since = this.presenceGapSince ?? this.now();
+    this.presenceGapSince = null;
+    for (const [key, mappings] of this.history) {
+      let index = mappings.length;
+      while (index > 0 && mappings[index - 1]!.since > since) index -= 1;
+      if (index > 0 && mappings[index - 1]!.realJid === null) continue;
+      this.history.set(key, [...mappings.slice(0, index), { realJid: null, since }, ...mappings.slice(index)]);
+    }
+  }
+
   clear(): void {
     this.history.clear();
     this.ownNicks.clear();
+    this.presenceGapSince = null;
   }
 }
 
@@ -190,8 +229,14 @@ export function roomOccupantAvatarJid(roomJid: string | null | undefined, nick: 
  * sent in the past, so only the mapping in effect at its timestamp may
  * name it.
  */
-export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string): T {
-  if (isOwnSend(row, occupantJidDirectory) || row.authorRealJid || row.authorAvatarJid) return row;
+export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string, selfJid?: string | null): T {
+  if (row.authorRealJid || row.authorAvatarJid) return row;
+  if (isOwnSend(row, occupantJidDirectory)) {
+    // Pin our own reflection now, while our actual nick is known: the
+    // own-nick map is forgotten on a fresh session.
+    const self = bare(selfJid);
+    return self ? { ...row, authorAvatarJid: self } : row;
+  }
   const past = row.createdAtSource === "archive" || row.createdAtSource === "delay";
   const author = past
     ? occupantJidDirectory.lookupAt(roomJid, nick, Date.parse(row.createdAt ?? ""))

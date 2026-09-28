@@ -1,4 +1,5 @@
 import type { AvatarChangedEvent } from "@/lib/xmpp/client-events";
+import type { XmppStatusSnapshot } from "@/lib/xmpp/types";
 import { avatarStore, type AvatarStore } from "./avatar-store";
 import { occupantJidDirectory, type OccupantJidDirectory } from "./author-jid";
 
@@ -10,6 +11,7 @@ export interface AvatarClient {
   addOccupantRealJidHandler: (handler: (roomJid: string, nick: string, bareJid: string | null) => void) => () => void;
   addOwnProfilePublishedHandler: (handler: (ownBareJid: string) => void) => () => void;
   addOwnOccupantNickHandler: (handler: (roomJid: string, nick: string | null) => void) => () => void;
+  onStatus: (hook: (status: XmppStatusSnapshot) => void) => () => void;
 }
 
 /**
@@ -28,11 +30,17 @@ function bindAvatarClient(
   const offOccupant = client.addOccupantRealJidHandler((roomJid, nick, bareJid) => directory.record(roomJid, nick, bareJid));
   const offOwnProfile = client.addOwnProfilePublishedHandler((ownJid) => store.invalidate(ownJid));
   const offOwnNick = client.addOwnOccupantNickHandler((roomJid, nick) => directory.recordOwnNick(roomJid, nick));
+  // A dropped connection may be a gap in room presence (decided by the
+  // next session's outcome: fresh or resumed).
+  const offStatus = client.onStatus((status) => {
+    if (status.state !== "online") directory.noteDisconnect();
+  });
   return () => {
     offChanged();
     offOccupant();
     offOwnProfile();
     offOwnNick();
+    offStatus();
     store.setFetcher(null);
     store.setEvictionHandler(null);
   };

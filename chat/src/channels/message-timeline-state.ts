@@ -133,6 +133,8 @@ export function queuedRoomMessageToTimeline(
     createdAt: queued.createdAt,
     createdAtSource: "queued",
     isSelf: true,
+    // Our own queued send: pinned so its face never depends on nick state.
+    authorAvatarJid: barePeerJid(session.jid).toLowerCase(),
     deliveryStatus: "queued",
   };
   if (queued.markup && queued.markup.length > 0) message.markup = queued.markup;

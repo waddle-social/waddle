@@ -336,3 +336,77 @@ describe("fresh session forgets our own nicks", () => {
     expect(directory.ownNick(ROOM)).toBeNull();
   });
 });
+
+describe("own reflections are pinned at ingest", () => {
+  test("an undelayed reflection under our actual nick is stamped with our JID and survives forgetting own nicks", () => {
+    occupantJidDirectory.recordOwnNick(ROOM, "me_2");
+    const own = stampLiveRoomAuthor({ authorOccupantJid: `${ROOM}/me_2`, createdAtSource: "fallback" }, ROOM, "me_2", "Me@Waddle.social/web");
+    expect(own.authorAvatarJid).toBe("me@waddle.social");
+
+    // A fresh session forgets our own nicks until the rejoin re-records them.
+    occupantJidDirectory.forgetOwnNicks();
+    expect(authorAvatarJid(own)).toBe("me@waddle.social");
+  });
+
+  test("a reflection under a nick that is not ours now is not stamped as us", () => {
+    occupantJidDirectory.recordOwnNick(ROOM, "me_2");
+    const other = stampLiveRoomAuthor({ isSelf: true, authorOccupantJid: `${ROOM}/me`, createdAtSource: "fallback" }, ROOM, "me", "me@waddle.social/web");
+    expect(other.authorAvatarJid).toBeUndefined();
+  });
+});
+
+describe("a disconnect is a gap in room presence", () => {
+  function scenario() {
+    const clock = directoryAt();
+    const { directory, setMinutes } = clock;
+    directory.record(ROOM, "sam", "alice@waddle.social");
+    setMinutes(10);
+    directory.noteDisconnect();
+    return clock;
+  }
+  const row = (minutes: number) => ({ authorOccupantJid: `${ROOM}/sam`, createdAt: at(minutes), createdAtSource: "archive" as const });
+
+  test("after a fresh session, rows from the offline interval render initials; earlier rows keep the holder", () => {
+    const { directory, setMinutes } = scenario();
+    setMinutes(30);
+    directory.beginFreshSession();
+
+    // Bob took "sam", posted and left while we were offline.
+    expect(resolveAuthorJid(row(15), directory)).toBeNull();
+    expect(resolveAuthorJid(row(5), directory)).toBe("alice@waddle.social");
+    expect(directory.lookup(ROOM, "sam")).toBeNull();
+
+    // Fresh presence re-establishes the holder from then on.
+    setMinutes(31);
+    directory.record(ROOM, "sam", "bob@waddle.social");
+    expect(directory.lookup(ROOM, "sam")).toBe("bob@waddle.social");
+    expect(resolveAuthorJid(row(32), directory)).toBe("bob@waddle.social");
+    expect(resolveAuthorJid(row(15), directory)).toBeNull();
+    expect(resolveAuthorJid(row(5), directory)).toBe("alice@waddle.social");
+  });
+
+  test("a rejoin presence recorded before the fresh-session signal is kept", () => {
+    const { directory, setMinutes } = scenario();
+    setMinutes(29);
+    directory.record(ROOM, "sam", "alice@waddle.social");
+    setMinutes(30);
+    directory.beginFreshSession();
+    expect(directory.lookup(ROOM, "sam")).toBe("alice@waddle.social");
+    expect(resolveAuthorJid(row(15), directory)).toBeNull();
+    expect(resolveAuthorJid(row(29.5), directory)).toBe("alice@waddle.social");
+  });
+
+  test("a resumed stream had no gap: the holder stays known", () => {
+    const { directory, setMinutes } = scenario();
+    setMinutes(12);
+    directory.resumeSession();
+    expect(resolveAuthorJid(row(15), directory)).toBe("alice@waddle.social");
+    expect(directory.lookup(ROOM, "sam")).toBe("alice@waddle.social");
+    // A later fresh session without a new drop starts its gap at that moment.
+    setMinutes(40);
+    directory.beginFreshSession();
+    expect(resolveAuthorJid(row(35), directory)).toBe("alice@waddle.social");
+    expect(resolveAuthorJid(row(41), directory)).toBeNull();
+  });
+});
+

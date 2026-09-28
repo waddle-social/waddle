@@ -250,6 +250,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
             mapLiveRoomMessageToTimeline(session.value, msg, (id) => findMessageById(messages.value, id)),
             msg.roomJid,
             msg.nick,
+            session.value.jid,
           ));
         }
         break;
