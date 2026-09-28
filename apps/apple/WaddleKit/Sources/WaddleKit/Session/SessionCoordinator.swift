@@ -499,15 +499,18 @@ public final class SessionCoordinator {
         }
         trackChatState(message, route: route)
         // An undelayed live message is being spoken now by the present
-        // occupant (us, when it is our nick): pin the row to them, so a later
-        // holder of the nick never takes it over. A delayed one (XEP-0203:
-        // room history, replay) may predate a handover, so it keeps only
-        // what the room vouched for.
+        // occupant: pin the row to them, so a later holder of the nick never
+        // takes it over. That is the real JID the room disclosed for them,
+        // else us when the nick is the one our self-presence carries. Our
+        // configured nick alone proves nothing: the room may have given us
+        // another (status 210) and someone else this one. A delayed message
+        // (XEP-0203: room history, replay) may predate a handover, so it
+        // keeps only what the room vouched for.
         if route.conversation.isRoom, message.isLive, message.timestamp == nil,
            message.authorRealJID == nil, let nick = message.from?.resource {
-            message.authorRealJID = route.isMine
-                ? account.jid
-                : presence.occupant(named: nick, in: route.conversation.jid)?.realJID
+            let room = route.conversation.jid
+            message.authorRealJID = presence.occupant(named: nick, in: room)?.realJID
+                ?? (presence.selfNicks[room] == nick ? account.jid : nil)
         }
         let result = timelines.ingest(message, route: route)
         if route.isMine {

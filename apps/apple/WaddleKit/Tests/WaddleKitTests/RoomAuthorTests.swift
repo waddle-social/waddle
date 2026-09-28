@@ -13,6 +13,16 @@ private func occupantPresence(_ nick: String, realJID: BareJID?, kind: WirePrese
     )
 }
 
+/// Our own occupant presence; the room withholds our real JID here, as a
+/// semi-anonymous room may.
+private func selfPresence(_ nick: String, codes: Set<Int> = [110]) -> WirePresence {
+    WirePresence(
+        from: room.with(resource: nick)!,
+        kind: .available,
+        occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: codes)
+    )
+}
+
 @MainActor
 @Suite("Room author resolution")
 struct RoomAuthorTests {
@@ -86,11 +96,38 @@ struct RoomAuthorTests {
         #expect(coordinator.authorJID(of: reflected) == me.jid)
     }
 
-    @Test func undelayedLiveMessageInOurNickIsUs() {
+    @Test func undelayedLiveMessageInOurJoinedNickIsUs() {
         let coordinator = coordinator()
+        coordinator.handle(.presence(selfPresence(me.nick)))
         // Another device of ours speaking in the room.
         coordinator.handle(.message(roomMessage("from my phone", from: me.nick, stanzaID: "s1")))
         #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == me.jid)
+    }
+
+    @Test func configuredNickAloneIsNotUs() {
+        let coordinator = coordinator()
+        coordinator.handle(.message(roomMessage("who?", from: me.nick, stanzaID: "s1")))
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == nil)
+    }
+
+    @Test func roomAssignedNickDecidesWhoIsUs() {
+        let coordinator = coordinator()
+        // The room renamed us (210); a peer holds our configured nick.
+        coordinator.handle(.presence(selfPresence("alice2", codes: [110, 210])))
+        coordinator.handle(.presence(occupantPresence(me.nick, realJID: dave)))
+        coordinator.handle(.message(roomMessage("from dave", from: me.nick, stanzaID: "s1")))
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == dave)
+
+        coordinator.handle(.message(roomMessage("from us", from: "alice2", stanzaID: "s2")))
+        #expect(coordinator.authorJID(of: row(coordinator, "s2")!) == me.jid)
+    }
+
+    @Test func peerOnOurConfiguredNickWithoutARealJIDIsNotUs() {
+        let coordinator = coordinator()
+        coordinator.handle(.presence(selfPresence("alice2", codes: [110, 210])))
+        coordinator.handle(.presence(occupantPresence(me.nick, realJID: nil)))
+        coordinator.handle(.message(roomMessage("anonymous", from: me.nick, stanzaID: "s1")))
+        #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == nil)
     }
 
     @Test func liveRowKeepsItsSenderWhenTheNickChangesHands() {
