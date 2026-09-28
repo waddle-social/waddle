@@ -6,6 +6,7 @@ import {
   occupantJidDirectory,
   resolveAuthorJid,
   stampLiveRoomAuthor,
+  typingAuthorAvatarJid,
 } from "../src/lib/avatars/author-jid";
 import { AvatarStore } from "../src/lib/avatars/avatar-store";
 
@@ -234,6 +235,37 @@ describe("handover to an occupant whose real JID is hidden", () => {
     expect(directory.lookup(ROOM, "ghost")).toBeNull();
     directory.record(ROOM, "ghost", "ghost@waddle.social");
     expect(directory.lookup(ROOM, "ghost")).toBe("ghost@waddle.social");
+  });
+});
+
+describe("typing indicator avatars", () => {
+  test("a DM peer sharing our localpart on another domain shows the peer, not us", () => {
+    // We are alex@a.example; the DM chat-state nick is the peer JID's localpart.
+    expect(typingAuthorAvatarJid("alex", { peerJid: "alex@b.example" })).toBe("alex@b.example");
+    expect(typingAuthorAvatarJid("alex", { peerJid: "Alex@B.example" })).toBe("alex@b.example");
+  });
+
+  test("a MUC private-message peer resolves through the room's disclosure", () => {
+    occupantJidDirectory.record(ROOM, "alex", "alex@b.example");
+    expect(typingAuthorAvatarJid("alex", { peerJid: `${ROOM}/alex` })).toBe("alex@b.example");
+  });
+
+  test("a room typer is the nick's disclosed holder, us only if that identity is ours", () => {
+    expect(typingAuthorAvatarJid("alex", { roomJid: ROOM })).toBeNull();
+    occupantJidDirectory.record(ROOM, "alex", "alex@b.example");
+    expect(typingAuthorAvatarJid("alex", { roomJid: ROOM })).toBe("alex@b.example");
+    occupantJidDirectory.record(ROOM, "me", "me@waddle.social");
+    expect(typingAuthorAvatarJid("me", { roomJid: ROOM })).toBe("me@waddle.social");
+  });
+});
+
+describe("ContentArea wiring", () => {
+  test("no nick-equals-self shortcut remains for typing or the profile drawer", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/components/chat/ContentArea.vue", import.meta.url), "utf8");
+    expect(source).not.toContain("nick === props.currentUser");
+    expect(source).not.toContain("popoverAuthor?.username === currentUser");
+    expect(source).toContain("typingAuthorAvatarJid(");
   });
 });
 

@@ -189,3 +189,18 @@ export function callParticipantAvatarJid(
   const owner = owners.find((entry) => entry.nick === nick);
   return owner?.realJid ? bare(owner.realJid) : roomOccupantAvatarJid(roomJid, nick);
 }
+
+/**
+ * Avatar JID for a typing notification's nick. A 1:1 chat's typer is the
+ * peer, whatever their display name (a peer's localpart may equal ours on
+ * another domain); a room's typer is the nick's current, disclosed holder.
+ * Nick equality with our own name never makes it us.
+ */
+export function typingAuthorAvatarJid(
+  nick: string,
+  context: { peerJid: string } | { roomJid: string | null | undefined },
+): string | null {
+  if ("peerJid" in context) return conversationPeerAvatarJid(context.peerJid);
+  return roomOccupantAvatarJid(context.roomJid, nick);
+}
+
