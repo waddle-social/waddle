@@ -21,6 +21,19 @@ describe("isQuickSwitcherShortcut", () => {
     expect(isQuickSwitcherShortcut(press("k", "KeyK", { ctrlKey: true, metaKey: true }), false)).toBe(false);
   });
 
+  test("leaves composition shortcuts to the input method", () => {
+    for (const isApplePlatform of [false, true]) {
+      const modifier = isApplePlatform ? { metaKey: true } : { ctrlKey: true };
+      expect(isQuickSwitcherShortcut(
+        press("Process", "KeyK", { ...modifier, isComposing: true }), isApplePlatform,
+      )).toBe(false);
+      // Safari can report keyCode 229 without isComposing.
+      expect(isQuickSwitcherShortcut(
+        press("k", "KeyK", { ...modifier, keyCode: 229 }), isApplePlatform,
+      )).toBe(false);
+    }
+  });
+
   test("follows the typed letter on Latin layouts and the physical key otherwise", () => {
     // Cyrillic layout: the K key types "л".
     expect(isQuickSwitcherShortcut(press("л", "KeyK", { ctrlKey: true }), false)).toBe(true);

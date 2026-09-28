@@ -39,6 +39,7 @@ export function consumeKeystrokEvent(event: KeyboardEvent) {
  * so the physical K key counts there — keystrok matches `event.key` only.
  */
 export function isQuickSwitcherShortcut(event: KeyboardEvent, isApplePlatform: boolean): boolean {
+  if (event.isComposing || Reflect.get(event, "keyCode") === 229) return false;
   const modifier = isApplePlatform ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
   if (!modifier || event.altKey || event.shiftKey) return false;
   return /^[a-z]$/i.test(event.key) ? event.key.toLowerCase() === "k" : event.code === "KeyK";
