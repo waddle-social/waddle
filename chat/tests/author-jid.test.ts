@@ -157,7 +157,23 @@ describe("self attribution never comes from nick equality alone", () => {
     directory.recordOwnNick(ROOM, "me");
     expect(resolveAuthorJid({ isSelf: true, authorOccupantJid: `${ROOM}/me`, deliveryStatus: "sending" }, directory, SELF))
       .toBe("me@waddle.social");
-    expect(resolveAuthorJid(liveRow("me", { isSelf: true }), directory, SELF)).toBe("me@waddle.social");
+    // A live reflection is ours through the stamp taken at ingest, not a
+    // render-time nick comparison.
+    occupantJidDirectory.recordOwnNick(ROOM, "me");
+    const reflection = stampLiveRoomAuthor(liveRow("me", { isSelf: true }), ROOM, "me", SELF);
+    expect(reflection.authorAvatarJid).toBe("me@waddle.social");
+    expect(resolveAuthorJid(reflection, directory, SELF)).toBe("me@waddle.social");
+  });
+
+  test("an unstamped row from another occupant keeps initials after we later take its nick", () => {
+    const directory = new OccupantJidDirectory();
+    // A JID-less occupant posted as "oyr" while we held "oyr2": unstamped.
+    directory.recordOwnNick(ROOM, "oyr2");
+    const theirs = liveRow("oyr");
+    expect(resolveAuthorJid(theirs, directory, SELF)).toBeNull();
+    // They leave; we take "oyr". Their row must not become ours.
+    directory.recordOwnNick(ROOM, "oyr");
+    expect(resolveAuthorJid(theirs, directory, SELF)).toBeNull();
   });
 });
 

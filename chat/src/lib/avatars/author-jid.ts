@@ -130,7 +130,12 @@ export function resolveAuthorJid(
   if (real) return real;
   const stamped = bare(author.authorAvatarJid);
   if (stamped) return stamped;
-  if (selfJid && isOwnSend(author, directory)) return bare(selfJid);
+  // At render time only a local echo proves a room row is ours: the live
+  // own-nick check runs once, at ingest (stampLiveRoomAuthor), because we
+  // may later take a nick an unstamped row was sent under.
+  const localEcho = !!author.isSelf && author.deliveryStatus !== undefined;
+  const ownDirect = !author.authorOccupantJid && isOwnSend(author, directory);
+  if (selfJid && (localEcho || ownDirect)) return bare(selfJid);
   // Any other room row (or MUC private message) carries only a nick, which
   // may have changed hands: initials rather than a possibly wrong face.
   if (author.authorOccupantJid) return null;
