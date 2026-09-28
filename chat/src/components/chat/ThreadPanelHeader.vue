@@ -118,7 +118,7 @@ const overflowParticipants = computed(() => overflowThreadParticipantCount(props
         <span class="chat-thread-header__avatars">
           <span
             v-for="participant in visibleParticipants"
-            :key="`thread-participant:${participant.nick}`"
+            :key="`thread-participant:${participant.key}`"
             class="chat-thread-header__avatar-wrap"
             :title="`${participant.nick}`"
           >

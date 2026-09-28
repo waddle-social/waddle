@@ -10,6 +10,8 @@ import ThreadsListPanel from "@/components/chat/ThreadsListPanel.vue";
 
 const props = defineProps<{
   channels: readonly ChannelSummary[];
+  /** Resolves a thread starter's avatar JID from loaded rows; unknown → initials. */
+  rootAuthorJid?: (entry: WasmThreadEntry) => string | null;
   onSelectThreadEntry: (channelJid: string, threadId: string) => void | Promise<void>;
   onJoinChannelCall: (channelId: string | null, roomJid: string, media: CallMedia) => void;
 }>();
@@ -55,6 +57,7 @@ function joinCall(entry: WasmThreadEntry, media: CallMedia) {
       <ThreadsListPanel
         :xmpp-client="xmppClient"
         :channels="channels"
+        :root-author-jid="rootAuthorJid"
         @open-thread="openThread"
         @join-call="joinCall"
       />

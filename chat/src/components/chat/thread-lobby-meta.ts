@@ -1,5 +1,6 @@
 import type { MessageThreadEntry } from "@/channels/threads";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import { threadParticipantKey } from "./timeline-display-meta";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
 // Thread "lobby" metadata for the rich ThreadPanel header. Substitutes the
@@ -24,6 +25,8 @@ export function threadPreviewFor(entry: MessageThreadEntry | null): string {
 }
 
 export interface ThreadParticipant {
+  /** Dedupe identity (see `threadParticipantKey`); stable per participant. */
+  key: string;
   nick: string;
   /** Real bare JID behind the author, for the avatar; `null` = initials. */
   jid: string | null;
@@ -49,21 +52,29 @@ export function threadParticipantsFor(
   for (let i = children.length - 1; i >= 0; i--) {
     const c = children[i];
     if (!c) continue;
-    if (seen.has(c.author)) continue;
-    seen.add(c.author);
+    const jid = authorJid(c);
+    const key = threadParticipantKey(c, jid);
+    if (seen.has(key)) continue;
+    seen.add(key);
     ordered.push({
+      key,
       nick: c.author,
-      jid: authorJid(c),
+      jid,
       presence: roomPresence[c.author] ?? "offline",
     });
   }
   const root = entry.root;
-  if (root && !seen.has(root.author)) {
-    ordered.push({
-      nick: root.author,
-      jid: authorJid(root),
-      presence: roomPresence[root.author] ?? "offline",
-    });
+  if (root) {
+    const jid = authorJid(root);
+    const key = threadParticipantKey(root, jid);
+    if (!seen.has(key)) {
+      ordered.push({
+        key,
+        nick: root.author,
+        jid,
+        presence: roomPresence[root.author] ?? "offline",
+      });
+    }
   }
   return ordered;
 }

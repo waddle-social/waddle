@@ -64,6 +64,7 @@ describe("ThreadPanelHeader", () => {
 
   test("participant stack caps at four avatars with an overflow chip", async () => {
     const participants: ThreadParticipant[] = ["a", "b", "c", "d", "e", "f"].map((nick) => ({
+      key: `unresolved:${nick}`,
       nick,
       jid: null,
       presence: "offline",

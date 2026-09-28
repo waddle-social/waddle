@@ -141,11 +141,6 @@ export function roomOccupantAvatarJid(roomJid: string | null | undefined, nick: 
   return occupantJidDirectory.lookup(roomJid, nick);
 }
 
-/** Real JID that was behind `nick` in `roomJid` at `at` (RFC 3339), for past rows. */
-export function roomOccupantAvatarJidAt(roomJid: string | null | undefined, nick: string, at: string | undefined): string | null {
-  return occupantJidDirectory.lookupAt(roomJid, nick, Date.parse(at ?? ""));
-}
-
 /**
  * Pin a room row delivered on the live path to the person behind its nick,
  * so a later reuse of the nick cannot change whose face (and profile) it

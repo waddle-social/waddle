@@ -62,7 +62,7 @@ const props = defineProps<{
   /** Unique participants in this thread (capped, current user excluded
    * by the caller). Rendered as a tiny avatar stack on the thread chip
    * so the eye can triage threads without opening them. */
-  threadParticipants?: { nick: string; jid: string | null; presence: OccupantPresence }[];
+  threadParticipants?: { key: string; nick: string; jid: string | null; presence: OccupantPresence }[];
   /** ISO timestamp of the most-recent reply in this thread, used to
    * suffix the chip with a relative-time hint ("· 2 min ago"). */
   threadLastReplyAt?: string;
@@ -649,7 +649,7 @@ const swipe = gestures.swipe;
       >
         <span
           v-for="participant in visibleThreadParticipants"
-          :key="`thread-chip-avatar:${message.id}:${participant.nick}`"
+          :key="`thread-chip-avatar:${message.id}:${participant.key}`"
           class="chat-thread-chip__avatar-wrap"
         >
           <UserAvatar

@@ -57,6 +57,8 @@ import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/rou
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { MessageThreadEntry } from "@/channels/threads";
 import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp/jid";
+import { threadRootAvatarJid } from "@/lib/avatars/thread-root-author";
+import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { isEventUpcomingOrOngoing, sortEventsUpcomingFirst, type CommunityEvent, type FeedPostInput, type StoryPostInput } from "@/lib/xmpp-client";
@@ -306,6 +308,14 @@ watch(() => ui.actionError.value, (message) => {
   if (!message || conversationPageActive.value) return;
   toast({ id: "shell-action-error", tone: "danger", title: message });
 });
+/** Thread starters on the Threads page: only a loaded root row can name them. */
+function threadsListRootAuthorJid(entry: WasmThreadEntry): string | null {
+  return threadRootAvatarJid(entry, {
+    loadedRoomJid: activeChannelRoomJid.value,
+    resolveRoot: (threadId) => threads.resolveEntry(threadId)?.root,
+    selfJid: connectionStore.session?.jid,
+  });
+}
 /** The header Search button opens the MessageSearchPanel that
  * ContentArea owns, through its exposed handle. */
 function openMessageSearch() {
@@ -841,6 +851,7 @@ async function recoverSupersededFromShell() {
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
         :channels="waddles.sortedChannels.value"
+        :root-author-jid="threadsListRootAuthorJid"
         :on-select-thread-entry="onSelectThreadEntry"
         :on-join-channel-call="joinChannelCallFromActivity"
         @open-nav="ui.showMobileNav.value = true"
