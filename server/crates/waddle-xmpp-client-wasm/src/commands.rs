@@ -549,7 +549,11 @@ pub(crate) async fn send_avatar_iq_command(
         .await
         .map_err(AvatarRequestFailure::Other)?
         .map_err(|err| match err {
-            ClientError::StanzaError(_) => AvatarRequestFailure::StanzaError,
+            ClientError::StanzaError(error) => {
+                AvatarRequestFailure::from_stanza_error(error, |error| {
+                    js_error(ClientError::StanzaError(error).to_string())
+                })
+            }
             other => AvatarRequestFailure::Other(js_error(other.to_string())),
         })
 }

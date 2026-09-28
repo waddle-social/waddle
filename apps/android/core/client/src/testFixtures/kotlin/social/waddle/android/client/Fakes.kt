@@ -1183,8 +1183,18 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     @Volatile
     var publishedAvatarBytes: ByteArray? = null
 
+    /** Thrown by [requestAvatar]: the FFI's failed-lookup signal (not "no avatar"). */
+    @Volatile
+    var requestAvatarFailure: Throwable? = null
+
+    /** Runs inside [requestAvatar] once per call, e.g. to race an eviction. */
+    @Volatile
+    var duringRequestAvatar: () -> Unit = {}
+
     override suspend fun requestAvatar(jid: String, knownIds: List<String>): WaddleAvatarResult? {
         requestAvatarCalls += jid to knownIds
+        duringRequestAvatar()
+        requestAvatarFailure?.let { throw it }
         val current = avatar ?: return null
         // Mirror the FFI's §4.2 contract: a known advertised id answers
         // id-only (no data fetch); an unknown id carries the bytes.
@@ -1220,11 +1230,16 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         profileVerbFailure?.let { throw it }
     }
 
-    override suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt) {
+    /** Item id [publishAvatar] reports; `null` = the core's id for the bytes (FFI parity). */
+    @Volatile
+    var publishedAvatarId: String? = null
+
+    override suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt): String {
         profileVerbStall()
         publishedAvatarBytes = data
         profileVerbs += RecordedProfileVerb.PublishAvatar(data.size, mimeType, width, height)
         profileVerbFailure?.let { throw it }
+        return publishedAvatarId ?: avatarItemId(data)
     }
 
     override suspend fun disableAvatar() {

@@ -56,7 +56,7 @@ describe("ContentArea feeds the in-call Chat tab", () => {
     const source = contentAreaSource();
     expect(source).toContain("callChatMessages");
     expect(source).toContain(":call-chat-messages=\"callChatMessages\"");
-    expect(source).toContain(":avatar-url-by-author=\"avatarUrlByAuthor\"");
+    expect(source).toContain(":avatar-jid-for=\"avatarJidFor\"");
   });
 
   test("drives the unread sync from inbound call-thread messages and Chat-tab focus", () => {

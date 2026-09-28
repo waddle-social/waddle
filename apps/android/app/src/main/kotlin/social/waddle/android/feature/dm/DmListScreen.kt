@@ -13,7 +13,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.GroupAdd
 import androidx.compose.material.icons.outlined.NotificationsOff
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -38,6 +37,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 
 /** The merged DM surface: 1:1 peers and group DMs by inbox recency. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -100,7 +101,7 @@ fun DmListScreen(
                         is DmListRow.Peer -> DmSurfaceRow(
                             name = row.name,
                             subtitle = row.peerJid,
-                            isGroup = false,
+                            peerJid = row.peerJid,
                             unreadCount = row.unreadCount,
                             isMuted = row.isMuted,
                             testTag = DmListTestTags.PEER_ROW_PREFIX + row.peerJid,
@@ -109,7 +110,7 @@ fun DmListScreen(
                         is DmListRow.Group -> DmSurfaceRow(
                             name = row.name,
                             subtitle = stringResource(R.string.dm_list_group_subtitle),
-                            isGroup = true,
+                            peerJid = null,
                             unreadCount = row.unreadCount,
                             isMuted = row.isMuted,
                             testTag = DmListTestTags.GROUP_ROW_PREFIX + row.roomJid,
@@ -136,7 +137,8 @@ fun DmListScreen(
 private fun DmSurfaceRow(
     name: String,
     subtitle: String,
-    isGroup: Boolean,
+    /** The 1:1 peer's bare JID; `null` marks a group DM. */
+    peerJid: String?,
     unreadCount: Int,
     isMuted: Boolean,
     testTag: String,
@@ -146,10 +148,11 @@ private fun DmSurfaceRow(
         headlineContent = { Text(text = name) },
         supportingContent = { Text(text = subtitle) },
         leadingContent = {
-            Icon(
-                if (isGroup) Icons.Outlined.Group else Icons.Outlined.Person,
-                contentDescription = null,
-            )
+            if (peerJid != null) {
+                PeerAvatar(jid = peerJid, displayName = name, size = LIST_AVATAR_SIZE)
+            } else {
+                Icon(Icons.Outlined.Group, contentDescription = null)
+            }
         },
         trailingContent = {
             Row(

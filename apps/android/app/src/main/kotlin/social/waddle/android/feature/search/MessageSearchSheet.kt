@@ -31,9 +31,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
+import social.waddle.android.avatar.PeerAvatar
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -144,15 +146,29 @@ private fun SearchStatusText(text: String) {
 /** Compact result preview: author + stamp header, two-line body. */
 @Composable
 private fun SearchResultRow(hit: MessageSearchHit) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+    val author = hit.author ?: stringResource(R.string.message_unknown_sender)
+    Row(
+        verticalAlignment = Alignment.Top,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
+        PeerAvatar(
+            jid = hit.authorJid,
+            displayName = author,
+            size = SEARCH_AVATAR_SIZE,
+            modifier = Modifier.padding(end = 12.dp),
+        )
+        SearchResultText(hit = hit, author = author)
+    }
+}
+
+@Composable
+private fun SearchResultText(hit: MessageSearchHit, author: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = hit.author ?: stringResource(R.string.message_unknown_sender),
+                text = author,
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,
                 maxLines = 1,
@@ -188,3 +204,5 @@ private fun formatSearchStamp(timestamp: String?): String? {
     } ?: return null
     return STAMP_FORMAT.withZone(ZoneId.systemDefault()).format(instant)
 }
+
+private val SEARCH_AVATAR_SIZE: Dp = 32.dp

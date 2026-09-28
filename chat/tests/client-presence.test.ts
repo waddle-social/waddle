@@ -100,6 +100,63 @@ describe("PresenceManager MUC occupant tracking", () => {
     expect(emitted.memberJid).toEqual([["bob", "bob@example.com"]]);
   });
 
+  test("a JID-less holder taking a nick clears the previous holder's real JID", () => {
+    const { manager, events } = createManager();
+    const occupantJids: unknown[] = [];
+    const memberJids: unknown[] = [];
+    events.on("occupantRealJid", (room, nick, bare) => occupantJids.push([room, nick, bare]));
+    events.on("memberJid", (nick, bare) => memberJids.push([nick, bare]));
+
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "member", muc_role: "participant", muc_jid: "alice@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/sam`, presence_type: "unavailable", muc_affiliation: "member", muc_role: "none" }));
+    // Bob takes the nick; this room does not disclose his real JID to us.
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "none", muc_role: "participant" }));
+
+    expect(occupantJids).toEqual([
+      [ROOM, "sam", "alice@example.com"],
+      [ROOM, "sam", null],
+    ]);
+    // The shell's nick map still holds Alice after her departure, so it is told to drop her.
+    expect(memberJids).toEqual([["sam", "alice@example.com"], ["sam", null]]);
+  });
+
+  test("self-presence reports our actual (possibly room-assigned) nick, and clears it on leave", () => {
+    const { manager, events } = createManager();
+    const ownNicks: unknown[] = [];
+    events.on("ownOccupantNick", (room, nick) => ownNicks.push([room, nick]));
+    // XEP-0045 210: we asked for "alice" and the room assigned "alice_2".
+    manager.handle(directPresence({ from: `${ROOM}/alice_2`, muc_affiliation: "member", muc_role: "participant", muc_status_codes: [110, 210] }));
+    manager.handle(directPresence({ from: `${ROOM}/alice`, muc_affiliation: "member", muc_role: "participant" }));
+    manager.handle(directPresence({ from: `${ROOM}/alice_2`, presence_type: "unavailable", muc_affiliation: "member", muc_role: "none", muc_status_codes: [110] }));
+    expect(ownNicks).toEqual([[ROOM, "alice_2"], [ROOM, null]]);
+  });
+
+  test("nicks containing '/' keep their whole resource: two such occupants never collapse", () => {
+    const { manager, events } = createManager();
+    const occupantJids: unknown[] = [];
+    const ownNicks: unknown[] = [];
+    events.on("occupantRealJid", (room, nick, bare) => occupantJids.push([room, nick, bare]));
+    events.on("ownOccupantNick", (room, nick) => ownNicks.push([room, nick]));
+    manager.handle(directPresence({ from: `${ROOM}/sam/phone`, muc_affiliation: "member", muc_role: "participant", muc_jid: "alice@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/sam/tablet`, muc_affiliation: "member", muc_role: "participant", muc_jid: "bob@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/me/laptop`, muc_affiliation: "member", muc_role: "participant", muc_status_codes: [110] }));
+    expect(occupantJids).toEqual([
+      [ROOM, "sam/phone", "alice@example.com"],
+      [ROOM, "sam/tablet", "bob@example.com"],
+      [ROOM, "me/laptop", null],
+    ]);
+    expect(ownNicks).toEqual([[ROOM, "me/laptop"]]);
+  });
+
+  test("a JID-less presence for a nick still mapped clears the member JID too", () => {
+    const { manager, events } = createManager();
+    const memberJids: unknown[] = [];
+    events.on("memberJid", (nick, bare) => memberJids.push([nick, bare]));
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "member", muc_role: "participant", muc_jid: "alice@example.com/web" }));
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "none", muc_role: "participant" }));
+    expect(memberJids).toEqual([["sam", "alice@example.com"], ["sam", null]]);
+  });
+
   test("unfocused-room presence is cached but not emitted; dispatchFocusedRoom replays it after a switch", () => {
     let focused: string | null = "other@muc.example.com";
     const { manager, events } = createManager({ currentRoom: () => focused });

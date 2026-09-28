@@ -86,7 +86,11 @@ fun IncomingCallScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.padding(top = 64.dp),
             ) {
-                CallPeerAvatar(peerJid = state.from, size = 96.dp)
+                CallPeerAvatar(
+                    jid = bareJidOf(state.from),
+                    name = localpartOf(bareJidOf(state.from)),
+                    size = 96.dp,
+                )
                 Text(
                     text = localpartOf(bareJidOf(state.from)),
                     style = MaterialTheme.typography.headlineMedium,

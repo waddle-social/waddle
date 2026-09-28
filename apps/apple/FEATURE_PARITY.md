@@ -62,7 +62,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
 | Presence | RFC 6121 | 🟡 | ✅ | Availability and status message |
-| Avatars | 0084 | 🟡 | ✅ | Fetch, publish (≤512 px PNG) and remove. Baseline: fetch only |
+| Avatars | 0084 | 🟡 | ✅ | Fetch (revalidated with known ids, refreshed on +notify events), publish (≤512 px PNG) and remove. Baseline: fetch only |
 | vCard / profile | 0292 | ❌ | ❌ | Not in this PR |
 | Mood / activity / tune | 0107, 0108, 0118 | ❌ | 🟡 | Mood only (XEP-0107 vocabulary). Baseline: all publish verbs were empty stubs |
 

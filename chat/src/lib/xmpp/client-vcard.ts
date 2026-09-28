@@ -6,13 +6,13 @@
 import { barePeerJid } from "./jid";
 import type { VCard4Profile } from "./vcard4-types";
 import { avatarDataUrl } from "./wasm-message-codecs";
-import type { WasmAvatar, WasmVCard4 } from "./wasm-types";
+import type { WasmAvatarFetch, WasmVCard4 } from "./wasm-types";
 
 /** Structural subset of the WASM client the vCard module drives. */
 export type VCardWasmClient = {
   fetch_vcard4?: (jid: string) => Promise<WasmVCard4 | null>;
   publish_vcard4?: (vcard: WasmVCard4) => Promise<unknown>;
-  request_avatar?: (jid: string) => Promise<WasmAvatar | null>;
+  request_avatar?: (jid: string, knownIds: string[]) => Promise<WasmAvatarFetch | null>;
 };
 
 type VCardManagerDeps = {
@@ -20,6 +20,9 @@ type VCardManagerDeps = {
 };
 
 export class VCardManager {
+  /** Last resolved avatar per bare JID, so revalidation can skip unchanged data (XEP-0084 §4.2). */
+  private readonly avatarCache = new Map<string, { id: string; url: string }>();
+
   constructor(private readonly deps: VCardManagerDeps) {}
 
   async fetchVCard4(jid: string): Promise<VCard4Profile | null> {
@@ -48,14 +51,26 @@ export class VCardManager {
     await xmpp.publish_vcard4?.(payload);
   }
 
+  /** Drop the known-id entry for `jid` once no surface shows it. */
+  forgetUserAvatar(jid: string): void {
+    this.avatarCache.delete(barePeerJid(jid));
+  }
+
   async fetchUserAvatar(jid: string): Promise<string | null> {
     const xmpp = await this.deps.requireConnectedXmpp();
     const bareJid = barePeerJid(jid);
-    if (xmpp.request_avatar) {
-      const avatar = await xmpp.request_avatar(bareJid);
-      if (avatar?.url) return avatar.url;
-      if (avatar?.data) return avatarDataUrl(avatar.data, avatar.mime_type);
+    if (!xmpp.request_avatar) return null;
+    const cached = this.avatarCache.get(bareJid);
+    const fetch = await xmpp.request_avatar(bareJid, cached ? [cached.id] : []);
+    if (!fetch) {
+      this.avatarCache.delete(bareJid);
+      return null;
     }
-    return null;
+    if (!fetch.avatar) return cached?.id === fetch.id ? cached.url : null;
+    if (!fetch.avatar.data) return null;
+    const url = avatarDataUrl(fetch.avatar.data, fetch.avatar.mime_type);
+    if (!url) return null;
+    this.avatarCache.set(bareJid, { id: fetch.id, url });
+    return url;
   }
 }

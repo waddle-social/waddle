@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Menu } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { useCallParticipantAvatarJid } from "@/lib/avatars/use-call-participant-avatar";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import { buildHomeChannelUnreadMap } from "@/home/dashboard-props";
@@ -49,7 +50,6 @@ const {
   computedChannelUnreadMap,
   groupDmConversations,
   activeChannelRoomJid,
-  avatarUrlByAuthor,
   selectChannel,
   selectChannelByRoomJid,
   selectGroupDm,
@@ -63,6 +63,8 @@ const {
   handleNewGroupDm,
   handleAddPeopleToDm,
 } = props.controller;
+
+const callParticipantAvatarJid = useCallParticipantAvatarJid();
 
 interface RoomTile {
   channel: ChannelSummary;
@@ -156,10 +158,10 @@ const tiles = computed<RoomTile[]>(() => {
 
 const liveCount = computed(() => tiles.value.filter((tile) => tile.live).length);
 
-function tileAvatars(tile: RoomTile): { nick: string; src: string | null }[] {
+function tileAvatars(tile: RoomTile): { nick: string; jid: string | null }[] {
   return tile.nicks.slice(0, 4).map((nick) => ({
     nick,
-    src: tile.isActive ? avatarUrlByAuthor.value[nick] ?? null : null,
+    jid: callParticipantAvatarJid(tile.roomJid, nick),
   }));
 }
 
@@ -272,7 +274,7 @@ function selectCommunitySurface(surface: "feed" | "events") {
               <div class="flex min-w-0 items-center gap-2">
                 <div v-if="tile.nicks.length > 0" class="room-card__avatars" :aria-label="`${tile.nicks.length} in the huddle`">
                   <span v-for="avatar in tileAvatars(tile)" :key="avatar.nick" class="inline-flex rounded-full ring-2 ring-card">
-                    <AppAvatar :name="avatar.nick" :src="avatar.src" size="xs" />
+                    <UserAvatar :name="avatar.nick" :jid="avatar.jid" size="xs" />
                   </span>
                 </div>
                 <span v-if="tile.mentions > 0" class="room-card__badge" :aria-label="`${tile.mentions} mentions`">@{{ tile.mentions }}</span>

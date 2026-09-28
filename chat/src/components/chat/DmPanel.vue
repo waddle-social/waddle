@@ -2,7 +2,8 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { ArrowRight, MessageCircle, MessagesSquare, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, UserPlus, Video } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
 import type { MessageThreadEntry } from "@/channels/threads";
@@ -86,7 +87,6 @@ const activeCallRows = computed(() =>
       action: callActivityActionLabel(activity),
       eyebrow: callActivityEyebrow(activity),
       since: callActivitySince(activity),
-      avatarUrl: callActivityAvatarUrl(activity),
     }))
     .filter((row) => row.peerJid && !isCurrentDmActivity(row.activity))
     .sort(compareActiveCallRows),
@@ -187,14 +187,6 @@ function callActivityTitle(activity: DmCallActivity): string {
     normalizedPeerJid(conversation.peerJid) === peerJid
   );
   return existing?.peerUsername || jidLocalpart(peerJid) || peerJid;
-}
-
-function callActivityAvatarUrl(activity: DmCallActivity): string | null {
-  const peerJid = normalizedPeerJid(activity.peerJid);
-  const existing = props.conversations.find((conversation) =>
-    normalizedPeerJid(conversation.peerJid) === peerJid
-  );
-  return existing?.peerAvatarUrl ?? null;
 }
 
 type CallActivityVisualTone = "primary" | "success" | "warning";
@@ -622,7 +614,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
               @click="selectCallActivity(row.activity)"
             >
               <span class="relative shrink-0">
-                <AppAvatar :name="row.title" :src="row.avatarUrl" size="sm" />
+                <UserAvatar :name="row.title" :jid="conversationPeerAvatarJid(row.peerJid)" size="sm" />
                 <span class="absolute -right-1 -bottom-1 flex h-4 w-4 items-center justify-center rounded-full border" :class="callActivityIconClass(row.activity)">
                   <Video v-if="hasKnownDmCallMedia(row.activity) && row.activity.media.video" class="h-2.5 w-2.5" aria-hidden="true" />
                   <PhoneIncoming v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'incoming'" class="h-2.5 w-2.5" aria-hidden="true" />
@@ -736,7 +728,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
             @click.stop="emit('selectDm', conversation.peerJid)"
           >
             <div class="relative">
-              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" :in-call="peerInCall(conversation.peerJid)" />
+              <UserAvatar :name="conversation.peerUsername" :jid="conversationPeerAvatarJid(conversation.peerJid)" size="sm" :in-call="peerInCall(conversation.peerJid)" />
               <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
             </div>
             <div class="min-w-0 flex-1">

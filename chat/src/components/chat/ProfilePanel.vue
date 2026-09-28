@@ -3,7 +3,7 @@ import { computed, ref, useId, watch } from "vue";
 import { Popover } from "@ark-ui/vue/popover";
 import type { PopoverOpenChangeDetails, PopoverRootProps } from "@ark-ui/vue/popover";
 import { Bell, BellOff, ChevronUp, LogOut, Settings, Volume2, VolumeX } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import PresencePicker from "@/components/chat/PresencePicker.vue";
 import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
@@ -152,7 +152,7 @@ watch(
             type="button"
             :aria-label="accountMenuLabel"
           >
-            <AppAvatar :name="session.username" :src="session.avatar_url" size="xs" />
+            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="xs" />
           </button>
         </Popover.Trigger>
       </AppTooltip>
@@ -162,7 +162,7 @@ watch(
           :aria-label="`${session.username} account menu`"
         >
           <div class="flex min-h-12 items-center gap-3 rounded-lg bg-muted/30 px-2.5 py-2">
-            <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
+            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="sm" />
             <div class="min-w-0 flex-1">
               <Popover.Title as-child>
                 <div class="type-menu-title truncate">{{ session.username }}</div>
@@ -230,7 +230,7 @@ watch(
             type="button"
             :aria-label="accountMenuLabel"
           >
-            <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
+            <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="sm" />
             <span class="type-menu-title min-w-0 flex-1 truncate text-sidebar-foreground">{{ session.username }}</span>
             <ChevronUp
               class="h-3.5 w-3.5 flex-shrink-0 text-sidebar-muted transition-transform duration-200"

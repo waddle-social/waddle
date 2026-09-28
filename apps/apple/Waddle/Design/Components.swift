@@ -36,7 +36,9 @@ struct AvatarView: View {
     }
 }
 
-/// Avatar for a JID, fetched through the session's avatar store.
+/// Avatar for a JID, fetched through the session's avatar store. While
+/// on screen it asks again each minute and after every reconnect; the
+/// store decides whether a lookup is due.
 struct JIDAvatar: View {
     @Environment(SessionCoordinator.self) private var session
     let jid: BareJID
@@ -50,7 +52,17 @@ struct JIDAvatar: View {
             image: session.avatars.image(for: jid),
             size: size
         )
-        .task(id: jid) { session.loadAvatarIfNeeded(jid) }
+        .task(id: RequestKey(jid: jid, generation: session.avatars.generation)) {
+            while !Task.isCancelled {
+                session.loadAvatarIfNeeded(jid)
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    private struct RequestKey: Hashable {
+        let jid: BareJID
+        let generation: Int
     }
 }
 

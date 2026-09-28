@@ -70,6 +70,19 @@ public struct AvatarImage: Hashable, Sendable {
     }
 }
 
+/// Outcome of a XEP-0084 avatar lookup (vCard-temp PHOTO as fallback).
+public enum AvatarFetch: Hashable, Sendable {
+    /// The peer advertises `id`, and these are its bytes.
+    case published(id: String, image: AvatarImage)
+    /// The advertised id is the known one passed in; no data was
+    /// transferred (XEP-0084 §4.2).
+    case unchanged
+    /// The peer has no avatar.
+    case absent
+    /// The lookup failed; what is held stays.
+    case failed
+}
+
 /// XEP-0363 upload slot.
 public struct UploadSlot: Hashable, Sendable {
     public let putURL: URL

@@ -231,25 +231,35 @@ impl WaddleClient {
         })
     }
 
-    pub fn request_avatar(&self, jid: String) -> Promise {
+    /// XEP-0084 fetch honoring §4.2: when the advertised item id is in
+    /// `known_ids` the data IQ is skipped and `avatar` is absent, so the
+    /// caller keeps its cached bytes. Resolves `null` when the peer has no
+    /// in-band avatar.
+    pub fn request_avatar(&self, jid: String, known_ids: Vec<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let bare: BareJid = jid
                 .parse()
                 .map_err(|err| js_error(format!("invalid JID: {err}")))?;
-            let avatar = request_avatar_with_iq(&bare, |stanza| {
+            let known_ids: Vec<_> = known_ids
+                .into_iter()
+                .filter_map(waddle_xmpp_client::AvatarItemId::new)
+                .collect();
+            let fetch = request_avatar_with_iq_skipping(&bare, &known_ids, |stanza| {
                 let inner = inner.clone();
                 async move { send_avatar_iq_command(inner, stanza).await }
             })
             .await?;
 
-            match avatar {
-                Some(avatar) => to_js_value(&WaddleAvatar {
-                    jid: avatar.jid.to_string(),
-                    id: avatar.id,
-                    mime_type: avatar.mime_type,
-                    data: avatar.data,
-                    url: avatar.url,
+            match fetch {
+                Some(fetch) => to_js_value(&WaddleAvatarFetch {
+                    id: fetch.id.to_string(),
+                    avatar: fetch.avatar.map(|avatar| WaddleAvatar {
+                        jid: avatar.jid.to_string(),
+                        id: avatar.id.to_string(),
+                        mime_type: avatar.mime_type,
+                        data: avatar.data,
+                    }),
                 }),
                 None => Ok(JsValue::NULL),
             }

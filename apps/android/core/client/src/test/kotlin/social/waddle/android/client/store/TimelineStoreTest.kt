@@ -108,6 +108,39 @@ class TimelineStoreTest {
     }
 
     @Test
+    fun `live room twin without occupant mapping keeps the archived real author`() {
+        val room = "room@muc.waddle.test"
+        val occupant = "$room/sam"
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "mam-1",
+                stanzaId = "room-1",
+                stanzaIdBy = room,
+                from = occupant,
+                to = null,
+                messageType = "groupchat",
+                authorRealJid = "Sam.Old@waddle.test/web",
+            ),
+        )
+        store.onLiveMessage(
+            testMessage(
+                stanzaId = "room-1",
+                stanzaIdBy = room,
+                from = occupant,
+                to = null,
+                messageType = "groupchat",
+                isMuc = true,
+            ),
+            authorJid = null,
+        )
+
+        val items = store.timeline(room).value
+        assertEquals(1, items.size)
+        assertTrue(items[0].source is TimelineSource.Live)
+        assertEquals("sam.old@waddle.test", items[0].authorJid)
+    }
+
+    @Test
     fun `orders by timestamp then insertion`() {
         store.onArchivedMessage(
             testArchivedMessage(mamId = "m1", stanzaId = "s1", timestamp = "2026-07-15T10:00:00Z", body = "second"),

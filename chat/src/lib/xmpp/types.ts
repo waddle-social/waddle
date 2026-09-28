@@ -64,6 +64,15 @@ export interface MessageSearchResult {
   parentThreadId?: string;
   roomJid?: string;
   peerJid?: string;
+  /**
+   * Author identity, in the same shape as a timeline row, so a hit
+   * resolves its avatar exactly like the row it came from: the archive
+   * real JID, the room occupant JID (room or MUC-PM hits), or the 1:1
+   * sender JID.
+   */
+  authorJid?: string;
+  authorOccupantJid?: string;
+  authorRealJid?: string;
 }
 
 /**
@@ -457,7 +466,6 @@ export interface DmConversation {
    */
   mucPm?: boolean;
   mucPmRoomJid?: string;
-  peerAvatarUrl?: string | null;
   lastMessageBody?: string;
   lastMessageAt?: string;
   unreadCount: number;

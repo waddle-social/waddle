@@ -328,7 +328,6 @@ describe("HomeDashboard activity rendering", () => {
         {
           peerJid: "bob@example.com",
           peerUsername: "bob",
-          peerAvatarUrl: "https://example.com/bob.png",
           lastMessageBody: "Can you review the plan?",
           lastMessageAt: "2026-05-08T13:00:00Z",
           unreadCount: 2,
@@ -363,7 +362,7 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).not.toContain('aria-label="Empty, 0 channels, no unread activity"');
 
     expect(html).toContain("Direct messages");
-    expect(html).toContain('data-vue-stub="@/components/ui/AppAvatar.vue"');
+    expect(html).toContain('data-vue-stub="@/components/ui/UserAvatar.vue" name="bob" jid="bob@example.com"');
     expect(html).toContain(`aria-label="${bobLabel}"`);
     expect(html).toContain("bob@example.com · Can you review the plan?");
     expect(buttonForLabel(html, bobLabel)).toContain(">available</span>");

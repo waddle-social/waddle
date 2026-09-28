@@ -248,6 +248,10 @@ public final class TimelineStore {
             let timestamp = incoming.timestamp ?? existing.item.timestamp
             var message = incoming.message
             message.timestamp = timestamp
+            // A stamp is never replaced by a later copy's, and a missing one
+            // is filled only from a room-vouched archive twin.
+            message.authorRealJID = existing.item.message.authorRealJID
+                ?? vouchedStamp(of: incoming, for: existing.item)
             replaced.item = TimelineItem(
                 id: existing.item.id,
                 conversation: incoming.conversation,
@@ -261,15 +265,35 @@ public final class TimelineStore {
             replaced.isArchived = !incomingIsLive && existing.isArchived
             return replaced
         }
-        // The archive copy of a timestampless live row brings the server
-        // timestamp; adopt it so the row sorts correctly.
+        // Otherwise the stored row stays, but adopts what only the other
+        // copy has: the server timestamp of a timestampless live row (so it
+        // sorts correctly), and an author stamp it lacks (a delayed live row
+        // gets none; its archive twin may name the author). An existing
+        // stamp is never replaced.
+        var replaced = existing
+        var changed = false
         if existing.item.timestamp == nil, let timestamp = incoming.timestamp {
-            var replaced = existing
             replaced.item.message.timestamp = timestamp
             replaced.sortDate = timestamp
-            return replaced
+            changed = true
         }
-        return nil
+        if existing.item.message.authorRealJID == nil, let author = vouchedStamp(of: incoming, for: existing.item) {
+            replaced.item.message.authorRealJID = author
+            changed = true
+        }
+        return changed ? replaced : nil
+    }
+
+    /// The author stamp a stored row may take from its twin: only an
+    /// archive copy carrying the row's own room-assigned stanza id. Rows
+    /// also merge on the sender-controlled origin id, which a later holder
+    /// of the nick could reuse to lend the row their identity.
+    private func vouchedStamp(of incoming: TimelineItem, for existing: TimelineItem) -> BareJID? {
+        guard incoming.message.source != .live,
+              let roomID = existing.roomStanzaID,
+              incoming.roomStanzaID == roomID
+        else { return nil }
+        return incoming.message.authorRealJID
     }
 
     // MARK: - Mutations

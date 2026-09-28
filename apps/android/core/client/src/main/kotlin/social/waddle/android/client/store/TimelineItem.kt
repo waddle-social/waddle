@@ -57,6 +57,14 @@ data class TimelineItem(
      * none were fastened or they were cleared.
      */
     val safetyScores: WaddleSafetyScores? = null,
+    /**
+     * The author's real bare JID ([social.waddle.android.client.normalizedBareJid]),
+     * captured ONCE when the row is stored: the room occupant's presence
+     * JID at arrival (undelayed live rows) or the archived `muc#user`
+     * JID. Never re-derived later — a nick reused by someone else must
+     * not re-attribute this row. `null` = unknown (initials).
+     */
+    val authorJid: String? = null,
 ) {
     /**
      * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),

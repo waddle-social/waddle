@@ -63,16 +63,27 @@ describe("threadChipParticipants", () => {
     const participants = threadChipParticipants(
       threadIndexWith(children),
       "root",
-      { u7: "https://cdn/u7.png" },
+      (m) => (m.author === "u7" ? "u7@example.com" : null),
       { u7: "online" },
     );
     expect(participants.map((p) => p.nick)).toEqual(["u7", "u6", "u5", "u4", "u2"]);
-    expect(participants[0]).toEqual({ nick: "u7", avatarUrl: "https://cdn/u7.png", presence: "online" });
+    expect(participants[0]).toEqual({ key: "jid:u7@example.com", nick: "u7", jid: "u7@example.com", presence: "online" });
     expect(participants[1]?.presence).toBe("offline");
   });
 
+  test("dedupes by resolved JID, not nick", () => {
+    const children = [
+      message({ id: "c1", author: "sam", createdAt: "2026-07-01T10:01:00Z" }),
+      message({ id: "c2", author: "sam", createdAt: "2026-07-01T10:02:00Z" }),
+      message({ id: "c3", author: "sam", createdAt: "2026-07-01T10:03:00Z" }),
+    ];
+    const jidById: Record<string, string | null> = { c1: "alice@example.com", c2: "bob@example.com", c3: null };
+    const participants = threadChipParticipants(threadIndexWith(children), "root", (m) => jidById[m.id] ?? null, {});
+    expect(participants.map((p) => p.jid)).toEqual([null, "bob@example.com", "alice@example.com"]);
+  });
+
   test("returns empty for unknown threads", () => {
-    expect(threadChipParticipants(new Map(), "missing", {}, {})).toEqual([]);
+    expect(threadChipParticipants(new Map(), "missing", () => null, {})).toEqual([]);
   });
 });
 

@@ -18,6 +18,9 @@ import {
 import type { connectionStore as ConnectionStore } from "@/lib/connection-store";
 import type { NotifySettingsStore } from "@/lib/notify-settings";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import { occupantJidDirectory } from "@/lib/avatars/author-jid";
+import { avatarStore } from "@/lib/avatars/avatar-store";
+import { createAvatarBinding } from "@/lib/avatars/bind-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid } from "@/lib/xmpp-client";
 import { bareJidKey, fullJidIdentityKey, resourceOf } from "@/lib/xmpp/jid";
@@ -156,11 +159,14 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     }
   }
 
+  const avatars = createAvatarBinding();
   watch(xmppClient, (client) => {
+    avatars.unbind();
     if (!client || !session.value) {
       presence.onClientCleared();
       return;
     }
+    avatars.bind(client);
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);
@@ -197,6 +203,12 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     client.addPubsubEventHandler(presence.handleActivityPubsubEvent);
     client.addPubsubEventHandler(presence.handleStatusPreferencePubsubEvent);
     client.setMemberJidHandler((nick, bareJid) => {
+      if (bareJid === null) {
+        if (!(nick in memberJidByNick.value)) return;
+        const { [nick]: _dropped, ...rest } = memberJidByNick.value;
+        memberJidByNick.value = rest;
+        return;
+      }
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
     });
     // XEP-0198 fan-out: the same message ID only ever appears in one timeline
@@ -234,6 +246,12 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       // otherwise restart hydrate against the about-to-disconnect
       // client. Round-12 reviewer P1.
       if (!connectionStore.session) return;
+      // A fresh session (reconnect without resume) may have outdated any
+      // cached avatar; a resumed one only retries transport failures.
+      if (event.type === "fresh") {
+        occupantJidDirectory.forgetOwnNicks();
+        avatarStore.beginSession();
+      } else avatarStore.resumeSession();
       presence.onSessionReady(event, client);
       // #754: one bootstrap fire per session-ready, fresh or resumed —
       // the choreographer replaces the old multi-subscriber fan-out
@@ -399,6 +417,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
 
   async function handleLogout() {
     clearPendingChannelRoomJidSelection();
+    avatars.logout();
     ui.activePage.value = "dashboard";
     messaging.disconnect();
     dmMessaging.disconnect();

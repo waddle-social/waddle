@@ -35,6 +35,7 @@ import {
 import { bareJidKey, barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, resourceOf, roomBareJidFor } from "./jid";
 import { TypedEventBus } from "./client-events";
 import type {
+  AvatarChangedEvent,
   CatchupConversationFailure,
   CatchupHookInfo,
   ClientEvents,
@@ -195,6 +196,7 @@ import type {
   WasmPinEvent,
   WasmPresence,
   WasmPubsubEvent,
+  WasmAvatarChanged,
   WasmRoomMember,
   WasmRosterContact,
   WasmSendMessageOutcome,
@@ -363,6 +365,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
+  set_on_avatar_changed?: (cb: (event: WasmAvatarChanged) => void) => void;
   set_on_stream_management?: (cb: (event: StreamManagementTelemetry) => void) => void;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
@@ -842,7 +845,8 @@ export class BrowserXmppClient {
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
     if (presence.presence_type !== "error") return false;
-    const [rawRoom = "", errorNick = ""] = presence.from?.split("/") ?? [];
+    const rawRoom = barePeerJid(presence.from ?? "");
+    const errorNick = resourceOf(presence.from ?? "");
     const room = rawRoom.trim();
     const key = this.roomJoinKey(room);
     if (!room || !key) return false;
@@ -923,7 +927,7 @@ export class BrowserXmppClient {
   setDisplayedHandler(h: (event: { roomJid: string; nick: string; messageId: string }) => void) { this.events.set("displayed", h); }
   setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.events.set("dmDisplayed", h); }
   setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.events.set("presenceUpdate", h); }
-  setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.events.set("memberJid", h); }
+  setMemberJidHandler(h: (nick: string, bareJid: string | null) => void) { this.events.set("memberJid", h); }
   setHatsHandler(h: (hats: RoomHats) => void) { this.events.set("hats", h); }
   setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.events.set("authority", h); }
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.events.set("activity", h); }
@@ -2125,6 +2129,29 @@ export class BrowserXmppClient {
     this.events.set("pubsubEvent", handler);
   }
 
+  /** XEP-0084: a peer published new avatar metadata or disabled their avatar. */
+  addAvatarChangedHandler(handler: (event: AvatarChangedEvent) => void): () => void {
+    return this.events.on("avatarChanged", handler);
+  }
+
+  /**
+   * XEP-0045 §7.2.4: a room occupant's real JID was disclosed, for any
+   * joined room (not only the focused one).
+   */
+  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string | null) => void): () => void {
+    return this.events.on("occupantRealJid", handler);
+  }
+
+  /** Our actual occupant nick per room, from XEP-0045 self-presence (may differ from the requested one). */
+  addOwnOccupantNickHandler(handler: (roomJid: string, nick: string | null) => void): () => void {
+    return this.events.on("ownOccupantNick", handler);
+  }
+
+  /** Our own profile (vCard4, incl. photo) was republished from this client. */
+  addOwnProfilePublishedHandler(handler: (ownBareJid: string) => void): () => void {
+    return this.events.on("ownProfilePublished", handler);
+  }
+
   private async resolveUploadService(): Promise<string> {
     if (this.uploadServiceJid) return this.uploadServiceJid;
     const xmpp = await this.requireConnectedXmpp();
@@ -2604,7 +2631,10 @@ export class BrowserXmppClient {
   async retractTune(): Promise<void> { return this.pubsub.retractTune(); }
   async fetchUserPepProfile(jid: string): Promise<UserPepProfile> { return this.pubsub.fetchUserPepProfile(jid); }
   async fetchVCard4(jid: string): Promise<VCard4Profile | null> { return this.vcard.fetchVCard4(jid); }
-  async publishVCard4(profile: VCard4Profile): Promise<void> { return this.vcard.publishVCard4(profile); }
+  async publishVCard4(profile: VCard4Profile): Promise<void> {
+    await this.vcard.publishVCard4(profile);
+    this.events.emitSafe("ownProfilePublished", barePeerJid(this.session.jid));
+  }
 
   async queryMam(spaceId: string, channelId: string, max = 50): Promise<LiveRoomMessage[]> { return this.mam.queryMam(spaceId, channelId, max); }
   async queryMamPage(spaceId: string, channelId: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveRoomMessage>> { return this.mam.queryMamPage(spaceId, channelId, max, pageParam); }
@@ -2767,8 +2797,19 @@ export class BrowserXmppClient {
   async adminChannelsAffiliations(opts: { channelJid: string; filter?: string | null; pageSize?: number | null; afterCursor?: string | null }): Promise<WasmAdminChannelsAffiliationsResult> { return this.mucAdmin.adminChannelsAffiliations(opts); }
   async adminChannelsSetAffiliation(opts: { channelJid: string; memberJid: string; affiliation: "owner" | "admin" | "member" | "none" | "outcast"; reason?: string | null }): Promise<WasmAdminChannelsSetAffiliationResult> { return this.mucAdmin.adminChannelsSetAffiliation(opts); }
   async adminChannelsKick(opts: { channelJid: string; occupantJid: string; reason?: string | null }): Promise<WasmAdminChannelsKickResult> { return this.mucAdmin.adminChannelsKick(opts); }
-  async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? jidLocalpart(user.jid), display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
+  async searchUsers(query: string): Promise<UserSearchResult[]> {
+    if (!query.trim()) return [];
+    const xmpp = await this.requireConnectedXmpp();
+    const users = await xmpp.search_users?.(query) as WasmUserSearchResult[];
+    return (users ?? []).map((user) => ({
+      id: user.jid,
+      jid: user.jid,
+      username: user.username ?? user.nick ?? jidLocalpart(user.jid),
+      display_name: user.display_name ?? user.name ?? null,
+    }));
+  }
   async fetchUserAvatar(jid: string): Promise<string | null> { return this.vcard.fetchUserAvatar(jid); }
+  forgetUserAvatar(jid: string): void { this.vcard.forgetUserAvatar(jid); }
   get agent(): XmppClientInstance | null { return this.xmpp; }
 
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
@@ -3317,7 +3358,7 @@ export class BrowserXmppClient {
       if (!message.body && !message.subject) return;
     }
     if (message.chat_state && !message.body) {
-      if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
+      if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
       else {
         // XEP-0045 §7.5 (#1256): a chat state from a MUC
         // occupant JID belongs to that occupant's PM conversation, not
@@ -3361,9 +3402,9 @@ export class BrowserXmppClient {
    * in `completeResumeBarrier` — it never re-enters the buffer.
    */
   private dispatchLiveMessage(message: InboundWasmMessage) {
-    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else { const occupant = this.mucPmOccupant(message); this.events.emit("dmDisplayed", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); } return; }
+    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else { const occupant = this.mucPmOccupant(message); this.events.emit("dmDisplayed", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); } return; }
     if (!message.is_muc && message.safety_scores) { this.dispatchDmSafetyScores(message); return; }
-    if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const occupant = this.mucPmOccupant(message); const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = occupant?.occupantJid ?? (fromBare === selfBare ? toBare : fromBare); const reactorJid = (occupant && fromBare !== selfBare ? occupant.occupantJid : fromBare) || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
+    if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const occupant = this.mucPmOccupant(message); const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = occupant?.occupantJid ?? (fromBare === selfBare ? toBare : fromBare); const reactorJid = (occupant && fromBare !== selfBare ? occupant.occupantJid : fromBare) || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
     this.dispatchLiveBodyMessage(message);
     // Rejections settle the retry queue immediately, even during catch-up.
     // A sent carbon can reach the timeline later when the resume buffer drains.
@@ -3626,6 +3667,13 @@ export class BrowserXmppClient {
     xmpp.set_on_pubsub_event?.((event: WasmPubsubEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.events.emit("pubsubEvent", event);
+    });
+    xmpp.set_on_avatar_changed?.((event: WasmAvatarChanged) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.events.emitSafe("avatarChanged", {
+        jid: event.jid,
+        ...(event.avatar_id ? { avatarId: event.avatar_id } : {}),
+      });
     });
     xmpp.set_on_call?.((event: CallEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;

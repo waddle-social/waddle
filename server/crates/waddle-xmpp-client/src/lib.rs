@@ -38,7 +38,7 @@ pub mod xep;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use avatar::AvatarExt;
-pub use avatar::{Avatar, AvatarInfo};
+pub use avatar::{Avatar, AvatarChanged, AvatarId, AvatarInfo, AvatarItemId};
 pub use bootstrap::{
     AuthMechanism, AuthenticationRequest, BootstrapElement, OAuthBearerRequest,
     RequiredStreamFeature, ResourceBindingRequest, ResourceBindingResult, SaslFailure,

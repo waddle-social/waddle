@@ -9,9 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -23,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -32,6 +31,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 
 /**
  * Create-group-DM sheet (web `NewGroupDmDialog` parity): XEP-0055
@@ -84,20 +85,22 @@ fun NewGroupDmSheet(
                     .testTag(NewGroupDmTestTags.NAME_FIELD),
             )
             state.selected.forEach { (jid, label) ->
-                ListItem(
-                    headlineContent = { Text(text = label) },
-                    supportingContent = { Text(text = jid) },
-                    leadingContent = { Icon(Icons.Outlined.Check, contentDescription = null) },
-                    trailingContent = {
-                        Icon(
-                            Icons.Outlined.Close,
-                            contentDescription = stringResource(R.string.new_group_dm_remove_member),
-                        )
-                    },
-                    modifier = Modifier
-                        .testTag(NewGroupDmTestTags.SELECTED_ROW_PREFIX + jid)
-                        .clickable { viewModel.removeMember(jid) },
-                )
+                key(jid) {
+                    ListItem(
+                        headlineContent = { Text(text = label) },
+                        supportingContent = { Text(text = jid) },
+                        leadingContent = { PeerAvatar(jid = jid, displayName = label, size = LIST_AVATAR_SIZE) },
+                        trailingContent = {
+                            Icon(
+                                Icons.Outlined.Close,
+                                contentDescription = stringResource(R.string.new_group_dm_remove_member),
+                            )
+                        },
+                        modifier = Modifier
+                            .testTag(NewGroupDmTestTags.SELECTED_ROW_PREFIX + jid)
+                            .clickable { viewModel.removeMember(jid) },
+                    )
+                }
             }
             OutlinedTextField(
                 value = state.searchQuery,
@@ -109,14 +112,18 @@ fun NewGroupDmSheet(
                     .testTag(NewGroupDmTestTags.SEARCH_FIELD),
             )
             state.searchResults.forEach { entry ->
-                ListItem(
-                    headlineContent = { Text(text = memberLabelOf(entry)) },
-                    supportingContent = { Text(text = entry.jid) },
-                    leadingContent = { Icon(Icons.Outlined.Person, contentDescription = null) },
-                    modifier = Modifier
-                        .testTag(NewGroupDmTestTags.RESULT_ROW_PREFIX + entry.jid)
-                        .clickable { viewModel.toggleMember(entry) },
-                )
+                key(entry.jid) {
+                    ListItem(
+                        headlineContent = { Text(text = memberLabelOf(entry)) },
+                        supportingContent = { Text(text = entry.jid) },
+                        leadingContent = {
+                            PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
+                        },
+                        modifier = Modifier
+                            .testTag(NewGroupDmTestTags.RESULT_ROW_PREFIX + entry.jid)
+                            .clickable { viewModel.toggleMember(entry) },
+                    )
+                }
             }
             if (!state.canCreate && !state.isSubmitting) {
                 Text(

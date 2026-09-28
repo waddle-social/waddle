@@ -2,18 +2,24 @@ import Foundation
 import WaddleKit
 
 extension FFIXmppPort {
-    /// No cached item ids are passed, so an advertised avatar always
-    /// carries its bytes. Dimensions are unknown on fetch.
-    func fetchAvatar(of jid: BareJID) async -> AvatarImage? {
-        let result = await client.requestAvatar(jid: jid.description, knownIds: [])
-        return result?.avatar.flatMap(FFIInbound.avatarImage)
+    /// `knownID` lets the core skip the data IQ for an unchanged avatar
+    /// (XEP-0084 §4.2). The core throws for a failed lookup and answers
+    /// nil only when the peer definitively has no avatar.
+    func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch {
+        do {
+            let result = try await client.requestAvatar(jid: jid.description, knownIds: knownID.map { [$0] } ?? [])
+            return FFIInbound.avatarFetch(result, knownID: knownID)
+        } catch {
+            BridgeLog.debug("avatar lookup failed: \(error)")
+            return .failed
+        }
     }
 
-    func publishAvatar(_ image: AvatarImage) async throws {
+    func publishAvatar(_ image: AvatarImage) async throws -> String {
         guard let width = UInt32(exactly: image.width), let height = UInt32(exactly: image.height) else {
             throw PortError.invalidRequest
         }
-        try await mappingPortErrors {
+        return try await mappingPortErrors {
             try await client.publishAvatar(data: image.data, mimeType: image.mediaType, width: width, height: height)
         }
     }

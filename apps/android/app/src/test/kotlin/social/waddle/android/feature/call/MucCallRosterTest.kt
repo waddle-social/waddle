@@ -172,6 +172,164 @@ class MucCallRosterTest {
     }
 
     @Test
+    fun rosterEntriesCarryRealJidsWithoutNickGuessing() {
+        val roster = mucRosterOf(
+            room,
+            MucPresenceRosterView(
+                participants = emptyMap(),
+                owners = mapOf(room to mapOf("alice" to "alice@waddle.test/phone", "ghost" to null)),
+                raisedHands = emptyMap(),
+                mutedNicks = emptyMap(),
+            ),
+            LiveRosterView(
+                participants = mapOf(room to listOf("alice@waddle.test/phone", "bob@waddle.test/web")),
+                leavingRooms = emptyMap(),
+            ),
+        )
+        assertEquals(
+            listOf(
+                MucRosterEntry("alice", handRaised = false, muted = false, jid = "alice@waddle.test"),
+                // No owner mapping: the LiveKit identity IS the real JID.
+                MucRosterEntry("bob", handRaised = false, muted = false, jid = "bob@waddle.test"),
+            ),
+            roster,
+        )
+        val presenceOnly = mucRosterOf(
+            room,
+            MucPresenceRosterView(
+                participants = mapOf(room to linkedSetOf("carol")),
+                owners = emptyMap(),
+                raisedHands = emptyMap(),
+                mutedNicks = emptyMap(),
+            ),
+            LiveRosterView(participants = emptyMap(), leavingRooms = emptyMap()),
+        )
+        // An unresolved nick stays unresolved (initials), never nick@domain.
+        assertEquals(listOf(MucRosterEntry("carol", handRaised = false, muted = false)), presenceOnly)
+    }
+
+    @Test
+    fun anOwnedIdentityNeverClaimsAnotherRowByLocalpart() {
+        // alice@y is owned under nick "ally"; alice@x (unowned) is listed
+        // under its localpart "alice". Order must not matter.
+        for (identities in listOf(
+            listOf("alice@y.test/phone", "alice@x.test/web"),
+            listOf("alice@x.test/web", "alice@y.test/phone"),
+        )) {
+            val roster = mucRosterOf(
+                room,
+                MucPresenceRosterView(
+                    participants = emptyMap(),
+                    owners = mapOf(room to mapOf("ally" to "alice@y.test/phone")),
+                    raisedHands = emptyMap(),
+                    mutedNicks = emptyMap(),
+                ),
+                LiveRosterView(participants = mapOf(room to identities), leavingRooms = emptyMap()),
+            ).associate { it.nick to it.jid }
+
+            assertEquals(mapOf("ally" to "alice@y.test", "alice" to "alice@x.test"), roster)
+        }
+    }
+
+    @Test
+    fun liveRowsTakeLabelAndFaceFromTheSameIdentity() {
+        // Muji maps nick "alice" to Bob; an unowned identity alice@x is
+        // also labeled "alice" by its localpart. Neither borrows the other's face.
+        val presence = MucPresenceRosterView(
+            participants = emptyMap(),
+            owners = mapOf(room to mapOf("alice" to "bob@y.test/phone")),
+            raisedHands = mapOf(room to setOf("alice")),
+            mutedNicks = emptyMap(),
+        )
+        val both = mucRosterOf(
+            room,
+            presence,
+            LiveRosterView(
+                participants = mapOf(room to listOf("alice@x.test/web", "bob@y.test/phone")),
+                leavingRooms = emptyMap(),
+            ),
+        )
+        assertEquals(
+            listOf(
+                MucRosterEntry("alice", handRaised = false, muted = false, jid = "alice@x.test"),
+                MucRosterEntry("alice", handRaised = true, muted = false, jid = "bob@y.test"),
+            ),
+            both,
+        )
+
+        // Bob not in the call: his owner entry never relabels Alice's face.
+        val aliceOnly = mucRosterOf(
+            room,
+            presence,
+            LiveRosterView(participants = mapOf(room to listOf("alice@x.test/web")), leavingRooms = emptyMap()),
+        )
+        assertEquals(
+            listOf(MucRosterEntry("alice", handRaised = false, muted = false, jid = "alice@x.test")),
+            aliceOnly,
+        )
+    }
+
+    @Test
+    fun aTwoDeviceParticipantKeepsBadgesWhicheverIdentityComesFirst() {
+        val presence = MucPresenceRosterView(
+            participants = emptyMap(),
+            owners = mapOf(room to mapOf("alice" to "alice@x.test/phone", "me" to "me@waddle.test/android")),
+            raisedHands = mapOf(room to setOf("alice")),
+            mutedNicks = mapOf(room to setOf("me")),
+        )
+        // Unowned second device first (LiveKit remote order), own identity
+        // on two devices with the unowned one first as well.
+        val identities = listOf(
+            "alice@x.test/web",
+            "alice@x.test/phone",
+            "me@waddle.test/tablet",
+            "me@waddle.test/android",
+        )
+        for (order in listOf(identities, identities.reversed())) {
+            val roster = mucRosterOf(
+                room,
+                presence,
+                LiveRosterView(participants = mapOf(room to order), leavingRooms = emptyMap()),
+            ).sortedBy { it.nick }
+
+            assertEquals(
+                listOf(
+                    MucRosterEntry("alice", handRaised = true, muted = false, jid = "alice@x.test"),
+                    MucRosterEntry("me", handRaised = false, muted = true, jid = "me@waddle.test"),
+                ),
+                roster,
+            )
+        }
+    }
+
+    @Test
+    fun aSecondDeviceTakesTheOwnerNickEvenWhenItDiffersFromTheLocalpart() {
+        val presence = MucPresenceRosterView(
+            participants = emptyMap(),
+            owners = mapOf(room to mapOf("ally" to "alice@x.test/phone")),
+            raisedHands = mapOf(room to setOf("ally")),
+            mutedNicks = emptyMap(),
+        )
+        val identities = listOf("alice@x.test/web", "alice@x.test/phone", "carol@x.test/web")
+        for (order in listOf(identities, identities.reversed())) {
+            val roster = mucRosterOf(
+                room,
+                presence,
+                LiveRosterView(participants = mapOf(room to order), leavingRooms = emptyMap()),
+            ).sortedBy { it.nick }
+
+            assertEquals(
+                listOf(
+                    MucRosterEntry("ally", handRaised = true, muted = false, jid = "alice@x.test"),
+                    // No owner match for this account: localpart fallback.
+                    MucRosterEntry("carol", handRaised = false, muted = false, jid = "carol@x.test"),
+                ),
+                roster,
+            )
+        }
+    }
+
+    @Test
     fun storeSnapshotsDedupeAndNormalizeIdentities() {
         val store = MucCallLiveParticipantsStore()
         store.setParticipants(room, listOf("Alice@Waddle.Test/web", "alice@waddle.test/web", ""))

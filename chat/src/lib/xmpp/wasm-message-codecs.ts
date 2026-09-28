@@ -3,7 +3,7 @@ import type { MarkupSpan, MessageReference } from "@/lib/rich-message";
 import type { RichInlineStyle } from "@/lib/rich-message/types";
 
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
-import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
+import { bareJidKey, barePeerJid, jidDomain, jidLocalpart, resourceOf } from "./jid";
 import type { InboxEntry } from "./inbox-types";
 import { isTrustedCachedPreviewImageUrl } from "./link-preview";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
@@ -460,7 +460,8 @@ export function roomMessageFromArchived(
   const decodeOptions = typeof sourceOrOptions === "string" ? maybeOptions : sourceOrOptions;
   const fromJid = message.from ?? "";
   const roomJid = barePeerJid(fromJid || message.to || "");
-  const nick = fromJid.split("/")[1] ?? "unknown";
+  // XEP-0045: the nick is the whole resource (it may contain '/').
+  const nick = fromJid.includes("/") ? resourceOf(fromJid) : "unknown";
   const { createdAt, createdAtSource } = deriveCreatedAt(message.timestamp, source);
   const stampedByRoom = roomAssignedStanzaId(message, roomJid);
   const moderationTargetId = message.moderation_target_id && fromJid === roomJid

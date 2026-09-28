@@ -30,6 +30,8 @@ internal class XmppEventRouter(
     private val resume: ResumePersistence,
     private val readState: ReadStateCoordinator,
     private val callStore: CallStore,
+    /** XEP-0084 metadata notifications, for the peer-avatar policy. */
+    private val onAvatarChanged: (jid: String, avatarId: String?) -> Unit = { _, _ -> },
     private val persistDmSeen: (peer: String, timestamp: String) -> Unit,
 ) {
     private val _events = MutableSharedFlow<XmppEvent>(
@@ -62,6 +64,7 @@ internal class XmppEventRouter(
             is XmppEvent.InboxPush -> routeInboxEntry(event.entry)
             is XmppEvent.Presence -> {
                 stores.presenceStore.onPresence(event.presence)
+                stores.occupantJidStore.onPresence(event.presence)
                 // XEP-0272 Muji bookkeeping rides the same serialized
                 // presence stream (web `set_on_presence` wrapper parity).
                 callStore.onPresence(event.presence)
@@ -71,6 +74,7 @@ internal class XmppEventRouter(
             // single-consumer dispatch path, so accept/reject can never
             // interleave with tie-break sends (web single-thread parity).
             is XmppEvent.Call -> callStore.onCallEvent(event.event)
+            is XmppEvent.AvatarChanged -> onAvatarChanged(event.jid, event.avatarId)
             else -> Unit
         }
         _events.tryEmit(event)
@@ -101,19 +105,39 @@ internal class XmppEventRouter(
         // or create DM-list entries.
         val hasContent = message.body != null
         if (!isMutation && hasContent) persistDmRecency(message)
-        val newlyInserted = stores.timelineStore.onLiveMessage(message)
+        val authorJid = liveAuthorJidOf(message)
+        val newlyInserted = stores.timelineStore.onLiveMessage(message, authorJid)
         if (!isMutation && hasContent) {
             stores.dmStore.onChatMessage(activeSession.ownBareJid, message)
         }
+        val isGroupchat = message.isMuc || message.messageType == "groupchat"
+        val configuredNick = activeSession.ownBareJid?.substringBefore('@')
         val key = conversationKeyOf(
             ownBareJid = activeSession.ownBareJid,
-            ownNick = activeSession.ownBareJid?.substringBefore('@'),
+            ownNick = if (isGroupchat) {
+                liveOwnNickOf(message.from, configuredNick, stores.occupantJidStore::ownNickIn)
+            } else {
+                configuredNick
+            },
             from = message.from,
             to = message.to,
-            isGroupchat = message.isMuc || message.messageType == "groupchat",
-        ) ?: return
+            isGroupchat = isGroupchat,
+        )?.withLiveAuthor(isGroupchat, authorJid, activeSession.ownBareJid) ?: return
         trackChatState(key, message)
         if (message.body != null) recordActivity(key, message, newlyInserted)
+    }
+
+    /**
+     * The room author's real JID for an UNDELAYED live groupchat message,
+     * from the occupant presence current at arrival. Delayed ones (join
+     * history, replays) predate that presence — a reused nick would
+     * mislabel them — so they stay unattributed unless the archive says.
+     */
+    private fun liveAuthorJidOf(message: WaddleMessage): String? {
+        if (!(message.isMuc || message.messageType == "groupchat") || message.timestamp != null) return null
+        val from = message.from ?: return null
+        val nick = resourcepart(from) ?: return null
+        return stores.occupantJidStore.jidFor(bareJid(from), nick)
     }
 
     /** Unread + resume-cursor bookkeeping for a content-bearing message. */

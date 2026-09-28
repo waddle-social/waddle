@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use jid::BareJid;
 use tracing::{debug, info};
-use waddle_xmpp::pubsub::{AccessModel, NodeConfig, PubSubItem};
+use waddle_xmpp::pubsub::{NodeConfig, PubSubItem};
 use waddle_xmpp::xep::xep0084::{
     build_avatar_data, build_avatar_metadata, AvatarInfo, NODE_AVATAR_DATA, NODE_AVATAR_METADATA,
     NS_AVATAR_METADATA,
@@ -51,20 +51,6 @@ use crate::vcard::VCardStore;
 /// removal shape is `current`.)
 const VCARD4_ITEM_ID: &str = "current";
 const AVATAR_METADATA_REMOVE_ITEM_ID: &str = "current";
-
-/// `NodeConfig` for the OIDC-managed avatar/vCard4 PEP nodes.
-///
-/// Built off `pep_default()` so we inherit the canonical PEP shape
-/// and override only:
-/// - `access_model = Open` — any peer can resolve a user's avatar.
-/// - `max_items = 1` — a new publish evicts the previous item.
-fn oidc_pep_node_config() -> NodeConfig {
-    NodeConfig {
-        access_model: AccessModel::Open,
-        max_items: 1,
-        ..NodeConfig::pep_default()
-    }
-}
 
 /// Dependencies passed to the publish helper.
 pub struct ProfilePublishDeps {
@@ -369,7 +355,7 @@ async fn publish_avatar_data(
 ) -> Result<(), ProfileSyncError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
-    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_DATA).await?;
+    ensure_canonical_pep_node(state, jid, NODE_AVATAR_DATA).await?;
 
     let payload = build_avatar_data(&BASE64.encode(&bytes.bytes));
     let item = PubSubItem {
@@ -386,7 +372,7 @@ async fn publish_avatar_metadata(
     item_id: &str,
     bytes: &AvatarBytes,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_METADATA).await?;
+    ensure_canonical_pep_node(state, jid, NODE_AVATAR_METADATA).await?;
 
     let info = AvatarInfo {
         id: item_id.to_string(),
@@ -412,7 +398,7 @@ async fn publish_empty_avatar_metadata(
     state: &Arc<WebSocketState>,
     jid: &BareJid,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(state, jid, NODE_AVATAR_METADATA).await?;
+    ensure_canonical_pep_node(state, jid, NODE_AVATAR_METADATA).await?;
 
     let payload = Element::builder("metadata", NS_AVATAR_METADATA).build();
     let item = PubSubItem {
@@ -470,7 +456,7 @@ async fn publish_vcard4(
     jid: &BareJid,
     vcard: &Element,
 ) -> Result<(), ProfileSyncError> {
-    ensure_node_with_oidc_config(state, jid, PEP_NODE_VCARD4).await?;
+    ensure_canonical_pep_node(state, jid, PEP_NODE_VCARD4).await?;
 
     let item = PubSubItem {
         id: Some(VCARD4_ITEM_ID.to_string()),
@@ -518,20 +504,25 @@ fn vcard4_photo_pep_uri(jid: &BareJid, sha1_hex: &str) -> String {
     format!("xmpp:{jid}?pubsub;node={NODE_AVATAR_DATA};item={sha1_hex}")
 }
 
-/// Pre-create the PEP node with the OIDC-managed config (Open
-/// access, `max_items=1`) BEFORE the first publish. Closing the
+/// Pre-create the PEP node with its canonical `pep_for_node` config
+/// (Open access, `max_items=1`) BEFORE the first publish. Closing the
 /// auto-create-then-flip race where a peer fetching between the two
 /// would have been denied by `pep_default()`'s Presence access.
-async fn ensure_node_with_oidc_config(
+async fn ensure_canonical_pep_node(
     state: &Arc<WebSocketState>,
     jid: &BareJid,
     node: &str,
 ) -> Result<(), ProfileSyncError> {
     let storage = &state.deps.protocol.pubsub_storage;
-    let _ = storage.get_or_create_node(jid, node).await?;
-    storage
-        .update_node_config(jid, node, &oidc_pep_node_config())
-        .await?;
+    let (existing, _) = storage.get_or_create_node(jid, node).await?;
+    if node == NODE_AVATAR_DATA || node == NODE_AVATAR_METADATA {
+        storage.repair_legacy_avatar_node(jid, node).await?;
+    }
+    if NodeConfig::needs_reconcile(node, &existing.config) {
+        storage
+            .update_node_config(jid, node, &NodeConfig::pep_for_node(node))
+            .await?;
+    }
     Ok(())
 }
 
@@ -574,16 +565,19 @@ async fn publish_and_fan_out(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::pubsub::AccessModel;
 
     #[test]
-    fn oidc_pep_node_config_is_public_with_one_item_cap() {
-        let cfg = oidc_pep_node_config();
-        assert_eq!(cfg.max_items, 1);
-        assert_eq!(
-            cfg.access_model,
-            AccessModel::Open,
-            "OIDC-managed PEP nodes are semi-public so non-roster peers can resolve avatars"
-        );
+    fn oidc_managed_nodes_are_public_with_one_item_cap() {
+        for node in [NODE_AVATAR_DATA, NODE_AVATAR_METADATA, PEP_NODE_VCARD4] {
+            let cfg = NodeConfig::pep_for_node(node);
+            assert_eq!(cfg.max_items, 1, "{node}");
+            assert_eq!(
+                cfg.access_model,
+                AccessModel::Open,
+                "{node}: OIDC-managed PEP nodes are semi-public so non-roster peers can resolve avatars"
+            );
+        }
     }
 
     #[test]

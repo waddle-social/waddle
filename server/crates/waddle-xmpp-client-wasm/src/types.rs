@@ -553,7 +553,21 @@ pub struct WaddleAvatar {
     pub id: String,
     pub mime_type: String,
     pub data: Vec<u8>,
-    pub url: Option<String>,
+}
+
+/// Outcome of a §4.2-aware avatar fetch: `id` is the advertised item id;
+/// `avatar` is absent when that id was already known to the caller.
+#[derive(Debug, Serialize)]
+pub struct WaddleAvatarFetch {
+    pub id: String,
+    pub avatar: Option<WaddleAvatar>,
+}
+
+/// XEP-0084 metadata transition delivered to the browser callback surface.
+#[derive(Debug, Serialize)]
+pub struct WaddleAvatarChanged {
+    pub jid: String,
+    pub avatar_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

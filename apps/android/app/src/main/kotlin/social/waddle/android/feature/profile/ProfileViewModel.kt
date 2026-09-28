@@ -17,7 +17,7 @@ import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
-import social.waddle.android.jid.bareJidOf
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleTune
@@ -54,12 +54,17 @@ class ProfileViewModel(
         .map { session -> session?.avatarUrl }
         .stateIn(viewModelScope, SharingStarted.Eagerly, currentSession.value?.avatarUrl)
 
+    /** The account's display name for the initials fallback avatar. */
+    val selfName: StateFlow<String> = currentSession
+        .map { session -> session?.username ?: session?.jid?.substringBefore('@').orEmpty() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, currentSession.value?.username.orEmpty())
+
     /** The current account's XMPP avatar (preferred over [restAvatarUrl]). */
     val selfAvatar: StateFlow<WaddleAvatar?> = combine(
         currentSession,
         sessionManager.profileStore.avatars,
     ) { session, avatars ->
-        session?.jid?.let(::bareJidOf)?.let(avatars::get)
+        session?.jid?.let(::normalizedBareJid)?.let(avatars::get)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private var loadedOnce = false

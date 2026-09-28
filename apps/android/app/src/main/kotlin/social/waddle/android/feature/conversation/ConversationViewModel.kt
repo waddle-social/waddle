@@ -65,6 +65,11 @@ open class ConversationViewModel(
      * XEP-0045 authority badges on message rows. Empty for DMs.
      */
     occupantPresence: Flow<Map<String, WaddlePresence>> = flowOf(emptyMap()),
+    /**
+     * Current room nick → real bare JID (occupant presence), for typing
+     * avatars. Timeline rows carry their own stamped author JID. Empty for DMs.
+     */
+    occupantJids: Flow<Map<String, String>> = flowOf(emptyMap()),
     /** XEP-0492 effective mode (store fallback resolved to §3 default). */
     notifyMode: Flow<WaddleNotifyMode> = flowOf(WaddleNotifyMode.ALWAYS),
     /**
@@ -118,6 +123,17 @@ open class ConversationViewModel(
     /** Occupant presence by nick (hats + authority badges on rows). */
     val authorPresence: StateFlow<Map<String, WaddlePresence>> =
         occupantPresence.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /** Current room nick → real bare JID; names typists' avatars. */
+    val authorJids: StateFlow<Map<String, String>> =
+        occupantJids.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /**
+     * Real bare JID behind a typing-indicator name: the room nick's
+     * mapping, or the DM peer itself. `null` = unknown (initials).
+     */
+    fun typingAuthorJid(name: String): String? =
+        if (isGroupchat) authorJids.value[name] else conversationJid
 
     val uiState: StateFlow<ConversationUiState> =
         combine(

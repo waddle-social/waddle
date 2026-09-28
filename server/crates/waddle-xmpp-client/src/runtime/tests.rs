@@ -302,6 +302,41 @@ fn app_stanza_emits_standalone_pubsub_retract_and_summary_events() {
 }
 
 #[test]
+fn app_stanza_emits_typed_avatar_change_without_altering_pubsub_message() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element = "<message xmlns='jabber:client' type='headline' \
+            from='alice@example.com' to='bob@example.com'>\
+        <event xmlns='http://jabber.org/protocol/pubsub#event'>\
+          <items node='urn:xmpp:avatar:metadata'>\
+            <item id='aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'>\
+              <metadata xmlns='urn:xmpp:avatar:metadata'>\
+                <info id='aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d' type='image/png'/>\
+              </metadata>\
+            </item>\
+          </items>\
+        </event>\
+    </message>"
+        .parse()
+        .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(matches!(
+        &events[0],
+        ClientEvent::Messaging(crate::messaging::MessagingEvent::Message(message))
+            if message.pubsub_events.len() == 1
+    ));
+    assert!(matches!(
+        &events[1],
+        ClientEvent::AvatarChanged(change)
+            if change.jid.to_string() == "alice@example.com"
+                && change.avatar_id.as_ref().map(|id| id.as_str())
+                    == Some("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d")
+    ));
+    assert_eq!(events.len(), 2);
+}
+
+#[test]
 fn app_stanza_answers_client_caps_disco_info() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.snapshot.phase = SessionPhase::Established;

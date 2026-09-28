@@ -168,7 +168,7 @@ pub(super) async fn handle_pubsub_iq(
                 }
 
                 // Pre-publish reconcile for well-known PEP nodes whose
-                // canonical XEP-defined config is stricter than the
+                // canonical XEP-defined config differs from the
                 // generic `pep_default()`. Only the owner's own PEP
                 // service is affected — peer fetches go through the
                 // Items arm, not Publish.
@@ -310,6 +310,29 @@ pub(super) async fn handle_pubsub_iq(
                 }
 
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
+                // A legacy Presence avatar node (e.g. created by an old pod
+                // after the last startup sweep) is repaired on a peer's
+                // read, so the avatar never stays hidden until the owner
+                // republishes. Conditional + marker-aware, so owner choices
+                // are kept; only Presence avatar nodes pay the write.
+                if is_pep
+                    && (node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+                        || node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA)
+                {
+                    let storage = &state.deps.protocol.pubsub_storage;
+                    let is_presence = matches!(
+                        storage.get_node(&target_jid, &node).await,
+                        Ok(Some(existing))
+                            if existing.config.access_model == waddle_xmpp::pubsub::AccessModel::Presence
+                    );
+                    if is_presence {
+                        if let Err(error) =
+                            storage.repair_legacy_avatar_node(&target_jid, &node).await
+                        {
+                            warn!(node = %node, error = %error, "Failed to repair legacy avatar node on read");
+                        }
+                    }
+                }
                 match crate::pubsub_authz::can_subscribe(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -564,16 +587,29 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// non-roster peers. We reconcile the config in-place so the next
 /// publish lands on a spec-conformant node.
 ///
+/// Avatar nodes are repaired only from the legacy Presence default and
+/// never after the owner configured them (see `NodeConfig::needs_reconcile`).
+///
 /// Scope is deliberately narrow: only nodes whose well-known defaults
-/// are stricter than ad-hoc PEP defaults (currently `urn:xmpp:vcard4`)
-/// — we don't bulk-rewrite arbitrary user node configs here.
+/// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
+/// nodes, DND) — we don't bulk-rewrite arbitrary user node configs here.
 async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
     if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
         && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
     {
         return;
     }
     let storage = &state.deps.protocol.pubsub_storage;
+    if node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+        || node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA
+    {
+        if let Err(error) = storage.repair_legacy_avatar_node(owner, node).await {
+            warn!(node, error = %error, "Failed to repair legacy avatar node on publish");
+        }
+        return;
+    }
     let existing = match storage.get_node(owner, node).await {
         Ok(Some(node)) => node,
         Ok(None) => return,
@@ -587,10 +623,10 @@ async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &Ba
             return;
         }
     };
-    let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
-    if existing.config == canonical {
+    if !waddle_xmpp_core::pubsub::NodeConfig::needs_reconcile(node, &existing.config) {
         return;
     }
+    let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
     if let Err(error) = storage.update_node_config(owner, node, &canonical).await {
         warn!(
             node,

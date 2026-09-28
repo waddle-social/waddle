@@ -166,7 +166,10 @@ export class PresenceManager {
     const from = presence.from ?? "";
     if (this.deps.handleMucPresenceError(presence)) return;
     if (isMucPresence(presence)) {
-      const [room, nick = ""] = from.split("/");
+      // XEP-0045: a nick may itself contain '/'; the resource is everything
+      // after the FIRST slash.
+      const room = barePeerJid(from);
+      const nick = resourceOf(from);
       if (!room) return;
       // XEP-0045 §7.2.2: our own available self-presence (status 110,
       // or, as a fallback, our disclosed real JID) completes the join.
@@ -175,6 +178,9 @@ export class PresenceManager {
       // matches the waiter.
       if (this.isOwnAvailableMucSelfPresence(presence)) {
         this.deps.onOwnSelfPresence(room);
+        // XEP-0045 §7.2.9 (210): the room may have assigned a nick other
+        // than the one requested; the self-presence's nick is the real one.
+        if (nick) this.deps.events.emitSafe("ownOccupantNick", room, nick);
       }
       if (!nick && presence.vcard_avatar) this.deps.events.emit("roomAvatar", room, presence.vcard_avatar);
       if (!nick) return;
@@ -191,6 +197,7 @@ export class PresenceManager {
         const isNickChange = presence.muc_status_codes?.includes(303) ?? false;
         if (this.isOwnMucSelfPresence(presence) && !isNickChange) {
           this.deps.onOwnUnavailable(room);
+          this.deps.events.emitSafe("ownOccupantNick", room, null);
         }
         delete roomHats[nick];
         delete roomAuthority[nick];
@@ -220,7 +227,17 @@ export class PresenceManager {
       if (presence.muc_jid) {
         const bare = barePeerJid(presence.muc_jid);
         roomMemberJids[nick] = bare;
+        this.deps.events.emitSafe("occupantRealJid", room, nick, bare);
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, bare);
+      } else {
+        // An occupant whose real JID is not disclosed to us holds this nick
+        // now (e.g. someone else took it in a semi-anonymous room): the
+        // previous holder's JID must stop naming the nick's current holder.
+        // The shell's nick map keeps a JID across the holder's departure,
+        // so it is told even when this manager already dropped it.
+        delete roomMemberJids[nick];
+        this.deps.events.emitSafe("occupantRealJid", room, nick, null);
+        if (isFocusedRoom) this.deps.events.emit("memberJid", nick, null);
       }
       if (isFocusedRoom) {
         this.deps.events.emit("hats", { ...roomHats });

@@ -376,12 +376,17 @@ export interface WasmRosterContact {
   groups: string[];
 }
 
-export interface WasmAvatar {
+interface WasmAvatar {
   jid: string;
   id: string;
   mime_type: string;
   data?: Uint8Array;
-  url?: string;
+}
+
+/** XEP-0084 §4.2-aware fetch: `avatar` is absent when `id` was already known. */
+export interface WasmAvatarFetch {
+  id: string;
+  avatar?: WasmAvatar | null;
 }
 
 export interface WasmUploadSlot {
@@ -495,6 +500,12 @@ export interface WasmMdsDisplayedEntry {
   chat_id: string;
   stanza_id: string;
   stanza_id_by: string;
+}
+
+/** XEP-0084 peer avatar metadata transition surfaced by the wasm client. */
+export interface WasmAvatarChanged {
+  jid: string;
+  avatar_id?: string;
 }
 
 export interface WasmPubsubEvent {

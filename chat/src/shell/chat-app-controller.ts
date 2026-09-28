@@ -185,14 +185,10 @@ export function useChatAppController() {
   );
 
   const memberDirectory = useMemberDirectory({
-    xmppClient,
-    session,
     waddles,
     messaging,
-    dmMessaging,
     memberJidByNick,
     mentionJidsByNickForSend,
-    selfDomain,
   });
 
   const { computedChannelUnreadMap, totalTabUnreadCount } = useChatReadActivity({
@@ -502,8 +498,7 @@ export function useChatAppController() {
     notifications,
     appUpdate,
     version,
-    avatarUrlByAuthor: memberDirectory.avatarUrlByAuthor,
-    membersWithAvatars: memberDirectory.membersWithAvatars,
+    displayedMembers: memberDirectory.displayedMembers,
     inferredMemberJids: memberDirectory.inferredMemberJids,
     authorHatsByNick: memberDirectory.authorHatsByNick,
     authorAuthorityByNick: memberDirectory.authorAuthorityByNick,

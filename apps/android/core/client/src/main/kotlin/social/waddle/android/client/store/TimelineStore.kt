@@ -5,7 +5,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import social.waddle.android.client.bareJid
 import social.waddle.android.client.conversationKeyOf
+import social.waddle.android.client.liveOwnNickOf
+import social.waddle.android.client.normalizedBareJid
+import social.waddle.android.client.resourcepart
 import social.waddle.android.client.stripReplyFallback
+import social.waddle.android.client.withLiveAuthor
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSafetyScores
@@ -54,6 +58,8 @@ import java.time.OffsetDateTime
 class TimelineStore(
     private val maxItemsPerConversation: Int = MAX_ITEMS_PER_CONVERSATION,
     private val maxPendingMutationsPerConversation: Int = MAX_PENDING_MUTATIONS,
+    /** Our actual occupant nick per room (self-presence); see [liveOwnNickOf]. */
+    private val actualOwnNickIn: (roomJid: String) -> String? = { null },
 ) {
     private val lock = Any()
     private val flows = HashMap<String, MutableStateFlow<List<TimelineItem>>>()
@@ -97,15 +103,22 @@ class TimelineStore(
      * all return false so callers (the unread counter) don't count what
      * the timeline itself never renders as new content.
      */
-    fun onLiveMessage(message: WaddleMessage): Boolean {
+    fun onLiveMessage(message: WaddleMessage, authorJid: String? = null): Boolean {
         val isGroupchat = message.isMuc || message.messageType == "groupchat"
+        // The avatar identity of this row, fixed at ingest: the disclosed
+        // occupant JID, else — for OUR undelayed reflection only, proven
+        // by the room's own self-presence — the account. The configured
+        // nick alone never earns our face (see [verifiedOwnReflection]).
+        val stamp = authorJid ?: ownBareJid?.let(::normalizedBareJid)?.takeIf {
+            isGroupchat && verifiedOwnReflection(message)
+        }
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
-            ownNick = ownNick,
+            ownNick = if (isGroupchat) liveOwnNickOf(message.from, ownNick, actualOwnNickIn) else ownNick,
             from = message.from,
             to = message.to,
             isGroupchat = isGroupchat,
-        ) ?: return false
+        )?.withLiveAuthor(isGroupchat, authorJid, ownBareJid) ?: return false
         mutationOf(message, isGroupchat = isGroupchat, mine = key.isMine)?.let { mutation ->
             applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
             return false
@@ -125,10 +138,24 @@ class TimelineStore(
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Live(message),
+                authorJid = stamp,
             ),
             isGroupchat = isGroupchat,
             initialTombstone = null,
         )
+    }
+
+    /**
+     * An undelayed room message from the nick the room's self-presence
+     * (XEP-0045 110/210) says is ours right now. Without that presence
+     * (e.g. right after a fresh session) the configured nick proves
+     * nothing: someone else may hold it.
+     */
+    private fun verifiedOwnReflection(message: WaddleMessage): Boolean {
+        if (message.timestamp != null) return false
+        val from = message.from ?: return false
+        val nick = resourcepart(from) ?: return false
+        return actualOwnNickIn(bareJid(from)) == nick
     }
 
     fun onArchivedMessage(message: WaddleArchivedMessage) {
@@ -140,7 +167,16 @@ class TimelineStore(
             to = message.to,
             isGroupchat = isGroupchat,
         ) ?: return
-        mutationOf(message, isGroupchat = isGroupchat, mine = key.isMine)?.let { mutation ->
+        val authorJid = message.authorRealJid?.let(::normalizedBareJid)?.takeIf { '@' in it }
+        // A room row the archive attributes is ours only if that real JID
+        // is — our nick may have been someone else's when it was written.
+        // Nick equality decides only rows without one.
+        val isMine = if (isGroupchat && authorJid != null) {
+            authorJid == ownBareJid?.let(::normalizedBareJid)
+        } else {
+            key.isMine
+        }
+        mutationOf(message, isGroupchat = isGroupchat, mine = isMine)?.let { mutation ->
             applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
             return
         }
@@ -155,8 +191,9 @@ class TimelineStore(
                 from = message.from,
                 body = stripReplyFallback(body, message.replyFallbackStart, message.replyFallbackEnd),
                 timestamp = message.timestamp,
-                isMine = key.isMine,
+                isMine = isMine,
                 source = TimelineSource.Archived(message),
+                authorJid = authorJid,
             ),
             isGroupchat = isGroupchat,
             // The archive returns retracted originals as tombstones.
@@ -222,32 +259,8 @@ class TimelineStore(
             }
             if (existingIndex >= 0) {
                 val existing = list[existingIndex]
-                // A live record supersedes its archived twin (richer
-                // payload); otherwise the first record wins and the
-                // replay is dropped. Applied mutations live on the entry
-                // and survive the swap.
-                if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
-                    val merged = item.copy(
-                        timestamp = item.timestamp ?: existing.item.timestamp,
-                        rejected = existing.item.rejected,
-                    )
-                    // The sort key must follow the adopted timestamp or
-                    // the row keeps its stale placement forever.
-                    list[existingIndex] = existing.copy(
-                        item = merged,
-                        sortInstant = merged.timestamp?.let(::parseInstant) ?: existing.sortInstant,
-                    )
-                    list.sortWith(ENTRY_ORDER)
-                    publish(conversation, list)
-                } else if (existing.item.timestamp == null && item.timestamp != null) {
-                    // The archived copy of a timestampless local echo
-                    // brings the server timestamp; adopt it in place —
-                    // including the sort key, else the echo stays pinned
-                    // at the newest edge above later-arriving messages.
-                    list[existingIndex] = existing.copy(
-                        item = existing.item.copy(timestamp = item.timestamp),
-                        sortInstant = parseInstant(item.timestamp),
-                    )
+                mergedTwin(existing, item)?.let { merged ->
+                    list[existingIndex] = merged
                     list.sortWith(ENTRY_ORDER)
                     publish(conversation, list)
                 }
@@ -271,6 +284,62 @@ class TimelineStore(
             publish(conversation, list)
         }
         return true
+    }
+
+    /**
+     * The same message seen twice (live + archive, or a replay): the
+     * updated entry, or `null` when [existing] already has everything.
+     * A live record supersedes its archived twin (richer payload);
+     * otherwise the first record wins. Applied mutations live on the
+     * entry and survive either way.
+     */
+    private fun mergedTwin(existing: Entry, item: TimelineItem): Entry? {
+        if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
+            val merged = item.copy(
+                timestamp = item.timestamp ?: existing.item.timestamp,
+                rejected = existing.item.rejected,
+                // A stamp is never replaced by a later copy's, and a
+                // missing one is filled only from a room-vouched archive
+                // twin — never from this live copy.
+                authorJid = existing.item.authorJid ?: vouchedStamp(item, existing.item),
+            )
+            // The sort key must follow the adopted timestamp or the row
+            // keeps its stale placement forever.
+            return existing.copy(
+                item = merged,
+                sortInstant = merged.timestamp?.let(::parseInstant) ?: existing.sortInstant,
+            )
+        }
+        // The archived copy of a timestampless local echo brings the
+        // server timestamp; adopt it in place — including the sort key,
+        // else the echo stays pinned at the newest edge above
+        // later-arriving messages. It also attributes a row that arrived
+        // unstamped (delayed, or no occupant presence yet) — but only
+        // from its room-vouched archive twin.
+        val adoptedTimestamp = item.timestamp?.takeIf { existing.item.timestamp == null }
+        val adoptedAuthor = if (existing.item.authorJid == null) vouchedStamp(item, existing.item) else null
+        if (adoptedTimestamp == null && adoptedAuthor == null) return null
+        return existing.copy(
+            item = existing.item.copy(
+                timestamp = adoptedTimestamp ?: existing.item.timestamp,
+                authorJid = adoptedAuthor ?: existing.item.authorJid,
+            ),
+            sortInstant = adoptedTimestamp?.let(::parseInstant) ?: existing.sortInstant,
+        )
+    }
+
+    /**
+     * The author stamp [existing] may take from its twin [incoming]: only
+     * an ARCHIVE copy carrying the row's own room-assigned XEP-0359
+     * stanza id. Rows also merge on the sender-controlled origin id,
+     * which a later holder of the nick could reuse to lend the row their
+     * identity; a live copy's stamp is just whoever holds the nick now.
+     */
+    private fun vouchedStamp(incoming: TimelineItem, existing: TimelineItem): String? {
+        if (incoming.source !is TimelineSource.Archived) return null
+        val room = existing.conversationJid
+        val roomId = existing.assignedStanzaId(room)?.id ?: return null
+        return incoming.authorJid.takeIf { incoming.assignedStanzaId(room)?.id == roomId }
     }
 
     private fun applyMutation(

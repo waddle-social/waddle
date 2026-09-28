@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import MessageBody from "@/components/chat/MessageBody.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import type { MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
@@ -23,7 +23,8 @@ const props = defineProps<{
   /** Whether the Chat tab is the visible dock tab. Becoming visible re-pins to
    *  the latest message so the unread badge → newest-message flow lands right. */
   visible?: boolean;
-  avatarUrlByAuthor: Record<string, string | null>;
+  /** Real bare JID behind a row's author, for the avatar; `null` = initials. */
+  avatarJidFor: (message: TimelineMessage) => string | null;
   isSending?: boolean;
   disabled?: boolean;
   mentionCandidates?: MentionCandidate[];
@@ -103,9 +104,9 @@ onMounted(() => void nextTick(scrollToBottom));
         class="call-chat__row"
         :data-message-id="m.id"
       >
-        <AppAvatar
+        <UserAvatar
           :name="m.author"
-          :src="avatarUrlByAuthor[m.author] ?? null"
+          :jid="avatarJidFor(m)"
           size="xs"
         />
         <div class="call-chat__bubble">

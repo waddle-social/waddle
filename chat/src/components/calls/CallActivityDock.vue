@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { ArrowRight, Hash, MessageCircle, Phone, PhoneIncoming, PhoneOff, PhoneOutgoing, Video } from "lucide-vue-next";
 import {
+  $mucCallParticipantOwners,
   $mucCallParticipants,
   mucCallParticipantCounts,
   normalizeMucCallRoomJid,
@@ -24,6 +25,8 @@ import type { CallMedia } from "@/lib/calls/types";
 import type { ChannelSummary, GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import { callParticipantAvatarJid } from "@/lib/avatars/author-jid";
+import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
 
 defineOptions({ inheritAttrs: false });
 
@@ -243,6 +246,20 @@ function visibleParticipantLabels(entry: CallActivityDockEntry): string[] {
   return entry.participantLabels.slice(0, 3);
 }
 
+const mucCallParticipantOwnersStore = useStore($mucCallParticipantOwners);
+
+function participantAvatarJid(entry: CallActivityDockEntry, label: string): string | null {
+  if (entry.kind !== "channel") return null;
+  const owners = mucCallParticipantOwnersStore.value[normalizeMucCallRoomJid(entry.roomJid)] ?? [];
+  return callParticipantAvatarJid(entry.roomJid, label, owners);
+}
+
+const participantAvatarUrl = useAvatarUrls(() =>
+  visibleEntries.value.flatMap((entry) =>
+    visibleParticipantLabels(entry).map((label) => participantAvatarJid(entry, label)),
+  ),
+);
+
 function participantInitial(label: string): string {
   return label.trim().charAt(0).toUpperCase() || "?";
 }
@@ -339,7 +356,13 @@ function selectEntry(entry: CallActivityDockEntry): void {
                     :key="`${entry.key}:${label}`"
                     class="call-activity-dock__participant"
                   >
-                    {{ participantInitial(label) }}
+                    <img
+                      v-if="participantAvatarUrl(participantAvatarJid(entry, label))"
+                      :src="participantAvatarUrl(participantAvatarJid(entry, label)) ?? undefined"
+                      alt=""
+                      class="call-activity-dock__participant-image"
+                    />
+                    <template v-else>{{ participantInitial(label) }}</template>
                   </span>
                 </span>
                 <span class="call-activity-dock__participant-copy">
@@ -545,6 +568,13 @@ function selectEntry(entry: CallActivityDockEntry): void {
   font-size: 0.5625rem;
   font-weight: 700;
   line-height: 1;
+}
+
+.call-activity-dock__participant-image {
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  object-fit: cover;
 }
 
 .call-activity-dock__participant + .call-activity-dock__participant {

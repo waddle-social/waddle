@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
 import { Loader2, Search, SearchX, X } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
 import type { MessageSearchResult, OccupantPresence } from "@/lib/xmpp-client";
 
@@ -10,7 +10,8 @@ const open = defineModel<boolean>("open", { default: false });
 defineProps<{
   results: MessageSearchResult[];
   isSearching: boolean;
-  avatarUrlByAuthor: Record<string, string | null>;
+  /** Real bare JID behind a result's author, for the avatar; `null` = initials. */
+  avatarJidFor: (result: MessageSearchResult) => string | null;
   roomPresence: Record<string, OccupantPresence>;
 }>();
 
@@ -114,9 +115,9 @@ function closeSearch() {
           type="button"
           @click="emit('openResult', result)"
         >
-          <AppAvatar
+          <UserAvatar
             :name="result.nick"
-            :src="avatarUrlByAuthor[result.nick] ?? null"
+            :jid="avatarJidFor(result)"
             :presence="roomPresence[result.nick] ?? 'offline'"
             size="xs"
           />

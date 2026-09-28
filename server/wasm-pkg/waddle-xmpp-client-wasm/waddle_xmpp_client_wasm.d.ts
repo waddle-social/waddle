@@ -280,7 +280,13 @@ export class WaddleClient {
      * carries the assigned node id directly.
      */
     register_push_device(options: any): Promise<any>;
-    request_avatar(jid: string): Promise<any>;
+    /**
+     * XEP-0084 fetch honoring §4.2: when the advertised item id is in
+     * `known_ids` the data IQ is skipped and `avatar` is absent, so the
+     * caller keeps its cached bytes. Resolves `null` when the peer has no
+     * in-band avatar.
+     */
+    request_avatar(jid: string, known_ids: string[]): Promise<any>;
     /**
      * Best-effort XEP-0198 acknowledgement request for synchronous browser
      * pagehide. The Rust runtime produces the typed `<r/>` control element.
@@ -450,6 +456,11 @@ export class WaddleClient {
      *   (the condition stays on the Rust side as a `tracing::warn`).
      */
     set_dm_notification_mode(options: any): Promise<any>;
+    /**
+     * XEP-0084 §4.1 metadata transition handler. Invoked once per peer PEP
+     * event with a `WaddleAvatarChanged`-shaped JS value.
+     */
+    set_on_avatar_changed(cb: Function): void;
     /**
      * Register a callback for inbound XMPP-native call events
      * (XEP-0353 JMI envelopes + XEP-0166 Jingle session control

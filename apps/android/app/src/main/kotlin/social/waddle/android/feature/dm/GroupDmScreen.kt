@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -26,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,6 +41,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.feature.channel.ChannelViewModel
 import social.waddle.android.feature.conversation.ConversationScreen
@@ -298,23 +300,27 @@ private fun GroupDmAddMemberSheet(
                 )
             }
             results.forEach { entry ->
-                ListItem(
-                    headlineContent = { Text(text = memberLabelOf(entry)) },
-                    supportingContent = { Text(text = entry.jid) },
-                    leadingContent = { Icon(Icons.Outlined.Person, contentDescription = null) },
-                    modifier = Modifier
-                        .testTag(GroupDmTestTags.ADD_MEMBER_RESULT_PREFIX + entry.jid)
-                        .clickable {
-                            scope.launch {
-                                val result = graph.sessionManager.inviteToGroupDm(
-                                    roomJid = roomJid,
-                                    inviteeJid = entry.jid,
-                                    fullHistory = fullHistory,
-                                )
-                                if (result == RoomAdminResult.Ok) onDismiss() else failed = true
-                            }
+                key(entry.jid) {
+                    ListItem(
+                        headlineContent = { Text(text = memberLabelOf(entry)) },
+                        supportingContent = { Text(text = entry.jid) },
+                        leadingContent = {
+                            PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
                         },
-                )
+                        modifier = Modifier
+                            .testTag(GroupDmTestTags.ADD_MEMBER_RESULT_PREFIX + entry.jid)
+                            .clickable {
+                                scope.launch {
+                                    val result = graph.sessionManager.inviteToGroupDm(
+                                        roomJid = roomJid,
+                                        inviteeJid = entry.jid,
+                                        fullHistory = fullHistory,
+                                    )
+                                    if (result == RoomAdminResult.Ok) onDismiss() else failed = true
+                                }
+                            },
+                    )
+                }
             }
         }
     }

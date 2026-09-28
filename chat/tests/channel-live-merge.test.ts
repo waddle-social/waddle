@@ -835,3 +835,81 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
   });
 });
+
+describe("live row author stamping (nick reuse)", () => {
+  test("a live row keeps the occupant behind its nick at ingest after the nick is reused", async () => {
+    const { occupantJidDirectory, authorAvatarJid } = await import("../src/lib/avatars/author-jid");
+    occupantJidDirectory.clear();
+    try {
+      const h = harness();
+      occupantJidDirectory.record("room@muc.example.com", "sam", "alice@example.com");
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "from-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from alice",
+        createdAt: new Date().toISOString(),
+      }));
+      occupantJidDirectory.record("room@muc.example.com", "sam", "bob@example.com");
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "from-bob", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from bob",
+        createdAt: new Date().toISOString(),
+      }));
+
+      const byId = new Map(h.messages.value.map((row) => [row.id, row]));
+      expect(authorAvatarJid(byId.get("from-alice")!)).toBe("alice@example.com");
+      expect(authorAvatarJid(byId.get("from-bob")!)).toBe("bob@example.com");
+    } finally {
+      occupantJidDirectory.clear();
+    }
+  });
+
+  test("a catch-up re-emission of a stamped row after a handover keeps the original author", async () => {
+    const { occupantJidDirectory, authorAvatarJid } = await import("../src/lib/avatars/author-jid");
+    occupantJidDirectory.clear();
+    try {
+      const h = harness();
+      occupantJidDirectory.record("room@muc.example.com", "sam", "alice@example.com");
+      const sentAt = new Date().toISOString();
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "from-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from alice",
+        createdAt: sentAt, createdAtSource: "fallback",
+      }));
+      await Bun.sleep(5);
+      occupantJidDirectory.record("room@muc.example.com", "sam", "bob@example.com");
+      // Reconnect catch-up re-emits the same stanza on the live path.
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "from-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from alice",
+        createdAt: sentAt, createdAtSource: "archive",
+      }));
+
+      expect(h.messages.value).toHaveLength(1);
+      expect(authorAvatarJid(h.messages.value[0]!)).toBe("alice@example.com");
+    } finally {
+      occupantJidDirectory.clear();
+    }
+  });
+
+  test("an unseen catch-up or replayed row is never stamped with the nick's current holder", async () => {
+    const { occupantJidDirectory, authorAvatarJid } = await import("../src/lib/avatars/author-jid");
+    occupantJidDirectory.clear();
+    try {
+      const h = harness();
+      // Alice held "sam" when these were sent; Bob holds it by the time they arrive.
+      occupantJidDirectory.record("room@muc.example.com", "sam", "bob@example.com");
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "missed-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "sent while we were away",
+        createdAt: new Date().toISOString(), createdAtSource: "archive",
+      }));
+      h.liveMerge.handleRoomMessage(makeLive({
+        id: "delayed-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "SM replay",
+        createdAt: new Date().toISOString(), createdAtSource: "delay",
+      }));
+
+      const byId = new Map(h.messages.value.map((row) => [row.id, row]));
+      expect(byId.get("missed-alice")?.authorAvatarJid).toBeUndefined();
+      expect(authorAvatarJid(byId.get("missed-alice")!)).toBeNull();
+      expect(authorAvatarJid(byId.get("delayed-alice")!)).toBeNull();
+    } finally {
+      occupantJidDirectory.clear();
+    }
+  });
+});
+

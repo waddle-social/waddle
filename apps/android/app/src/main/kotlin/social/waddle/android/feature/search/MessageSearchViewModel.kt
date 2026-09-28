@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.jid.resourcepartOf
 import social.waddle.android.viewModelFactoryOf
@@ -134,9 +135,20 @@ class MessageSearchViewModel(
         return MessageSearchHit(
             key = message.mamId,
             author = author,
+            authorJid = authorJidOf(message),
             body = body,
             timestamp = message.timestamp,
         )
+    }
+
+    /**
+     * Real bare JID of a match's author: a DM sender's own JID, a room
+     * match's archived `muc#user` JID — never today's holder of the nick.
+     */
+    private fun authorJidOf(message: WaddleArchivedMessage): String? {
+        val from = message.from ?: return null
+        val jid = if (target.isGroupchat) message.authorRealJid ?: return null else from
+        return normalizedBareJid(jid).takeIf { '@' in it }
     }
 
     companion object {

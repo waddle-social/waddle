@@ -37,9 +37,24 @@ export function buildMessageDisplayMeta(list: readonly TimelineMessage[]): Messa
 
 const THREAD_CHIP_MAX_PARTICIPANTS = 5;
 
+/**
+ * Identity a thread participant is deduplicated by: the resolved real JID
+ * when known, so two people who used the same nick stay distinct. An
+ * unresolved author falls back to its sender identity (occupant JID or
+ * nick); it can never merge with a resolved one, and two unresolved
+ * authors sharing a nick would render identical initials anyway.
+ */
+export function threadParticipantKey(message: TimelineMessage, jid: string | null): string {
+  if (jid) return `jid:${jid}`;
+  return `unresolved:${message.authorOccupantJid ?? message.authorJid ?? message.author}`;
+}
+
 export interface ThreadChipParticipant {
+  /** Dedupe identity (see `threadParticipantKey`); stable per participant. */
+  key: string;
   nick: string;
-  avatarUrl?: string | null;
+  /** Real bare JID behind the author, for the avatar; `null` = initials. */
+  jid: string | null;
   presence: OccupantPresence;
 }
 
@@ -56,7 +71,7 @@ export interface ThreadChipParticipant {
 export function threadChipParticipants(
   threadIndex: MessageThreadIndex,
   messageId: string,
-  avatarUrlByAuthor: Record<string, string | null>,
+  authorJid: (message: TimelineMessage) => string | null,
   roomPresence: Record<string, OccupantPresence>,
 ): ThreadChipParticipant[] {
   const entry = threadIndex.get(messageId);
@@ -67,11 +82,14 @@ export function threadChipParticipants(
   for (let i = children.length - 1; i >= 0; i--) {
     const c = children[i];
     if (!c) continue;
-    if (seen.has(c.author)) continue;
-    seen.add(c.author);
+    const jid = authorJid(c);
+    const key = threadParticipantKey(c, jid);
+    if (seen.has(key)) continue;
+    seen.add(key);
     ordered.push({
+      key,
       nick: c.author,
-      avatarUrl: avatarUrlByAuthor[c.author] ?? null,
+      jid,
       presence: roomPresence[c.author] ?? "offline",
     });
     if (ordered.length >= THREAD_CHIP_MAX_PARTICIPANTS) break;

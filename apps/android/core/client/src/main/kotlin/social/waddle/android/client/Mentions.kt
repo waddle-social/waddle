@@ -60,6 +60,8 @@ data class MentionCandidate(
     /** The XEP-0372 mention URI a selection emits on the wire. */
     val uri: String,
     val isBroadcast: Boolean,
+    /** The occupant's real bare JID (avatar); `null` for broadcasts. */
+    val jid: String? = null,
 )
 
 /**
@@ -83,7 +85,7 @@ fun mentionCandidatesOf(occupants: Map<String, WaddlePresence>): List<MentionCan
             if (realJid == null || canonical.isEmpty() || !seen.add(canonical)) {
                 null
             } else {
-                MentionCandidate(display = nick, uri = mentionUriFor(realJid), isBroadcast = false)
+                MentionCandidate(display = nick, uri = mentionUriFor(realJid), isBroadcast = false, jid = realJid)
             }
         }
     return broadcasts + members

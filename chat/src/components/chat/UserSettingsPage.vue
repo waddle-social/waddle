@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
 import { ChevronLeft, MessageCircle, ScanText, UserRound, Volume2, VolumeX } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import ReadReceiptSwitcher from "@/components/chat/ReadReceiptSwitcher.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
 import VCardEditor from "@/components/chat/VCardEditor.vue";
@@ -363,7 +363,7 @@ async function clearTuneStatus() {
     <div class="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-5 sm:px-6">
       <section class="chat-section-card glass-panel">
         <div class="flex items-center gap-3">
-          <AppAvatar :name="session.username" :src="session.avatar_url" size="md" />
+          <UserAvatar :name="session.username" :jid="session.jid" :fallback-src="session.avatar_url" size="md" />
           <div class="min-w-0">
             <div class="type-section-label flex items-center gap-2 text-muted-foreground/70">
               <UserRound class="h-3.5 w-3.5" />

@@ -70,28 +70,34 @@ struct ActivityThreadRow: View {
     }
 }
 
-/// One unread message: author, time and a few lines of its text.
+/// One unread message: author avatar, name, time and a few lines of its
+/// text.
 struct ActivityMessageRow: View {
+    @Environment(SessionCoordinator.self) private var session
     let item: TimelineItem
     var isThreadReply = false
     let onOpen: () -> Void
 
     var body: some View {
+        let author = MessageAuthor.resolve(item, occupant: nil, authorJID: session.authorJID(of: item))
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(item.authorName)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.consistent(for: item.authorName))
-                        .lineLimit(1)
-                    Spacer(minLength: Theme.Spacing.s)
-                    Text(ListTimestamp.string(for: item.sentAt))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: Theme.Spacing.s) {
+                MessageAvatar(author: author, size: Theme.Size.smallAvatar)
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(item.authorName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.consistent(for: item.authorName))
+                            .lineLimit(1)
+                        Spacer(minLength: Theme.Spacing.s)
+                        Text(ListTimestamp.string(for: item.sentAt))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(RowPreview.content(of: item) ?? "")
+                        .font(.callout)
+                        .lineLimit(3)
                 }
-                Text(RowPreview.content(of: item) ?? "")
-                    .font(.callout)
-                    .lineLimit(3)
             }
             .padding(.leading, isThreadReply ? Theme.Spacing.l : 0)
             .contentShape(Rectangle())

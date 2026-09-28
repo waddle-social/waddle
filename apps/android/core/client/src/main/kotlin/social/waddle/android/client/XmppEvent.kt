@@ -46,6 +46,12 @@ sealed interface XmppEvent {
     data class Call(val event: WaddleCallEvent) : XmppEvent
 
     /**
+     * XEP-0084 metadata notification from [jid]'s PEP service: the
+     * current avatar id, or `null` when the avatar was disabled.
+     */
+    data class AvatarChanged(val jid: Jid, val avatarId: String?) : XmppEvent
+
+    /**
      * XEP-0490 catch-up entries from the connect bootstrap, injected
      * into the event stream so cursor/badge recomputes serialize with
      * live-message unread increments. [applied] (when present) is

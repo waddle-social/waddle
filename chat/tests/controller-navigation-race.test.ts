@@ -71,7 +71,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
   const discoverTopology = mock(async () => discoveredTopology);
   const subscribeToPeerPresence = mock(done);
   const searchUsers = mock(async (_query: string): Promise<UserSearchResult[]> => [
-    { id: "bob@example.com", jid: "bob@example.com", username: "bob", display_name: null, avatar_url: null },
+    { id: "bob@example.com", jid: "bob@example.com", username: "bob", display_name: null },
   ]);
   const client = {
     discoverTopology,
@@ -87,6 +87,12 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
     setMdsDisplayedHandler: noop,
     setPresenceUpdateHandler: noop,
     addPubsubEventHandler: noop,
+    addAvatarChangedHandler: () => noop,
+    addOccupantRealJidHandler: () => noop,
+    addOwnProfilePublishedHandler: () => noop,
+    addOwnOccupantNickHandler: () => noop,
+    fetchUserAvatar: async () => null,
+    forgetUserAvatar: noop,
     setMemberJidHandler: noop,
     setMessageAckHandler: noop,
     setMessageDeliveryFailureHandler: noop,
@@ -451,7 +457,7 @@ describe("New DM recipient identity through the full shell", () => {
     const chat = { id: "chat", name: "Chat", jid: "chat@muc.example.com", channelType: "text" as const };
     const h = harness("/dm", { spaces: [], rooms: [chat] });
     h.searchUsers.mockResolvedValue([
-      { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null, avatar_url: null },
+      { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null },
     ]);
     const finishDiscovery = delayDiscovery(h);
     h.connectionStore.appState = "ready";

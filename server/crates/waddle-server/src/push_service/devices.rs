@@ -917,6 +917,30 @@ mod tests {
             self.inner.list_node_names_for_item(owner, item_id).await
         }
 
+        async fn mark_owner_configured(
+            &self,
+            _owner: &BareJid,
+            _node_name: &str,
+        ) -> Result<(), XmppError> {
+            Ok(())
+        }
+
+        async fn repair_legacy_avatar_node(
+            &self,
+            _owner: &BareJid,
+            _node_name: &str,
+        ) -> Result<bool, XmppError> {
+            Ok(false)
+        }
+
+        async fn is_owner_configured(
+            &self,
+            _owner: &BareJid,
+            _node_name: &str,
+        ) -> Result<bool, XmppError> {
+            Ok(false)
+        }
+
         async fn update_node_config(
             &self,
             _owner: &BareJid,

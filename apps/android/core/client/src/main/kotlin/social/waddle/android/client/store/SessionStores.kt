@@ -11,7 +11,8 @@ import java.time.OffsetDateTime
  * re-seeded from persistence via [seedFromPrefs].
  */
 internal class SessionStores {
-    val timelineStore = TimelineStore()
+    val occupantJidStore = OccupantJidStore()
+    val timelineStore = TimelineStore(actualOwnNickIn = occupantJidStore::ownNickIn)
     val roomStore = RoomStore()
     val presenceStore = PresenceStore()
     val dmStore = DmStore()
@@ -31,6 +32,7 @@ internal class SessionStores {
         timelineStore.setOwnBareJid(null)
         roomStore.clear()
         presenceStore.clear()
+        occupantJidStore.clear()
         dmStore.clear()
         unreadStore.clearAll()
         inboxStore.clear()

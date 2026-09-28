@@ -8,6 +8,7 @@
 use waddle_ws_test_support as ws_common;
 
 use serde_json::json;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 
@@ -20,6 +21,9 @@ const NS_VCARD_TEMP: &str = "vcard-temp";
 const NS_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
 const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
 const NS_VCARD4: &str = "urn:ietf:params:xml:ns:vcard-4.0";
+const NS_CAPS: &str = "http://jabber.org/protocol/caps";
+const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
+const AVATAR_METADATA_NOTIFY: &str = "urn:xmpp:avatar:metadata+notify";
 
 async fn admin_client(server: &TestServer, resource: &str) -> WsXmppClient {
     let password = server.fixed_account_password().to_string();
@@ -1136,6 +1140,149 @@ async fn wait_for_event_message(
     }
 }
 
+fn caps_verification_string(features: &[&str]) -> String {
+    use waddle_xmpp::disco::info::{Feature, Identity};
+    use waddle_xmpp::xep::xep0115::compute_caps_hash;
+
+    let identities = vec![Identity::new("client", "pc", Some("Bob's Client"))];
+    let features: Vec<Feature> = features
+        .iter()
+        .map(|feature| Feature::new(feature))
+        .collect();
+    compute_caps_hash(&identities, &features)
+}
+
+fn extract_iq_id(frame: &str) -> String {
+    ws_common::extract_attr_after(frame, "<iq", "id").expect("iq has id attribute")
+}
+
+async fn establish_bob_subscribes_to_alice(
+    alice: &mut WsXmppClient,
+    bob: &mut WsXmppClient,
+    alice_bare: &str,
+    bob_bare: &str,
+) {
+    alice
+        .send(r#"<iq xmlns="jabber:client" type="get" id="roster-init-a"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("alice roster get");
+    let _ = alice
+        .recv_matching(|frame| frame.contains("roster-init-a"))
+        .await
+        .expect("alice roster result");
+    bob.send(r#"<iq xmlns="jabber:client" type="get" id="roster-init-b"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("bob roster get");
+    let _ = bob
+        .recv_matching(|frame| frame.contains("roster-init-b"))
+        .await
+        .expect("bob roster result");
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice presence");
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client" type="subscribe" to="{alice_bare}"/>"#
+    ))
+    .await
+    .expect("bob subscribes");
+    let _ = alice
+        .recv_matching(|frame| frame.contains(r#"type='subscribe'"#))
+        .await
+        .expect("alice receives subscribe");
+    alice
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="{bob_bare}"/>"#
+        ))
+        .await
+        .expect("alice approves");
+    let _ = bob
+        .recv_matching(|frame| frame.contains(r#"type='subscribed'"#))
+        .await
+        .expect("bob receives approval");
+}
+
+#[tokio::test]
+async fn avatar_metadata_publish_fans_to_roster_contact_with_notify_caps() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", alice_password.as_str()),
+        ("bob", bob_password.as_str()),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "avatar-caps-alice",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "avatar-caps-bob",
+    )
+    .await
+    .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let bob_full = bob.full_jid.clone().expect("bob full JID");
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    let features = [NS_DISCO_INFO, AVATAR_METADATA_NOTIFY];
+    let caps_node = "https://bob.example/avatar-metadata";
+    let ver = caps_verification_string(&features);
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{caps_node}" ver="{ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob advertises avatar notify caps");
+    let disco_query = bob
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries bob caps");
+    let iq_id = extract_iq_id(&disco_query);
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="{caps_node}#{ver}"><identity category="client" type="pc" name="Bob's Client"/><feature var="{NS_DISCO_INFO}"/><feature var="{AVATAR_METADATA_NOTIFY}"/></query></iq>"#
+    ))
+    .await
+    .expect("bob answers caps disco#info");
+    bob.send(r#"<iq xmlns="jabber:client" type="get" id="avatar-caps-anchor"><ping xmlns="urn:xmpp:ping"/></iq>"#)
+        .await
+        .expect("send caps anchor ping");
+    let _ = bob
+        .recv_matching(|frame| frame.contains("avatar-caps-anchor") && frame.contains("<iq"))
+        .await
+        .expect("caps anchor ping result");
+
+    wire_publish_avatar(&mut alice, &alice_bare, "avatar-caps-1").await;
+    let event = wait_for_event_message(&mut bob, NS_AVATAR_METADATA, Duration::from_secs(2))
+        .await
+        .expect("roster contact advertising avatar metadata +notify MUST receive the event");
+    assert!(
+        event.contains(&format!(r#"from='{alice_bare}'"#)),
+        "PEP event MUST come from the owner bare JID: {event}"
+    );
+    assert!(
+        event.contains(r#"id='avatar-caps-1'"#),
+        "avatar metadata event MUST carry the published item: {event}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
 // ============================================================================
 // user_self_published_avatar_is_protected_from_oidc_removal
 // ============================================================================
@@ -1214,5 +1361,143 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
         "user-published metadata item MUST survive the suppressed removal: {metadata}"
     );
 
+    let _ = admin.close().await;
+}
+
+// ============================================================================
+// Wire-published avatars are readable by other users
+// ============================================================================
+//
+// A client-published XEP-0084 avatar auto-creates its PEP nodes. Those
+// nodes must be as readable as the OIDC-published ones (`open`), or
+// every peer's items-get answers `forbidden` and the avatar is
+// invisible to everyone but its owner.
+
+async fn wire_publish_avatar(client: &mut WsXmppClient, owner_bare: &str, item_id: &str) {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    let png = tiny_png();
+    let png_b64 = BASE64.encode(&png);
+    let data = iq_set_to(
+        client,
+        &format!("{item_id}-data"),
+        owner_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{NS_AVATAR_DATA}"><item id="{item_id}"><data xmlns="{NS_AVATAR_DATA}">{png_b64}</data></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(data.contains(r#"type='result'"#), "data publish: {data}");
+    let meta = iq_set_to(
+        client,
+        &format!("{item_id}-meta"),
+        owner_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{NS_AVATAR_METADATA}"><item id="{item_id}"><metadata xmlns="{NS_AVATAR_METADATA}"><info id="{item_id}" type="image/png" bytes="{}"/></metadata></item></publish></pubsub>"#,
+            png.len()
+        ),
+    )
+    .await;
+    assert!(
+        meta.contains(r#"type='result'"#),
+        "metadata publish: {meta}"
+    );
+}
+
+async fn assert_peer_reads_avatar(peer: &mut WsXmppClient, owner_bare: &str, item_id: &str) {
+    for node in [NS_AVATAR_METADATA, NS_AVATAR_DATA] {
+        let resp = iq_get_to(
+            peer,
+            &format!("peer-read-{item_id}-{node}"),
+            owner_bare,
+            &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+        )
+        .await;
+        assert!(
+            resp.contains(r#"type='result'"#) && resp.contains(&format!(r#"id='{item_id}'"#)),
+            "peer MUST be able to read {node} of a wire-published avatar: {resp}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wire_published_avatar_is_readable_by_other_users() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let mut admin = admin_client(&server, "wire-avatar-admin").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    wire_publish_avatar(&mut admin, &admin_bare, "wire-avatar-1").await;
+
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "wire-avatar-bob",
+    )
+    .await
+    .expect("bob connect");
+    assert_peer_reads_avatar(&mut bob, &admin_bare, "wire-avatar-1").await;
+
+    let _ = bob.close().await;
+    let _ = admin.close().await;
+}
+
+// An owner's explicit configure (`presence` or `roster`) is a privacy
+// choice: the next avatar publish MUST NOT reopen it. Legacy Presence
+// nodes are repaired once by the pubsub data fixup (storage tests).
+#[tokio::test]
+async fn republish_keeps_owner_configured_avatar_access_model() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let mut admin = admin_client(&server, "owner-choice-admin").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "owner-choice-bob",
+    )
+    .await
+    .expect("bob connect");
+
+    for access_model in ["presence", "roster"] {
+        wire_publish_avatar(&mut admin, &admin_bare, &format!("{access_model}-1")).await;
+        for node in [NS_AVATAR_DATA, NS_AVATAR_METADATA] {
+            let resp = iq_set_to(
+                &mut admin,
+                &format!("owner-choice-configure-{access_model}-{node}"),
+                &admin_bare,
+                &format!(
+                    r#"<pubsub xmlns="http://jabber.org/protocol/pubsub#owner"><configure node="{node}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field><field var="pubsub#access_model"><value>{access_model}</value></field></x></configure></pubsub>"#
+                ),
+            )
+            .await;
+            assert!(
+                resp.contains(r#"type='result'"#),
+                "configure {node}: {resp}"
+            );
+        }
+        wire_publish_avatar(&mut admin, &admin_bare, &format!("{access_model}-2")).await;
+
+        for node in [NS_AVATAR_METADATA, NS_AVATAR_DATA] {
+            let resp = iq_get_to(
+                &mut bob,
+                &format!("owner-choice-read-{access_model}-{node}"),
+                &admin_bare,
+                &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+            )
+            .await;
+            assert!(
+                resp.contains("<forbidden"),
+                "non-roster peer MUST stay denied on a {access_model} {node}: {resp}"
+            );
+        }
+    }
+
+    let _ = bob.close().await;
     let _ = admin.close().await;
 }

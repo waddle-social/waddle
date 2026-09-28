@@ -7,12 +7,14 @@ import { jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { threadDisplayTitle } from "@/lib/threads-view-filters";
 import { useCallAnchorCardState, wasmThreadEntryToAnchorMessage } from "@/lib/call-thread-anchor";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 
 const props = defineProps<{
   entry: WasmThreadEntry;
   markingRead?: boolean;
+  /** Real bare JID of the thread starter when its root row is loaded; `null` = initials. */
+  rootAuthorJid?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -59,6 +61,9 @@ const replyLabel = computed(() => {
 // The threads query carries only the person who started the discussion,
 // so the avatar stack shows exactly that: no invented participants.
 const rootAuthor = computed(() => props.entry.root_author?.trim() ?? "");
+// `root_author` is a display label only (a room nick may have changed
+// hands): the avatar comes from the loaded root row's resolved author.
+const rootAuthorJid = computed(() => props.rootAuthorJid ?? null);
 
 const isDmCallThread = computed(() => props.entry.callThread?.kind === "dm");
 const dmCallFlagLabel = computed(() => {
@@ -95,7 +100,7 @@ const DmCallFlagIcon = computed(() => {
       @click="emit('open', entry)"
     >
       <span v-if="rootAuthor" class="mt-0.5 flex shrink-0 items-center" aria-hidden="true">
-        <AppAvatar :name="rootAuthor" size="sm" />
+        <UserAvatar :name="rootAuthor" :jid="rootAuthorJid" size="sm" />
       </span>
       <span class="min-w-0 flex-1">
         <span class="flex min-w-0 items-center gap-2">

@@ -2,7 +2,7 @@
 import { ref, watch } from "vue";
 import { Loader2, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import type { UserSearchResult } from "@/lib/chat-types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -91,7 +91,7 @@ function handleSubmit() {
           :aria-pressed="selectedJid === user.jid"
           @click="selectedJid = user.jid"
         >
-          <AppAvatar :name="user.display_name || user.username" :src="user.avatar_url" size="sm" />
+          <UserAvatar :name="user.display_name || user.username" :jid="user.jid" size="sm" />
           <span class="min-w-0 flex-1">
             <span class="type-control block truncate">{{ user.display_name || user.username }}</span>
             <span class="type-caption block truncate text-muted-foreground">{{ user.jid }}</span>

@@ -265,7 +265,8 @@ extension SessionCoordinator {
             },
             markupSpans: message.options.markupSpans,
             references: message.options.references,
-            sharedFiles: message.options.sharedFiles
+            sharedFiles: message.options.sharedFiles,
+            authorRealJID: conversation.isRoom ? account.jid : nil
         )
     }
 

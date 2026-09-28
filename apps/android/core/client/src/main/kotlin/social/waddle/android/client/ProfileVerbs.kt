@@ -78,7 +78,7 @@ internal class ProfileVerbs(
         }
         // Each follow-up remains bound to the original lease. A completed
         // old read cannot issue an avatar IQ through a successor client.
-        fetchAvatarForLease(own, lease)
+        resolveAvatarForLease(own, lease)
         if (!activeSession.isCurrent(lease)) return VerbResult.NotConnected
         return VerbResult.Ok
     }
@@ -95,47 +95,80 @@ internal class ProfileVerbs(
      */
     suspend fun fetchAvatar(jid: String, knownId: String? = null): WaddleAvatar? {
         val lease = activeSession.captureOwnerLease() ?: return null
-        return fetchAvatarForLease(jid, lease, knownId)
+        return (resolveAvatarForLease(jid, lease, knownId) as? AvatarLookup.Found)?.avatar
     }
 
-    private suspend fun fetchAvatarForLease(
+    /**
+     * [fetchAvatar] for the peer-avatar policy: distinguishes "nothing
+     * published" (the store drops to initials) from a failure (the store
+     * is left alone), and projects only through [commit] so a superseded
+     * attempt cannot overwrite a newer `AvatarChanged` outcome.
+     */
+    suspend fun resolveAvatar(
+        jid: String,
+        knownId: String?,
+        commit: (() -> Unit) -> Boolean,
+    ): AvatarLookup {
+        val lease = activeSession.captureOwnerLease() ?: return AvatarLookup.Failed
+        return resolveAvatarForLease(jid, lease, knownId, commit)
+    }
+
+    private suspend fun resolveAvatarForLease(
         jid: String,
         lease: ActiveSession.OwnerLease,
         knownId: String? = null,
-    ): WaddleAvatar? {
-        val owner = bareJid(jid)
-        if (knownId != null) {
-            stores.profileStore.cachedAvatar(owner, knownId)?.let { cached ->
-                return if (activeSession.applyIfCurrent(lease) {
-                        stores.profileStore.onAvatar(cached)
-                    }
-                ) {
-                    cached
-                } else {
-                    null
+        commit: (() -> Unit) -> Boolean = { projection ->
+            projection()
+            true
+        },
+    ): AvatarLookup {
+        val owner = normalizedBareJid(jid)
+        val cached = knownId?.let { stores.profileStore.cachedAvatar(owner, it) }
+        val lookup = cached?.let(AvatarLookup::Found) ?: requestAvatar(owner, lease)
+        if (lookup == AvatarLookup.Failed) return lookup
+        var committed = false
+        val current = activeSession.applyIfCurrent(lease) {
+            committed = commit {
+                when (lookup) {
+                    is AvatarLookup.Found -> stores.profileStore.onAvatar(lookup.avatar)
+                    AvatarLookup.Absent -> stores.profileStore.clearAvatar(owner)
+                    AvatarLookup.Failed -> Unit
                 }
             }
         }
-        val knownIds = stores.profileStore.knownAvatarIds(owner)
+        return if (current && committed) lookup else AvatarLookup.Failed
+    }
+
+    /** One §4.2-aware wire fetch for [owner]; never throws. */
+    private suspend fun requestAvatar(
+        owner: String,
+        lease: ActiveSession.OwnerLease,
+        knownIds: List<String> = stores.profileStore.knownAvatarIds(owner),
+    ): AvatarLookup {
         val result = try {
             when (val invocation = activeSession.invokeIfCurrent(lease) { it.requestAvatar(owner, knownIds) }) {
                 ActiveSession.LeaseInvocation.Stale,
                 ActiveSession.LeaseInvocation.NotConnected,
-                -> return null
-                is ActiveSession.LeaseInvocation.Completed -> invocation.value
+                -> return AvatarLookup.Failed
+                // `null` = definitively no avatar.
+                is ActiveSession.LeaseInvocation.Completed -> invocation.value ?: return AvatarLookup.Absent
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
-            null
-        } ?: return null
+            // The FFI throws for a FAILED lookup (not connected, timeout,
+            // transient stanza error): keep whatever avatar is held.
+            return AvatarLookup.Failed
+        }
         // An id-only result means the FFI skipped the data fetch: the
         // bytes for that id are, by construction, in the cache we
-        // handed it — re-mark them current.
-        val avatar = result.avatar
-            ?: stores.profileStore.cachedAvatar(owner, result.id)
-            ?: return null
-        return if (activeSession.applyIfCurrent(lease) { stores.profileStore.onAvatar(avatar) }) avatar else null
+        // handed it — re-mark them current. Keyed by the requested
+        // owner so display lookups hit whatever form the wire echoed.
+        val avatar = result.avatar ?: stores.profileStore.cachedAvatar(owner, result.id)
+        if (avatar != null) return AvatarLookup.Found(avatar.copy(jid = owner))
+        // Id-only, but the bytes were evicted while the IQ was in flight:
+        // ask once more without known ids so the data comes back.
+        return if (knownIds.isEmpty()) AvatarLookup.Failed else requestAvatar(owner, lease, emptyList())
     }
 
     /**
@@ -190,15 +223,18 @@ internal class ProfileVerbs(
      *  their SHA-1 item id and become the account's current avatar. */
     suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt): VerbResult {
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
-        val result = unitVerb(lease) { it.publishAvatar(data, mimeType, width, height) }
+        // The FFI returns the item id it published under; caching the
+        // bytes at exactly that id makes our own revalidation send it as
+        // known (XEP-0084 §4.2) instead of re-downloading our upload.
+        var publishedId = avatarItemId(data)
+        val result = unitVerb(lease) { publishedId = it.publishAvatar(data, mimeType, width, height) }
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
             stores.profileStore.onAvatar(
                 WaddleAvatar(
                     jid = lease.ownerBareJid,
-                    id = avatarItemId(data),
+                    id = publishedId,
                     mimeType = mimeType,
                     data = data,
-                    url = null,
                 ),
             )
         }

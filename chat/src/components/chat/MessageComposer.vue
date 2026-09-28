@@ -18,7 +18,7 @@ import { tiptapToRichMessage } from "@/lib/rich-message";
 import { planComposerPaste } from "@/lib/composer-paste/plan-composer-paste";
 import { resolveComposerPaste } from "@/lib/composer-paste/resolve-composer-paste";
 import type { MentionCandidate } from "@/lib/mentions";
-import { jidLocalpart } from "@/lib/xmpp/jid";
+import { jidLocalpart, resourceOf } from "@/lib/xmpp/jid";
 import type { SlashInvocation } from "@/lib/slash-dispatch";
 import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
 import { useComposerLinkPreview } from "@/lib/use-composer-link-preview";
@@ -77,7 +77,7 @@ const emit = defineEmits<{
 const replyAuthorName = computed(() => {
   const author = props.replyingTo?.author;
   if (!author) return "";
-  return author.includes("/") ? author.split("/").pop() ?? author : jidLocalpart(author);
+  return author.includes("/") ? resourceOf(author) || author : jidLocalpart(author);
 });
 
 const showGifPicker = ref(false);

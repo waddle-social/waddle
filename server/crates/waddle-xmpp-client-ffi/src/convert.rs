@@ -80,6 +80,12 @@ pub(super) fn dispatch_event(
                 to: rejection.to,
             });
         }
+        ClientEvent::AvatarChanged(change) => {
+            listener.on_event(WaddleClientEvent::AvatarChanged {
+                jid: change.jid.into(),
+                avatar_id: change.avatar_id.map(|id| id.to_string()),
+            });
+        }
         ClientEvent::Call(call) => {
             listener.on_event(WaddleClientEvent::Call {
                 event: call_event_to_ffi(*call),
@@ -2437,6 +2443,32 @@ mod tests {
                 assert_eq!(event.sid, "c1");
             }
             _ => panic!("expected Call variant"),
+        }
+    }
+
+    #[test]
+    fn dispatch_event_maps_avatar_changed_to_ffi() {
+        use waddle_xmpp_client::{AvatarChanged, AvatarItemId};
+
+        let listener = CapturingListener::default();
+        dispatch_event(
+            ClientEvent::AvatarChanged(AvatarChanged {
+                jid: "bob@waddle.test".parse().expect("valid bare JID"),
+                avatar_id: AvatarItemId::new("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"),
+            }),
+            "alice@waddle.test",
+            &listener,
+        );
+
+        match listener.events().as_slice() {
+            [WaddleClientEvent::AvatarChanged { jid, avatar_id }] => {
+                assert_eq!(jid.to_string(), "bob@waddle.test");
+                assert_eq!(
+                    avatar_id.as_deref(),
+                    Some("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d")
+                );
+            }
+            _ => panic!("expected one AvatarChanged event"),
         }
     }
 

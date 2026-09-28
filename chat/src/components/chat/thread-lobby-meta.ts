@@ -1,4 +1,6 @@
 import type { MessageThreadEntry } from "@/channels/threads";
+import type { TimelineMessage } from "@/lib/chat-ui";
+import { threadParticipantKey } from "./timeline-display-meta";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
 // Thread "lobby" metadata for the rich ThreadPanel header. Substitutes the
@@ -23,8 +25,11 @@ export function threadPreviewFor(entry: MessageThreadEntry | null): string {
 }
 
 export interface ThreadParticipant {
+  /** Dedupe identity (see `threadParticipantKey`); stable per participant. */
+  key: string;
   nick: string;
-  avatarUrl?: string | null;
+  /** Real bare JID behind the author, for the avatar; `null` = initials. */
+  jid: string | null;
   presence: OccupantPresence;
 }
 
@@ -37,7 +42,7 @@ export interface ThreadParticipant {
  */
 export function threadParticipantsFor(
   entry: MessageThreadEntry | null,
-  avatarUrlByAuthor: Record<string, string | null>,
+  authorJid: (message: TimelineMessage) => string | null,
   roomPresence: Record<string, OccupantPresence>,
 ): ThreadParticipant[] {
   if (!entry) return [];
@@ -47,21 +52,29 @@ export function threadParticipantsFor(
   for (let i = children.length - 1; i >= 0; i--) {
     const c = children[i];
     if (!c) continue;
-    if (seen.has(c.author)) continue;
-    seen.add(c.author);
+    const jid = authorJid(c);
+    const key = threadParticipantKey(c, jid);
+    if (seen.has(key)) continue;
+    seen.add(key);
     ordered.push({
+      key,
       nick: c.author,
-      avatarUrl: avatarUrlByAuthor[c.author] ?? null,
+      jid,
       presence: roomPresence[c.author] ?? "offline",
     });
   }
   const root = entry.root;
-  if (root && !seen.has(root.author)) {
-    ordered.push({
-      nick: root.author,
-      avatarUrl: avatarUrlByAuthor[root.author] ?? null,
-      presence: roomPresence[root.author] ?? "offline",
-    });
+  if (root) {
+    const jid = authorJid(root);
+    const key = threadParticipantKey(root, jid);
+    if (!seen.has(key)) {
+      ordered.push({
+        key,
+        nick: root.author,
+        jid,
+        presence: roomPresence[root.author] ?? "offline",
+      });
+    }
   }
   return ordered;
 }

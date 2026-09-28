@@ -8,7 +8,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -30,6 +29,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.jid.localpartOf
 import social.waddle.client.ffi.WaddleAdminUserEntry
 
@@ -108,7 +109,13 @@ private fun UserRow(entry: WaddleAdminUserEntry) {
     ListItem(
         headlineContent = { Text(text = entry.displayName ?: localpartOf(entry.jid)) },
         supportingContent = { Text(text = entry.jid) },
-        leadingContent = { Icon(Icons.Outlined.AccountCircle, contentDescription = null) },
+        leadingContent = {
+            PeerAvatar(
+                jid = entry.jid,
+                displayName = entry.displayName ?: localpartOf(entry.jid),
+                size = LIST_AVATAR_SIZE,
+            )
+        },
         trailingContent = {
             if (entry.hasOwnerHat) {
                 Badge { Text(text = stringResource(R.string.community_users_owner_pill)) }

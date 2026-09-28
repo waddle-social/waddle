@@ -4,7 +4,7 @@ import type { UserSearchResult } from "../src/lib/chat-types";
 import { setupVueComponent } from "./helpers/render-vue-sfc";
 
 const account: UserSearchResult = {
-  id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null, avatar_url: null,
+  id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null,
 };
 
 interface DialogBindings {

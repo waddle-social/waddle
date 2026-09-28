@@ -35,6 +35,8 @@ const SORT_OPTIONS: Array<{ value: ThreadsSort; label: string }> = [
 const props = defineProps<{
   xmppClient: BrowserXmppClient | null;
   channels: readonly ChannelSummary[];
+  /** Resolves a thread starter's avatar JID from loaded rows; unknown → initials. */
+  rootAuthorJid?: (entry: WasmThreadEntry) => string | null;
 }>();
 
 const emit = defineEmits<{
@@ -202,6 +204,7 @@ onMounted(() => {
           :key="threadKey(entry)"
           :entry="entry"
           :marking-read="markingReadKey === threadKey(entry)"
+          :root-author-jid="rootAuthorJid?.(entry) ?? null"
           @open="emit('openThread', $event)"
           @mark-read="markThreadRead"
           @join-call="(joined, media) => emit('joinCall', joined, media)"

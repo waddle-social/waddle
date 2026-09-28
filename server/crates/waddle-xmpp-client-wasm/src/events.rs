@@ -154,6 +154,14 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 }
             }
         }
+        ClientEvent::AvatarChanged(change) => {
+            let callback = inner.borrow().on_avatar_changed.clone();
+            if let Some(callback) = callback {
+                if let Ok(value) = to_js_value(&avatar_changed_to_js(change)) {
+                    let _ = callback.call1(&JsValue::NULL, &value);
+                }
+            }
+        }
         ClientEvent::Call(call_event) => {
             let callback = inner.borrow().on_call.clone();
             if let Some(callback) = callback {
@@ -170,6 +178,13 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
         // the JS callback, so they are intentionally consumed here.
         ClientEvent::PubsubItemsRetracted(_) | ClientEvent::PubsubAttachmentSummary(_) => {}
         _ => {}
+    }
+}
+
+fn avatar_changed_to_js(change: waddle_xmpp_client::AvatarChanged) -> WaddleAvatarChanged {
+    WaddleAvatarChanged {
+        jid: change.jid.to_string(),
+        avatar_id: change.avatar_id.map(|id| id.to_string()),
     }
 }
 
@@ -215,6 +230,20 @@ mod tests {
         }));
 
         assert_eq!(payloads, vec![serde_json::json!({ "kind": "failed" })]);
+    }
+
+    #[test]
+    fn avatar_changed_callback_payload_uses_bare_jid_and_optional_id() {
+        let payload = avatar_changed_to_js(waddle_xmpp_client::AvatarChanged {
+            jid: "bob@waddle.test".parse().expect("valid bare JID"),
+            avatar_id: waddle_xmpp_client::AvatarItemId::new(
+                "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+            ),
+        });
+        assert_eq!(
+            serde_json::to_value(payload).expect("serializable payload"),
+            serde_json::json!({ "jid": "bob@waddle.test", "avatar_id": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d" })
+        );
     }
 }
 

@@ -141,6 +141,9 @@ public final class SessionCoordinator {
         self.readCursors = ReadCursorStore()
         self.threadHistory = ThreadHistoryStore()
         self.unreadOverview = UnreadOverviewStore()
+        avatars.fetch = { [port] jid, knownID in
+            await port.fetchAvatar(of: jid, knownID: knownID)
+        }
         timelines.account = account
         timelines.onArchiveTrimmed = { [weak self] conversation, cursor in
             self?.archiveTrimmed(conversation, cursor: cursor)
@@ -374,6 +377,9 @@ public final class SessionCoordinator {
             reconnectTask?.cancel()
             reconnectTask = nil
             status.connection = .online
+            // Avatars may have changed while we were away; rows on screen
+            // ask again.
+            avatars.markAllStale()
             // Runs beside the event loop: the pipeline awaits server
             // round-trips whose answers arrive as events.
             readyTask?.cancel()
@@ -415,6 +421,8 @@ public final class SessionCoordinator {
             sentMessageFailed(stanzaID, bounced: false)
         case let .messageRejected(stanzaID, from, to):
             messageRejected(stanzaID, from: from, to: to)
+        case let .avatarChanged(jid, id):
+            avatars.avatarChanged(jid, id: id)
         case let .inboxPush(entry):
             applyInbox(entry)
         case .authenticationFailed:
@@ -462,6 +470,12 @@ public final class SessionCoordinator {
         // Errors only change send state through the typed rejection event,
         // where the outbound id and addresses are checked together.
         guard message.type != .error else { return }
+        // PEP notifications (avatar, mood…) are headlines without a body;
+        // their typed payloads arrive as their own events.
+        if message.type == .headline, message.body == nil, message.displayedCursors == nil, message.pinEvent == nil {
+            return
+        }
+        var message = message
         if let cursors = message.displayedCursors {
             // A sibling device's XEP-0490 notification is read-state
             // metadata only, and only trusted from our own account.
@@ -484,6 +498,20 @@ public final class SessionCoordinator {
             return
         }
         trackChatState(message, route: route)
+        // An undelayed live message is being spoken now by the present
+        // occupant: pin the row to them, so a later holder of the nick never
+        // takes it over. That is the real JID the room disclosed for them,
+        // else us when the nick is the one our self-presence carries. Our
+        // configured nick alone proves nothing: the room may have given us
+        // another (status 210) and someone else this one. A delayed message
+        // (XEP-0203: room history, replay) may predate a handover, so it
+        // keeps only what the room vouched for.
+        if route.conversation.isRoom, message.isLive, message.timestamp == nil,
+           message.authorRealJID == nil, let nick = message.from?.resource {
+            let room = route.conversation.jid
+            message.authorRealJID = presence.occupant(named: nick, in: room)?.realJID
+                ?? (presence.selfNicks[room] == nick ? account.jid : nil)
+        }
         let result = timelines.ingest(message, route: route)
         if route.isMine {
             // Our own copy back from the server confirms an unacked send,

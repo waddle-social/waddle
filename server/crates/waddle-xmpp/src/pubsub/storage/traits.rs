@@ -132,6 +132,32 @@ pub trait PubSubStorage: Send + Sync + 'static {
         config: &NodeConfig,
     ) -> Result<(), XmppError>;
 
+    /// Record that the owner explicitly configured this node (XEP-0060
+    /// §8.2), so server-side default repairs never override the choice.
+    async fn mark_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<(), XmppError>;
+
+    /// Atomically reopen a legacy XEP-0084 avatar node: set its access
+    /// model to `open` only if it is still on the Presence default AND the
+    /// owner never configured it. Returns whether the node was changed.
+    /// A single conditional write, so a concurrent owner configure (which
+    /// marks before it writes) always wins.
+    async fn repair_legacy_avatar_node(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError>;
+
+    /// Whether the owner has explicitly configured this node.
+    async fn is_owner_configured(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<bool, XmppError>;
+
     /// Purge all items from a node without deleting the node (XEP-0060 §8.5).
     /// Returns the number of items removed.
     async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError>;

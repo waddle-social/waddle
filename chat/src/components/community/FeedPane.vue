@@ -13,7 +13,7 @@ import {
   SmilePlus,
   User,
 } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import FeedUpdateComposer from "@/components/community/FeedUpdateComposer.vue";
@@ -399,7 +399,7 @@ function selectStoryReaction(emoji: string) {
           ></span>
           <div v-if="item.kind === 'entry'" class="grid gap-2 pl-4 pr-4 py-3.5">
             <header class="flex min-w-0 items-start gap-3">
-              <AppAvatar :name="authorLabel(item.entry.author)" :src="null" size="md" />
+              <UserAvatar :name="authorLabel(item.entry.author)" :jid="item.entry.author ?? null" size="md" />
               <div class="min-w-0 flex-1">
                 <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <p class="type-control truncate font-semibold text-foreground">
@@ -453,7 +453,7 @@ function selectStoryReaction(emoji: string) {
           >
             <span class="grid min-w-0 gap-3">
               <span class="flex min-w-0 items-start gap-3">
-                <AppAvatar :name="authorLabel(item.story.author)" :src="null" size="md" />
+                <UserAvatar :name="authorLabel(item.story.author)" :jid="item.story.author ?? null" size="md" />
                 <span class="min-w-0 flex-1">
                   <span class="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span class="type-control truncate font-semibold text-foreground">

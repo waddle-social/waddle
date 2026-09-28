@@ -932,11 +932,12 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * whose bytes the caller already caches: when the advertised
      * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
      * retrieve the image data") and the result carries the id alone.
-     * Returns `None` when the target JID hasn't published an avatar or
-     * the fetch failed; errors are reported on the event listener so
-     * the caller can treat `None` as "fall back to initials".
+     *
+     * `Ok(None)` is a definitive "no readable avatar" (fall back to
+     * initials). `Err` is a failed lookup (not connected, timeout,
+     * transient stanza error): callers keep any avatar they already show.
      */
-    func requestAvatar(jid: String, knownIds: [String]) async  -> WaddleAvatarResult?
+    func requestAvatar(jid: String, knownIds: [String]) async throws  -> WaddleAvatarResult?
 
     func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
@@ -1207,7 +1208,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * pipelines always encode PNG) and dimensions must fit
      * `xs:unsignedShort`, else `InvalidArgument`.
      */
-    func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32) async throws
+    func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32) async throws  -> String
 
     /**
      * XEP-0107: publish a user mood. `kind` must be one of the 84
@@ -2511,13 +2512,14 @@ open func leaveRoom(roomJid: String, nick: String)async   {
      * whose bytes the caller already caches: when the advertised
      * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
      * retrieve the image data") and the result carries the id alone.
-     * Returns `None` when the target JID hasn't published an avatar or
-     * the fetch failed; errors are reported on the event listener so
-     * the caller can treat `None` as "fall back to initials".
+     *
+     * `Ok(None)` is a definitive "no readable avatar" (fall back to
+     * initials). `Err` is a failed lookup (not connected, timeout,
+     * transient stanza error): callers keep any avatar they already show.
      */
-open func requestAvatar(jid: String, knownIds: [String])async  -> WaddleAvatarResult?  {
+open func requestAvatar(jid: String, knownIds: [String])async throws  -> WaddleAvatarResult?  {
     return
-        try!  await uniffiRustCallAsync(
+        try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(
                     self.uniffiCloneHandle(),
@@ -2528,8 +2530,7 @@ open func requestAvatar(jid: String, knownIds: [String])async  -> WaddleAvatarRe
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeWaddleAvatarResult.lift,
-            errorHandler: nil
-
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -3331,7 +3332,7 @@ open func publishActivity(general: String, specific: String?, text: String?)asyn
      * pipelines always encode PNG) and dimensions must fit
      * `xs:unsignedShort`, else `InvalidArgument`.
      */
-open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32)async throws   {
+open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32)async throws  -> String  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -3340,10 +3341,10 @@ open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UIn
                     FfiConverterData.lower(data),FfiConverterString.lower(mimeType),FfiConverterUInt32.lower(width),FfiConverterUInt32.lower(height)
                 )
             },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -5935,9 +5936,7 @@ public func FfiConverterTypeWaddleArchivedMessage_lower(_ value: WaddleArchivedM
 /**
  * XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.
  *
- * `data` is the raw image bytes (base64-decoded) when carried by XMPP.
- * `url` is present when XEP-0084 metadata or vCard `EXTVAL` points to an
- * externally hosted avatar.
+ * `data` is the raw image bytes (base64-decoded) carried in-band by XMPP.
  */
 public struct WaddleAvatar: Equatable, Hashable {
     /**
@@ -5956,10 +5955,6 @@ public struct WaddleAvatar: Equatable, Hashable {
      * Decoded image bytes.
      */
     public var data: Data
-    /**
-     * Externally hosted avatar URL.
-     */
-    public var url: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -5975,15 +5970,11 @@ public struct WaddleAvatar: Equatable, Hashable {
          */mimeType: String,
         /**
          * Decoded image bytes.
-         */data: Data,
-        /**
-         * Externally hosted avatar URL.
-         */url: String?) {
+         */data: Data) {
         self.jid = jid
         self.id = id
         self.mimeType = mimeType
         self.data = data
-        self.url = url
     }
 
 
@@ -6005,8 +5996,7 @@ public struct FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer {
                 jid: FfiConverterString.read(from: &buf),
                 id: FfiConverterString.read(from: &buf),
                 mimeType: FfiConverterString.read(from: &buf),
-                data: FfiConverterData.read(from: &buf),
-                url: FfiConverterOptionString.read(from: &buf)
+                data: FfiConverterData.read(from: &buf)
         )
     }
 
@@ -6015,7 +6005,6 @@ public struct FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.mimeType, into: &buf)
         FfiConverterData.write(value.data, into: &buf)
-        FfiConverterOptionString.write(value.url, into: &buf)
     }
 }
 
@@ -12304,6 +12293,11 @@ public enum WaddleClientEvent: Equatable, Hashable {
     case messageRejected(stanzaId: StanzaId, from: Jid, to: Jid?
     )
     /**
+     * XEP-0084 metadata transition announced by a peer's PEP service.
+     */
+    case avatarChanged(jid: Jid, avatarId: String?
+    )
+    /**
      * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
      * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
      * query-response entries resolve the `fetch_inbox` verb and are
@@ -12375,16 +12369,19 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case 8: return .messageRejected(stanzaId: try FfiConverterTypeStanzaId.read(from: &buf), from: try FfiConverterTypeJid.read(from: &buf), to: try FfiConverterOptionTypeJid.read(from: &buf)
         )
 
-        case 9: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
+        case 9: return .avatarChanged(jid: try FfiConverterTypeJid.read(from: &buf), avatarId: try FfiConverterOptionString.read(from: &buf)
         )
 
-        case 10: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        case 10: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
         )
 
-        case 11: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        case 11: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         )
 
-        case 12: return .error(description: try FfiConverterString.read(from: &buf)
+        case 12: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        )
+
+        case 13: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -12435,23 +12432,29 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             FfiConverterOptionTypeJid.write(to, into: &buf)
 
 
-        case let .inboxPush(entry):
+        case let .avatarChanged(jid,avatarId):
             writeInt(&buf, Int32(9))
+            FfiConverterTypeJid.write(jid, into: &buf)
+            FfiConverterOptionString.write(avatarId, into: &buf)
+
+
+        case let .inboxPush(entry):
+            writeInt(&buf, Int32(10))
             FfiConverterTypeWaddleInboxEntry.write(entry, into: &buf)
 
 
         case let .call(event):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
 
 
         case let .authenticationFailed(condition):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
 
 
         case let .error(description):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(13))
             FfiConverterString.write(description, into: &buf)
 
         }
@@ -17433,7 +17436,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 55862) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 2785) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
@@ -17538,7 +17541,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 59372) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 15067) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 4753) {

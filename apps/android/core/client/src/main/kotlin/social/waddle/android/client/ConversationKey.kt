@@ -32,3 +32,24 @@ internal fun conversationKeyOf(
     } ?: return null
     return ConversationKey(conversation, isMine)
 }
+
+/**
+ * Live room ownership, decided at ingest: the sending occupant's
+ * disclosed real JID wins when there is one ([authorJid]); otherwise the
+ * nick comparison in [key] (made against our ACTUAL occupant nick — see
+ * [liveOwnNickOf]) stands.
+ */
+internal fun ConversationKey.withLiveAuthor(
+    isGroupchat: Boolean,
+    authorJid: String?,
+    ownBareJid: String?,
+): ConversationKey =
+    if (isGroupchat && authorJid != null) copy(isMine = authorJid == ownBareJid?.let(::normalizedBareJid)) else this
+
+/**
+ * The nick our live room reflections come from: our actual occupant nick
+ * in the sender's room (self-presence, incl. a XEP-0045 210 rename), else
+ * the configured join nick when the room has not told us yet.
+ */
+internal fun liveOwnNickOf(from: String?, configuredNick: String?, actualNickIn: (String) -> String?): String? =
+    from?.let { actualNickIn(bareJid(it)) } ?: configuredNick

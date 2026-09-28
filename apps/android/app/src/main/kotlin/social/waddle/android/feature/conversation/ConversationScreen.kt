@@ -58,8 +58,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.filterNotNull
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.avatar.LIST_AVATAR_SIZE
+import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.store.TimelineItem
+import social.waddle.android.client.store.authorBareJidOf
 import social.waddle.android.feature.search.MessageSearchSheet
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.feature.search.MessageSearchViewModel
@@ -257,7 +260,7 @@ fun ConversationScreen(
                 authorPresence = authorPresence,
                 trustedMediaOrigin = trustedMediaOrigin,
             )
-            TypingIndicator(names = typing)
+            TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)
             val slashCommands = slashCommandHost
                 ?.let { host -> host.controller.commands.collectAsStateWithLifecycle().value }
                 .orEmpty()
@@ -470,6 +473,13 @@ fun ConversationScreen(
                 LazyColumn {
                     items(state.threads, key = { it.threadId }) { thread ->
                         ListItem(
+                            leadingContent = {
+                                PeerAvatar(
+                                    jid = thread.rootItem?.let { authorBareJidOf(it, selfBareJid) },
+                                    displayName = thread.rootAuthor.orEmpty(),
+                                    size = LIST_AVATAR_SIZE,
+                                )
+                            },
                             headlineContent = {
                                 Text(
                                     text = if (thread.rootTombstoned) {

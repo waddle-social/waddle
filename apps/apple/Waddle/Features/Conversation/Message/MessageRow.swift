@@ -45,7 +45,7 @@ private struct MessageRowContent: View {
     private var avatarSize: CGFloat { isCompact ? Theme.Size.rowAvatar : Theme.Size.avatar }
 
     var body: some View {
-        let author = MessageAuthor.resolve(item, occupant: occupant)
+        let author = MessageAuthor.resolve(item, occupant: occupant, authorJID: session.authorJID(of: item))
         HStack(alignment: .top, spacing: isCompact ? Theme.Spacing.s : Theme.Spacing.m) {
             gutter(author: author)
                 .frame(width: avatarSize, alignment: .trailing)

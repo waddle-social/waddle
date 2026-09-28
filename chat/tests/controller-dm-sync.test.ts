@@ -128,7 +128,7 @@ describe("useDmSync handleOpenDm / handleNewDm", () => {
   test.each(["chat", "@chat", "chat@example.com", "Chat@EXAMPLE.COM"])("New DM resolves %s to a selected directory JID", async (query) => {
     const h = makeHarness();
     h.searchUsers.mockResolvedValue([
-      { id: "chat@example.com", jid: "chat@example.com", username: "display-chat", display_name: null, avatar_url: null },
+      { id: "chat@example.com", jid: "chat@example.com", username: "display-chat", display_name: null },
     ]);
     const results = await h.dmSync.searchDmRecipients(query);
     await h.dmSync.handleNewDm(results[0]!.jid);
@@ -153,9 +153,9 @@ describe("useDmSync handleOpenDm / handleNewDm", () => {
   test("full addresses require an exact local account result", async () => {
     const h = makeHarness();
     h.searchUsers.mockResolvedValue([
-      { id: "chatty@example.com", jid: "chatty@example.com", username: "chatty", display_name: null, avatar_url: null },
-      { id: "chat@muc.example.com", jid: "chat@muc.example.com", username: "chat", display_name: null, avatar_url: null },
-      { id: "chat@example.com/resource", jid: "chat@example.com/resource", username: "chat", display_name: null, avatar_url: null },
+      { id: "chatty@example.com", jid: "chatty@example.com", username: "chatty", display_name: null },
+      { id: "chat@muc.example.com", jid: "chat@muc.example.com", username: "chat", display_name: null },
+      { id: "chat@example.com/resource", jid: "chat@example.com/resource", username: "chat", display_name: null },
     ]);
     expect(await h.dmSync.searchDmRecipients("chat@example.com")).toEqual([]);
     await h.dmSync.handleNewDm("chat@example.com");
@@ -169,7 +169,7 @@ describe("useDmSync handleOpenDm / handleNewDm", () => {
 
   test("failed search clears previous recipients and retains the error", async () => {
     const h = makeHarness();
-    const user = { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null, avatar_url: null };
+    const user = { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null };
     h.searchUsers.mockResolvedValue([user]);
     await h.dmSync.searchDmRecipients("chat");
     h.searchUsers.mockRejectedValue(new Error("Directory unavailable"));
@@ -181,7 +181,7 @@ describe("useDmSync handleOpenDm / handleNewDm", () => {
 
   test("a stale search and a replaced connection cannot supply selectable recipients", async () => {
     const h = makeHarness();
-    const user = { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null, avatar_url: null };
+    const user = { id: "chat@example.com", jid: "chat@example.com", username: "chat", display_name: null };
     let finish!: (users: UserSearchResult[]) => void;
     h.searchUsers.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const stale = h.dmSync.searchDmRecipients("chat");

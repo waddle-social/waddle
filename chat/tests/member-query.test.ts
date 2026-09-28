@@ -8,7 +8,7 @@ type TestXmpp = {
     room: string,
     affiliation: "owner" | "admin" | "member" | "outcast",
   ) => Promise<Array<{ jid?: string }>>;
-  request_avatar?: (jid: string) => Promise<{ jid: string; id: string; mime_type: string; data?: Uint8Array; url?: string } | null>;
+  request_avatar?: (jid: string, knownIds: string[]) => Promise<{ id: string; avatar?: { jid: string; id: string; mime_type: string; data?: Uint8Array } | null } | null>;
 };
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -69,7 +69,6 @@ describe("BrowserXmppClient.listRoomMembers", () => {
     expect(members).toEqual([{
       jid: "bob@example.com",
       username: "bob",
-      avatar_url: null,
       affiliation: "member",
       joined_at: "",
     }]);
@@ -110,33 +109,26 @@ describe("BrowserXmppClient.listRoomMembers", () => {
 
 describe("BrowserXmppClient.fetchUserAvatar", () => {
   test("fetches avatar data through the Rust client with a bare JID", async () => {
-    const requestAvatar = mock(async (jid: string) => ({
-      jid,
+    const requestAvatar = mock(async (jid: string, _knownIds: string[]) => ({
       id: "hash1",
-      mime_type: "image/png",
-      data: new Uint8Array(Buffer.from("avatar-bytes")),
+      avatar: { jid, id: "hash1", mime_type: "image/png", data: new Uint8Array(Buffer.from("avatar-bytes")) },
     }));
     const client = clientWithXmpp({ request_avatar: requestAvatar });
 
     await expect(client.fetchUserAvatar("bob@example.com/mobile")).resolves.toBe(
       `data:image/png;base64,${Buffer.from("avatar-bytes").toString("base64")}`,
     );
-    expect(requestAvatar).toHaveBeenCalledWith("bob@example.com");
+    expect(requestAvatar).toHaveBeenCalledWith("bob@example.com", []);
   });
 
-  test("returns external avatar URLs from the Rust client", async () => {
-    const requestAvatar = mock(async (jid: string) => {
+  test("returns in-band avatar data from the Rust client as a data URL", async () => {
+    const requestAvatar = mock(async (jid: string, _knownIds: string[]) => {
       expect(jid).toBe("dana@example.com");
-      return {
-        jid,
-        id: "vcard-extval",
-        mime_type: "image/png",
-        url: "https://avatars.example.com/dana.png",
-      };
+      return { id: "sha1", avatar: { jid, id: "sha1", mime_type: "image/png", data: new Uint8Array([137, 80, 78, 71]) } };
     });
     const client = clientWithXmpp({ request_avatar: requestAvatar });
 
-    await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBe("https://avatars.example.com/dana.png");
+    await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBe("data:image/png;base64,iVBORw==");
   });
 
   test("returns null when the Rust client has no avatar", async () => {

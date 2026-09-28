@@ -240,6 +240,7 @@ const gridStyle = computed(() => ({
         <CallTile
           :key="focusedTile.key"
           :label="focusedTile.label"
+          :avatar-jid="focusedTile.identity"
           :attach-key="focusedTile.key"
           :is-self="focusedTile.isSelf"
           :mirror-video="focusedTile.mirrorVideo"
@@ -257,6 +258,7 @@ const gridStyle = computed(() => ({
           v-for="tile in otherTiles"
           :key="tile.key"
           :label="tile.label"
+          :avatar-jid="tile.identity"
           :attach-key="tile.key"
           :is-self="tile.isSelf"
           :mirror-video="tile.mirrorVideo"
@@ -285,6 +287,7 @@ const gridStyle = computed(() => ({
         v-for="tile in visibleTiles"
         :key="tile.key"
         :label="tile.label"
+        :avatar-jid="tile.identity"
         :attach-key="tile.key"
         :is-self="tile.isSelf"
         :mirror-video="tile.mirrorVideo"

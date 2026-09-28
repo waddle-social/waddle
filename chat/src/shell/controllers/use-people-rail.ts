@@ -21,8 +21,7 @@ export interface PeopleRailPerson {
   /** Bare JID — the dedupe key across every source. */
   jid: string;
   name: string;
-  avatarUrl: string | null;
-  /** Presence dot for `AppAvatar`; undefined when no presence is known. */
+  /** Presence dot for the avatar; undefined when no presence is known. */
   presence: OccupantPresence | undefined;
   status: PeopleRailStatus;
   /** Short truthful status line ("speaking", "in the huddle", "away"). */
@@ -52,9 +51,7 @@ export interface PeopleRailSources {
   roomPresence: RoomPresence;
   /** nick -> bare JID for the focused room. */
   authorJidByNick: Record<string, string>;
-  /** nick -> avatar URL for the focused room (lazy fetch). */
-  avatarUrlByAuthor: Record<string, string | null>;
-  /** Affiliation list merged with online occupants, avatars resolved. */
+  /** Affiliation list merged with online occupants. */
   members: readonly MemberSummary[];
   /** Bare room JID of the focused room, or null. */
   activeRoomJid: string | null;
@@ -113,7 +110,6 @@ interface KnownPerson {
   /** Bare JID — the dedupe key across roster and DM peers. */
   jid: string;
   name: string;
-  avatarUrl: string | null;
   presence: OccupantPresence | undefined;
   /** The raw 1:1 show, for copy such as `dmPresenceLabel`. */
   presenceShow: PresenceShow;
@@ -151,7 +147,6 @@ export function splitKnownPeople(
     const person: KnownPerson = {
       jid,
       name: contact?.name || conversation?.peerUsername || contact?.username || jid,
-      avatarUrl: conversation?.peerAvatarUrl ?? null,
       presence: presenceFromShow(presenceShow),
       presenceShow,
     };
@@ -213,7 +208,7 @@ function bare(jid: string): string {
   return barePeerJid(jid).toLowerCase();
 }
 
-function memberAvatarIndex(members: readonly MemberSummary[]): Map<string, MemberSummary> {
+function memberIndexByJid(members: readonly MemberSummary[]): Map<string, MemberSummary> {
   const index = new Map<string, MemberSummary>();
   for (const member of members) index.set(bare(member.jid), member);
   return index;
@@ -223,7 +218,7 @@ function memberAvatarIndex(members: readonly MemberSummary[]): Map<string, Membe
 export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
   const selfKey = sources.selfJid ? bare(sources.selfJid) : null;
   const seen = new Set<string>();
-  const memberIndex = memberAvatarIndex(sources.members);
+  const memberIndex = memberIndexByJid(sources.members);
   const contactByJid = new Map<string, RosterContact>();
   for (const contact of sources.contacts) contactByJid.set(bare(contact.jid), contact);
   const conversationByJid = new Map<string, DmConversation>();
@@ -248,11 +243,6 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
     if (conversation?.peerUsername) return conversation.peerUsername;
     if (contact?.username) return contact.username;
     return memberIndex.get(jid)?.username ?? fallback;
-  }
-
-  function knownAvatar(jid: string, nick?: string): string | null {
-    if (nick && sources.avatarUrlByAuthor[nick]) return sources.avatarUrlByAuthor[nick] ?? null;
-    return memberIndex.get(jid)?.avatar_url ?? conversationByJid.get(jid)?.peerAvatarUrl ?? null;
   }
 
   function claim(jid: string): boolean {
@@ -282,7 +272,6 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
       huddle.push({
         jid,
         name: knownName(jid, nick),
-        avatarUrl: knownAvatar(jid, isActiveRoom ? nick : undefined),
         presence: (isActiveRoom ? sources.roomPresence[nick] : undefined) ?? knownPresence(jid) ?? "online",
         status,
         statusText: statusText(status),
@@ -299,7 +288,6 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
     huddle.push({
       jid,
       name: knownName(jid, activity.peerJid),
-      avatarUrl: knownAvatar(jid),
       presence: knownPresence(jid) ?? "online",
       status,
       statusText: statusText(status),
@@ -321,7 +309,6 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
       room.push({
         jid,
         name: knownName(jid, nick),
-        avatarUrl: knownAvatar(jid, nick),
         presence: occupantPresence,
         status,
         statusText: statusText(status),
@@ -342,7 +329,6 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
     const person: PeopleRailPerson = {
       jid,
       name: knownName(jid, jid),
-      avatarUrl: knownAvatar(jid),
       presence,
       status,
       statusText: statusText(status),
@@ -372,7 +358,6 @@ export interface MemberCardSources {
   members: readonly MemberSummary[];
   roomPresence: RoomPresence;
   authorJidByNick: Record<string, string>;
-  avatarUrlByAuthor: Record<string, string | null>;
   contacts: readonly RosterContact[];
   conversations: readonly DmConversation[];
   huddleJids: ReadonlySet<string>;
@@ -418,7 +403,6 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
       cards.push({
         jid,
         name: member.username || nick || jid,
-        avatarUrl: (nick ? sources.avatarUrlByAuthor[nick] : null) ?? member.avatar_url ?? null,
         presence,
         status,
         statusText: statusText(status),
@@ -438,7 +422,6 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
       cards.push({
         jid,
         name: contact?.name || conversation?.peerUsername || contact?.username || jid,
-        avatarUrl: conversation?.peerAvatarUrl ?? null,
         presence,
         status,
         statusText: statusText(status),
@@ -455,7 +438,6 @@ export interface PeopleRailDeps {
   selfJid: Ref<string | null> | ComputedRef<string | null>;
   roomPresence: Ref<RoomPresence>;
   authorJidByNick: Ref<Record<string, string>> | ComputedRef<Record<string, string>>;
-  avatarUrlByAuthor: Ref<Record<string, string | null>> | ComputedRef<Record<string, string | null>>;
   members: Ref<readonly MemberSummary[]> | ComputedRef<readonly MemberSummary[]>;
   activeRoomJid: Ref<string | null> | ComputedRef<string | null>;
   callParticipants: Ref<Record<string, readonly string[]>> | ComputedRef<Record<string, readonly string[]>>;
@@ -475,7 +457,6 @@ export function usePeopleRail(deps: PeopleRailDeps): ComputedRef<PeopleRailGroup
       selfJid: deps.selfJid.value,
       roomPresence: deps.roomPresence.value,
       authorJidByNick: deps.authorJidByNick.value,
-      avatarUrlByAuthor: deps.avatarUrlByAuthor.value,
       members: deps.members.value,
       activeRoomJid: deps.activeRoomJid.value,
       callParticipants: deps.callParticipants.value,

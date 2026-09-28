@@ -43,6 +43,11 @@ final class FFIEventListener: WaddleEventListener {
             let recipient = to.flatMap(JID.init(parsing:))
             guard to == nil || recipient != nil else { return nil }
             return .messageRejected(stanzaID: stanzaId, from: sender, to: recipient)
+        case let .avatarChanged(jid, avatarId):
+            // The core emits this only for a bare `from`; the strict parse
+            // just refuses anything else rather than truncating it.
+            guard let owner = FFIInbound.bareJID(jid) else { return nil }
+            return .avatarChanged(jid: owner, id: avatarId)
         case .call:
             BridgeLog.debug("dropped call event: calls are not bridged")
             return nil

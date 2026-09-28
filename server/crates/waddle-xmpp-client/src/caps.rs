@@ -9,6 +9,8 @@ use crate::messaging::{
 
 pub const NS_CAPS: &str = "http://jabber.org/protocol/caps";
 pub const CAPS_NODE: &str = "https://waddle.social/caps";
+/// XEP-0084 §4.1 PEP notification filter for peer avatar metadata changes.
+pub const NS_AVATAR_METADATA_NOTIFY: &str = "urn:xmpp:avatar:metadata+notify";
 
 const IDENTITY_CATEGORY: &str = "client";
 const IDENTITY_TYPE: &str = "pc";
@@ -20,6 +22,7 @@ pub fn client_caps_features() -> Vec<&'static str> {
         NS_CAPS,
         NS_CHAT_MARKERS,
         crate::mds::NS_MDS_NOTIFY,
+        NS_AVATAR_METADATA_NOTIFY,
         // XEP-0163 §3: advertise interest in peers' User Activity so the server
         // fans their in-call overlay (ADR-010 Phase 3) out to us. Without this
         // the activity PEP node is published but no contact is ever notified.
@@ -166,6 +169,7 @@ mod tests {
             Some(client_caps_verification_string().as_str())
         );
         assert!(client_caps_features().contains(&crate::mds::NS_MDS_NOTIFY));
+        assert!(client_caps_features().contains(&NS_AVATAR_METADATA_NOTIFY));
         assert!(client_caps_features().contains(&NS_CHAT_MARKERS));
         // ADR-010 Phase 3: the in-call overlay receive path depends on this
         // being advertised, or the server never fans a peer's activity to us.
@@ -226,6 +230,7 @@ mod tests {
                 crate::messaging::NS_CHAT_STATES,
                 DISCO_INFO_NS,
                 crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
+                NS_AVATAR_METADATA_NOTIFY,
                 NS_CHAT_MARKERS,
                 crate::mds::NS_MDS_NOTIFY,
                 NS_MESSAGE_CORRECT,
@@ -237,7 +242,7 @@ mod tests {
         );
         assert_eq!(
             client_caps_verification_string(),
-            "xOykj9pu3F2sZWOM/yD+WvlIkgU="
+            "3JxBttV3VjZcCeN5hRcehLf0Cq0="
         );
     }
 

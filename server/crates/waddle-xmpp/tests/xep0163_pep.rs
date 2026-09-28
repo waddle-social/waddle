@@ -227,17 +227,26 @@ fn xep0163_default_access_model_for_bookmarks_is_whitelist() {
 }
 
 #[test]
+fn xep0163_avatar_nodes_default_to_open_access() {
+    // XEP-0084 avatars are resolved by peers that share only a room
+    // with the owner, and clients request `pubsub#access_model=open`
+    // via publish-options. The Publish arm does not enforce
+    // publish-options, so the auto-create default carries that shape.
+    for node in [PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA] {
+        assert_eq!(
+            PepHandler::default_access_model_for_node(node),
+            AccessModel::Open,
+            "{node} should default to `open`"
+        );
+    }
+}
+
+#[test]
 fn xep0163_default_access_model_for_other_nodes_is_presence() {
     // XEP-0163 §5: "PEP-defined nodes by default use the
     // 'presence' access model" — items get pushed to every
     // roster contact whose presence is currently online.
-    for node in [
-        PEP_NODE_AVATAR_DATA,
-        PEP_NODE_AVATAR_METADATA,
-        "http://jabber.org/protocol/nick",
-        "urn:waddle:custom:0",
-        "",
-    ] {
+    for node in ["http://jabber.org/protocol/nick", "urn:waddle:custom:0", ""] {
         assert_eq!(
             PepHandler::default_access_model_for_node(node),
             AccessModel::Presence,

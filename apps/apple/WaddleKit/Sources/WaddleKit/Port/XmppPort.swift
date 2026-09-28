@@ -38,6 +38,9 @@ public enum XmppEvent: Sendable {
     case deliveryFailed(stanzaID: String)
     /// Explicit error, subject to outbound id and address validation.
     case messageRejected(stanzaID: String, from: JID, to: JID?)
+    /// XEP-0084 metadata notification from a peer's PEP service; `id` is
+    /// nil when the avatar was disabled.
+    case avatarChanged(jid: BareJID, id: String?)
     /// Live `urn:waddle:inbox:0` unread push.
     case inboxPush(InboxEntry)
     /// SASL failure: the presented credential is dead.
@@ -107,8 +110,10 @@ public protocol DirectoryPort: AnyObject, Sendable {
 
 /// The signed-in user's published profile and other users' avatars.
 public protocol ProfilePort: AnyObject, Sendable {
-    func fetchAvatar(of jid: BareJID) async -> AvatarImage?
-    func publishAvatar(_ image: AvatarImage) async throws
+    /// `knownID` is the id of the avatar already held, if any.
+    func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch
+    /// Returns the XEP-0084 item id the avatar was published under.
+    func publishAvatar(_ image: AvatarImage) async throws -> String
     func removeAvatar() async throws
     func fetchMood(of jid: BareJID) async throws -> UserMood?
     func publishMood(_ mood: UserMood) async throws

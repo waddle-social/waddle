@@ -72,7 +72,8 @@ describe("threadPreviewFor", () => {
 });
 
 describe("threadParticipantsFor", () => {
-  const avatars = { alice: "alice.png", bob: null } as Record<string, string | null>;
+  const jids: Record<string, string> = { alice: "alice@example.com" };
+  const avatars = (m: TimelineMessage) => jids[m.author] ?? null;
   const presence = { alice: "online" } as Record<string, "online" | "away" | "dnd" | "offline">;
 
   test("orders unique reply authors newest-first and appends the root author", () => {
@@ -86,8 +87,8 @@ describe("threadParticipantsFor", () => {
     });
     const participants = threadParticipantsFor(e, avatars, presence);
     expect(participants.map((p) => p.nick)).toEqual(["alice", "bob", "root-author"]);
-    expect(participants[0]).toEqual({ nick: "alice", avatarUrl: "alice.png", presence: "online" });
-    expect(participants[1]).toEqual({ nick: "bob", avatarUrl: null, presence: "offline" });
+    expect(participants[0]).toEqual({ key: "jid:alice@example.com", nick: "alice", jid: "alice@example.com", presence: "online" });
+    expect(participants[1]).toEqual({ key: "unresolved:bob", nick: "bob", jid: null, presence: "offline" });
   });
 
   test("does not duplicate a root author who also replied", () => {
@@ -96,6 +97,29 @@ describe("threadParticipantsFor", () => {
       directChildren: [message({ id: "1", author: "alice" })],
     });
     expect(threadParticipantsFor(e, avatars, presence).map((p) => p.nick)).toEqual(["alice"]);
+  });
+
+  test("two people who used the same nick stay two participants; unresolved never merges with resolved", () => {
+    const jidById: Record<string, string | null> = {
+      "alice-as-sam": "alice@example.com",
+      "bob-as-sam": "bob@example.com",
+      "alice-again": "alice@example.com",
+      "unknown-sam": null,
+    };
+    const e = entry({
+      root: message({ id: "root", author: "sam", authorOccupantJid: "room@muc.example.com/sam" }),
+      directChildren: [
+        message({ id: "alice-as-sam", author: "sam", authorOccupantJid: "room@muc.example.com/sam" }),
+        message({ id: "bob-as-sam", author: "sam", authorOccupantJid: "room@muc.example.com/sam" }),
+        message({ id: "alice-again", author: "sam", authorOccupantJid: "room@muc.example.com/sam" }),
+        message({ id: "unknown-sam", author: "sam", authorOccupantJid: "room@muc.example.com/sam" }),
+      ],
+    });
+    const participants = threadParticipantsFor(e, (m) => jidById[m.id] ?? null, {});
+    // Newest first: the unresolved author, Alice, Bob; the unresolved root
+    // shares the unresolved identity and is not repeated.
+    expect(participants.map((p) => p.jid)).toEqual([null, "alice@example.com", "bob@example.com"]);
+    expect(new Set(participants.map((p) => p.key)).size).toBe(participants.length);
   });
 
   test("is empty without an entry", () => {

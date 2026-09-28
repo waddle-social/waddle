@@ -472,7 +472,7 @@ export class MamPager {
     const xmpp = await this.deps.requireConnectedXmpp();
     const page = await xmpp.search_room_history?.(this.deps.roomJidForChannel(channelId), query, max);
     const parsed = page ? this.roomPageToMessages(page).messages : [];
-    return parsed.filter((message) => !!message.body).map((message, index) => ({ id: message.id, ...(page?.messages[index]?.mam_id ? { archiveId: page.messages[index].mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), roomJid: message.roomJid }));
+    return parsed.filter((message) => !!message.body).map((message, index) => ({ id: message.id, ...(page?.messages[index]?.mam_id ? { archiveId: page.messages[index].mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), roomJid: message.roomJid, authorOccupantJid: `${message.roomJid}/${message.nick}`, ...(message.authorRealJid ? { authorRealJid: message.authorRealJid } : {}) }));
   }
 
   async queryPersonalMam(peerJid: string, max = 100, requestedScope?: DmConversationScope): Promise<LiveDmMessage[]> {
@@ -583,7 +583,7 @@ export class MamPager {
       .filter((entry): entry is { archived: WasmArchivedMessage; message: LiveDmMessage } =>
         !!entry.message && this.dmMessageMatchesPeer(entry.message, archivePeerJid, dmScope)
       ) ?? [];
-    return parsed.filter(({ message }) => !!message.body).map(({ archived, message }) => ({ id: message.id, ...(archived.mam_id ? { archiveId: archived.mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid }));
+    return parsed.filter(({ message }) => !!message.body).map(({ archived, message }) => ({ id: message.id, ...(archived.mam_id ? { archiveId: archived.mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid, ...dmSearchAuthor(message) }));
   }
 
   async runReconnectCatchup(
@@ -916,4 +916,17 @@ export class MamPager {
     }
     return lastArchiveId;
   }
+}
+
+/**
+ * Author identity of a 1:1 search hit, mirroring the DM timeline row: the
+ * sender's JID, plus the occupant JID when a MUC private message came from
+ * the occupant (never our own copy).
+ */
+function dmSearchAuthor(message: LiveDmMessage): Pick<MessageSearchResult, "authorJid" | "authorOccupantJid"> {
+  const fromOccupant = message.mucPm && barePeerJid(message.fromJid) === barePeerJid(message.peerJid);
+  return {
+    authorJid: message.fromJid,
+    ...(fromOccupant ? { authorOccupantJid: message.fromJid } : {}),
+  };
 }

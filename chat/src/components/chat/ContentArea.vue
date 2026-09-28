@@ -23,6 +23,8 @@ import {
 } from "@/lib/scroll-direction";
 import { extractDroppedFiles } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
+import { authorAvatarJid, roomOccupantAvatarJid, typingAuthorAvatarJid } from "@/lib/avatars/author-jid";
+import { barePeerJid } from "@/lib/xmpp/jid";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { CallMedia } from "@/lib/calls/types";
 import type { MentionCandidate } from "@/lib/mentions";
@@ -93,8 +95,6 @@ const props = defineProps<{
   currentUser?: string;
   currentUserJid?: string;
   selfFullJid?: string | null;
-  selfDomain?: string;
-  avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
   mentionCandidates: MentionCandidate[];
   roomHats: RoomHats;
@@ -191,7 +191,7 @@ const channelHeaderMembers = computed<ChannelHeaderMember[]>(() => {
     members.push({
       nick,
       jid: props.authorJidByNick?.[nick],
-      avatarUrl: props.avatarUrlByAuthor[nick] ?? null,
+      avatarJid: roomOccupantAvatarJid(props.roomJid, nick),
       presence: p,
     });
   }
@@ -428,7 +428,32 @@ watch(
   { immediate: true },
 );
 const showSearch = ref(false);
-const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
+/** Avatar JID for a timeline row's author; `null` renders initials. */
+function avatarJidFor(message: TimelineMessage): string | null {
+  return authorAvatarJid(message, props.currentUserJid);
+}
+
+/**
+ * Avatar JID for a typing nick. In a 1:1 chat the only one typing is the
+ * peer, whatever their localpart (it may equal ours on another domain). In
+ * a room the nick's current holder is whoever the room disclosed; that is
+ * us only when the disclosed identity is ours — never by nick equality.
+ */
+function typingAvatarJid(nick: string): string | null {
+  return typingAuthorAvatarJid(nick, props.dmPeer ? { peerJid: props.dmPeer.peerJid } : { roomJid: props.roomJid });
+}
+
+/** Whether the profile drawer shows us: by resolved identity, never by nick. */
+const popoverIsSelf = computed(() => {
+  const jid = popoverAuthor.value?.jid;
+  if (!jid || !props.currentUserJid) return false;
+  return barePeerJid(jid).toLowerCase() === barePeerJid(props.currentUserJid).toLowerCase();
+});
+
+/** A search hit resolves like the row it came from; unknown authors render initials. */
+function searchResultAvatarJid(result: MessageSearchResult): string | null {
+  return authorAvatarJid(result, props.currentUserJid);
+}
 const isForumChannel = computed(() => detectForumChannel(props.channel));
 
 // #414: pin state for the current room. Hydrated by the controller.
@@ -479,7 +504,7 @@ const queuedMessageCount = computed(() =>
     message.isSelf && (message.deliveryStatus === "sending" || message.deliveryStatus === "failed")
   ).length,
 );
-const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
+const popoverAuthor = ref<{ username: string; jid: string; avatarJid: string | null } | null>(null);
 const profileDrawerOpen = computed({
   get: () => !!popoverAuthor.value,
   set: (v: boolean) => { if (!v) popoverAuthor.value = null; },
@@ -581,11 +606,12 @@ function presenceTextForAuthor(username: string): string {
   return "offline";
 }
 
-function onAvatarClick(author: string) {
-  const authorJid = props.authorJidByNick?.[author]
-    ?? (props.selfDomain ? `${author}@${props.selfDomain}` : null);
+function onAvatarClick(author: string, avatarJid: string | null) {
+  // Only the row's own resolved author: the current nick map may name
+  // someone who reused the nick after this row was sent.
+  const authorJid = avatarJid;
   if (!authorJid) return;
-  popoverAuthor.value = { username: author, jid: authorJid };
+  popoverAuthor.value = { username: author, jid: authorJid, avatarJid };
 }
 
 function openPopoverDm() {
@@ -676,7 +702,7 @@ function threadChipParticipants(messageId: string) {
   return threadChipParticipantsFor(
     props.threadIndex,
     messageId,
-    props.avatarUrlByAuthor,
+    avatarJidFor,
     props.roomPresence,
   );
 }
@@ -832,7 +858,7 @@ function dayDividerLabel(createdAt: string): string {
       v-model:open="showSearch"
       :results="searchResults"
       :is-searching="isSearching"
-      :avatar-url-by-author="avatarUrlByAuthor"
+      :avatar-jid-for="searchResultAvatarJid"
       :room-presence="roomPresence"
       @search="(query) => emit('search', query)"
       @clear="emit('clearSearch')"
@@ -937,7 +963,7 @@ function dayDividerLabel(createdAt: string): string {
       v-if="typingUsers.length > 0 && isTopPinned"
       variant="social"
       :typing-users="typingUsers"
-      :avatar-url-by-author="avatarUrlByAuthor"
+      :avatar-jid-for="typingAvatarJid"
       :room-presence="roomPresence"
     />
 
@@ -1040,7 +1066,7 @@ function dayDividerLabel(createdAt: string): string {
             :message="msg"
             :current-user="props.currentUser"
             :current-user-jid="props.currentUserJid"
-            :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
+            :avatar-jid="avatarJidFor(msg)"
             :hats="roomHats[msg.author] ?? []"
             :authority="roomAuthority[msg.author] ?? null"
             :presence="roomPresence[msg.author] ?? 'offline'"
@@ -1105,7 +1131,7 @@ function dayDividerLabel(createdAt: string): string {
       v-if="typingUsers.length > 0 && !isTopPinned"
       variant="chat"
       :typing-users="typingUsers"
-      :avatar-url-by-author="avatarUrlByAuthor"
+      :avatar-jid-for="typingAvatarJid"
       :room-presence="roomPresence"
     />
 
@@ -1154,11 +1180,11 @@ function dayDividerLabel(createdAt: string): string {
       v-model:open="profileDrawerOpen"
       :username="popoverAuthor?.username ?? ''"
       :jid="popoverAuthor?.jid ?? ''"
-      :avatar-url="popoverAuthor ? avatarUrlByAuthor[popoverAuthor.username] ?? null : null"
+      :avatar-jid="popoverAuthor?.avatarJid ?? null"
       :presence="popoverAuthor ? roomPresence[popoverAuthor.username] : undefined"
       :presence-text="popoverAuthor ? presenceTextForAuthor(popoverAuthor.username) : undefined"
       :hats="popoverAuthor ? roomHats[popoverAuthor.username] : undefined"
-      :is-self="popoverAuthor?.username === currentUser"
+      :is-self="popoverIsSelf"
       :xmpp-client="xmppClient"
       @message="openPopoverDm"
     />
@@ -1174,7 +1200,7 @@ function dayDividerLabel(createdAt: string): string {
       :dm-peer-name="dmPeer?.peerUsername"
       :call-thread-id="activeCallThreadId"
       :call-chat-messages="callChatMessages"
-      :avatar-url-by-author="avatarUrlByAuthor"
+      :avatar-jid-for="avatarJidFor"
       :is-sending="isSending"
       :disabled="!canShowComposer"
       :mention-candidates="mentionCandidates"

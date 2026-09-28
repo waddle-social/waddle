@@ -4,6 +4,7 @@ import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
+import { barePeerJid } from "@/lib/xmpp/jid";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 import { composerLinkPreviewPayloadIsFresh, type ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import {
@@ -195,6 +196,8 @@ export function useMucSend(deps: UseMucSendDeps) {
           createdAt: new Date().toISOString(),
           createdAtSource: "queued",
           isSelf: true,
+          // Our own send: pinned so its face never depends on nick state.
+          authorAvatarJid: barePeerJid(session.value.jid).toLowerCase(),
           deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
           ...(markup && markup.length > 0 ? { markup } : {}),
           ...(references && references.length > 0 ? { references } : {}),

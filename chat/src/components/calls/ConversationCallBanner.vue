@@ -15,7 +15,9 @@ import {
   hasKnownDmCallMedia,
   type DmCallActivity,
 } from "@/lib/calls/dm-call-activity";
-import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { $mucCallParticipantOwners, $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { callParticipantAvatarJid, conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
+import { useAvatarUrls } from "@/lib/avatars/use-avatar-url";
 import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
@@ -96,6 +98,19 @@ const banner = computed<BannerView | null>(() => {
   if (groupBanner) return groupBanner;
   return dmBanner();
 });
+
+const mucCallParticipantOwners = useStore($mucCallParticipantOwners);
+
+/** Avatar JID behind a banner label: the DM peer, or a call participant's real JID. */
+function avatarJidFor(label: string): string | null {
+  if (banner.value?.kind === "dm") {
+    return props.dmPeerJid ? conversationPeerAvatarJid(props.dmPeerJid) : null;
+  }
+  const roomJid = normalizedRoomJid.value;
+  return callParticipantAvatarJid(roomJid, label, mucCallParticipantOwners.value[roomJid] ?? []);
+}
+
+const avatarUrlFor = useAvatarUrls(() => (banner.value?.avatarLabels.slice(0, 3) ?? []).map(avatarJidFor));
 
 function groupCallBanner(): BannerView | null {
   const roomJid = normalizedRoomJid.value;
@@ -410,7 +425,13 @@ function activateSecondaryBanner(): void {
               :key="label"
               class="conversation-call-banner__avatar type-meta"
             >
-              {{ avatarInitials(label) }}
+              <img
+                v-if="avatarUrlFor(avatarJidFor(label))"
+                :src="avatarUrlFor(avatarJidFor(label)) ?? undefined"
+                alt=""
+                class="conversation-call-banner__avatar-image"
+              />
+              <template v-else>{{ avatarInitials(label) }}</template>
             </span>
             <span
               v-if="banner.avatarLabels.length > 3"
@@ -539,6 +560,13 @@ function activateSecondaryBanner(): void {
   background: color-mix(in oklab, var(--primary) 18%, var(--card));
   color: var(--primary);
   font-variant-numeric: tabular-nums;
+}
+
+.conversation-call-banner__avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  object-fit: cover;
 }
 
 .conversation-call-banner__avatar--more {

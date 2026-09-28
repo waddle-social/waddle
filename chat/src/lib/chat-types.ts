@@ -50,7 +50,6 @@ export interface MemberSummary {
   jid: string;
   user_id?: string;
   username: string;
-  avatar_url: string | null;
   /** XEP-0045 §5.2 affiliation — persistent room-relationship.
    * Previously named `role` here, which was a misnomer: the XMPP
    * `role` (XEP-0045 §5.1) is the session-scoped permission layer
@@ -64,6 +63,5 @@ export interface UserSearchResult {
   id: string;
   username: string;
   display_name: string | null;
-  avatar_url: string | null;
   jid: string;
 }

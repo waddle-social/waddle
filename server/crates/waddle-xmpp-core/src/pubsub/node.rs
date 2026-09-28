@@ -331,6 +331,10 @@ impl NodeConfig {
             config = Self::stickers_defaults();
         } else if node == super::pep::PEP_NODE_VCARD4 {
             config = Self::vcard4_defaults();
+        } else if node == super::pep::PEP_NODE_AVATAR_DATA
+            || node == super::pep::PEP_NODE_AVATAR_METADATA
+        {
+            config = Self::avatar_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DND {
             config = Self::waddle_dnd_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS {
@@ -534,6 +538,36 @@ impl NodeConfig {
             max_items: 1,
             ..Self::pep_default()
         }
+    }
+
+    /// XEP-0084 user avatar (`urn:xmpp:avatar:data` / `:metadata`) PEP
+    /// node defaults.
+    ///
+    /// XEP-0084 leaves the access model to the service. Waddle policy is
+    /// `open`, the shape clients request via publish-options (which the
+    /// Publish arm does not enforce), because peers who share only a room
+    /// with the owner must resolve the avatar. `max_items = 1` so a new
+    /// avatar replaces the previous one.
+    pub fn avatar_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Open,
+            max_items: 1,
+            ..Self::pep_default()
+        }
+    }
+
+    /// Whether a stored config for a well-known PEP node should be
+    /// rewritten to [`Self::pep_for_node`].
+    ///
+    /// Never for avatar nodes: they are created canonical, and legacy
+    /// Presence avatar nodes are repaired by the storage's atomic
+    /// `repair_legacy_avatar_node`, which respects owner choices.
+    pub fn needs_reconcile(node: &str, existing: &Self) -> bool {
+        if node == super::pep::PEP_NODE_AVATAR_DATA || node == super::pep::PEP_NODE_AVATAR_METADATA
+        {
+            return false;
+        }
+        *existing != Self::pep_for_node(node)
     }
 
     /// XEP-0490 §3 Message Displayed Synchronization node defaults.

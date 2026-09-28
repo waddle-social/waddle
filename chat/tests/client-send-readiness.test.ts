@@ -3233,6 +3233,7 @@ describe("client keepalive lifecycle", () => {
         body: "matched text",
         createdAt: "2024-01-01T00:00:02.000Z",
         peerJid: "bob@example.com",
+        authorJid: "bob@example.com/phone",
       },
     ]);
     expect(readDmCallActivity("bob@example.com")).toEqual(existingActivity);

@@ -40,6 +40,15 @@ import type { InboxEntry } from "./inbox-types";
 import type { TerminalMucJoinCondition } from "./room-auto-join-policy";
 import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
 
+/**
+ * XEP-0084 peer avatar metadata transition. `avatarId` is the new
+ * avatar's id; absent when the peer disabled their avatar.
+ */
+export interface AvatarChangedEvent {
+  jid: string;
+  avatarId?: string;
+}
+
 /** Event name → payload tuple. */
 export type ClientEventMap = Record<string, ReadonlyArray<unknown>>;
 
@@ -119,13 +128,20 @@ export type ClientEvents = {
   displayed: [event: { roomJid: string; nick: string; messageId: string }];
   mdsDisplayed: [entry: MdsDisplayedEntry];
   pubsubEvent: [event: PubsubEvent];
+  avatarChanged: [event: AvatarChangedEvent];
+  /** `bareJid` null: the nick is held by an occupant whose real JID is not disclosed. */
+  occupantRealJid: [roomJid: string, nick: string, bareJid: string | null];
+  ownProfilePublished: [ownBareJid: string];
+  /** Our actual occupant nick in a room (from self-presence), or null after leaving. */
+  ownOccupantNick: [roomJid: string, nick: string | null];
   chatState: [event: ChatStateEvent];
   dmChatState: [event: DmChatStateEvent];
   dmReaction: [event: DmReactionEvent];
   dmSafetyScores: [fastening: SafetyScoresFastening];
   dmDisplayed: [event: DmDisplayedEvent];
   presenceUpdate: [event: PresenceUpdateEvent];
-  memberJid: [nick: string, bareJid: string];
+  /** `bareJid` null: the nick's current holder no longer has a known real JID. */
+  memberJid: [nick: string, bareJid: string | null];
   hats: [hats: RoomHats];
   authority: [authority: RoomAuthority];
   activity: [event: RoomActivityEvent];

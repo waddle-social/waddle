@@ -78,6 +78,11 @@ public struct WireMessage: Hashable, Sendable {
     public var pinEvent: PinEvent?
     /// XEP-0490 cursors from a sibling device's PEP notification.
     public var displayedCursors: [DisplayedCursor]?
+    /// A room author's real JID as the room vouched for it: the archived
+    /// XEP-0045 `muc#user` item, our own account on a local echo, or the
+    /// occupant when an undelayed live message arrived. The first stamp a
+    /// row gets is kept.
+    public var authorRealJID: BareJID?
 
     public init(
         source: Source = .live,
@@ -109,7 +114,8 @@ public struct WireMessage: Hashable, Sendable {
         sharedFiles: [SharedFile] = [],
         linkPreviews: [LinkPreview] = [],
         pinEvent: PinEvent? = nil,
-        displayedCursors: [DisplayedCursor]? = nil
+        displayedCursors: [DisplayedCursor]? = nil,
+        authorRealJID: BareJID? = nil
     ) {
         self.source = source
         self.type = type
@@ -141,6 +147,7 @@ public struct WireMessage: Hashable, Sendable {
         self.linkPreviews = linkPreviews
         self.pinEvent = pinEvent
         self.displayedCursors = displayedCursors
+        self.authorRealJID = authorRealJID
     }
 
     public var isGroupchat: Bool { type == .groupchat }

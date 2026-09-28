@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue";
 import { Hash, Menu, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
+import { conversationPeerAvatarJid } from "@/lib/avatars/author-jid";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
 import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
@@ -28,7 +29,8 @@ interface ConnectionStatusClasses {
 export interface ChannelHeaderMember {
   nick: string;
   jid?: string;
-  avatarUrl?: string | null;
+  /** Real bare JID disclosed for the occupant, for the avatar; `null` = initials. */
+  avatarJid: string | null;
   presence: OccupantPresence;
 }
 
@@ -248,7 +250,10 @@ const memberButtonCopy = computed(() => {
         <Menu class="w-4 h-4" />
       </button>
       <div class="chat-pane-title-group">
-        <span class="chat-pane-title-icon hidden rounded-lg bg-primary/8 lg:flex">
+        <span v-if="dmPeer?.peerJid" class="hidden lg:flex">
+          <UserAvatar :name="dmPeer.peerUsername" :jid="conversationPeerAvatarJid(dmPeer.peerJid)" size="sm" />
+        </span>
+        <span v-else class="chat-pane-title-icon hidden rounded-lg bg-primary/8 lg:flex">
           <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-4 h-4 text-primary/70" />
         </span>
         <div class="min-w-0">
@@ -410,9 +415,9 @@ const memberButtonCopy = computed(() => {
                   @click.stop="onAvatarClick(member)"
                   @keydown.enter.stop="onAvatarClick(member)"
                 >
-                  <AppAvatar
+                  <UserAvatar
                     :name="member.nick"
-                    :src="member.avatarUrl ?? null"
+                    :jid="member.avatarJid"
                     :presence="member.presence"
                     size="xs"
                   />

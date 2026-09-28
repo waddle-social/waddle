@@ -48,7 +48,7 @@ import { toast } from "@/ui/toaster";
 import RoomsPage from "@/components/community/pages/RoomsPage.vue";
 import MembersPage from "@/components/community/pages/MembersPage.vue";
 import MemberProfileCard from "@/components/community/pages/MemberProfileCard.vue";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
+import UserAvatar from "@/components/ui/UserAvatar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
@@ -57,6 +57,8 @@ import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/rou
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { MessageThreadEntry } from "@/channels/threads";
 import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp/jid";
+import { threadRootAvatarJid } from "@/lib/avatars/thread-root-author";
+import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { isEventUpcomingOrOngoing, sortEventsUpcomingFirst, type CommunityEvent, type FeedPostInput, type StoryPostInput } from "@/lib/xmpp-client";
@@ -128,7 +130,6 @@ const {
   notifications,
   appUpdate,
   version,
-  avatarUrlByAuthor,
   authorHatsByNick,
   authorAuthorityByNick,
   activeActionError,
@@ -307,6 +308,14 @@ watch(() => ui.actionError.value, (message) => {
   if (!message || conversationPageActive.value) return;
   toast({ id: "shell-action-error", tone: "danger", title: message });
 });
+/** Thread starters on the Threads page: only a loaded root row can name them. */
+function threadsListRootAuthorJid(entry: WasmThreadEntry): string | null {
+  return threadRootAvatarJid(entry, {
+    loadedRoomJid: activeChannelRoomJid.value,
+    resolveRoot: (threadId) => threads.resolveEntry(threadId)?.root,
+    selfJid: connectionStore.session?.jid,
+  });
+}
 /** The header Search button opens the MessageSearchPanel that
  * ContentArea owns, through its exposed handle. */
 function openMessageSearch() {
@@ -841,6 +850,7 @@ async function recoverSupersededFromShell() {
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
         :channels="waddles.sortedChannels.value"
+        :root-author-jid="threadsListRootAuthorJid"
         :on-select-thread-entry="onSelectThreadEntry"
         :on-join-channel-call="joinChannelCallFromActivity"
         @open-nav="ui.showMobileNav.value = true"
@@ -942,8 +952,6 @@ async function recoverSupersededFromShell() {
               :current-user="connectionStore.session?.username"
               :current-user-jid="connectionStore.session?.jid"
               :self-full-jid="selfFullJid"
-              :self-domain="selfDomain"
-              :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :mention-candidates="mentionCandidates"
               :room-hats="authorHatsByNick"
@@ -1072,7 +1080,6 @@ async function recoverSupersededFromShell() {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :current-user-jid="connectionStore.session?.jid"
-              :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-authority="authorAuthorityByNick"
@@ -1116,7 +1123,6 @@ async function recoverSupersededFromShell() {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :current-user-jid="connectionStore.session?.jid"
-              :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-authority="authorAuthorityByNick"
@@ -1228,7 +1234,7 @@ async function recoverSupersededFromShell() {
                   :aria-label="`Message ${person.name}`"
                   @click="handleOpenDm(person.jid)"
                 >
-                  <AppAvatar :name="person.name" :src="person.avatarUrl" :presence="person.presence" size="md" />
+                  <UserAvatar :name="person.name" :jid="person.jid" :presence="person.presence" size="md" />
                 </button>
               </div>
               <span v-else class="context-card__text">Nobody around right now. Start a huddle and they will find you.</span>

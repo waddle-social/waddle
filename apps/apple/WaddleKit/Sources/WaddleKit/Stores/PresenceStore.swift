@@ -46,6 +46,10 @@ public final class PresenceStore {
     public private(set) var occupants: [BareJID: [String: Occupant]] = [:]
     /// Rooms whose self-presence (status 110) has arrived.
     public private(set) var joinedRooms: Set<BareJID> = []
+    /// Room → the nick our self-presence (status 110) carries: the one the
+    /// room actually gave us, which may differ from the configured one
+    /// (status 210).
+    public private(set) var selfNicks: [BareJID: String] = [:]
 
     @ObservationIgnored private var resources: [BareJID: [String: ContactPresence]] = [:]
     @ObservationIgnored private let roomJIDs: @MainActor (BareJID) -> Bool
@@ -99,12 +103,14 @@ public final class PresenceStore {
     public func markLeft(_ room: BareJID) {
         joinedRooms.remove(room)
         occupants[room] = nil
+        selfNicks[room] = nil
     }
 
     public func clear() {
         contacts.removeAll()
         occupants.removeAll()
         joinedRooms.removeAll()
+        selfNicks.removeAll()
         resources.removeAll()
     }
 
@@ -126,6 +132,9 @@ public final class PresenceStore {
                 hats: presence.hats
             )
             occupants[room, default: [:]][nick] = occupant
+            if isSelf {
+                selfNicks[room] = nick
+            }
             if isSelf, !joinedRooms.contains(room) {
                 joinedRooms.insert(room)
                 return .joined(room: room)
