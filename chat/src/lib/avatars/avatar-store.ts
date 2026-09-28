@@ -256,33 +256,28 @@ export class AvatarStore {
     entry.inFlight = false;
     this.inFlightCount -= 1;
     if (entry.epoch === epoch) {
-      if (url) {
-        this.urls.set(key, url);
-        this.settle(key, entry, "ok");
-      } else {
-        // A transport failure keeps the last known face; a definitive
-        // "no avatar" clears it. Both retry on the negative TTL.
-        if (!failed) this.urls.set(key, null);
-        this.settle(key, entry, "miss", failed);
-      }
-      // The fetch straddled a session change, so its answer may come from
-      // (or have failed with) the old socket. Mirror `beginSession`: across
-      // a reconnect (any fresh session after the first) every answer is
-      // suspect; across the first session only a miss is (a fetch waiting
-      // on the initial connect answers from the new session); across a
-      // resume only a transport failure is.
-      const straddledReconnect = this.freshSessions > Math.max(freshSessions, 1);
-      const straddledFirstSession = freshSessions === 0 && this.freshSessions > 0;
-      const straddledResume = this.resumes !== resumes;
-      const suspect = straddledReconnect
-        || (straddledFirstSession && entry.settled?.kind === "miss")
-        || (straddledResume && failed);
-      if (entry.settled && suspect) {
+      this.applyResult(key, entry, url, failed);
+      const kind = url ? "ok" : "miss";
+      const started = { freshSessions, resumes };
+      const now = { freshSessions: this.freshSessions, resumes: this.resumes };
+      if (entry.settled && isStraddledResultSuspect(started, now, kind, failed)) {
         entry.settled.stale = true;
         if (entry.retainers > 0) this.enqueue(key, true);
       }
     }
     this.pump();
+  }
+
+  private applyResult(key: string, entry: Entry, url: string | null, failed: boolean): void {
+    if (url) {
+      this.urls.set(key, url);
+      this.settle(key, entry, "ok");
+      return;
+    }
+    // A transport failure keeps the last known face; a definitive
+    // "no avatar" clears it. Both retry on the negative TTL.
+    if (!failed) this.urls.set(key, null);
+    this.settle(key, entry, "miss", failed);
   }
 
   private settle(key: string, entry: Entry, kind: Settled["kind"], failed = false): void {
@@ -302,6 +297,31 @@ export class AvatarStore {
       this.onEvict?.(key);
     }, ttl);
   }
+}
+
+interface SessionCounters {
+  freshSessions: number;
+  resumes: number;
+}
+
+/**
+ * Whether a fetch result must be re-marked stale because the fetch
+ * straddled a session change, so its answer may come from (or have failed
+ * with) the old socket. Mirrors `beginSession`: across a reconnect (any
+ * fresh session after the first) every answer is suspect; across the
+ * first session only a miss is (a fetch waiting on the initial connect
+ * answers from the new session); across a resume only a transport
+ * failure is.
+ */
+function isStraddledResultSuspect(
+  started: SessionCounters,
+  now: SessionCounters,
+  kind: Settled["kind"],
+  failed: boolean,
+): boolean {
+  if (now.freshSessions > Math.max(started.freshSessions, 1)) return true;
+  if (started.freshSessions === 0 && now.freshSessions > 0 && kind === "miss") return true;
+  return now.resumes !== started.resumes && failed;
 }
 
 /** Process-wide store every avatar surface reads. */

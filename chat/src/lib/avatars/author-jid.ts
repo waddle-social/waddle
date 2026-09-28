@@ -24,7 +24,7 @@ export type AuthorRef = Partial<Pick<
 >>;
 
 function bare(jid: string | null | undefined): string | null {
-  if (!jid || !jid.includes("@")) return null;
+  if (!jid?.includes("@")) return null;
   return barePeerJid(jid).toLowerCase() || null;
 }
 
