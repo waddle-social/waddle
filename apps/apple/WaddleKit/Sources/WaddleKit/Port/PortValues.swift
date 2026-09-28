@@ -1,4 +1,3 @@
-import Crypto
 import Foundation
 
 /// Structured options a send carries beside its body.
@@ -68,12 +67,6 @@ public struct AvatarImage: Hashable, Sendable {
         self.mediaType = mediaType
         self.width = width
         self.height = height
-    }
-
-    /// The XEP-0084 §3.1 item id these bytes are published under: their
-    /// SHA-1, lowercase hex (as the core computes it when publishing).
-    public var itemID: String {
-        Insecure.SHA1.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

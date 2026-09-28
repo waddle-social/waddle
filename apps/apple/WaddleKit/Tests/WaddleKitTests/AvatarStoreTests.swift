@@ -265,7 +265,7 @@ struct AvatarStoreTests {
 
     @Test func publishedOwnAvatarShowsImmediately() async {
         let (store, lookups, _) = store()
-        store.set(me.jid, image: image(9))
+        store.set(me.jid, image: image(9), id: "own1")
         #expect(store.image(for: me.jid) == image(9))
         store.request(me.jid)
         await Task.yield()
@@ -275,18 +275,32 @@ struct AvatarStoreTests {
     @Test func publishedOwnAvatarRevalidatesWithItsItemID() async {
         let (store, lookups, clock) = store()
         let published = image(9)
-        store.set(me.jid, image: published)
+        store.set(me.jid, image: published, id: "own1")
         clock.advance(minutes: 46)
         store.request(me.jid)
         await lookups.waitForCalls(1)
-        #expect(lookups.calls == [.init(jid: me.jid, knownID: published.itemID)])
+        #expect(lookups.calls == [.init(jid: me.jid, knownID: "own1")])
         await lookups.answer(me.jid, with: .unchanged)
         #expect(store.image(for: me.jid) == published)
     }
 
-    @Test func itemIDIsTheLowercaseHexSHA1OfTheBytes() {
-        let abc = AvatarImage(data: Data("abc".utf8), mediaType: "image/png", width: 0, height: 0)
-        #expect(abc.itemID == "a9993e364706816aba3e25717850c26c9cd0d89d")
+    @Test func publishingStoresTheItemIDThePortReturns() async throws {
+        let port = FakePort()
+        port.publishedAvatarID = "sha-from-core"
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        try await coordinator.publishAvatar(image(9))
+        #expect(coordinator.avatars.image(for: me.jid) == image(9))
+
+        // Our own notification for that id is already known: no lookup.
+        coordinator.handle(.avatarChanged(jid: me.jid, id: "sha-from-core"))
+        for _ in 0..<5 { await Task.yield() }
+        #expect(port.avatarLookups.isEmpty)
+
+        // Another id is news.
+        coordinator.handle(.avatarChanged(jid: me.jid, id: "other"))
+        await eventually { !port.avatarLookups.isEmpty }
+        #expect(port.avatarLookups == [me.jid])
     }
 }
 

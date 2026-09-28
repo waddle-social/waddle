@@ -31,6 +31,7 @@ final class FakePort: XmppPort {
     var probeConnectionResult = true
     var probeConnectionCount = 0
     var avatarLookups: [BareJID] = []
+    var publishedAvatarID = "own1"
     var avatarLookup: (BareJID, String?) -> AvatarFetch = { _, _ in .absent }
 
     init() {
@@ -195,7 +196,9 @@ final class FakePort: XmppPort {
         avatarLookups.append(jid)
         return avatarLookup(jid, knownID)
     }
-    func publishAvatar(_ image: AvatarImage) async throws {}
+    func publishAvatar(_ image: AvatarImage) async throws -> String {
+        publishedAvatarID
+    }
     func removeAvatar() async throws {}
     func fetchMood(of jid: BareJID) async throws -> UserMood? { nil }
     func publishMood(_ mood: UserMood) async throws {}

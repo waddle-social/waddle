@@ -19,13 +19,13 @@ extension SessionCoordinator {
     }
 
     public func publishAvatar(_ image: AvatarImage) async throws {
-        try await port.publishAvatar(image)
-        avatars.set(account.jid, image: image)
+        let id = try await port.publishAvatar(image)
+        avatars.set(account.jid, image: image, id: id)
     }
 
     public func removeAvatar() async throws {
         try await port.removeAvatar()
-        avatars.set(account.jid, image: nil)
+        avatars.set(account.jid, image: nil, id: nil)
     }
 
     /// RFC 6121 availability with an optional status message.

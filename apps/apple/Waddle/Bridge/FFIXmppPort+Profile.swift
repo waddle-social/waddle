@@ -15,11 +15,11 @@ extension FFIXmppPort {
         }
     }
 
-    func publishAvatar(_ image: AvatarImage) async throws {
+    func publishAvatar(_ image: AvatarImage) async throws -> String {
         guard let width = UInt32(exactly: image.width), let height = UInt32(exactly: image.height) else {
             throw PortError.invalidRequest
         }
-        try await mappingPortErrors {
+        return try await mappingPortErrors {
             try await client.publishAvatar(data: image.data, mimeType: image.mediaType, width: width, height: height)
         }
     }

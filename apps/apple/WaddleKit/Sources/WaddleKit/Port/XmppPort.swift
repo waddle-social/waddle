@@ -112,7 +112,8 @@ public protocol DirectoryPort: AnyObject, Sendable {
 public protocol ProfilePort: AnyObject, Sendable {
     /// `knownID` is the id of the avatar already held, if any.
     func fetchAvatar(of jid: BareJID, knownID: String?) async -> AvatarFetch
-    func publishAvatar(_ image: AvatarImage) async throws
+    /// Returns the XEP-0084 item id the avatar was published under.
+    func publishAvatar(_ image: AvatarImage) async throws -> String
     func removeAvatar() async throws
     func fetchMood(of jid: BareJID) async throws -> UserMood?
     func publishMood(_ mood: UserMood) async throws
