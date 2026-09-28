@@ -42,12 +42,11 @@ spec:
     # See docs/operations/relay-cutovers.md.
     cutoverGuard:
       enabled: true
-    # #1733 / PR #1869: V0013 occupancy authority and remote-resource register /
-    # force-detach v3 require all old writers to stop before the new fleet starts.
-    # Verify the cutover, then restore RollingUpdate in a separate change.
-    # See docs/operations/relay-cutovers.md.
     updateStrategy:
-      type: Recreate
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
