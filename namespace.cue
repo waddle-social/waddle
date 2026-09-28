@@ -33,6 +33,10 @@ let _serverRustInputs = [
 	},
 ]
 
+let _nativeRustEnv = {
+	PKG_CONFIG_PATH: schema.#EnvPassthrough
+}
+
 schema.#Project & {
 	name: "waddle-server-namespace-rust-checks"
 	runtime: {type: "nix", flake: "."}
@@ -43,6 +47,7 @@ schema.#Project & {
 			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
+			env: _nativeRustEnv
 			hermetic: sandbox: "dir"
 		}
 
@@ -51,6 +56,7 @@ schema.#Project & {
 			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
+			env: _nativeRustEnv
 			hermetic: sandbox: "dir"
 		}
 
@@ -59,6 +65,7 @@ schema.#Project & {
 			args: ["test", "--doc", "--workspace", "--all-features", "--locked"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
+			env: _nativeRustEnv
 			hermetic: sandbox: "dir"
 		}
 	}
