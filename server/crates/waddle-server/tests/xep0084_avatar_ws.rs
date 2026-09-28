@@ -1501,3 +1501,62 @@ async fn republish_keeps_owner_configured_avatar_access_model() {
     let _ = bob.close().await;
     let _ = admin.close().await;
 }
+
+// A `'user'` avatar provenance row can outlive the avatar it protected
+// (e.g. a pubsub schema bump drops every pubsub table, but the provenance
+// table survives). With no user-published metadata left, the OIDC picture
+// MUST be published instead of being suppressed forever.
+#[tokio::test]
+async fn stale_user_provenance_without_an_avatar_does_not_block_the_oidc_picture() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "stale-provenance").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    // The user self-publishes (provenance flips to 'user') ...
+    wire_publish_avatar(&mut admin, &admin_bare, "self-1").await;
+    // ... then the avatar is lost while the provenance row survives.
+    for node in [NS_AVATAR_METADATA, NS_AVATAR_DATA] {
+        let resp = iq_set_to(
+            &mut admin,
+            &format!("stale-delete-{node}"),
+            &admin_bare,
+            &format!(r#"<pubsub xmlns="http://jabber.org/protocol/pubsub#owner"><delete node="{node}"/></pubsub>"#),
+        )
+        .await;
+        assert!(resp.contains(r#"type='result'"#), "delete {node}: {resp}");
+    }
+
+    let png = tiny_png();
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(png.clone()),
+        )
+        .mount(&mock)
+        .await;
+    let resp = invoke_profile_publish(
+        &server,
+        &PublishReq::for_jid(&admin_bare).set_photo_url(format!("{}/oidc.png", mock.uri())),
+    )
+    .await;
+    assert!(
+        resp.published_avatar_metadata,
+        "the OIDC picture must be published when no user avatar exists: {resp:?}"
+    );
+
+    let metadata = iq_get_to(
+        &mut admin,
+        "stale-meta",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{NS_AVATAR_METADATA}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        metadata.contains("<info"),
+        "OIDC avatar metadata must be readable: {metadata}"
+    );
+    let _ = admin.close().await;
+}
