@@ -9,6 +9,7 @@ import org.junit.Test
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
 import social.waddle.android.client.testPresence
+import social.waddle.client.ffi.WaddleMucRole
 
 /** Current nick → real JID lookup, and stored-row author resolution. */
 class OccupantJidStoreTest {
@@ -42,6 +43,34 @@ class OccupantJidStoreTest {
         store.onPresence(testPresence(from = "$room/alice", mucJid = "bob@waddle.test/x"))
 
         assertEquals("bob@waddle.test", store.jidFor(room, "alice"))
+    }
+
+    @Test
+    fun `an available occupant presence without a real JID forgets the old holder`() {
+        val store = OccupantJidStore()
+        store.onPresence(
+            testPresence(from = "$room/alice", mucJid = "alice@waddle.test/phone", mucRole = WaddleMucRole.PARTICIPANT),
+        )
+        // The room turned semi-anonymous (or we were demoted): the nick's
+        // current holder is unknown and must not inherit Alice.
+        store.onPresence(testPresence(from = "$room/alice", mucJid = null, mucRole = WaddleMucRole.PARTICIPANT))
+
+        assertNull(store.jidFor(room, "alice"))
+    }
+
+    @Test
+    fun `leaves and non-occupant presences keep the known mapping`() {
+        val store = OccupantJidStore()
+        store.onPresence(
+            testPresence(from = "$room/alice", mucJid = "alice@waddle.test/phone", mucRole = WaddleMucRole.PARTICIPANT),
+        )
+        store.onPresence(
+            testPresence(from = "$room/alice", presenceType = "unavailable", mucRole = WaddleMucRole.NONE),
+        )
+        // A plain contact presence carries no muc#user payload at all.
+        store.onPresence(testPresence(from = "$room/alice", mucJid = null))
+
+        assertEquals("alice@waddle.test", store.jidFor(room, "alice"))
     }
 
     @Test

@@ -52,16 +52,19 @@ fun messageAvatarsOf(
 
 /**
  * Real bare JID of the author a XEP-0461 reply quotes: the loaded
- * original's stamped author, else the reply's `to` attribute when it
- * names a real JID. An occupant JID of this room (original not loaded)
- * stays unknown — whoever holds that nick now may not have written it.
+ * original's stamped author. Without the original, the reply's `to`
+ * attribute is the REPLYING sender's claim, so it is trusted only in a
+ * 1:1 conversation and only when it names one of its two participants
+ * (the account or the peer); a room reply falls back to initials — no
+ * arbitrary face, and no avatar lookup aimed at a JID the sender picked.
  */
 fun quotedAuthorJidOf(reply: TimelineItem, quoted: TimelineItem?, selfBareJid: String?): String? {
     if (quoted != null) return authorBareJidOf(quoted, selfBareJid)
+    if (isGroupchatRow(reply)) return null
     val sender = reply.replyToSender?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val bare = normalizedBareJid(sender)
-    val isRoomOccupant = isGroupchatRow(reply) && bare == normalizedBareJid(reply.conversationJid)
-    return bare.takeIf { !isRoomOccupant && '@' in it }
+    val participants = setOfNotNull(selfBareJid?.let(::normalizedBareJid), normalizedBareJid(reply.conversationJid))
+    return bare.takeIf { it in participants }
 }
 
 private fun isGroupchatRow(item: TimelineItem): Boolean = when (val source = item.source) {

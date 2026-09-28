@@ -41,16 +41,36 @@ class OccupantJidStore {
     fun onPresence(presence: WaddlePresence) {
         val from = presence.from ?: return
         val nick = resourcepart(from) ?: return
-        val realJid = presence.mucJid?.let(::normalizedBareJid)?.takeIf { '@' in it } ?: return
+        val realJid = presence.mucJid?.let(::normalizedBareJid)?.takeIf { '@' in it }
         val room = normalizedBareJid(from)
-        _jids.update { rooms ->
-            val known = rooms[room].orEmpty()
-            if (known[nick] == realJid) rooms else rooms + (room to known + (nick to realJid))
+        when {
+            realJid != null -> _jids.update { rooms ->
+                val known = rooms[room].orEmpty()
+                if (known[nick] == realJid) rooms else rooms + (room to known + (nick to realJid))
+            }
+            // An AVAILABLE occupant presence without a real JID (we were
+            // demoted, the room went semi-anonymous, a remote MUC omits
+            // it): whoever holds the nick now is unknown — forget the old
+            // holder so they are not stamped onto new rows. Leaves keep
+            // the entry (a message may race its author's unavailable).
+            isOccupant(presence) && presence.presenceType !in NOT_AVAILABLE -> _jids.update { rooms ->
+                val known = rooms[room] ?: return@update rooms
+                if (nick !in known) rooms else rooms + (room to known - nick)
+            }
         }
     }
 
+    private fun isOccupant(presence: WaddlePresence): Boolean =
+        presence.mucRole != null ||
+            presence.mucAffiliation != null ||
+            presence.mucStatusCodes.isNotEmpty()
+
     fun clear() {
         _jids.value = emptyMap()
+    }
+
+    private companion object {
+        val NOT_AVAILABLE = setOf("unavailable", "error")
     }
 }
 

@@ -91,7 +91,7 @@ class MessageAvatarTest {
     }
 
     @Test
-    fun `a quoted author resolves from the original, else only a real-JID reply target`() {
+    fun `a room quote resolves only from the loaded original`() {
         val original = row("1", "alice", authorJid = "alice@waddle.test")
         fun reply(to: String?) = row("2", "bob").item.copy(
             source = TimelineSource.Live(
@@ -101,10 +101,31 @@ class MessageAvatarTest {
         )
 
         assertEquals("alice@waddle.test", quotedAuthorJidOf(reply("$room/alice"), original.item, self))
-        // Original not loaded: whoever holds that nick now may not have written it.
+        // Original not loaded: the sender's `to` claim is never trusted in a room.
         assertNull(quotedAuthorJidOf(reply("$room/alice"), null, self))
-        // A real JID target is used as-is (normalized).
-        assertEquals("dave@waddle.test", quotedAuthorJidOf(reply("Dave@Waddle.test/x"), null, self))
+        assertNull(quotedAuthorJidOf(reply("Dave@Waddle.test/x"), null, self))
+        assertNull(quotedAuthorJidOf(reply(null), null, self))
+    }
+
+    @Test
+    fun `a 1-1 quote target is trusted only when it names a participant`() {
+        val peer = "peer@waddle.test"
+        fun reply(to: String?) = TimelineItem(
+            id = "d2",
+            conversationJid = peer,
+            from = "$peer/phone",
+            body = "re",
+            timestamp = null,
+            isMine = false,
+            source = TimelineSource.Live(
+                testMessage(id = "d2", from = "$peer/phone").copy(replyToId = "d1", replyToSender = to),
+            ),
+        )
+
+        assertEquals(self, quotedAuthorJidOf(reply("Me@Waddle.test/laptop"), null, self))
+        assertEquals(peer, quotedAuthorJidOf(reply("$peer/tablet"), null, self))
+        // A third party named by the sender gets initials, not their face.
+        assertNull(quotedAuthorJidOf(reply("mallory@evil.test"), null, self))
         assertNull(quotedAuthorJidOf(reply(null), null, self))
     }
 
