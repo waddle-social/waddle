@@ -270,6 +270,39 @@ class MucCallRosterTest {
     }
 
     @Test
+    fun aTwoDeviceParticipantKeepsBadgesWhicheverIdentityComesFirst() {
+        val presence = MucPresenceRosterView(
+            participants = emptyMap(),
+            owners = mapOf(room to mapOf("alice" to "alice@x.test/phone", "me" to "me@waddle.test/android")),
+            raisedHands = mapOf(room to setOf("alice")),
+            mutedNicks = mapOf(room to setOf("me")),
+        )
+        // Unowned second device first (LiveKit remote order), own identity
+        // on two devices with the unowned one first as well.
+        val identities = listOf(
+            "alice@x.test/web",
+            "alice@x.test/phone",
+            "me@waddle.test/tablet",
+            "me@waddle.test/android",
+        )
+        for (order in listOf(identities, identities.reversed())) {
+            val roster = mucRosterOf(
+                room,
+                presence,
+                LiveRosterView(participants = mapOf(room to order), leavingRooms = emptyMap()),
+            ).sortedBy { it.nick }
+
+            assertEquals(
+                listOf(
+                    MucRosterEntry("alice", handRaised = true, muted = false, jid = "alice@x.test"),
+                    MucRosterEntry("me", handRaised = false, muted = true, jid = "me@waddle.test"),
+                ),
+                roster,
+            )
+        }
+    }
+
+    @Test
     fun storeSnapshotsDedupeAndNormalizeIdentities() {
         val store = MucCallLiveParticipantsStore()
         store.setParticipants(room, listOf("Alice@Waddle.Test/web", "alice@waddle.test/web", ""))

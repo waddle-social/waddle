@@ -82,7 +82,11 @@ private fun liveParticipantsOf(
             jid = normalizedBareJid(identity).takeIf { '@' in it },
             ownedNick = ownerNick != null,
         )
-        out.putIfAbsent(participant.nick to participant.jid, participant)
+        // One person on two devices collapses to one row; whichever
+        // identity arrives first, the row keeps the owner-matched flag.
+        out.merge(participant.nick to participant.jid, participant) { first, second ->
+            if (first.ownedNick) first else second
+        }
     }
     return out.values.toList()
 }
