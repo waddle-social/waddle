@@ -4975,3 +4975,56 @@ async fn owner_configure_without_access_model_does_not_lock_in_legacy_presence_a
         .await
         .expect("marker"));
 }
+
+#[tokio::test]
+async fn peer_read_repairs_unmarked_legacy_presence_avatar_node() {
+    let state = create_test_websocket_state().await;
+    let reader = create_test_session(state.as_ref(), "bob").await;
+    let owner: BareJid = "legacy-owner@example.com".parse().expect("owner jid");
+    let storage = &state.deps.protocol.pubsub_storage;
+    let node = "urn:xmpp:avatar:metadata";
+    // Created by an old pod after the last startup sweep: Presence, no marker.
+    storage
+        .get_or_create_node(&owner, node)
+        .await
+        .expect("node");
+    storage
+        .update_node_config(
+            &owner,
+            node,
+            &waddle_xmpp::pubsub::NodeConfig::pep_default(),
+        )
+        .await
+        .expect("legacy config");
+
+    let reader_jid: FullJid = format!("{}@example.com/web", reader.xmpp_localpart)
+        .parse()
+        .expect("reader jid");
+    let phase = ready_phase(&reader_jid);
+    let query = format!(
+        r#"<iq xmlns="jabber:client" id="peer-read-1" type="get" to="{owner}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="{node}"/></pubsub></iq>"#
+    );
+    let responses = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(reader),
+        &phase,
+    )
+    .await;
+    let response = responses.first().expect("items response");
+    assert!(
+        !response.contains("forbidden"),
+        "a peer read must repair the legacy node instead of being denied: {response}"
+    );
+    let stored = storage
+        .get_node(&owner, node)
+        .await
+        .expect("read")
+        .expect("node");
+    assert_eq!(
+        stored.config.access_model,
+        waddle_xmpp::pubsub::AccessModel::Open
+    );
+}

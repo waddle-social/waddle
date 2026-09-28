@@ -310,6 +310,29 @@ pub(super) async fn handle_pubsub_iq(
                 }
 
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
+                // A legacy Presence avatar node (e.g. created by an old pod
+                // after the last startup sweep) is repaired on a peer's
+                // read, so the avatar never stays hidden until the owner
+                // republishes. Conditional + marker-aware, so owner choices
+                // are kept; only Presence avatar nodes pay the write.
+                if is_pep
+                    && (node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA
+                        || node == waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_METADATA)
+                {
+                    let storage = &state.deps.protocol.pubsub_storage;
+                    let is_presence = matches!(
+                        storage.get_node(&target_jid, &node).await,
+                        Ok(Some(existing))
+                            if existing.config.access_model == waddle_xmpp::pubsub::AccessModel::Presence
+                    );
+                    if is_presence {
+                        if let Err(error) =
+                            storage.repair_legacy_avatar_node(&target_jid, &node).await
+                        {
+                            warn!(node = %node, error = %error, "Failed to repair legacy avatar node on read");
+                        }
+                    }
+                }
                 match crate::pubsub_authz::can_subscribe(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
