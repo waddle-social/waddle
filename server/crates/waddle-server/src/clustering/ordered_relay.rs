@@ -785,7 +785,7 @@ impl OrderedRelayDiversions {
         self.entries.is_empty()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, debug_assertions))]
     fn len(&self) -> usize {
         self.entries.len()
     }
