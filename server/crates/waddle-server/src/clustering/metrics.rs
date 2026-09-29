@@ -22,9 +22,7 @@
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use std::sync::OnceLock;
 
-use super::ordered_relay::{
-    OrderedRelayClaimRole, OrderedRelayDiversionReason, OrderedRelayNackReason,
-};
+use super::ordered_relay::{OrderedRelayClaimRole, OrderedRelayNackReason};
 
 static METER: OnceLock<Meter> = OnceLock::new();
 
@@ -345,28 +343,6 @@ pub fn record_ordered_relay_nack(reason: OrderedRelayNackMetricReason) {
     );
 }
 
-/// Count a stanza dropped on the sender because its ordered-relay channel is
-/// diverted (#1623). Diversions expire after
-/// `ORDERED_RELAY_DIVERSION_COOLDOWN`, so a sustained rate means repeated
-/// uncertain failures, not one stuck channel.
-pub fn record_ordered_relay_diverted_drop(reason: &OrderedRelayDiversionReason) {
-    static C: OnceLock<Counter<u64>> = OnceLock::new();
-    C.get_or_init(|| {
-        meter()
-            .u64_counter("waddle.clustering.ordered_relay_diverted_drops")
-            .with_description("Stanzas dropped because their ordered-relay channel was diverted")
-            .with_unit("{stanza}")
-            .build()
-    })
-    .add(
-        1,
-        &[opentelemetry::KeyValue::new(
-            "reason",
-            reason.metric_label(),
-        )],
-    );
-}
-
 /// Set the current age (in milliseconds) since this node's last
 /// successfully committed node-lease heartbeat (ADR-0017 Phase 3 Slice 2,
 /// element 12: "a heartbeat-write-latency histogram + alert watches the
@@ -659,7 +635,6 @@ mod tests {
         ("waddle.clustering.relay_respawns", "{respawn}"),
         ("waddle.clustering.ordered_relay_acks", "{reply}"),
         ("waddle.clustering.ordered_relay_nacks", "{reply}"),
-        ("waddle.clustering.ordered_relay_diverted_drops", "{stanza}"),
         ("waddle.clustering.node_heartbeat_age", "ms"),
         ("waddle.clustering.node_heartbeat_write_latency", "ms"),
         ("waddle.clustering.peers_revoked", "{peer}"),
@@ -711,7 +686,6 @@ mod tests {
             OrphanTerminalCleanupFailureReason::Error,
         );
         super::record_sm_orphan_candidate_page(1, false, 1);
-        super::record_ordered_relay_diverted_drop(&super::OrderedRelayDiversionReason::Unreachable);
     }
 
     #[tokio::test]
@@ -811,15 +785,6 @@ mod tests {
             OrderedRelayNackMetricReason::Diverted,
         ] {
             super::record_ordered_relay_nack(reason);
-        }
-        for reason in [
-            super::OrderedRelayDiversionReason::OrderingGap,
-            super::OrderedRelayDiversionReason::NotOwner,
-            super::OrderedRelayDiversionReason::Unreachable,
-            super::OrderedRelayDiversionReason::Backpressure,
-            super::OrderedRelayDiversionReason::MaybeCommitted,
-        ] {
-            super::record_ordered_relay_diverted_drop(&reason);
         }
         for queue in [
             OrphanWorkQueue::SmHydration,

@@ -85,9 +85,6 @@ impl OrderedRelayDeliveryBridge {
             ) {
                 Ok(envelope) => envelope,
                 Err(diversion) => {
-                    crate::clustering::metrics::record_ordered_relay_diverted_drop(
-                        &diversion.reason,
-                    );
                     tracing::warn!(
                         target = %seed.target,
                         reason = ?diversion.reason,
@@ -237,11 +234,7 @@ impl OrderedRelayDeliveryBridge {
                 envelope.asserted_origin_node.clone(),
                 envelope.channel.clone(),
                 envelope.origin_inbound_sequence,
-                OrderedRelayEnvelopeClaims::new(
-                    envelope.origin_claim.clone(),
-                    envelope.sender_claim.clone(),
-                    envelope.target_claim.clone(),
-                ),
+                envelope.claims(),
                 envelope.payload.clone(),
             )
         };

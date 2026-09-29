@@ -499,6 +499,15 @@ pub struct RemoteStanzaEnvelope {
 }
 
 impl RemoteStanzaEnvelope {
+    /// The claim triple this envelope was minted under.
+    pub fn claims(&self) -> OrderedRelayEnvelopeClaims {
+        OrderedRelayEnvelopeClaims::new(
+            self.origin_claim.clone(),
+            self.sender_claim.clone(),
+            self.target_claim.clone(),
+        )
+    }
+
     pub fn signing_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(&RemoteStanzaEnvelopeSigningView {
             asserted_origin_node: &self.asserted_origin_node,
@@ -651,18 +660,6 @@ pub enum OrderedRelayDiversionReason {
     MaybeCommitted,
 }
 
-impl OrderedRelayDiversionReason {
-    pub(crate) const fn metric_label(&self) -> &'static str {
-        match self {
-            Self::OrderingGap => "ordering_gap",
-            Self::NotOwner => "not_owner",
-            Self::Unreachable => "unreachable",
-            Self::Backpressure => "backpressure",
-            Self::MaybeCommitted => "maybe_committed",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OrderedRelayRecentAck {
     reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
@@ -735,47 +732,47 @@ pub struct OrderedRelayDiversion {
 /// Diversions recorded by one side of the relay, each bounded by
 /// [`ORDERED_RELAY_DIVERSION_COOLDOWN`]. The recording instant stays local:
 /// [`OrderedRelayDiversion`] is part of the `Diverted` NACK wire shape.
+/// `tokio::time::Instant` lets tests drive expiry with a paused clock.
 #[derive(Debug, Default)]
 struct OrderedRelayDiversions {
     entries: HashMap<OrderedRelayChannel, (OrderedRelayDiversion, Instant)>,
 }
 
+fn diversion_is_live(since: Instant) -> bool {
+    since.elapsed() < ORDERED_RELAY_DIVERSION_COOLDOWN
+}
+
 impl OrderedRelayDiversions {
     /// The channel's unexpired diversion; an expired one is removed.
-    fn active(
-        &mut self,
-        channel: &OrderedRelayChannel,
-        now: Instant,
-    ) -> Option<OrderedRelayDiversion> {
+    fn active(&mut self, channel: &OrderedRelayChannel) -> Option<OrderedRelayDiversion> {
         let (diversion, since) = self.entries.get(channel)?;
-        if now.saturating_duration_since(*since) < ORDERED_RELAY_DIVERSION_COOLDOWN {
+        if diversion_is_live(*since) {
             return Some(diversion.clone());
         }
         self.entries.remove(channel);
         None
     }
 
-    fn is_active(&self, channel: &OrderedRelayChannel, now: Instant) -> bool {
-        self.entries.get(channel).is_some_and(|(_, since)| {
-            now.saturating_duration_since(*since) < ORDERED_RELAY_DIVERSION_COOLDOWN
-        })
+    fn is_active(&self, channel: &OrderedRelayChannel) -> bool {
+        self.entries
+            .get(channel)
+            .is_some_and(|(_, since)| diversion_is_live(*since))
     }
 
     /// Record `diversion`, pruning expired entries first when at capacity.
     /// Returns `false` when the table is still full of live diversions.
-    fn insert(&mut self, diversion: OrderedRelayDiversion, now: Instant) -> bool {
+    fn insert(&mut self, diversion: OrderedRelayDiversion) -> bool {
         if !self.entries.contains_key(&diversion.channel)
             && self.entries.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
         {
-            self.entries.retain(|_, (_, since)| {
-                now.saturating_duration_since(*since) < ORDERED_RELAY_DIVERSION_COOLDOWN
-            });
+            self.entries
+                .retain(|_, (_, since)| diversion_is_live(*since));
             if self.entries.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS {
                 return false;
             }
         }
         self.entries
-            .insert(diversion.channel.clone(), (diversion, now));
+            .insert(diversion.channel.clone(), (diversion, Instant::now()));
         true
     }
 
@@ -811,26 +808,7 @@ impl OrderedRelaySenderState {
         claims: OrderedRelayEnvelopeClaims,
         payload: OrderedRelayPayload,
     ) -> Result<RemoteStanzaEnvelope, OrderedRelayDiversion> {
-        self.next_envelope_at(
-            Instant::now(),
-            asserted_origin_node,
-            channel,
-            origin_inbound_sequence,
-            claims,
-            payload,
-        )
-    }
-
-    pub(crate) fn next_envelope_at(
-        &mut self,
-        now: Instant,
-        asserted_origin_node: NodeId,
-        channel: OrderedRelayChannel,
-        origin_inbound_sequence: OriginInboundSequence,
-        claims: OrderedRelayEnvelopeClaims,
-        payload: OrderedRelayPayload,
-    ) -> Result<RemoteStanzaEnvelope, OrderedRelayDiversion> {
-        if let Some(diversion) = self.diversions.active(&channel, now) {
+        if let Some(diversion) = self.diversions.active(&channel) {
             return Err(diversion);
         }
         if self.new_channels_diverted && !self.next_by_channel.contains_key(&channel) {
@@ -860,7 +838,7 @@ impl OrderedRelaySenderState {
                 channel: channel.clone(),
                 reason: OrderedRelayDiversionReason::Backpressure,
             };
-            self.divert_at(now, diversion.clone());
+            self.divert(diversion.clone());
             return Err(diversion);
         };
         let envelope = RemoteStanzaEnvelope {
@@ -879,12 +857,8 @@ impl OrderedRelaySenderState {
     }
 
     pub fn divert(&mut self, diversion: OrderedRelayDiversion) {
-        self.divert_at(Instant::now(), diversion);
-    }
-
-    pub(crate) fn divert_at(&mut self, now: Instant, diversion: OrderedRelayDiversion) {
         let channel = diversion.channel.clone();
-        if !self.diversions.insert(diversion, now) {
+        if !self.diversions.insert(diversion) {
             self.next_by_channel.remove(&channel);
             self.new_channels_diverted = true;
         }
@@ -910,7 +884,7 @@ impl OrderedRelaySenderState {
         expected: OrderedRelaySequence,
     ) -> bool {
         if expected == envelope.sequence
-            || self.diversions.is_active(&envelope.channel, Instant::now())
+            || self.diversions.is_active(&envelope.channel)
             || envelope.sequence.checked_next().as_ref()
                 != self.next_by_channel.get(&envelope.channel)
         {
@@ -922,7 +896,7 @@ impl OrderedRelaySenderState {
     }
 
     pub fn rollback_unseen_envelope(&mut self, envelope: &RemoteStanzaEnvelope) {
-        if self.diversions.is_active(&envelope.channel, Instant::now()) {
+        if self.diversions.is_active(&envelope.channel) {
             return;
         }
         let Some(expected_after_envelope) = envelope.sequence.checked_next() else {
@@ -952,15 +926,7 @@ pub struct OrderedRelayReceiverState {
 
 impl OrderedRelayReceiverState {
     pub fn reserve(&mut self, envelope: RemoteStanzaEnvelope) -> OrderedRelayReservation {
-        self.reserve_at(Instant::now(), envelope)
-    }
-
-    pub(crate) fn reserve_at(
-        &mut self,
-        now: Instant,
-        envelope: RemoteStanzaEnvelope,
-    ) -> OrderedRelayReservation {
-        if let Some(diversion) = self.diversions.active(&envelope.channel, now) {
+        if let Some(diversion) = self.diversions.active(&envelope.channel) {
             return OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
                 sequence: envelope.sequence,
@@ -1116,7 +1082,7 @@ impl OrderedRelayReceiverState {
     ) -> OrderedRelayReply {
         let envelope = reserved.envelope;
         self.pending_by_channel.remove(&envelope.channel);
-        if let Some(diversion) = self.diversions.active(&envelope.channel, Instant::now()) {
+        if let Some(diversion) = self.diversions.active(&envelope.channel) {
             return OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
                 sequence: envelope.sequence,
@@ -1175,29 +1141,18 @@ impl OrderedRelayReceiverState {
         reserved: OrderedRelayReservedEnvelope,
         reason: OrderedRelayNackReason,
     ) -> OrderedRelayReply {
-        self.abort_reserved_at(Instant::now(), reserved, reason)
-    }
-
-    pub(crate) fn abort_reserved_at(
-        &mut self,
-        now: Instant,
-        reserved: OrderedRelayReservedEnvelope,
-        reason: OrderedRelayNackReason,
-    ) -> OrderedRelayReply {
-        let envelope = reserved.envelope;
-        self.pending_by_channel.remove(&envelope.channel);
         // An unbound target is a delivery answer, not a channel failure:
         // `next_expected` stays at this sequence, so the sender rolls back and
         // its next stanza reaches the resource once it rebinds (#1623).
-        if reason != OrderedRelayNackReason::TargetUnavailable {
-            self.divert_at(
-                now,
-                OrderedRelayDiversion {
-                    channel: envelope.channel.clone(),
-                    reason: receiver_diversion_reason_for_nack(&reason),
-                },
-            );
+        if reason == OrderedRelayNackReason::TargetUnavailable {
+            return self.abort_reserved_without_diversion(reserved, reason);
         }
+        let envelope = reserved.envelope;
+        self.pending_by_channel.remove(&envelope.channel);
+        self.divert(OrderedRelayDiversion {
+            channel: envelope.channel.clone(),
+            reason: receiver_diversion_reason_for_nack(&reason),
+        });
         OrderedRelayReply::Nack(OrderedRelayNack {
             channel: envelope.channel,
             sequence: envelope.sequence,
@@ -1220,12 +1175,8 @@ impl OrderedRelayReceiverState {
     }
 
     pub fn divert(&mut self, diversion: OrderedRelayDiversion) {
-        self.divert_at(Instant::now(), diversion);
-    }
-
-    pub(crate) fn divert_at(&mut self, now: Instant, diversion: OrderedRelayDiversion) {
         let channel = diversion.channel.clone();
-        if !self.diversions.insert(diversion, now) {
+        if !self.diversions.insert(diversion) {
             self.next_expected_by_channel.remove(&channel);
             self.pending_by_channel.remove(&channel);
             self.recent_acked_by_channel.remove(&channel);

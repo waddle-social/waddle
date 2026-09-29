@@ -354,17 +354,11 @@ pub(super) fn diversion_reason_for_nack(nack: &OrderedRelayNack) -> OrderedRelay
 pub(super) fn channel_diversion_for_ask_error(
     error: &RelayAskError,
 ) -> Option<OrderedRelayDiversionReason> {
-    match error {
-        // The handler never ran: the envelope is rolled back instead (#1623).
-        RelayAskError::NotFound { .. }
-        | RelayAskError::Send {
-            effect: RelaySendEffect::NoEffect,
-            ..
-        } => None,
-        RelayAskError::Send { .. } | RelayAskError::Cancelled => {
-            Some(OrderedRelayDiversionReason::Unreachable)
-        }
+    // The handler never ran: the envelope is rolled back instead (#1623).
+    if ask_error_is_unseen(error) {
+        return None;
     }
+    Some(OrderedRelayDiversionReason::Unreachable)
 }
 
 /// The ask provably never reached the handler, so the envelope's sequence
