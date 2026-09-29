@@ -240,9 +240,11 @@ pub(super) async fn outcome_for_nack(
                 false,
             )
         }
+        // The owner answered that the resource is not bound; nothing was
+        // consumed. Keep the channel so a rebind is reachable at once (#1623).
         OrderedRelayNackReason::TargetUnavailable => (
             Some(FullJidDeliveryOutcome::Unavailable),
-            NackChannelAction::Divert(diversion_reason_for_nack(nack)),
+            NackChannelAction::Rollback,
             false,
         ),
         OrderedRelayNackReason::InFlight => (
@@ -353,15 +355,29 @@ pub(super) fn channel_diversion_for_ask_error(
     error: &RelayAskError,
 ) -> Option<OrderedRelayDiversionReason> {
     match error {
-        RelayAskError::NotFound { .. } => None,
-        RelayAskError::Send {
-            failure: RelaySendFailure::MailboxFull,
+        // The handler never ran: the envelope is rolled back instead (#1623).
+        RelayAskError::NotFound { .. }
+        | RelayAskError::Send {
+            effect: RelaySendEffect::NoEffect,
             ..
-        } => Some(OrderedRelayDiversionReason::Backpressure),
+        } => None,
         RelayAskError::Send { .. } | RelayAskError::Cancelled => {
             Some(OrderedRelayDiversionReason::Unreachable)
         }
     }
+}
+
+/// The ask provably never reached the handler, so the envelope's sequence
+/// was not consumed and must be rolled back.
+pub(super) fn ask_error_is_unseen(error: &RelayAskError) -> bool {
+    matches!(
+        error,
+        RelayAskError::NotFound { .. }
+            | RelayAskError::Send {
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+    )
 }
 
 pub(super) fn ask_error_allows_target_refresh(error: &RelayAskError) -> bool {
