@@ -141,9 +141,14 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> Result<ExtensionResponse> {
-        self.call_handle_event_typed(event, tools, context, config, grants, allowed_http_origins)
+        self.invoke_with_deadline(event, tools, context, config, grants, allowed_http_origins)
             .await
-            .map_err(|error| anyhow::anyhow!("extension invocation failed: {error:?}"))
+            .map_err(|(failure, message)| match message {
+                Some(message) => {
+                    anyhow::anyhow!("extension invocation failed: {failure:?}: {message}")
+                }
+                None => anyhow::anyhow!("extension invocation failed: {failure:?}"),
+            })
     }
 
     pub async fn call_handle_event_typed(
@@ -155,12 +160,29 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+        self.invoke_with_deadline(event, tools, context, config, grants, allowed_http_origins)
+            .await
+            .map_err(|(failure, _)| failure)
+    }
+
+    /// Like [`Self::call_handle_event_typed`], but keeps the guest's error
+    /// message so command callers can surface why an invocation failed.
+    async fn invoke_with_deadline(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        context: InvocationContext,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+    ) -> std::result::Result<ExtensionResponse, (crate::types::ObservationFailure, Option<String>)>
+    {
         tokio::time::timeout(
             std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
             self.invoke(event, tools, context, config, grants, allowed_http_origins),
         )
         .await
-        .map_err(|_| crate::types::ObservationFailure::DeadlineExceeded)?
+        .map_err(|_| (crate::types::ObservationFailure::DeadlineExceeded, None))?
     }
 
     async fn invoke(
@@ -171,7 +193,8 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+    ) -> std::result::Result<ExtensionResponse, (crate::types::ObservationFailure, Option<String>)>
+    {
         use crate::types::ObservationFailure;
         let mut store = Store::new(
             &self.engine,
@@ -186,34 +209,37 @@ impl LoadedExtension {
             ),
         );
         self.configure_store(&mut store)
-            .map_err(|_| ObservationFailure::ResourceLimit)?;
+            .map_err(|_| (ObservationFailure::ResourceLimit, None))?;
         let bindings =
             WaddleExtension::instantiate_async(&mut store, &self.component, &self.linker)
                 .await
-                .map_err(classify_runtime_error)?;
+                .map_err(|error| (classify_runtime_error(error), None))?;
         let result = bindings
             .waddle_extension_framework()
             .call_handle_event(&mut store, &event.into())
             .await
-            .map_err(classify_runtime_error)?;
+            .map_err(|error| (classify_runtime_error(error), None))?;
         match result {
             Ok(response) => response
                 .try_into()
-                .map_err(|_| ObservationFailure::InvalidResult),
-            Err(error) => Err(match error.code {
-                super::waddle::extension::types::ExtensionErrorCode::TemporaryFailure => {
-                    ObservationFailure::TemporaryFailure
-                }
-                super::waddle::extension::types::ExtensionErrorCode::Denied => {
-                    ObservationFailure::Denied
-                }
-                super::waddle::extension::types::ExtensionErrorCode::InvalidRequest => {
-                    ObservationFailure::InvalidRequest
-                }
-                super::waddle::extension::types::ExtensionErrorCode::UnsupportedEvent => {
-                    ObservationFailure::UnsupportedEvent
-                }
-            }),
+                .map_err(|_| (ObservationFailure::InvalidResult, None)),
+            Err(error) => Err((
+                match error.code {
+                    super::waddle::extension::types::ExtensionErrorCode::TemporaryFailure => {
+                        ObservationFailure::TemporaryFailure
+                    }
+                    super::waddle::extension::types::ExtensionErrorCode::Denied => {
+                        ObservationFailure::Denied
+                    }
+                    super::waddle::extension::types::ExtensionErrorCode::InvalidRequest => {
+                        ObservationFailure::InvalidRequest
+                    }
+                    super::waddle::extension::types::ExtensionErrorCode::UnsupportedEvent => {
+                        ObservationFailure::UnsupportedEvent
+                    }
+                },
+                Some(error.message.value),
+            )),
         }
     }
 }
