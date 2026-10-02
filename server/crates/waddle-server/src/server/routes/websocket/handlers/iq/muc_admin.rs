@@ -392,15 +392,19 @@ async fn recover_committed_admin_effects_after_ambiguity(
     items: &[AdminItem],
     sender_jid: &FullJid,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
-    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
     pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
     observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
 ) -> Result<
     (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
     crate::room_effect_outbox::RoomEffectOutboxError,
 > {
-    let mut applied =
-        recover_committed_admin_effects(room, items, sender_jid, occupant_id_secret, server_hats);
+    let mut applied = recover_committed_admin_effects(
+        room,
+        items,
+        sender_jid,
+        occupant_id_secret,
+        &state.deps.app_state.server_hats,
+    );
     let proven_coordinates =
         derive_ambiguous_admin_commit_coordinates(pre_apply_coordinates, observed_coordinates);
     let suppress_direct_admin_effects = !is_role_change_query(items)
@@ -524,7 +528,6 @@ async fn reconcile_ambiguous_admin_result(
                         items,
                         sender_jid,
                         &state.deps.occupant_id_secret,
-                        &state.deps.app_state.server_hats,
                         snapshot_before_apply.durable_coordinates,
                         snapshot.durable_coordinates,
                     )
@@ -2078,6 +2081,7 @@ mod tests {
             &items,
             &"owner@example.com/web".parse().expect("owner full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         ) {
             AdminReconciliationOutcome::NotCommitted => {}
             AdminReconciliationOutcome::Committed(_) => {
@@ -2118,6 +2122,7 @@ mod tests {
             &items,
             &"owner@example.com/web".parse().expect("owner full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         ) {
             AdminReconciliationOutcome::Committed(applied) => {
                 assert!(
@@ -2174,6 +2179,7 @@ mod tests {
             }],
             &"admin@example.com/web".parse().expect("admin full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         );
         let target_full_jid: FullJid = "target@example.com/web".parse().expect("target full jid");
 
@@ -2239,6 +2245,7 @@ mod tests {
             }],
             &"admin@example.com/web".parse().expect("admin full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         );
         let member_full_jid: FullJid = "member@example.com/web".parse().expect("member full jid");
 
@@ -2372,6 +2379,7 @@ mod tests {
             }],
             &"admin@example.com/web".parse().expect("admin full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         );
         let target_full_jid: FullJid = "target@example.com/web".parse().expect("target full jid");
 
@@ -2433,6 +2441,7 @@ mod tests {
             }],
             &"owner@example.com/web".parse().expect("owner full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         );
 
         assert!(
@@ -2490,6 +2499,7 @@ mod tests {
             }],
             &"owner@example.com/web".parse().expect("owner full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         );
 
         assert!(
@@ -2547,6 +2557,7 @@ mod tests {
             }],
             &"owner@example.com/web".parse().expect("owner full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         );
 
         assert!(
@@ -2604,6 +2615,7 @@ mod tests {
             }],
             &"owner@example.com/web".parse().expect("owner full jid"),
             &test_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
         );
 
         assert!(

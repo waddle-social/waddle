@@ -210,7 +210,12 @@ mod tests {
             voice_changes: Vec::new(),
         };
 
-        let rendered = rebuild_effect(&room_jid(), &effect, &occupant_id_secret());
+        let rendered = rebuild_effect(
+            &room_jid(),
+            &effect,
+            &occupant_id_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
+        );
 
         let expected = [
             (
@@ -286,7 +291,12 @@ mod tests {
             }],
         };
 
-        let rendered = rebuild_effect(&room_jid(), &effect, &secret);
+        let rendered = rebuild_effect(
+            &room_jid(),
+            &effect,
+            &secret,
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
+        );
 
         let expected_identity = OccupantIdentity {
             bare_jid: &alice_bare,
@@ -350,7 +360,12 @@ mod tests {
             }],
         };
 
-        let rendered = rebuild_effect(&room_jid(), &effect, &secret);
+        let rendered = rebuild_effect(
+            &room_jid(),
+            &effect,
+            &secret,
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
+        );
 
         let expected_identity = OccupantIdentity {
             bare_jid: &alice_bare,
@@ -425,7 +440,12 @@ mod tests {
             }],
         };
 
-        let rendered = rebuild_effect(&room_jid(), &effect, &occupant_id_secret());
+        let rendered = rebuild_effect(
+            &room_jid(),
+            &effect,
+            &occupant_id_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
+        );
         assert_eq!(rendered.len(), 1);
     }
 
@@ -450,7 +470,12 @@ mod tests {
             voice_changes: Vec::new(),
         };
 
-        let rendered = rebuild_effect(&room_jid(), &effect, &occupant_id_secret());
+        let rendered = rebuild_effect(
+            &room_jid(),
+            &effect,
+            &occupant_id_secret(),
+            &waddle_xmpp::xep::xep0317::ServerHats::default(),
+        );
         let frame = xml(&rendered[0].1);
 
         assert!(

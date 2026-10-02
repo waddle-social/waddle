@@ -4127,6 +4127,7 @@ async fn stopped_registry_after_steal_exactly_releases_the_won_claim() {
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
+        waddle_xmpp::xep::xep0317::ServerHats::default(),
         None,
     );
     registry.actor_ref().kill();
@@ -4184,6 +4185,7 @@ async fn terminal_shutdown_transfers_a_post_cas_room_handoff_into_registry_drain
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
+        waddle_xmpp::xep::xep0317::ServerHats::default(),
         None,
     );
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
@@ -4252,6 +4254,7 @@ async fn cancelled_after_known_steal_still_registers_the_exact_room_fence() {
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
+        waddle_xmpp::xep::xep0317::ServerHats::default(),
         None,
     );
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
@@ -4358,6 +4361,7 @@ async fn registry_death_after_mailbox_acceptance_self_fences_the_node() {
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
+        waddle_xmpp::xep::xep0317::ServerHats::default(),
         None,
     );
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
@@ -4440,6 +4444,7 @@ async fn idle_room_registry_death_self_fences_the_node() {
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
+        waddle_xmpp::xep::xep0317::ServerHats::default(),
         None,
     );
     let node_lifecycle = crate::clustering::NodeLifecycle::new();
@@ -5067,6 +5072,7 @@ async fn worker_restart_self_fences_when_an_uncertain_sm_claim_is_unobserved() {
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
+        waddle_xmpp::xep::xep0317::ServerHats::default(),
         None,
     );
     room_registry

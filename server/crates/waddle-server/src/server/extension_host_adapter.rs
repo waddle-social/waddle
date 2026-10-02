@@ -137,17 +137,6 @@ impl ExtensionHostAdapter {
             .map_err(|error: jid::Error| ExtensionHostAdapterError::Protocol(error.to_string()))
     }
 
-    fn extension_manifest(
-        &self,
-        plugin_id: &PluginId,
-    ) -> Option<waddle_extensions::ExtensionManifest> {
-        self.state
-            .deps
-            .protocol
-            .extension_manager
-            .manifest_for_plugin(plugin_id.as_str())
-    }
-
     fn extension_bot_nick(&self, plugin_id: &PluginId) -> String {
         crate::server::extension_bot::bot_name(
             &self.state.deps.protocol.extension_manager,

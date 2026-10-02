@@ -2657,7 +2657,12 @@ mod resolver_sync_retry_tests {
         let member: BareJid = "deposed@example.com".parse().expect("member JID");
         let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
             .expect("occupant-id secret");
-        let registry = RoomRegistry::spawn("muc.example.com".to_string(), secret, None);
+        let registry = RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            secret,
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
+            None,
+        );
         let actor = registry
             .get_or_create_room(
                 room_jid.clone(),

@@ -52,6 +52,23 @@ impl GroupchatFixture {
 
     /// The same persistent room and live member on `adapter`'s node.
     pub async fn on(f: &IngressFixture, adapter: ExtensionHostAdapter) -> Self {
+        Self::with_config(f, adapter, RoomConfig::default()).await
+    }
+
+    /// The fixture's room as a group DM: a conversation between people.
+    pub async fn group_dm(f: &IngressFixture) -> Self {
+        let config = RoomConfig {
+            group_dm: true,
+            ..Default::default()
+        };
+        Self::with_config(f, direct_ingress::adapter(f).await, config).await
+    }
+
+    async fn with_config(
+        f: &IngressFixture,
+        adapter: ExtensionHostAdapter,
+        config: RoomConfig,
+    ) -> Self {
         let room: BareJid = "extension-room@muc.example.com".parse().expect("room");
         let actor = adapter
             .state
@@ -65,7 +82,7 @@ impl GroupchatFixture {
                 config: RoomConfig {
                     persistent: true,
                     members_only: true,
-                    ..Default::default()
+                    ..config
                 },
             })
             .await
@@ -253,6 +270,48 @@ async fn provider_grant_revocation(f: IngressFixture) {
     );
     assert_eq!(f.count("ingress_messages").await, 1);
     fixture.close(f).await;
+}
+
+/// A group DM is a conversation between people: an extension command or send
+/// into one is refused before the bot joins, takes an affiliation or posts.
+async fn group_dm_refuses_the_bot(f: IngressFixture) {
+    let mut fixture = GroupchatFixture::group_dm(&f).await;
+    let bot = fixture.invocation().actor_jid;
+    assert!(
+        matches!(
+            fixture.send("group-dm-bot").await,
+            Err(ExtensionHostAdapterError::NotAuthorized)
+        ),
+        "the bot is not authorized to speak in a group DM"
+    );
+    let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert!(room.config.group_dm);
+    assert!(
+        room.session_generation(&bot).is_none(),
+        "the bot never joined the group DM"
+    );
+    assert_eq!(
+        room.get_affiliation(&bot.to_bare()),
+        Affiliation::None,
+        "the refusal leaves no Member affiliation behind"
+    );
+    assert_eq!(f.count("ingress_messages").await, 0);
+    assert!(
+        fixture.drain().is_empty(),
+        "no bot join presence or message reached a member"
+    );
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_group_dm_refused_sqlite() {
+    group_dm_refuses_the_bot(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_groupchat_group_dm_refused_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_group_dm").await {
+        group_dm_refuses_the_bot(f).await;
+    }
 }
 
 #[tokio::test]

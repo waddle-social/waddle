@@ -58,6 +58,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         node_lifecycle: crate::clustering::NodeLifecycle::new(),
         clustering_claims: crate::clustering::ClusteringHandles::default(),
         lineage_config: crate::config::LineageConfig::default(),
+        server_hats: waddle_xmpp::xep::xep0317::ServerHats::default(),
         clustering_enabled: false,
     }));
 

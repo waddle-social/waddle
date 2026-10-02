@@ -1002,6 +1002,157 @@ async fn handle_iq_disco_info_answers_every_component_domain() {
     }
 }
 
+async fn disco_reply_for_test(
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    frame: &str,
+) -> Element {
+    let responses = handle_iq(frame, "example.com", "muc.example.com", state, &None, phase).await;
+    assert_eq!(responses.len(), 1, "exactly one reply: {responses:?}");
+    Element::from_str(&responses[0]).expect("reply is well-formed XML")
+}
+
+fn assert_item_not_found_for_test(reply: &Element, target: &str) {
+    assert_eq!(reply.attr("type"), Some("error"), "{target}: {reply:?}");
+    let error = reply
+        .get_child("error", waddle_xmpp::ns::JABBER_CLIENT)
+        .unwrap_or_else(|| panic!("{target}: error payload: {reply:?}"));
+    assert!(
+        error
+            .children()
+            .any(|child| child.name() == "item-not-found"),
+        "{target} must be item-not-found: {reply:?}"
+    );
+}
+
+/// XEP-0030 §3 on an extension bot: the server answers for the host-owned
+/// entity with the `client/bot` identity named by its manifest, on the bare
+/// JID and on `/bot`. Any other address on the extensions domain (unknown
+/// plugin, other resource, a node) does not exist, and the service domain
+/// itself keeps answering as the `pubsub/service` it always was.
+#[tokio::test]
+async fn handle_iq_disco_info_answers_for_extension_bots() {
+    let state = create_test_websocket_state_with_fixture_bot().await;
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let phase = ready_phase(&alice);
+    let extensions = state.deps.service_domains.extensions.clone();
+    let bot = format!("{FIXTURE_BOT_PLUGIN}@{extensions}");
+    let manifest = state
+        .deps
+        .protocol
+        .extension_manager
+        .manifest_for_plugin(FIXTURE_BOT_PLUGIN)
+        .expect("fixture manifest is loaded");
+    assert!(!manifest.name.as_str().is_empty());
+
+    for target in [bot.clone(), format!("{bot}/bot")] {
+        let reply = disco_reply_for_test(
+            &state,
+            &phase,
+            &disco_info_iq_frame("disco-bot", &target, None),
+        )
+        .await;
+        assert_eq!(reply.attr("type"), Some("result"), "{target}: {reply:?}");
+        let query = reply
+            .get_child("query", waddle_xmpp::disco::DISCO_INFO_NS)
+            .expect("disco#info result payload");
+        let identities: Vec<_> = query
+            .children()
+            .filter(|child| child.name() == "identity")
+            .map(|child| {
+                (
+                    child.attr("category"),
+                    child.attr("type"),
+                    child.attr("name"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            identities,
+            [(Some("client"), Some("bot"), Some(manifest.name.as_str()))],
+            "{target} is exactly one client/bot named by its manifest"
+        );
+        assert!(
+            disco_feature_vars_for_test(query).contains(waddle_xmpp::disco::DISCO_INFO_NS),
+            "{target} advertises disco#info: {reply:?}"
+        );
+    }
+
+    for (target, node) in [
+        (format!("unknown-plugin@{extensions}"), None),
+        (format!("unknown-plugin@{extensions}/bot"), None),
+        (format!("{bot}/other"), None),
+        (bot.clone(), Some("some-node")),
+        (format!("{bot}/bot"), Some("some-node")),
+    ] {
+        let reply = disco_reply_for_test(
+            &state,
+            &phase,
+            &disco_info_iq_frame("disco-missing", &target, node),
+        )
+        .await;
+        assert_item_not_found_for_test(&reply, &target);
+    }
+
+    let reply = disco_reply_for_test(
+        &state,
+        &phase,
+        &disco_info_iq_frame("disco-service", &extensions, None),
+    )
+    .await;
+    let query = reply
+        .get_child("query", waddle_xmpp::disco::DISCO_INFO_NS)
+        .expect("service domain disco#info result");
+    assert!(
+        query.children().any(|child| child.name() == "identity"
+            && child.attr("category") == Some("pubsub")
+            && child.attr("type") == Some("service")),
+        "{extensions} stays a pubsub/service: {reply:?}"
+    );
+}
+
+/// XEP-0030 §4: a bot is a leaf, so its items are empty; every other
+/// address on the extensions domain does not exist.
+#[tokio::test]
+async fn handle_iq_disco_items_for_extension_bots_are_empty() {
+    let state = create_test_websocket_state_with_fixture_bot().await;
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let phase = ready_phase(&alice);
+    let extensions = state.deps.service_domains.extensions.clone();
+    let bot = format!("{FIXTURE_BOT_PLUGIN}@{extensions}");
+
+    for target in [bot.clone(), format!("{bot}/bot")] {
+        let reply = disco_reply_for_test(
+            &state,
+            &phase,
+            &disco_items_iq_frame("items-bot", &target, None),
+        )
+        .await;
+        assert_eq!(reply.attr("type"), Some("result"), "{target}: {reply:?}");
+        let query = reply
+            .get_child("query", waddle_xmpp::disco::DISCO_ITEMS_NS)
+            .expect("disco#items result payload");
+        assert!(
+            disco_items_for_test(query).is_empty(),
+            "{target} has no items: {reply:?}"
+        );
+    }
+
+    for (target, node) in [
+        (format!("unknown-plugin@{extensions}"), None),
+        (format!("{bot}/other"), None),
+        (bot.clone(), Some("some-node")),
+    ] {
+        let reply = disco_reply_for_test(
+            &state,
+            &phase,
+            &disco_items_iq_frame("items-missing", &target, node),
+        )
+        .await;
+        assert_item_not_found_for_test(&reply, &target);
+    }
+}
+
 #[tokio::test]
 async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
     let state = create_test_websocket_state().await;

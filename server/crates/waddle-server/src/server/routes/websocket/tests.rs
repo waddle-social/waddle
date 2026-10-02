@@ -903,6 +903,45 @@ async fn empty_extension_manager() -> Arc<ExtensionManager> {
     )
 }
 
+/// The plugin id of the one real component [`create_test_websocket_state_with_fixture_bot`]
+/// loads, so `FIXTURE_BOT_PLUGIN@extensions.example.com` is a bot with a manifest.
+pub(crate) const FIXTURE_BOT_PLUGIN: &str = "message-hook-fixture";
+
+/// A test state whose extension manager really loads [`FIXTURE_BOT_PLUGIN`].
+pub(crate) async fn create_test_websocket_state_with_fixture_bot() -> Arc<WebSocketState> {
+    let manager = ExtensionManager::from_config(ExtensionConfig {
+        enabled: true,
+        modules: vec![waddle_extensions::ExtensionModuleConfig {
+            room_observation: None,
+            runtime_limits: Default::default(),
+            name: FIXTURE_BOT_PLUGIN.into(),
+            namespace: "urn:test:message-hook".into(),
+            registry: Default::default(),
+            digest: None,
+            tag: None,
+            config: serde_json::json!(0),
+            capability_grants: vec![waddle_extensions::ExtensionCapability::MessageEnrich],
+            allowed_http_origins: vec![],
+            provider_room_grants: vec![],
+            config_secret_files: Default::default(),
+            local_path: Some(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../waddle-extensions/tests/fixtures/message_hook.wat")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        }],
+        ..Default::default()
+    })
+    .await
+    .expect("fixture bot extension manager");
+    create_test_websocket_state_with_extension_manager(
+        Arc::new(manager),
+        TestStateOverrides::default(),
+    )
+    .await
+}
+
 /// Optional fixture substitutions for one test websocket state; unset fields
 /// take the shared defaults.
 #[derive(Default)]
@@ -1078,18 +1117,26 @@ async fn create_test_websocket_state_with_extension_manager(
         tokio::runtime::Handle::current(),
     );
 
+    let service_domains = XmppServiceDomains {
+        muc: "muc.example.com".to_string(),
+        spaces: "spaces.example.com".to_string(),
+        upload: "upload.example.com".to_string(),
+        extensions: "extensions.example.com".to_string(),
+        push: "push.example.com".to_string(),
+        community: "community.example.com".to_string(),
+    };
+    // Mirror `http.rs`: the bot hat is server-assigned for every bot JID.
+    crate::server::extension_bot::install_bot_hats(
+        &app_state.server_hats,
+        service_domains.clone(),
+        Arc::clone(&extension_manager),
+    );
+
     Arc::new(WebSocketState {
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,
-                service_domains: XmppServiceDomains {
-                    muc: "muc.example.com".to_string(),
-                    spaces: "spaces.example.com".to_string(),
-                    upload: "upload.example.com".to_string(),
-                    extensions: "extensions.example.com".to_string(),
-                    push: "push.example.com".to_string(),
-                    community: "community.example.com".to_string(),
-                },
+                service_domains,
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
                     user_registry: waddle_xmpp::registry::UserRegistryActor::spawn(
@@ -1098,13 +1145,16 @@ async fn create_test_websocket_state_with_extension_manager(
                     room_registry: if share_app_room_registry {
                         app_state.room_registry.clone()
                     } else {
-                        RoomRegistryActor::spawn(RoomRegistryActor::new(
-                            "muc.example.com".to_string(),
-                            OccupantIdSecret::new(
-                                b"test-occupant-id-secret-32-bytes-long".to_vec(),
+                        RoomRegistryActor::spawn(
+                            RoomRegistryActor::new(
+                                "muc.example.com".to_string(),
+                                OccupantIdSecret::new(
+                                    b"test-occupant-id-secret-32-bytes-long".to_vec(),
+                                )
+                                .expect("test secret meets length floor"),
                             )
-                            .expect("test secret meets length floor"),
-                        ))
+                            .with_server_hats(app_state.server_hats.clone()),
+                        )
                     },
                     mam_storage,
                     inbox_storage: Arc::clone(&test_inbox_storage),
