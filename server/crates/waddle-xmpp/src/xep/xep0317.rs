@@ -18,8 +18,8 @@
 //! Therefore this module deliberately does NOT expose constructors for
 //! "owner / admin / moderator" hats — those are MUC authority and
 //! belong in `<x muc#user>`, not in `<hats>`. The only well-known hat
-//! Waddle ships is `Bot`, used by the extension-bot path to socially
-//! identify automated participants.
+//! Waddle ships is `Bot`: the server assigns it to extension bots through
+//! [`ServerHats`], so every occupant presence it builds for a bot wears it.
 //!
 //! ## Wire shape
 //!
@@ -33,6 +33,8 @@
 //!   </hats>
 //! </presence>
 //! ```
+
+use std::sync::{Arc, OnceLock};
 
 use minidom::Element;
 use xmpp_parsers::presence::Presence;
@@ -134,6 +136,41 @@ impl HatSet {
     /// Get hat titles as a vec.
     pub fn titles(&self) -> Vec<&str> {
         self.hats.iter().map(|h| h.title.as_str()).collect()
+    }
+}
+
+type HatResolver = dyn Fn(&jid::BareJid) -> Option<HatSet> + Send + Sync;
+
+/// Deployment-wide source of server-assigned hats, keyed by an occupant's
+/// real bare JID.
+///
+/// Every server-built occupant presence consults it, so a hat survives
+/// join replay and role/affiliation changes without living in room state.
+/// The deployment installs the resolver once its inputs exist; until then,
+/// and in tests that never install one, occupants wear no server hats.
+#[derive(Clone, Default)]
+pub struct ServerHats(Arc<OnceLock<Box<HatResolver>>>);
+
+impl ServerHats {
+    /// Install the resolver. Only the first call takes effect.
+    pub fn install(
+        &self,
+        resolver: impl Fn(&jid::BareJid) -> Option<HatSet> + Send + Sync + 'static,
+    ) {
+        let _ = self.0.set(Box::new(resolver));
+    }
+
+    /// Hats the server assigns to `occupant`, if any.
+    pub fn resolve(&self, occupant: &jid::BareJid) -> Option<HatSet> {
+        self.0.get().and_then(|resolver| resolver(occupant))
+    }
+}
+
+impl std::fmt::Debug for ServerHats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ServerHats")
+            .field(&self.0.get().is_some())
+            .finish()
     }
 }
 

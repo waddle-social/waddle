@@ -368,6 +368,7 @@ fn xep0421_destroy_notification_carries_occupant_id() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 

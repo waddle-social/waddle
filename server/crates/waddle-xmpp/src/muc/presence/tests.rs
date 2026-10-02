@@ -116,6 +116,7 @@ fn test_build_occupant_presence() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -152,6 +153,7 @@ fn test_build_occupant_presence_created_room_self_includes_201() {
         bare_jid: &creator_bare,
         real_jid: Some(&creator),
         secret: &secret,
+        hats: &Default::default(),
     };
 
     let self_presence = build_occupant_presence(
@@ -224,6 +226,7 @@ fn test_build_leave_presence() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -277,6 +280,7 @@ fn test_build_kick_presence_self_includes_307_and_110_and_actor_reason() {
             bare_jid: &target_bare,
             real_jid: Some(&target_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -341,6 +345,7 @@ fn test_build_kick_presence_remaining_excludes_110() {
             bare_jid: &target_bare,
             real_jid: Some(&target_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -393,6 +398,7 @@ fn test_build_ban_presence_self_includes_301_outcast_role_none() {
             bare_jid: &target_bare,
             real_jid: Some(&target_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -459,6 +465,7 @@ fn test_build_occupant_presence_update_replaces_spoofable_identity_payloads() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -581,6 +588,7 @@ fn test_build_destroy_notification() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -646,6 +654,7 @@ fn test_build_destroy_notification_not_self_minimal() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
     let x_elem = presence
@@ -696,6 +705,7 @@ fn xep0045_service_error_removal_marks_the_other_occupants_presence_with_333() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -735,6 +745,7 @@ fn xep0045_service_error_removal_marks_the_removed_users_own_presence_with_110_a
             bare_jid: &occupant_bare,
             real_jid: Some(&to),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 
@@ -769,6 +780,7 @@ fn xep0045_voluntary_leave_carries_no_removal_status_code() {
             bare_jid: &occupant_bare,
             real_jid: Some(&occupant_jid),
             secret: &secret,
+            hats: &Default::default(),
         },
     );
 

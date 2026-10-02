@@ -110,9 +110,11 @@ impl RoomRegistry {
     pub fn spawn(
         muc_domain: String,
         occupant_id_secret: OccupantIdSecret,
+        server_hats: crate::xep::xep0317::ServerHats,
         membership_source: Option<Arc<dyn DurableMembershipSource>>,
     ) -> Self {
-        let mut actor = RoomRegistryActor::new(muc_domain, occupant_id_secret);
+        let mut actor =
+            RoomRegistryActor::new(muc_domain, occupant_id_secret).with_server_hats(server_hats);
         if let Some(source) = membership_source {
             actor = actor.with_membership_source(source);
         }

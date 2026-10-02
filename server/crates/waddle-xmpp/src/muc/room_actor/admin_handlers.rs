@@ -17,6 +17,7 @@ use crate::muc::{
     OccupantVoiceChange, RoomEffectReservation,
 };
 use crate::types::{Affiliation, Role, Voice};
+use crate::xep::xep0317::ServerHats;
 use crate::xep::xep0421::{OccupantIdSecret, OccupantIdentity};
 
 const STATUS_AFFILIATION_CHANGE_REMOVAL: &str = "321";
@@ -232,6 +233,7 @@ pub(super) fn restored_roster_removal_effects(
 fn removal_presence_updates(
     room: &MucRoom,
     occupant_id_secret: &OccupantIdSecret,
+    server_hats: &ServerHats,
     occupant: &Occupant,
     status_code: &'static str,
     kind: AdminPresenceKind,
@@ -250,6 +252,7 @@ fn removal_presence_updates(
                 bare_jid: &occupant_bare,
                 real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
                 secret: occupant_id_secret,
+                hats: server_hats,
             };
             let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
             let presence = build_membership_removal_presence(
@@ -286,6 +289,7 @@ fn removal_presence_updates(
 fn apply_affiliation_change_with_effects(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
+    server_hats: &ServerHats,
     target_jid: BareJid,
     new_affiliation: Affiliation,
     actor: Option<&BareJid>,
@@ -336,6 +340,7 @@ fn apply_affiliation_change_with_effects(
                     bare_jid: &occupant_bare,
                     real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
                     secret: occupant_id_secret,
+                    hats: server_hats,
                 };
                 let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
                 let presence = build_ban_presence(
@@ -386,6 +391,7 @@ fn apply_affiliation_change_with_effects(
             for built in removal_presence_updates(
                 room,
                 occupant_id_secret,
+                server_hats,
                 occupant,
                 STATUS_AFFILIATION_CHANGE_REMOVAL,
                 AdminPresenceKind::AffiliationRemoved,
@@ -435,6 +441,7 @@ fn apply_affiliation_change_with_effects(
                 bare_jid: &occupant_bare,
                 real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
                 secret: occupant_id_secret,
+                hats: server_hats,
             };
             let is_self = affected_sessions.iter().any(|jid| jid == &recipient);
             let presence = build_affiliation_change_presence(
@@ -480,6 +487,7 @@ fn apply_affiliation_change_with_effects(
 pub(super) fn apply_affiliation_change(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
+    server_hats: &ServerHats,
     target_jid: BareJid,
     new_affiliation: Affiliation,
     actor: Option<&BareJid>,
@@ -488,6 +496,7 @@ pub(super) fn apply_affiliation_change(
     apply_affiliation_change_with_effects(
         room,
         occupant_id_secret,
+        server_hats,
         target_jid,
         new_affiliation,
         actor,
@@ -543,6 +552,7 @@ fn changed_session_voices(
 pub fn enforce_members_only_from_room(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
+    server_hats: &ServerHats,
 ) -> AdminItemsApplied {
     if !room.config.members_only {
         return AdminItemsApplied::default();
@@ -560,6 +570,7 @@ pub fn enforce_members_only_from_room(
             removal_presence_updates(
                 room,
                 occupant_id_secret,
+                server_hats,
                 occupant,
                 STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
                 AdminPresenceKind::MembersOnlyRemoved,
@@ -797,6 +808,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 &target_occupant.real_jid,
                             ),
                             secret: &self.occupant_id_secret,
+                            hats: &self.server_hats,
                         };
                         let is_self = target_sessions.iter().any(|jid| jid == &recipient);
                         let presence = build_kick_presence(
@@ -833,6 +845,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 &target_occupant.real_jid,
                             ),
                             secret: &self.occupant_id_secret,
+                            hats: &self.server_hats,
                         };
                         let is_self = target_sessions.iter().any(|jid| jid == &recipient);
                         let presence = build_role_change_presence(
@@ -980,6 +993,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             } = apply_affiliation_change_with_effects(
                 &mut staged_room,
                 &self.occupant_id_secret,
+                &self.server_hats,
                 target_jid.clone(),
                 new_affiliation,
                 Some(&actor),
@@ -1122,6 +1136,7 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         } = apply_affiliation_change_with_effects(
             &mut staged_room,
             &self.occupant_id_secret,
+            &self.server_hats,
             msg.jid.clone(),
             msg.affiliation,
             msg.actor.as_ref(),
@@ -1179,6 +1194,7 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
         Ok(enforce_members_only_from_room(
             &mut self.room,
             &self.occupant_id_secret,
+            &self.server_hats,
         ))
     }
 }
@@ -1243,8 +1259,11 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         for (jid, _) in changed_affiliations {
             self.advance_member_admission_revision(&jid);
         }
-        let mut applied =
-            enforce_members_only_from_room(&mut staged_room, &self.occupant_id_secret);
+        let mut applied = enforce_members_only_from_room(
+            &mut staged_room,
+            &self.occupant_id_secret,
+            &self.server_hats,
+        );
         // Report voice losses for occupants who survived the
         // members-only sweep; ejected sessions are carried by
         // `removed_by_moderation` and must not be double-reported.
@@ -1281,6 +1300,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                     removal_presence_updates(
                         &self.room,
                         &self.occupant_id_secret,
+                        &self.server_hats,
                         &occupant,
                         STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
                         AdminPresenceKind::MembersOnlyRemoved,
@@ -1421,6 +1441,7 @@ mod voice_change_tests {
         let applied = apply_affiliation_change(
             &mut room,
             &secret(),
+            &Default::default(),
             "mallory@example.com".parse().expect("bare jid"),
             Affiliation::None,
             None,
@@ -1478,6 +1499,7 @@ mod voice_change_tests {
         let applied = apply_affiliation_change(
             &mut room,
             &secret(),
+            &Default::default(),
             "mallory@example.com".parse().expect("bare jid"),
             Affiliation::None,
             None,
@@ -1525,6 +1547,7 @@ mod voice_change_tests {
         let applied = apply_affiliation_change(
             &mut room,
             &secret(),
+            &Default::default(),
             "bob@example.com".parse().expect("bare jid"),
             Affiliation::None,
             None,

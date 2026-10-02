@@ -383,6 +383,9 @@ pub struct RoomRegistryActor {
     /// `RoomActor` at spawn so all rooms in this deployment share the
     /// same keying material.
     occupant_id_secret: OccupantIdSecret,
+    /// Deployment-wide XEP-0317 hats, forwarded to every `RoomActor` at
+    /// spawn alongside the occupant-id secret.
+    server_hats: crate::xep::xep0317::ServerHats,
     /// Durable membership source used to hydrate each freshly spawned
     /// `RoomActor`'s durable-recipient set (#1135). `None` in
     /// deployments/tests without a durable membership store; such
@@ -657,6 +660,7 @@ impl RoomRegistryActor {
             terminal_claim_acquisition_disabled: false,
             muc_domain,
             occupant_id_secret,
+            server_hats: Default::default(),
             membership_source: None,
             claim_store: crate::ownership::observed_claim_store(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
@@ -1322,6 +1326,11 @@ impl RoomRegistryActor {
         self
     }
 
+    pub fn with_server_hats(mut self, server_hats: crate::xep::xep0317::ServerHats) -> Self {
+        self.server_hats = server_hats;
+        self
+    }
+
     fn remember_pending_reclaimed_room(
         &mut self,
         room_jid: BareJid,
@@ -1742,10 +1751,10 @@ impl RoomRegistryActor {
                 }
             }
         }
-        let actor_guard = RoomPreparationGuard::new(RoomActor::spawn(RoomActor::new(
-            room,
-            self.occupant_id_secret.clone(),
-        )));
+        let actor_guard = RoomPreparationGuard::new(RoomActor::spawn(
+            RoomActor::new(room, self.occupant_id_secret.clone())
+                .with_server_hats(self.server_hats.clone()),
+        ));
         let actor_ref = actor_guard.actor_ref();
         if let Some(store) = &self.durable_store {
             if let Err(error) = actor_ref

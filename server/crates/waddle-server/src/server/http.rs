@@ -707,6 +707,11 @@ async fn create_websocket_state(
         Arc::clone(&deferred_extension_host_tools),
     )
     .await?;
+    crate::server::extension_bot::install_bot_hats(
+        &state.server_hats,
+        service_domains.clone(),
+        Arc::clone(&extension_manager),
+    );
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
 

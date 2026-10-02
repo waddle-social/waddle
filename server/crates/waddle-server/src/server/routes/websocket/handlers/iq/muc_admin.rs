@@ -334,6 +334,7 @@ fn reconcile_admin_result_from_rooms(
     items: &[AdminItem],
     sender_jid: &FullJid,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
 ) -> AdminReconciliationOutcome {
     if current_after.is_some_and(|after| admin_items_match_room(before, after, items))
         || recovered_after.is_some_and(|after| admin_items_match_room(before, after, items))
@@ -343,6 +344,7 @@ fn reconcile_admin_result_from_rooms(
             items,
             sender_jid,
             occupant_id_secret,
+            server_hats,
         ));
     }
     if recovered_after.is_some() {
@@ -390,13 +392,15 @@ async fn recover_committed_admin_effects_after_ambiguity(
     items: &[AdminItem],
     sender_jid: &FullJid,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
     pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
     observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
 ) -> Result<
     (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
     crate::room_effect_outbox::RoomEffectOutboxError,
 > {
-    let mut applied = recover_committed_admin_effects(room, items, sender_jid, occupant_id_secret);
+    let mut applied =
+        recover_committed_admin_effects(room, items, sender_jid, occupant_id_secret, server_hats);
     let proven_coordinates =
         derive_ambiguous_admin_commit_coordinates(pre_apply_coordinates, observed_coordinates);
     let suppress_direct_admin_effects = !is_role_change_query(items)
@@ -449,6 +453,7 @@ async fn recover_exact_admin_result(
                 items,
                 sender_jid,
                 &state.deps.occupant_id_secret,
+                &state.deps.app_state.server_hats,
             );
             applied.outbox_reservation = reservation;
             // Only this exact durable batch's rows own delivery, even if
@@ -510,6 +515,7 @@ async fn reconcile_ambiguous_admin_result(
                 items,
                 sender_jid,
                 &state.deps.occupant_id_secret,
+                &state.deps.app_state.server_hats,
             ) {
                 AdminReconciliationOutcome::Committed(_) => {
                     match recover_committed_admin_effects_after_ambiguity(
@@ -518,6 +524,7 @@ async fn reconcile_ambiguous_admin_result(
                         items,
                         sender_jid,
                         &state.deps.occupant_id_secret,
+                        &state.deps.app_state.server_hats,
                         snapshot_before_apply.durable_coordinates,
                         snapshot.durable_coordinates,
                     )
@@ -687,6 +694,7 @@ fn occupant_room_jid(room: &waddle_xmpp::muc::MucRoom, nick: &str) -> Option<Ful
 fn replay_affiliation_change_from_snapshot(
     room: &mut waddle_xmpp::muc::MucRoom,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
     target_jid: BareJid,
     new_affiliation: Affiliation,
     actor: &BareJid,
@@ -716,6 +724,7 @@ fn replay_affiliation_change_from_snapshot(
                         bare_jid: &occupant_bare,
                         real_jid: Some(&occupant.real_jid),
                         secret: occupant_id_secret,
+                        hats: server_hats,
                     };
                     let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
                     let presence = waddle_xmpp::muc::build_ban_presence(
@@ -757,6 +766,7 @@ fn replay_affiliation_change_from_snapshot(
                         bare_jid: &occupant_bare,
                         real_jid: Some(&occupant.real_jid),
                         secret: occupant_id_secret,
+                        hats: server_hats,
                     };
                     let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
                     let presence = waddle_xmpp::muc::build_membership_removal_presence(
@@ -792,6 +802,7 @@ fn replay_affiliation_change_from_snapshot(
                     bare_jid: &occupant_bare,
                     real_jid: Some(&occupant.real_jid),
                     secret: occupant_id_secret,
+                    hats: server_hats,
                 };
                 let is_self = affected_sessions.iter().any(|jid| jid == &recipient);
                 let presence = waddle_xmpp::muc::build_affiliation_change_presence(
@@ -818,6 +829,7 @@ fn replay_affiliation_change_from_snapshot(
 fn replay_role_change_from_snapshot(
     room: &mut waddle_xmpp::muc::MucRoom,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
     target_nick: &str,
     new_role: waddle_xmpp::Role,
     actor: &BareJid,
@@ -836,6 +848,7 @@ fn replay_role_change_from_snapshot(
                     bare_jid: &target_bare,
                     real_jid: Some(&target_occupant.real_jid),
                     secret: occupant_id_secret,
+                    hats: server_hats,
                 };
                 let is_self = target_sessions.iter().any(|jid| jid == &recipient);
                 let presence = waddle_xmpp::muc::build_kick_presence(
@@ -880,6 +893,7 @@ fn replay_role_change_from_snapshot(
                 bare_jid: &target_bare,
                 real_jid: Some(&target_occupant.real_jid),
                 secret: occupant_id_secret,
+                hats: server_hats,
             };
             let is_self = target_sessions.iter().any(|jid| jid == &recipient);
             let presence = waddle_xmpp::muc::build_role_change_presence(
@@ -906,6 +920,7 @@ fn recover_committed_admin_effects(
     items: &[AdminItem],
     sender_jid: &FullJid,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
 ) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
     let mut replay_room = room.clone();
     let actor = sender_jid.to_bare();
@@ -917,6 +932,7 @@ fn recover_committed_admin_effects(
             replay_affiliation_change_from_snapshot(
                 &mut replay_room,
                 occupant_id_secret,
+                server_hats,
                 target_jid,
                 new_affiliation,
                 &actor,
@@ -926,6 +942,7 @@ fn recover_committed_admin_effects(
             replay_role_change_from_snapshot(
                 &mut replay_room,
                 occupant_id_secret,
+                server_hats,
                 target_nick,
                 new_role,
                 &actor,

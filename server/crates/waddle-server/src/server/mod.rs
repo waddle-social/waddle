@@ -3,6 +3,7 @@ pub(crate) mod caps_resolution;
 mod config;
 pub(crate) mod dual_registration;
 pub(crate) mod durable_membership;
+pub(crate) mod extension_bot;
 mod extension_commands;
 pub mod extension_host_adapter;
 mod extension_host_tools;
@@ -217,9 +218,11 @@ pub async fn start_with_config(
         Arc::new(durable_membership::PermissionDurableMembershipSource::new(
             permission_actor.clone(),
         ));
+    let server_hats = waddle_xmpp::xep::xep0317::ServerHats::default();
     let room_registry_handle = waddle_xmpp::muc::RoomRegistry::spawn(
         xmpp_config.muc_domain.to_string(),
         server_config.occupant_id_secret.clone(),
+        server_hats.clone(),
         Some(durable_membership_source),
     );
     room_registry_gauge::spawn(room_registry_handle.clone(), stop_token.clone());
@@ -311,6 +314,7 @@ pub async fn start_with_config(
         spaces_jid: xmpp_config.spaces_jid.clone(),
         muc_domain: xmpp_config.muc_domain.clone(),
         occupant_id_secret: server_config.occupant_id_secret.clone(),
+        server_hats,
         permission_actor: permission_actor.clone(),
         server_owner_jids,
         node_lifecycle: node_lifecycle.clone(),

@@ -15,6 +15,7 @@ pub fn rebuild_effect(
     room_jid: &BareJid,
     effect: &RoomEffect,
     occupant_id_secret: &OccupantIdSecret,
+    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
 ) -> Vec<(FullJid, Stanza)> {
     match effect {
         RoomEffect::ConfigChanged {
@@ -31,13 +32,13 @@ pub fn rebuild_effect(
             .collect(),
         RoomEffect::AdminSelfNotify { updates } => updates
             .iter()
-            .map(|update| rebuild_admin_update(update, occupant_id_secret))
+            .map(|update| rebuild_admin_update(update, occupant_id_secret, server_hats))
             .collect(),
         RoomEffect::AdminRemainingBroadcast {
             presence_updates, ..
         } => presence_updates
             .iter()
-            .map(|update| rebuild_admin_update(update, occupant_id_secret))
+            .map(|update| rebuild_admin_update(update, occupant_id_secret, server_hats))
             .collect(),
         RoomEffect::DestroyNotification {
             reason,
@@ -58,6 +59,7 @@ pub fn rebuild_effect(
                         bare_jid: &session_bare,
                         real_jid: Some(session),
                         secret: occupant_id_secret,
+                        hats: server_hats,
                     };
                     let presence = build_destroy_notification(
                         room_jid,
@@ -95,11 +97,13 @@ pub fn effect_removed_sessions(effect: &RoomEffect) -> &[FullJid] {
 fn rebuild_admin_update(
     update: &OccupantPresenceUpdate,
     occupant_id_secret: &OccupantIdSecret,
+    server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
 ) -> (FullJid, Stanza) {
     let occupant_identity = OccupantIdentity {
         bare_jid: &update.occupant_bare_jid,
         real_jid: update.disclosed_real_jid.as_ref(),
         secret: occupant_id_secret,
+        hats: server_hats,
     };
     let reason = update.reason.as_ref().map(|value| value.as_str());
     let actor = update.actor.as_ref();
@@ -288,11 +292,13 @@ mod tests {
             bare_jid: &alice_bare,
             real_jid: Some(&alice_real),
             secret: &secret,
+            hats: &Default::default(),
         };
         let expected_peer_identity = OccupantIdentity {
             bare_jid: &alice_bare,
             real_jid: None,
             secret: &secret,
+            hats: &Default::default(),
         };
         let expected = [
             (
@@ -350,6 +356,7 @@ mod tests {
             bare_jid: &alice_bare,
             real_jid: Some(&alice_real),
             secret: &secret,
+            hats: &Default::default(),
         };
         let expected = Stanza::Presence(build_destroy_notification(
             &room_jid(),

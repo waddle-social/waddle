@@ -267,7 +267,6 @@ pub(crate) struct ExtensionRoomMessage {
     pub body: DisplayText,
     pub room: RoomJid,
     pub preferred_nick: Option<String>,
-    pub bot_hat_label: Option<DisplayText>,
     pub stanza_id: Option<StanzaId>,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
@@ -344,7 +343,6 @@ pub(crate) async fn plan_extension_bot_groupchat(
     #[cfg(feature = "clustering")]
     require_local_room(deps, &room_jid).await?;
     let preferred_nick = response.preferred_nick.clone();
-    let bot_hat_label = response.bot_hat_label.clone();
     let (working, digest_input) =
         prepare_extension_room_message(deps, &room_jid, &bot_full, response)?;
     let Some(state) = deps.web_socket_state else {
@@ -491,7 +489,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
                             }
                         };
                         let bot_bare = bot_full.to_bare();
-                        let mut presence = waddle_xmpp::muc::build_occupant_presence(
+                        let presence = waddle_xmpp::muc::build_occupant_presence(
                             &from,
                             &existing.jid,
                             join.new_occupant_affiliation,
@@ -501,20 +499,8 @@ pub(crate) async fn plan_extension_bot_groupchat(
                                 bare_jid: &bot_bare,
                                 real_jid: Some(&bot_full),
                                 secret: &state.deps.occupant_id_secret,
+                                hats: &state.deps.app_state.server_hats,
                             },
-                        );
-                        let bot_hat = bot_hat_label
-                            .as_ref()
-                            .map(|label| {
-                                waddle_xmpp::xep::xep0317::Hat::new(
-                                    label.as_str(),
-                                    waddle_xmpp::xep::xep0317::well_known::BOT,
-                                )
-                            })
-                            .unwrap_or_else(waddle_xmpp::xep::xep0317::Hat::bot);
-                        waddle_xmpp::xep::xep0317::set_hats(
-                            &mut presence,
-                            &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
                         );
                         join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }

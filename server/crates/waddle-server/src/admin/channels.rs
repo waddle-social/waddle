@@ -2777,6 +2777,7 @@ pub(crate) fn broadcast_group_dm_leave(
         bare_jid: &sender_bare,
         real_jid: Some(leaving_real_jid),
         secret: &state.occupant_id_secret,
+        hats: &state.server_hats,
     };
     if notify_self {
         let presence = waddle_xmpp::muc::build_leave_presence(
