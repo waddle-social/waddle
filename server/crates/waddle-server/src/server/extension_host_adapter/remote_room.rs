@@ -93,9 +93,14 @@ impl ExtensionHostAdapter {
                 .await
                 .map_err(|failure| host_tool_error(ExtensionHostAdapterError::Plan(failure)))?;
             let reply = match owner {
+                // A re-resolved local send still answers within this host
+                // call's wait; it may not commit after the caller gave up.
                 None => local_reply(
-                    self.send_message(invocation, host_request(&send, None))
-                        .await,
+                    self.send_message(
+                        invocation,
+                        host_request(&send, reresolved.then(|| deadline - OWNER_REPLY_RESERVE)),
+                    )
+                    .await,
                 ),
                 Some(owner) => self.ask_room_owner(&owner, &send, deadline).await?,
             };

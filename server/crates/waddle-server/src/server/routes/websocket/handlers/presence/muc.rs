@@ -390,34 +390,32 @@ pub(crate) async fn route_room_presence_to_occupant(
     if try_deliver_registered_remote_resource(state, recipient, &stanza).await {
         return;
     }
-    if deliver_room_presence_locally(state, room_jid, recipient, &stanza) {
-        return;
-    }
+    let delivered = deliver_room_presence_locally(state, room_jid, recipient, &stanza);
+    #[cfg(not(feature = "clustering"))]
+    let _ = delivered;
     #[cfg(feature = "clustering")]
-    let deps = {
+    if !delivered {
         let deps =
-            crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
-        deps.with_ordered_relay_origin(Some(
-            crate::server::routes::interpret::OrderedRelayRouteOrigin::room(room_jid),
-        ))
-    };
-    #[cfg(feature = "clustering")]
-    let replies = crate::server::routes::interpret::route_to_connection(
-        &deps,
-        jid::Jid::from(recipient.clone()),
-        Box::new(stanza),
-        0,
-        None,
-    )
-    .await;
-    #[cfg(feature = "clustering")]
-    if !replies.is_empty() {
-        warn!(
-            room = %room_jid,
-            recipient = %recipient,
-            reply_count = replies.len(),
-            "MUC presence fan-out produced unexpected route fallback replies"
-        );
+            crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None)
+                .with_ordered_relay_origin(Some(
+                    crate::server::routes::interpret::OrderedRelayRouteOrigin::room(room_jid),
+                ));
+        let replies = crate::server::routes::interpret::route_to_connection(
+            &deps,
+            jid::Jid::from(recipient.clone()),
+            Box::new(stanza),
+            0,
+            None,
+        )
+        .await;
+        if !replies.is_empty() {
+            warn!(
+                room = %room_jid,
+                recipient = %recipient,
+                reply_count = replies.len(),
+                "MUC presence fan-out produced unexpected route fallback replies"
+            );
+        }
     }
 }
 

@@ -19,6 +19,7 @@ use crate::{
         extension_host_adapter::{
             relayed_room_send,
             remote_room::{TestRoomOwnerRelay, OWNER_REPLY_RESERVE, TEST_ROOM_OWNER_RELAY},
+            ExtensionHostAdapterError,
         },
         routes::{
             interpret::{
@@ -961,6 +962,109 @@ async fn slow_remote_occupant_is_detached(f: IngressFixture) {
     .await
     .expect("the detached route finishes");
     fixture.close(f).await;
+}
+
+/// A revoked join waits for a still-running cross-node join presence, so the
+/// remote occupant sees available before unavailable, not a ghost bot.
+async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
+    let fixture = GroupchatFixture::new(&f).await;
+    let remote: jid::FullJid = "mercutio@example.com/remote".parse().expect("remote");
+    fixture
+        .actor
+        .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            nick: "mercutio".into(),
+            real_jid: remote.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("remote-attached occupant");
+    let routed = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let route: TestJoinPresenceRoute = {
+        let (routed, release) = (Arc::clone(&routed), Arc::clone(&release));
+        Arc::new(move |occupant, presence| {
+            let (routed, release) = (Arc::clone(&routed), Arc::clone(&release));
+            Box::pin(async move {
+                release.notified().await;
+                routed.lock().expect("routed").push((occupant, presence));
+            })
+        })
+    };
+    let offered = "revoked-slow-join";
+    let gate = Registration::before_admission(OriginId::new(offered.to_owned()));
+    let sending = {
+        let adapter = fixture.adapter.clone();
+        let invocation = fixture.invocation();
+        let request = fixture.request(offered);
+        let routed = Arc::clone(&routed);
+        tokio::spawn(TEST_JOIN_PRESENCE_ROUTE.scope(
+            route,
+            crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY.scope(
+                (
+                    crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                    routed,
+                ),
+                async move { adapter.send_message(&invocation, request).await },
+            ),
+        ))
+    };
+    tokio::time::timeout(Duration::from_secs(5), gate.entered())
+        .await
+        .expect("planning detached the slow join");
+    let mut tx = f.uow.begin().await.expect("revocation transaction");
+    ExtensionGrantRepository::sync_configured(&mut tx, &[])
+        .await
+        .expect("revoke plugin grants");
+    tx.commit().await.expect("durable revocation");
+    gate.release();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        routed.lock().expect("routed").is_empty(),
+        "the unavailable waits for the join"
+    );
+    release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), sending)
+        .await
+        .expect("refused send completes")
+        .expect("send task");
+    assert!(
+        matches!(result, Err(ExtensionHostAdapterError::NotAuthorized)),
+        "{result:?}"
+    );
+    let types: Vec<_> = routed
+        .lock()
+        .expect("routed")
+        .iter()
+        .map(|(target, stanza)| {
+            assert_eq!(target, &remote);
+            match stanza {
+                Stanza::Presence(presence) => presence.type_.clone(),
+                other => panic!("only presences reach the remote occupant: {other:?}"),
+            }
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            xmpp_parsers::presence::Type::None,
+            xmpp_parsers::presence::Type::Unavailable
+        ]
+    );
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_bot_revoked_join_waits_for_remote_join_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    revoked_join_waits_for_slow_remote_join(f).await;
+}
+#[tokio::test]
+async fn extension_bot_revoked_join_waits_for_remote_join_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_bot_revoked_slow_join").await {
+        revoked_join_waits_for_slow_remote_join(f).await;
+    }
 }
 
 #[tokio::test]

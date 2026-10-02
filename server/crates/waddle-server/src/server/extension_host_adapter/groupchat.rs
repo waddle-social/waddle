@@ -149,6 +149,11 @@ impl ExtensionHostAdapter {
             ))
         ) {
             if let Some((nick, session)) = planned.joined_occupancy {
+                // Occupants on other nodes must see the join before its
+                // unavailable, or they keep a ghost bot.
+                for route in planned.join_stragglers {
+                    let _ = route.await;
+                }
                 // Revoke only this dispatch's join, before another send can reuse it.
                 // The normal departure path emits unavailable presence and retains
                 // interrupted actor cleanup for the departure janitor.

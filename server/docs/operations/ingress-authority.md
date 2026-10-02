@@ -59,7 +59,8 @@ The bot's join presence goes to local sockets first and in order, before the
 message. Occupants on other nodes are routed concurrently and waited for at
 most 500 ms (and never past a forwarded send's commit deadline); a slower
 route is detached and finishes on its own, so that peer may see the message
-before the join.
+before the join. A join revoked for a missing principal waits for those
+routes, so its unavailable never overtakes the join.
 
 V1018 stores grants in `extension_grants`: scope `0` is plugin send authority
 (`room_jid IS NULL`), scope `1` is provider-room authority. Partial unique indexes

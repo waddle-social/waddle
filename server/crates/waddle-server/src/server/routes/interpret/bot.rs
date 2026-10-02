@@ -258,6 +258,7 @@ pub(super) async fn plan_bot_groupchat_message(
         ),
         digest_input,
         joined_occupancy: None,
+        join_stragglers: Vec::new(),
     })
 }
 
@@ -281,6 +282,9 @@ pub(crate) struct PlannedExtensionBotGroupchat {
         waddle_xmpp::muc::MucOccupantNick,
         waddle_xmpp_core::OccupancySessionGeneration,
     )>,
+    /// Join presence routes to other nodes still running after the cap. A
+    /// revoked join awaits them so its unavailable cannot overtake the join.
+    pub join_stragglers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Option<Element> {
@@ -435,6 +439,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
         })
         .collect();
     let mut joined_occupancy = None;
+    let mut join_stragglers = Vec::new();
     if !initial_snapshot
         .occupants
         .iter()
@@ -502,7 +507,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
                         );
                         join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }
-                    route_join_presences(
+                    join_stragglers = route_join_presences(
                         state,
                         host_state,
                         &room_jid,
@@ -572,6 +577,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
     )
     .await?;
     planned.joined_occupancy = joined_occupancy;
+    planned.join_stragglers = join_stragglers;
     Ok(planned)
 }
 
@@ -594,14 +600,15 @@ tokio::task_local! {
 /// XEP-0045 §7.2.3. Local sockets get the join first and in order, ahead of
 /// the message. Occupants on other nodes are routed concurrently and waited
 /// for up to [`JOIN_PRESENCE_CAP`]; a route still running then is detached
-/// and finishes on its own, so a slow peer may see the message first.
+/// and finishes on its own, so a slow peer may see the message first. The
+/// routes still running are returned.
 async fn route_join_presences(
     state: &crate::server::routes::websocket::WebSocketState,
     host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
     room: &BareJid,
     presences: Vec<(FullJid, Stanza)>,
     commit_deadline: Option<tokio::time::Instant>,
-) {
+) -> Vec<tokio::task::JoinHandle<()>> {
     use crate::server::routes::websocket::handlers::presence::{
         deliver_room_presence_locally, route_room_presence_to_occupant,
     };
@@ -627,12 +634,9 @@ async fn route_join_presences(
             route_room_presence_to_occupant(&state, &room, &occupant, presence).await;
         }));
     }
-    if routes.is_empty() {
-        return;
-    }
     let cap = tokio::time::Instant::now() + JOIN_PRESENCE_CAP;
     let bound = commit_deadline.map_or(cap, |deadline| deadline.min(cap));
-    if tokio::time::timeout_at(bound, futures::future::join_all(routes))
+    if tokio::time::timeout_at(bound, futures::future::join_all(routes.iter_mut()))
         .await
         .is_err()
     {
@@ -641,6 +645,8 @@ async fn route_join_presences(
             "Extension bot join presence is still routing to another node; continuing"
         );
     }
+    routes.retain(|route| !route.is_finished());
+    routes
 }
 
 /// The remote node owning `room`'s actor claim, or `None` when this node runs it.
