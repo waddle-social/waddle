@@ -183,6 +183,17 @@ async fn two_sends_reuse_occupancy(f: IngressFixture) {
         .room
         .session_generation(&bot)
         .expect("bot occupancy session");
+    // Durable room joins commit only for the published generation (#1869).
+    assert!(
+        crate::occupancy_authority::is_current(
+            fixture.adapter.state.deps.app_state.db_pool.global(),
+            &bot,
+            session,
+        )
+        .await
+        .expect("occupancy authority"),
+        "bot joins under its published occupancy generation"
+    );
     let first_wire = fixture.drain();
     groupchat_message(&first_wire);
     assert_eq!(
