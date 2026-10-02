@@ -186,6 +186,8 @@ pub(crate) use bot::{
 };
 #[cfg(test)]
 pub(crate) use bot::{BotSnapshotGate, TEST_BOT_SNAPSHOT_GATE, TEST_SIGNING_TIME};
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use bot::{TestJoinPresenceRoute, TEST_JOIN_PRESENCE_ROUTE};
 use carbons::send_carbons;
 use direct_archive::archive_direct;
 use direct_inbox::project_direct_inbox;

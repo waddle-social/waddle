@@ -21,7 +21,10 @@ use crate::{
             remote_room::{TestRoomOwnerRelay, OWNER_REPLY_RESERVE, TEST_ROOM_OWNER_RELAY},
         },
         routes::{
-            interpret::{BotSnapshotGate, PlanningClaims, TEST_BOT_SNAPSHOT_GATE},
+            interpret::{
+                BotSnapshotGate, PlanningClaims, TestJoinPresenceRoute, TEST_BOT_SNAPSHOT_GATE,
+                TEST_JOIN_PRESENCE_ROUTE,
+            },
             websocket::WebSocketState,
         },
     },
@@ -76,6 +79,10 @@ enum Fault {
     Budget(Duration),
     /// The owner never answers.
     Silent,
+    /// The cached relay ref names no running actor; nothing ran.
+    StaleRef,
+    /// The relay actor stopped after the owner ran the send.
+    ActorStopped,
 }
 
 struct Transport {
@@ -83,6 +90,8 @@ struct Transport {
     claims: Arc<PlanningClaims>,
     faults: Mutex<VecDeque<Fault>>,
     asks: AtomicUsize,
+    /// Per ask: whether the origin had just looked the relay up.
+    fresh: Mutex<Vec<bool>>,
     gate: Arc<BotSnapshotGate>,
     detached: Mutex<Vec<tokio::task::JoinHandle<RelayExtensionRoomSendReply>>>,
 }
@@ -92,9 +101,11 @@ impl Transport {
         &self,
         to: NodeIdentity,
         send: RelayExtensionRoomSend,
+        fresh: bool,
     ) -> Result<RelayExtensionRoomSendReply, RelayAskError> {
         assert_eq!(to, owner_node(), "the origin asks the claimed owner");
         self.asks.fetch_add(1, Ordering::SeqCst);
+        self.fresh.lock().expect("fresh").push(fresh);
         let fault = self.faults.lock().expect("faults").pop_front();
         match fault {
             Some(Fault::OldPeer) => {
@@ -106,10 +117,21 @@ impl Transport {
                 })
             }
             Some(Fault::NotOwner) => return Ok(RelayExtensionRoomSendReply::NotOwner),
+            Some(Fault::StaleRef) => {
+                return Err(RelayAskError::Send {
+                    failure: RelaySendFailure::StaleRef,
+                    effect: RelaySendEffect::NoEffect,
+                    message: "actor not running".into(),
+                })
+            }
             Some(Fault::MoveToOrigin) => self.claims.set_owner(origin_node()),
             Some(Fault::Silent) => std::future::pending::<()>().await,
             Some(
-                Fault::LoseReply | Fault::DropWhileRunning | Fault::ArrivesLate | Fault::Budget(_),
+                Fault::LoseReply
+                | Fault::ActorStopped
+                | Fault::DropWhileRunning
+                | Fault::ArrivesLate
+                | Fault::Budget(_),
             )
             | None => {}
         }
@@ -147,14 +169,19 @@ impl Transport {
         let reply = relayed_room_send(Arc::clone(&self.owner), send).await;
         let reply = rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode reply"))
             .expect("decode reply");
-        if matches!(fault, Some(Fault::LoseReply)) {
-            return Err(RelayAskError::Send {
+        match fault {
+            Some(Fault::LoseReply) => Err(RelayAskError::Send {
                 failure: RelaySendFailure::ReplyTimeout,
                 effect: RelaySendEffect::MaybeCommitted,
                 message: "reply lost".into(),
-            });
+            }),
+            Some(Fault::ActorStopped) => Err(RelayAskError::Send {
+                failure: RelaySendFailure::StaleRef,
+                effect: RelaySendEffect::MaybeCommitted,
+                message: "actor stopped".into(),
+            }),
+            _ => Ok(reply),
         }
-        Ok(reply)
     }
 }
 
@@ -164,12 +191,24 @@ struct Cluster {
     claims: Arc<PlanningClaims>,
 }
 
-fn join_cluster(fixture: &mut GroupchatFixture, claims: &Arc<PlanningClaims>, node: NodeIdentity) {
+fn join_cluster(
+    fixture: &mut GroupchatFixture,
+    claims: &Arc<PlanningClaims>,
+    node: NodeIdentity,
+    relay: bool,
+) {
     let state = Arc::get_mut(&mut fixture.adapter.state).expect("unique websocket state");
     let app = Arc::get_mut(&mut state.deps.app_state).expect("unique app state");
     app.clustering_claims = crate::clustering::ClusteringHandles {
         claim_store: Some(Arc::clone(claims) as _),
         node_identity: Some(SharedNodeIdentity::new(node)),
+        // The origin builds real relay handles; only the hop is replaced.
+        ordered_relay_delivery_bridge: relay.then(|| {
+            crate::clustering::route_bridge::OrderedRelayDeliveryBridge::new(
+                tokio_util::sync::CancellationToken::new(),
+                &crate::config::ClusteringMessagingConfig::default(),
+            )
+        }),
         ..Default::default()
     };
 }
@@ -179,8 +218,8 @@ impl Cluster {
         let claims = Arc::new(PlanningClaims::new(owner_node()));
         let mut origin = GroupchatFixture::new(f).await;
         let mut owner = GroupchatFixture::on(f, direct_ingress::node(f).await).await;
-        join_cluster(&mut origin, &claims, origin_node());
-        join_cluster(&mut owner, &claims, owner_node());
+        join_cluster(&mut origin, &claims, origin_node(), true);
+        join_cluster(&mut owner, &claims, owner_node(), false);
         Self {
             origin,
             owner,
@@ -194,6 +233,7 @@ impl Cluster {
             claims: Arc::clone(&self.claims),
             faults: Mutex::new(faults.into_iter().collect()),
             asks: AtomicUsize::new(0),
+            fresh: Mutex::default(),
             gate: Arc::default(),
             detached: Mutex::default(),
         })
@@ -282,9 +322,9 @@ impl Cluster {
 
 fn relay(transport: &Arc<Transport>) -> TestRoomOwnerRelay {
     let transport = Arc::clone(transport);
-    Arc::new(move |to, send| {
+    Arc::new(move |to, send, fresh| {
         let transport = Arc::clone(&transport);
-        Box::pin(async move { transport.ask(to, send).await })
+        Box::pin(async move { transport.ask(to, send, fresh).await })
     })
 }
 
@@ -371,6 +411,11 @@ async fn lost_reply_reasks_same_offer(f: IngressFixture) {
         .await
         .expect("the re-ask resolves the committed send");
     assert_eq!(transport.asks.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *transport.fresh.lock().expect("fresh"),
+        vec![true, false],
+        "the re-ask reuses the resolved relay"
+    );
     assert_eq!(f.count("ingress_messages").await, 1);
     assert_eq!(f.count("mam_messages").await, 1);
     assert_eq!(id.as_str(), archived_id(&f).await);
@@ -664,6 +709,37 @@ async fn concurrent_reask_shares_first_attempt(f: IngressFixture) {
     cluster.close(f).await;
 }
 
+/// A dead relay ref is looked up again before the one re-ask, whether or
+/// not the owner already ran the send.
+async fn stale_relay_ref_relooks_up(f: IngressFixture) {
+    let mut cluster = Cluster::new(&f).await;
+    let context = cluster.provider(direct_ingress::plugin());
+    let unused = cluster.transport([Fault::StaleRef]);
+    let first = cluster
+        .send(&unused, &context, "stale-unused", cluster.request())
+        .await
+        .expect("a no-effect stale ref is asked again");
+    assert_eq!(*unused.fresh.lock().expect("fresh"), vec![true, true]);
+    let stopped = cluster.transport([Fault::ActorStopped]);
+    let second = cluster
+        .send(&stopped, &context, "stale-stopped", cluster.request())
+        .await
+        .expect("the re-ask shares the stopped relay's attempt");
+    assert_eq!(*stopped.fresh.lock().expect("fresh"), vec![true, true]);
+    assert_ne!(first, second);
+    assert_eq!(f.count("ingress_messages").await, 2, "one row per send");
+    assert_eq!(f.count("mam_messages").await, 2);
+    let wire = cluster.owner.drain();
+    assert_eq!(
+        wire.iter()
+            .filter(|stanza| matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat))
+            .count(),
+        2,
+        "no second fanout"
+    );
+    cluster.close(f).await;
+}
+
 async fn signed_on_owner(f: IngressFixture) {
     let mut cluster = Cluster::new(&f).await;
     Arc::get_mut(&mut cluster.owner.adapter.state)
@@ -739,22 +815,38 @@ async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
         .await
         .expect("remote-attached occupant");
     let routed = Arc::new(Mutex::new(Vec::new()));
+    // The real cross-node route, observed where it hands the frame to a peer.
+    let route: TestJoinPresenceRoute = {
+        let state = Arc::clone(&fixture.adapter.state);
+        let room = fixture.room.clone();
+        let routed = Arc::clone(&routed);
+        Arc::new(move |occupant, presence| {
+            let (state, room, routed) = (Arc::clone(&state), room.clone(), Arc::clone(&routed));
+            Box::pin(
+                crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY.scope(
+                    (
+                        crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                        routed,
+                    ),
+                    async move {
+                        crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                            &state, &room, &occupant, presence,
+                        )
+                        .await;
+                    },
+                ),
+            )
+        })
+    };
     let offered = "remote-occupant-join";
     let gate = Registration::before_admission(OriginId::new(offered.to_owned()));
     let sending = {
         let adapter = fixture.adapter.clone();
         let invocation = fixture.invocation();
         let request = fixture.request(offered);
-        let routed = Arc::clone(&routed);
-        tokio::spawn(
-            crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY.scope(
-                (
-                    crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
-                    routed,
-                ),
-                async move { adapter.send_message(&invocation, request).await },
-            ),
-        )
+        tokio::spawn(TEST_JOIN_PRESENCE_ROUTE.scope(route, async move {
+            adapter.send_message(&invocation, request).await
+        }))
     };
     tokio::time::timeout(Duration::from_secs(5), gate.entered())
         .await
@@ -785,6 +877,102 @@ async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
     assert_eq!(presences(&wire).len(), 1, "local occupant too");
     groupchat_message(&wire);
     fixture.close(f).await;
+}
+
+/// A slow cross-node occupant does not hold the send: planning waits at most
+/// the join presence cap, the local occupant still gets join then message,
+/// and the slow route finishes later on its own, outside the bot room lock.
+async fn slow_remote_occupant_is_detached(f: IngressFixture) {
+    let mut fixture = GroupchatFixture::new(&f).await;
+    fixture
+        .actor
+        .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            nick: "mercutio".into(),
+            real_jid: "mercutio@example.com/remote".parse().expect("remote"),
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("remote-attached occupant");
+    let started = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let route: TestJoinPresenceRoute = {
+        let (started, finished, release) = (
+            Arc::clone(&started),
+            Arc::clone(&finished),
+            Arc::clone(&release),
+        );
+        Arc::new(move |_, _| {
+            let (started, finished, release) = (
+                Arc::clone(&started),
+                Arc::clone(&finished),
+                Arc::clone(&release),
+            );
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                release.notified().await;
+                finished.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+    };
+    let began = std::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        TEST_JOIN_PRESENCE_ROUTE.scope(route.clone(), fixture.send("slow-peer-first")),
+    )
+    .await
+    .expect("the send does not wait for the slow peer")
+    .expect("first send");
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        began.elapsed()
+    );
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    assert_eq!(finished.load(Ordering::SeqCst), 0, "still routing");
+    assert_eq!(f.count("ingress_messages").await, 1);
+    let wire = fixture.drain();
+    let join = wire
+        .iter()
+        .position(|stanza| matches!(stanza, Stanza::Presence(_)))
+        .expect("local join");
+    let message = wire
+        .iter()
+        .position(|stanza| matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat))
+        .expect("local message");
+    assert!(join < message, "the local occupant sees the join first");
+    // The lock is free while the slow route still runs.
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        TEST_JOIN_PRESENCE_ROUTE.scope(route, fixture.send("slow-peer-second")),
+    )
+    .await
+    .expect("the bot room lock is not held")
+    .expect("second send");
+    assert_eq!(finished.load(Ordering::SeqCst), 0);
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while finished.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the detached route finishes");
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_bot_join_presence_slow_remote_occupant_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    slow_remote_occupant_is_detached(f).await;
+}
+#[tokio::test]
+async fn extension_bot_join_presence_slow_remote_occupant_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_bot_join_slow_remote").await {
+        slow_remote_occupant_is_detached(f).await;
+    }
 }
 
 #[tokio::test]
@@ -904,6 +1092,18 @@ async fn extension_remote_concurrent_reask_sqlite() {
 async fn extension_remote_concurrent_reask_postgres() {
     if let Some(f) = IngressFixture::postgres("extension_remote_concurrent_reask").await {
         concurrent_reask_shares_first_attempt(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_remote_stale_relay_ref_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    stale_relay_ref_relooks_up(f).await;
+}
+#[tokio::test]
+async fn extension_remote_stale_relay_ref_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_remote_stale_relay_ref").await {
+        stale_relay_ref_relooks_up(f).await;
     }
 }
 

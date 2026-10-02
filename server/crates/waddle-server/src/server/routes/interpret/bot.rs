@@ -327,11 +327,15 @@ pub(crate) enum ExtensionBotDispatchError {
     MissingCanonicalStanzaId,
 }
 
+/// `host_state` owns cross-node join presence routes that outlive planning.
+/// A forwarded send's `commit_deadline` also bounds the wait for them.
 pub(crate) async fn plan_extension_bot_groupchat(
     deps: &Deps<'_>,
     room_jid: BareJid,
     bot_full: FullJid,
     response: ExtensionRoomMessage,
+    host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
+    commit_deadline: Option<tokio::time::Instant>,
 ) -> Result<PlannedExtensionBotGroupchat, ExtensionBotDispatchError> {
     #[cfg(feature = "clustering")]
     require_local_room(deps, &room_jid).await?;
@@ -498,19 +502,13 @@ pub(crate) async fn plan_extension_bot_groupchat(
                         );
                         join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }
-                    // XEP-0045 §7.2.3: every occupant, including one attached
-                    // through another node, has the join before the commit can
-                    // fan out the message. Peers are asked concurrently; the
-                    // host's commit deadline bounds a slow one.
-                    let room = &room_jid;
-                    futures::future::join_all(join_presences.into_iter().map(
-                        |(occupant, presence)| async move {
-                            crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
-                                state, room, &occupant, presence,
-                            )
-                            .await;
-                        },
-                    ))
+                    route_join_presences(
+                        state,
+                        host_state,
+                        &room_jid,
+                        join_presences,
+                        commit_deadline,
+                    )
                     .await;
                 }
             }
@@ -575,6 +573,74 @@ pub(crate) async fn plan_extension_bot_groupchat(
     .await?;
     planned.joined_occupancy = joined_occupancy;
     Ok(planned)
+}
+
+/// The longest planning waits for cross-node join presences. A healthy peer
+/// acks a frame in milliseconds; this leaves most of a forwarded send's 1.5 s
+/// commit budget and keeps a local command far inside the 15 s backstop.
+const JOIN_PRESENCE_CAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(test)]
+pub(crate) type TestJoinPresenceRoute = std::sync::Arc<
+    dyn Fn(FullJid, Stanza) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Replaces the cross-node route of a bot join presence.
+    pub(crate) static TEST_JOIN_PRESENCE_ROUTE: TestJoinPresenceRoute;
+}
+
+/// XEP-0045 §7.2.3. Local sockets get the join first and in order, ahead of
+/// the message. Occupants on other nodes are routed concurrently and waited
+/// for up to [`JOIN_PRESENCE_CAP`]; a route still running then is detached
+/// and finishes on its own, so a slow peer may see the message first.
+async fn route_join_presences(
+    state: &crate::server::routes::websocket::WebSocketState,
+    host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
+    room: &BareJid,
+    presences: Vec<(FullJid, Stanza)>,
+    commit_deadline: Option<tokio::time::Instant>,
+) {
+    use crate::server::routes::websocket::handlers::presence::{
+        deliver_room_presence_locally, route_room_presence_to_occupant,
+    };
+    let mut routes = Vec::new();
+    for (occupant, presence) in presences {
+        let local = state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&occupant)
+            .is_some_and(|entry| entry.is_locally_hosted());
+        if local && deliver_room_presence_locally(state, room, &occupant, &presence) {
+            continue;
+        }
+        #[cfg(test)]
+        if let Ok(route) = TEST_JOIN_PRESENCE_ROUTE.try_with(std::sync::Arc::clone) {
+            routes.push(tokio::spawn(route(occupant, presence)));
+            continue;
+        }
+        let state = std::sync::Arc::clone(host_state);
+        let room = room.clone();
+        routes.push(tokio::spawn(async move {
+            route_room_presence_to_occupant(&state, &room, &occupant, presence).await;
+        }));
+    }
+    if routes.is_empty() {
+        return;
+    }
+    let cap = tokio::time::Instant::now() + JOIN_PRESENCE_CAP;
+    let bound = commit_deadline.map_or(cap, |deadline| deadline.min(cap));
+    if tokio::time::timeout_at(bound, futures::future::join_all(routes))
+        .await
+        .is_err()
+    {
+        warn!(
+            room = %room,
+            "Extension bot join presence is still routing to another node; continuing"
+        );
+    }
 }
 
 /// The remote node owning `room`'s actor claim, or `None` when this node runs it.

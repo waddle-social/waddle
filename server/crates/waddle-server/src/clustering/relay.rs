@@ -2435,9 +2435,12 @@ impl RelayHandle {
             .map_err(send_error)
     }
 
+    /// Stamps the origin's remaining wait after the relay lookup, so lookup
+    /// time never counts toward the owner's window.
     pub(crate) async fn extension_room_send(
         &mut self,
         mut message: RelayExtensionRoomSend,
+        origin_deadline: tokio::time::Instant,
     ) -> Result<RelayExtensionRoomSendReply, RelayAskError> {
         message.trace = RelayTraceContext::capture();
         let stop_token = self.stop_token.clone();
@@ -2446,6 +2449,8 @@ impl RelayHandle {
             _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
             result = async {
                 let remote_ref = self.resolve().await?;
+                message.origin_budget =
+                    origin_deadline.saturating_duration_since(tokio::time::Instant::now());
                 remote_ref
                     .ask(&message)
                     .mailbox_timeout(self.mailbox_timeout)

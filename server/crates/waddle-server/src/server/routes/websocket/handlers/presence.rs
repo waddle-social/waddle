@@ -42,8 +42,8 @@ mod subscription;
 #[cfg(test)]
 pub use muc::parse_room_jid_context;
 pub(crate) use muc::registered_remote_resource_write_accepted_delivery;
-pub(crate) use muc::route_room_presence_to_occupant;
 pub(crate) use muc::RegisteredRemoteDelivery;
+pub(crate) use muc::{deliver_room_presence_locally, route_room_presence_to_occupant};
 pub use muc::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
     resolve_muc_room_archive_access, MucJoinRequest, RoomArchiveAccess,

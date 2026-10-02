@@ -58,11 +58,14 @@ pub struct RelayedRoomSends(
     dashmap::DashMap<(PluginId, BareJid, StanzaId), (RelayedFlight, tokio::time::Instant)>,
 );
 
+/// Replaces only the transport hop; `bool` says the relay ref was just
+/// looked up.
 #[cfg(test)]
 pub(crate) type TestRoomOwnerRelay = Arc<
     dyn Fn(
             NodeIdentity,
             RelayExtensionRoomSend,
+            bool,
         ) -> futures::future::BoxFuture<
             'static,
             Result<RelayExtensionRoomSendReply, RelayAskError>,
@@ -117,18 +120,18 @@ impl ExtensionHostAdapter {
         let mut handle = None;
         let mut result = self.ask_once(&mut handle, owner, send, deadline).await;
         if let Err(RelayAskError::Send {
-            failure,
-            effect: RelaySendEffect::MaybeCommitted,
-            ..
+            failure, effect, ..
         }) = &result
         {
-            // A stopped relay actor leaves a dead ref; look the relay up again.
-            if *failure == RelaySendFailure::StaleRef {
-                handle = None;
+            let stale = *failure == RelaySendFailure::StaleRef;
+            if stale || *effect == RelaySendEffect::MaybeCommitted {
+                // A dead relay ref resolves again. The same offered id makes
+                // the owner answer with the first attempt's outcome, if any.
+                if stale {
+                    handle = None;
+                }
+                result = self.ask_once(&mut handle, owner, send, deadline).await;
             }
-            // The same offered id: the owner answers with the first attempt's
-            // outcome instead of sending twice.
-            result = self.ask_once(&mut handle, owner, send, deadline).await;
         }
         result.map_err(|error| {
             tracing::warn!(
@@ -150,18 +153,19 @@ impl ExtensionHostAdapter {
         send: &RelayExtensionRoomSend,
         deadline: tokio::time::Instant,
     ) -> Result<RelayExtensionRoomSendReply, RelayAskError> {
-        let mut send = send.clone();
-        send.origin_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         let limit = deadline.min(tokio::time::Instant::now() + ASK_LIMIT);
-        tokio::time::timeout_at(limit, self.relay_room_send(handle, owner, send))
-            .await
-            .unwrap_or_else(|_| {
-                Err(RelayAskError::Send {
-                    failure: RelaySendFailure::ReplyTimeout,
-                    effect: RelaySendEffect::MaybeCommitted,
-                    message: "the room owner did not answer in time".to_owned(),
-                })
+        tokio::time::timeout_at(
+            limit,
+            self.relay_room_send(handle, owner, send.clone(), deadline),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(RelayAskError::Send {
+                failure: RelaySendFailure::ReplyTimeout,
+                effect: RelaySendEffect::MaybeCommitted,
+                message: "the room owner did not answer in time".to_owned(),
             })
+        })
     }
 
     async fn relay_room_send(
@@ -169,11 +173,10 @@ impl ExtensionHostAdapter {
         handle: &mut Option<RelayHandle>,
         owner: &NodeIdentity,
         send: RelayExtensionRoomSend,
+        deadline: tokio::time::Instant,
     ) -> Result<RelayExtensionRoomSendReply, RelayAskError> {
         #[cfg(test)]
-        if let Ok(relay) = TEST_ROOM_OWNER_RELAY.try_with(Arc::clone) {
-            return relay(owner.clone(), send).await;
-        }
+        let fresh = handle.is_none();
         let handle = match handle {
             Some(handle) => handle,
             None => {
@@ -192,7 +195,13 @@ impl ExtensionHostAdapter {
                 handle.insert(bridge.extension_room_handle(owner))
             }
         };
-        handle.extension_room_send(send).await
+        #[cfg(test)]
+        if let Ok(relay) = TEST_ROOM_OWNER_RELAY.try_with(Arc::clone) {
+            let mut send = send;
+            send.origin_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+            return relay(owner.clone(), send, fresh).await;
+        }
+        handle.extension_room_send(send, deadline).await
     }
 }
 

@@ -84,25 +84,31 @@ impl ExtensionHostAdapter {
             return Err(ExtensionHostAdapterError::DeadlineExceeded);
         }
         let deps = self.interpret_deps(invocation.session.as_ref());
-        let planned =
-            interpret::plan_extension_bot_groupchat(&deps, room.clone(), sender.clone(), response)
-                .await
-                .map_err(|error| match error {
-                    interpret::ExtensionBotDispatchError::InvalidEnvelope
-                    | interpret::ExtensionBotDispatchError::BotOutcast => {
-                        ExtensionHostAdapterError::NotAuthorized
-                    }
-                    interpret::ExtensionBotDispatchError::Plan(failure) => {
-                        ExtensionHostAdapterError::Plan(failure)
-                    }
-                    interpret::ExtensionBotDispatchError::Digest(error) => {
-                        ExtensionHostAdapterError::Unsupported(error.to_string())
-                    }
-                    interpret::ExtensionBotDispatchError::RoomNotRegistered => {
-                        ExtensionHostAdapterError::RoomNotFound(room.clone())
-                    }
-                    other => ExtensionHostAdapterError::Protocol(other.to_string()),
-                })?;
+        let planned = interpret::plan_extension_bot_groupchat(
+            &deps,
+            room.clone(),
+            sender.clone(),
+            response,
+            &self.state,
+            commit_deadline,
+        )
+        .await
+        .map_err(|error| match error {
+            interpret::ExtensionBotDispatchError::InvalidEnvelope
+            | interpret::ExtensionBotDispatchError::BotOutcast => {
+                ExtensionHostAdapterError::NotAuthorized
+            }
+            interpret::ExtensionBotDispatchError::Plan(failure) => {
+                ExtensionHostAdapterError::Plan(failure)
+            }
+            interpret::ExtensionBotDispatchError::Digest(error) => {
+                ExtensionHostAdapterError::Unsupported(error.to_string())
+            }
+            interpret::ExtensionBotDispatchError::RoomNotRegistered => {
+                ExtensionHostAdapterError::RoomNotFound(room.clone())
+            }
+            other => ExtensionHostAdapterError::Protocol(other.to_string()),
+        })?;
         if let Some(failure) = planned.plan.failure {
             return Err(ExtensionHostAdapterError::Plan(failure));
         }
