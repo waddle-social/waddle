@@ -30,6 +30,11 @@ public struct Occupant: Hashable, Sendable, Identifiable {
         self.hats = hats
     }
 
+    /// Extension bots wear the server-assigned bot hat; they refuse DMs.
+    public var isBot: Bool {
+        hats.contains { $0.uri == Hat.botURI }
+    }
+
     /// XEP-0045 §5: moderators and admins/owners may moderate messages.
     public var canModerate: Bool {
         role == .moderator || affiliation == .owner || affiliation == .admin

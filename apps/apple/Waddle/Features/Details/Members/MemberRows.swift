@@ -19,7 +19,7 @@ struct OccupantMemberRow: View {
             isAbsent: false
         )
         .memberActions(
-            MemberSubject(nick: occupant.nick, jid: occupant.realJID, affiliation: occupant.affiliation, isPresent: true),
+            MemberSubject(nick: occupant.nick, jid: occupant.realJID, affiliation: occupant.affiliation, isPresent: true, isBot: occupant.isBot),
             room: room,
             model: model
         )
