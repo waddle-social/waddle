@@ -15,7 +15,7 @@ use waddle_xmpp::ownership::NodeIdentity;
 
 use crate::clustering::relay::{
     RelayAskError, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelayHandle,
-    RelaySendEffect,
+    RelaySendEffect, RelaySendFailure,
 };
 use crate::server::routes::{interpret::effects::PlanFailure, websocket::WebSocketState};
 
@@ -24,21 +24,29 @@ use super::{
     ExtensionInvocation, HostMessageTarget, HostSendMessage,
 };
 
-/// One owner ask. Extension commands run inline under the 15 s stanza
-/// handler backstop, so the relay lookup backoff (2.1 s), the ask and its one
-/// re-ask must fit inside it: 2.1 s + 2 × (1 s + 4 s) ≈ 12 s.
+/// Receiver-side windows for one owner ask; kameo enforces them on the owner.
 pub(crate) const EXTENSION_ROOM_MAILBOX_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const EXTENSION_ROOM_REPLY_TIMEOUT: Duration = Duration::from_secs(4);
-/// The owner begins its commit only while the commit and the settlement wait
-/// still fit before the origin stops waiting for the reply.
+/// The origin's own bound on one ask, relay lookup included.
+const ASK_LIMIT: Duration = EXTENSION_ROOM_MAILBOX_TIMEOUT
+    .saturating_add(EXTENSION_ROOM_REPLY_TIMEOUT)
+    .saturating_add(Duration::from_millis(500));
+/// The origin's whole wait for an ask and its one re-ask. Extension commands
+/// run inline under the 15 s stanza-handler backstop.
+const ORIGIN_BUDGET: Duration = ASK_LIMIT.saturating_mul(2);
 const OWNER_COMMIT_ALLOWANCE: Duration = Duration::from_millis(500);
-pub(super) const OWNER_COMMIT_BUDGET: Duration = EXTENSION_ROOM_REPLY_TIMEOUT
+/// Of the origin's remaining wait, the owner keeps this much for mailbox
+/// admission, the commit and the settlement wait.
+pub(super) const OWNER_REPLY_RESERVE: Duration = EXTENSION_ROOM_MAILBOX_TIMEOUT
+    .saturating_add(super::settlement::SETTLEMENT_RESPONSE_DEADLINE)
+    .saturating_add(OWNER_COMMIT_ALLOWANCE);
+/// Within one ask, the owner begins its commit early enough for the reply to
+/// fit the ask's reply window.
+const OWNER_COMMIT_BUDGET: Duration = EXTENSION_ROOM_REPLY_TIMEOUT
     .saturating_sub(super::settlement::SETTLEMENT_RESPONSE_DEADLINE)
     .saturating_sub(OWNER_COMMIT_ALLOWANCE);
-/// The origin's re-ask arrives within one ask of the first attempt.
-const RELAYED_OUTCOME_RETENTION: Duration = EXTENSION_ROOM_MAILBOX_TIMEOUT
-    .saturating_add(EXTENSION_ROOM_REPLY_TIMEOUT)
-    .saturating_mul(2);
+/// Any re-ask arrives within the origin's budget of the first attempt.
+const RELAYED_OUTCOME_RETENTION: Duration = ORIGIN_BUDGET;
 
 type RelayedFlight = Shared<BoxFuture<'static, RelayExtensionRoomSendReply>>;
 
@@ -74,6 +82,8 @@ impl ExtensionHostAdapter {
         invocation: &ExtensionInvocation,
         send: RelayExtensionRoomSend,
     ) -> Result<StanzaId, ext_host::HostToolError> {
+        // One bound for every ask of this host call, re-resolution included.
+        let deadline = tokio::time::Instant::now() + ORIGIN_BUDGET;
         let mut reresolved = false;
         loop {
             let owner = interpret::extension_room_owner(&self.state, &send.room)
@@ -84,7 +94,7 @@ impl ExtensionHostAdapter {
                     self.send_message(invocation, host_request(&send, None))
                         .await,
                 ),
-                Some(owner) => self.ask_room_owner(&owner, &send).await?,
+                Some(owner) => self.ask_room_owner(&owner, &send, deadline).await?,
             };
             match reply {
                 RelayExtensionRoomSendReply::Sent(id) => return Ok(id),
@@ -102,19 +112,23 @@ impl ExtensionHostAdapter {
         &self,
         owner: &NodeIdentity,
         send: &RelayExtensionRoomSend,
+        deadline: tokio::time::Instant,
     ) -> Result<RelayExtensionRoomSendReply, ext_host::HostToolError> {
         let mut handle = None;
-        let mut result = self.relay_room_send(&mut handle, owner, send.clone()).await;
-        if matches!(
-            result,
-            Err(RelayAskError::Send {
-                effect: RelaySendEffect::MaybeCommitted,
-                ..
-            })
-        ) {
-            // The same offered id on the resolved relay: the owner answers
-            // with the first attempt's outcome instead of sending twice.
-            result = self.relay_room_send(&mut handle, owner, send.clone()).await;
+        let mut result = self.ask_once(&mut handle, owner, send, deadline).await;
+        if let Err(RelayAskError::Send {
+            failure,
+            effect: RelaySendEffect::MaybeCommitted,
+            ..
+        }) = &result
+        {
+            // A stopped relay actor leaves a dead ref; look the relay up again.
+            if *failure == RelaySendFailure::StaleRef {
+                handle = None;
+            }
+            // The same offered id: the owner answers with the first attempt's
+            // outcome instead of sending twice.
+            result = self.ask_once(&mut handle, owner, send, deadline).await;
         }
         result.map_err(|error| {
             tracing::warn!(
@@ -125,6 +139,29 @@ impl ExtensionHostAdapter {
             );
             temporary_failure("extension room owner is unavailable")
         })
+    }
+
+    /// kameo bounds the mailbox and reply only on the owner, so the origin
+    /// bounds its own wait. Expiry may follow delivery: it is maybe-committed.
+    async fn ask_once(
+        &self,
+        handle: &mut Option<RelayHandle>,
+        owner: &NodeIdentity,
+        send: &RelayExtensionRoomSend,
+        deadline: tokio::time::Instant,
+    ) -> Result<RelayExtensionRoomSendReply, RelayAskError> {
+        let mut send = send.clone();
+        send.origin_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let limit = deadline.min(tokio::time::Instant::now() + ASK_LIMIT);
+        tokio::time::timeout_at(limit, self.relay_room_send(handle, owner, send))
+            .await
+            .unwrap_or_else(|_| {
+                Err(RelayAskError::Send {
+                    failure: RelaySendFailure::ReplyTimeout,
+                    effect: RelaySendEffect::MaybeCommitted,
+                    message: "the room owner did not answer in time".to_owned(),
+                })
+            })
     }
 
     async fn relay_room_send(
@@ -164,14 +201,6 @@ pub(crate) async fn relayed_room_send(
     state: Arc<WebSocketState>,
     send: RelayExtensionRoomSend,
 ) -> RelayExtensionRoomSendReply {
-    relayed_room_send_within(state, send, OWNER_COMMIT_BUDGET).await
-}
-
-pub(super) async fn relayed_room_send_within(
-    state: Arc<WebSocketState>,
-    send: RelayExtensionRoomSend,
-    commit_budget: Duration,
-) -> RelayExtensionRoomSendReply {
     let flights = &state.deps.protocol.extension_bot_rooms.relayed.0;
     flights.retain(|_, (flight, started)| {
         flight.peek().is_none() || started.elapsed() < RELAYED_OUTCOME_RETENTION
@@ -184,9 +213,12 @@ pub(super) async fn relayed_room_send_within(
     let flight = flights
         .entry(key)
         .or_insert_with(|| {
-            let commit_deadline = tokio::time::Instant::now() + commit_budget;
-            let attempt = owner_send(Arc::clone(&state), send, commit_deadline);
-            (attempt.boxed().shared(), tokio::time::Instant::now())
+            let started = tokio::time::Instant::now();
+            // Begin the commit only while the reply can reach a waiting origin.
+            let budget =
+                OWNER_COMMIT_BUDGET.min(send.origin_budget.saturating_sub(OWNER_REPLY_RESERVE));
+            let attempt = owner_send(Arc::clone(&state), send, started + budget);
+            (attempt.boxed().shared(), started)
         })
         .0
         .clone();

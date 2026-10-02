@@ -258,7 +258,6 @@ pub(super) async fn plan_bot_groupchat_message(
         ),
         digest_input,
         joined_occupancy: None,
-        join_presences: Vec::new(),
     })
 }
 
@@ -282,9 +281,6 @@ pub(crate) struct PlannedExtensionBotGroupchat {
         waddle_xmpp::muc::MucOccupantNick,
         waddle_xmpp_core::OccupancySessionGeneration,
     )>,
-    /// The bot join presence for occupants without a local socket. The host
-    /// routes them through the cluster without holding the bot room lock.
-    pub join_presences: Vec<(FullJid, Stanza)>,
 }
 
 pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Option<Element> {
@@ -435,7 +431,6 @@ pub(crate) async fn plan_extension_bot_groupchat(
         })
         .collect();
     let mut joined_occupancy = None;
-    let mut routed_presences = Vec::new();
     if !initial_snapshot
         .occupants
         .iter()
@@ -462,6 +457,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
             Ok(join) => {
                 joined_occupancy = Some((joined_nick, session));
                 if !join.is_same_bare_multi_session_join {
+                    let mut join_presences = Vec::new();
                     for existing in join.existing_occupants {
                         let from = match room_jid.clone().with_resource_str(&bot_nick) {
                             Ok(from) => from,
@@ -500,21 +496,22 @@ pub(crate) async fn plan_extension_bot_groupchat(
                             &mut presence,
                             &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
                         );
-                        // XEP-0045 §7.2.3. A local socket gets the join in
-                        // order, ahead of the message; the host routes every
-                        // other occupant's copy through the cluster.
-                        let presence = Stanza::Presence(presence);
-                        if !matches!(
-                            state
-                                .deps
-                                .protocol
-                                .connection_registry
-                                .try_send_to(&existing.jid, presence.clone()),
-                            waddle_xmpp::registry::BroadcastOutcome::Delivered
-                        ) {
-                            routed_presences.push((existing.jid, presence));
-                        }
+                        join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }
+                    // XEP-0045 §7.2.3: every occupant, including one attached
+                    // through another node, has the join before the commit can
+                    // fan out the message. Peers are asked concurrently; the
+                    // host's commit deadline bounds a slow one.
+                    let room = &room_jid;
+                    futures::future::join_all(join_presences.into_iter().map(
+                        |(occupant, presence)| async move {
+                            crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                                state, room, &occupant, presence,
+                            )
+                            .await;
+                        },
+                    ))
+                    .await;
                 }
             }
             Err(error) => {
@@ -577,7 +574,6 @@ pub(crate) async fn plan_extension_bot_groupchat(
     )
     .await?;
     planned.joined_occupancy = joined_occupancy;
-    planned.join_presences = routed_presences;
     Ok(planned)
 }
 

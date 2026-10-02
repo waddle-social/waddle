@@ -1168,6 +1168,9 @@ pub struct RelayExtensionRoomSend {
     pub context: waddle_extensions::host_tools::InvocationContext,
     pub room: jid::BareJid,
     pub offered_id: waddle_extensions::StanzaId,
+    /// How much longer the origin waits for this send, measured when the ask
+    /// leaves it. The owner never begins a commit the origin cannot learn of.
+    pub origin_budget: std::time::Duration,
     pub body: waddle_extensions::DisplayText,
     pub thread_id: Option<waddle_extensions::ThreadId>,
     pub reply_to: Option<waddle_extensions::ReplyTarget>,

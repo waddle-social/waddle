@@ -16,9 +16,9 @@ use crate::{
     ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
     ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     server::{
-        extension_host_adapter::remote_room::{
-            relayed_room_send_within, TestRoomOwnerRelay, OWNER_COMMIT_BUDGET,
-            TEST_ROOM_OWNER_RELAY,
+        extension_host_adapter::{
+            relayed_room_send,
+            remote_room::{TestRoomOwnerRelay, OWNER_REPLY_RESERVE, TEST_ROOM_OWNER_RELAY},
         },
         routes::{
             interpret::{BotSnapshotGate, PlanningClaims, TEST_BOT_SNAPSHOT_GATE},
@@ -70,6 +70,12 @@ enum Fault {
     /// The connection drops while the owner is still planning; the owner
     /// keeps running and the re-ask arrives before it finishes.
     DropWhileRunning,
+    /// The ask reaches the owner after the origin stopped waiting.
+    ArrivesLate,
+    /// The origin can wait only this much longer than the owner's reserve.
+    Budget(Duration),
+    /// The owner never answers.
+    Silent,
 }
 
 struct Transport {
@@ -77,7 +83,6 @@ struct Transport {
     claims: Arc<PlanningClaims>,
     faults: Mutex<VecDeque<Fault>>,
     asks: AtomicUsize,
-    commit_budget: Duration,
     gate: Arc<BotSnapshotGate>,
     detached: Mutex<Vec<tokio::task::JoinHandle<RelayExtensionRoomSendReply>>>,
 }
@@ -102,16 +107,29 @@ impl Transport {
             }
             Some(Fault::NotOwner) => return Ok(RelayExtensionRoomSendReply::NotOwner),
             Some(Fault::MoveToOrigin) => self.claims.set_owner(origin_node()),
-            Some(Fault::LoseReply | Fault::DropWhileRunning) | None => {}
+            Some(Fault::Silent) => std::future::pending::<()>().await,
+            Some(
+                Fault::LoseReply | Fault::DropWhileRunning | Fault::ArrivesLate | Fault::Budget(_),
+            )
+            | None => {}
         }
-        let send: RelayExtensionRoomSend =
+        let mut send: RelayExtensionRoomSend =
             rmp_serde::from_slice(&rmp_serde::to_vec_named(&send).expect("encode request"))
                 .expect("decode request");
+        assert!(
+            send.origin_budget > Duration::ZERO,
+            "the origin stamps its wait"
+        );
+        match fault {
+            Some(Fault::ArrivesLate) => send.origin_budget = Duration::ZERO,
+            Some(Fault::Budget(extra)) => send.origin_budget = OWNER_REPLY_RESERVE + extra,
+            _ => {}
+        }
         if matches!(fault, Some(Fault::DropWhileRunning)) {
             // Like kameo's delegated reply, the owner task outlives the ask.
             let first = tokio::spawn(TEST_BOT_SNAPSHOT_GATE.scope(
                 Arc::clone(&self.gate),
-                relayed_room_send_within(Arc::clone(&self.owner), send, self.commit_budget),
+                relayed_room_send(Arc::clone(&self.owner), send),
             ));
             self.gate.reached.notified().await;
             self.detached.lock().expect("detached").push(first);
@@ -126,8 +144,7 @@ impl Transport {
                 message: "connection closed".into(),
             });
         }
-        let reply =
-            relayed_room_send_within(Arc::clone(&self.owner), send, self.commit_budget).await;
+        let reply = relayed_room_send(Arc::clone(&self.owner), send).await;
         let reply = rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode reply"))
             .expect("decode reply");
         if matches!(fault, Some(Fault::LoseReply)) {
@@ -172,20 +189,11 @@ impl Cluster {
     }
 
     fn transport(&self, faults: impl IntoIterator<Item = Fault>) -> Arc<Transport> {
-        self.transport_within(faults, OWNER_COMMIT_BUDGET)
-    }
-
-    fn transport_within(
-        &self,
-        faults: impl IntoIterator<Item = Fault>,
-        commit_budget: Duration,
-    ) -> Arc<Transport> {
         Arc::new(Transport {
             owner: Arc::clone(&self.owner.adapter.state),
             claims: Arc::clone(&self.claims),
             faults: Mutex::new(faults.into_iter().collect()),
             asks: AtomicUsize::new(0),
-            commit_budget,
             gate: Arc::default(),
             detached: Mutex::default(),
         })
@@ -538,11 +546,11 @@ async fn denials_cross_nodes(f: IngressFixture) {
     cluster.close(f).await;
 }
 
-/// The origin stops waiting after its reply timeout, so an owner that could
-/// not begin its commit in time refuses with nothing committed.
-async fn owner_past_deadline_commits_nothing(f: IngressFixture) {
+/// An ask that reaches the owner after the origin stopped waiting is refused
+/// before planning: nothing commits and the bot does not join.
+async fn late_ask_commits_nothing(f: IngressFixture) {
     let mut cluster = Cluster::new(&f).await;
-    let transport = cluster.transport_within([], Duration::ZERO);
+    let transport = cluster.transport([Fault::ArrivesLate]);
     let context = cluster.provider(direct_ingress::plugin());
     let error = cluster
         .send(&transport, &context, "late-owner", cluster.request())
@@ -557,19 +565,64 @@ async fn owner_past_deadline_commits_nothing(f: IngressFixture) {
     assert_eq!(f.count("ingress_messages").await, 0);
     assert_eq!(f.count("mam_messages").await, 0);
     let bot = cluster.bot(&direct_ingress::plugin());
+    assert!(!Cluster::bot_joined(&cluster.owner, &bot).await);
     assert!(
-        !Cluster::bot_joined(&cluster.owner, &bot).await,
-        "the late attempt revokes its join"
+        cluster.owner.drain().is_empty(),
+        "the refusal precedes the bot join"
     );
+    assert!(cluster.origin.drain().is_empty());
+    cluster.close(f).await;
+}
+
+/// A deadline that passes during planning refuses the commit but keeps the
+/// join, which is the occupancy every successful send leaves behind.
+async fn deadline_during_planning_keeps_join(f: IngressFixture) {
+    let mut cluster = Cluster::new(&f).await;
+    let transport = cluster.transport([Fault::Budget(Duration::from_millis(200))]);
+    let context = cluster.provider(direct_ingress::plugin());
+    let gate = Arc::clone(&transport.gate);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        gate.release.notify_one();
+    });
+    let error = TEST_BOT_SNAPSHOT_GATE
+        .scope(
+            Arc::clone(&transport.gate),
+            cluster.send(&transport, &context, "slow-owner", cluster.request()),
+        )
+        .await
+        .expect_err("the owner missed its deadline");
+    assert_eq!(error.code, HostToolErrorCode::TemporaryFailure);
+    assert_eq!(f.count("ingress_messages").await, 0);
+    assert_eq!(f.count("mam_messages").await, 0);
+    let bot = cluster.bot(&direct_ingress::plugin());
+    assert!(Cluster::bot_joined(&cluster.owner, &bot).await);
     let wire = cluster.owner.drain();
     let presences = presences(&wire);
-    assert_eq!(presences.len(), 2, "join then compensating unavailable");
-    assert_eq!(
-        presences[1].type_,
-        xmpp_parsers::presence::Type::Unavailable
-    );
+    assert_eq!(presences.len(), 1, "the join stays");
+    assert_eq!(presences[0].type_, xmpp_parsers::presence::Type::None);
     assert!(!has_groupchat(&wire));
-    assert!(cluster.origin.drain().is_empty());
+    cluster.close(f).await;
+}
+
+/// kameo bounds the mailbox and reply only on the owner. A silent owner must
+/// not hold the origin past its own bound; the re-ask then succeeds.
+async fn silent_owner_is_bounded_locally(f: IngressFixture) {
+    let mut cluster = Cluster::new(&f).await;
+    let transport = cluster.transport([Fault::Silent]);
+    let context = cluster.provider(direct_ingress::plugin());
+    let started = std::time::Instant::now();
+    let id = tokio::time::timeout(
+        Duration::from_secs(14),
+        cluster.send(&transport, &context, "silent-owner", cluster.request()),
+    )
+    .await
+    .expect("the origin bounds a silent owner")
+    .expect("the re-ask succeeds");
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert_eq!(transport.asks.load(Ordering::SeqCst), 2);
+    assert_eq!(id.as_str(), archived_id(&f).await);
+    groupchat_message(&cluster.owner.drain());
     cluster.close(f).await;
 }
 
@@ -668,8 +721,9 @@ async fn signed_on_owner(f: IngressFixture) {
     cluster.close(f).await;
 }
 
-/// XEP-0045 §7.2.3: the bot's join presence reaches an occupant whose socket
-/// lives on another node.
+/// XEP-0045 §7.2.3: an occupant whose socket lives on another node has the
+/// bot's join presence, with hat and occupant id, before the message can be
+/// admitted and fanned out.
 async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let remote: jid::FullJid = "mercutio@example.com/remote".parse().expect("remote");
@@ -684,27 +738,52 @@ async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
         })
         .await
         .expect("remote-attached occupant");
-    let targets = Arc::new(Mutex::new(Vec::new()));
-    crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY
-        .scope(
-            (
-                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
-                Arc::clone(&targets),
+    let routed = Arc::new(Mutex::new(Vec::new()));
+    let offered = "remote-occupant-join";
+    let gate = Registration::before_admission(OriginId::new(offered.to_owned()));
+    let sending = {
+        let adapter = fixture.adapter.clone();
+        let invocation = fixture.invocation();
+        let request = fixture.request(offered);
+        let routed = Arc::clone(&routed);
+        tokio::spawn(
+            crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY.scope(
+                (
+                    crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                    routed,
+                ),
+                async move { adapter.send_message(&invocation, request).await },
             ),
-            fixture.send("remote-occupant-join"),
         )
+    };
+    tokio::time::timeout(Duration::from_secs(5), gate.entered())
         .await
+        .expect("the send reaches admission");
+    {
+        let routed = routed.lock().expect("routed");
+        let [(target, Stanza::Presence(presence))] = routed.as_slice() else {
+            panic!("only the join is routed before admission: {routed:?}");
+        };
+        assert_eq!(target, &remote);
+        assert_eq!(presence.type_, xmpp_parsers::presence::Type::None);
+        assert!(presence
+            .payloads
+            .iter()
+            .any(|p| p.is("hats", waddle_xmpp::xep::xep0317::NS_HATS)));
+        assert!(presence
+            .payloads
+            .iter()
+            .any(|p| p.is("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)));
+    }
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(5), sending)
+        .await
+        .expect("send completes")
+        .expect("send task")
         .expect("send");
-    // Cross-node routing runs off the room lock.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while targets.lock().expect("targets").is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the join reaches the cross-node route");
-    assert_eq!(*targets.lock().expect("targets"), vec![remote]);
-    assert_eq!(presences(&fixture.drain()).len(), 1, "local occupant too");
+    let wire = fixture.drain();
+    assert_eq!(presences(&wire).len(), 1, "local occupant too");
+    groupchat_message(&wire);
     fixture.close(f).await;
 }
 
@@ -781,14 +860,38 @@ async fn extension_remote_denials_postgres() {
 }
 
 #[tokio::test]
-async fn extension_remote_owner_past_deadline_sqlite() {
+async fn extension_remote_late_ask_sqlite() {
     let f = IngressFixture::sqlite().await;
-    owner_past_deadline_commits_nothing(f).await;
+    late_ask_commits_nothing(f).await;
 }
 #[tokio::test]
-async fn extension_remote_owner_past_deadline_postgres() {
-    if let Some(f) = IngressFixture::postgres("extension_remote_owner_past_deadline").await {
-        owner_past_deadline_commits_nothing(f).await;
+async fn extension_remote_late_ask_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_remote_late_ask").await {
+        late_ask_commits_nothing(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_remote_deadline_during_planning_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    deadline_during_planning_keeps_join(f).await;
+}
+#[tokio::test]
+async fn extension_remote_deadline_during_planning_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_remote_deadline_planning").await {
+        deadline_during_planning_keeps_join(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_remote_silent_owner_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    silent_owner_is_bounded_locally(f).await;
+}
+#[tokio::test]
+async fn extension_remote_silent_owner_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_remote_silent_owner").await {
+        silent_owner_is_bounded_locally(f).await;
     }
 }
 

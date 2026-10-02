@@ -281,6 +281,7 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
         },
         room: room.clone(),
         offered_id: waddle_extensions::StanzaId::new("offered-1893").expect("offered"),
+        origin_budget: Duration::from_millis(10_500),
         body: waddle_extensions::DisplayText::new("hello").expect("body"),
         thread_id: Some(waddle_extensions::ThreadId::new("thread").expect("thread")),
         reply_to: None,
@@ -297,6 +298,7 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
             .expect("decode send");
     assert_eq!(decoded.room, room);
     assert_eq!(decoded.offered_id, message.offered_id);
+    assert_eq!(decoded.origin_budget, message.origin_budget);
     assert_eq!(decoded.context.kind, InvocationKind::Command);
     assert_eq!(decoded.context.requester, message.context.requester);
     assert_eq!(decoded.markup, message.markup);

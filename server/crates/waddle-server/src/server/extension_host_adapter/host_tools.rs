@@ -302,6 +302,8 @@ impl ExtensionHostAdapter {
                             context: context.clone(),
                             room,
                             offered_id,
+                            // Stamped per ask from the origin's remaining wait.
+                            origin_budget: std::time::Duration::ZERO,
                             body: request.body,
                             thread_id: request.thread_id,
                             reply_to: request.reply_to,

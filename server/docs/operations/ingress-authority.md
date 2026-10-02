@@ -44,12 +44,16 @@ and runs the local send path on the owner. The origin mints the offered stanza
 id once and re-asks with it after an ambiguous transport failure, so the
 owner's origin alias returns the committed canonical id without a second
 fanout. `NotOwner` re-resolves the claim once; a peer that predates the
-message (`UnknownMessage`) is a `TemporaryFailure`. Each ask allows 1 s of
-mailbox and 4 s of reply, so both asks fit inside the 15 s stanza-handler
-backstop. The owner begins its commit only within 1.5 s of receiving the ask
-and otherwise refuses with nothing committed; a re-ask shares the first
-attempt's outcome. The bot's join presence reaches occupants on other nodes
-through the cluster route, outside the bot room lock.
+message (`UnknownMessage`) is a `TemporaryFailure`. kameo enforces the ask's
+1 s mailbox and 4 s reply windows only on the owner, so the origin also bounds
+each ask to 5.5 s and the whole wait to 11 s, inside the 15 s stanza-handler
+backstop; a local expiry counts as maybe-committed and is re-asked. Each ask
+carries the origin's remaining wait. The owner begins its commit only while its
+reply can still reach a waiting origin (at most 1.5 s after the ask), checking
+both after taking the bot room lock and after planning; past that it refuses
+with nothing committed and keeps any join it made. A re-ask shares the first
+attempt's outcome. The bot's join presence reaches every occupant, including
+ones on other nodes, before the commit; occupants are routed concurrently.
 
 V1018 stores grants in `extension_grants`: scope `0` is plugin send authority
 (`room_jid IS NULL`), scope `1` is provider-room authority. Partial unique indexes

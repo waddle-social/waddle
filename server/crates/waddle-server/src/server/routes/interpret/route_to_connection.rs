@@ -1423,7 +1423,7 @@ pub(crate) async fn deliver_ordered_local_copy(
 tokio::task_local! {
     pub(crate) static CONTROLLED_REGISTERED_REMOTE_DELIVERY: (
         FullJidDeliveryOutcome,
-        std::sync::Arc<std::sync::Mutex<Vec<jid::FullJid>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<(jid::FullJid, Stanza)>>>,
     );
 }
 
@@ -1443,7 +1443,7 @@ async fn deliver_registered_remote_resource(
         targets
             .lock()
             .expect("controlled registered-remote targets")
-            .push(target.clone());
+            .push((target.clone(), stanza.clone()));
         *outcome
     }) {
         return Some(outcome);
