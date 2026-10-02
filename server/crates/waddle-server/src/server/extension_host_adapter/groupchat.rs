@@ -76,7 +76,8 @@ impl ExtensionHostAdapter {
             interpret::plan_extension_bot_groupchat(&deps, room.clone(), sender.clone(), response)
                 .await
                 .map_err(|error| match error {
-                    interpret::ExtensionBotDispatchError::InvalidEnvelope => {
+                    interpret::ExtensionBotDispatchError::InvalidEnvelope
+                    | interpret::ExtensionBotDispatchError::BotOutcast => {
                         ExtensionHostAdapterError::NotAuthorized
                     }
                     interpret::ExtensionBotDispatchError::Plan(failure) => {
