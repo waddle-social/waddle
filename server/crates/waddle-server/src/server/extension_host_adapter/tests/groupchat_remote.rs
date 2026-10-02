@@ -37,9 +37,9 @@ use waddle_extensions::{
 };
 use waddle_xmpp::{
     ingress::IngressEffectIntent,
-    muc::room_actor::{ChangeAffiliation, GetSnapshot},
+    muc::room_actor::{ChangeAffiliation, GetSnapshot, Join},
     ownership::{NodeIdentity, SharedNodeIdentity},
-    Affiliation, Stanza,
+    Affiliation, Role, Stanza,
 };
 use waddle_xmpp_core::xep0359::OriginId;
 
@@ -554,6 +554,38 @@ async fn signed_on_owner(f: IngressFixture) {
     cluster.close(f).await;
 }
 
+/// XEP-0045 §7.2.3: the bot's join presence reaches an occupant whose socket
+/// lives on another node.
+async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
+    let mut fixture = GroupchatFixture::new(&f).await;
+    let remote: jid::FullJid = "mercutio@example.com/remote".parse().expect("remote");
+    fixture
+        .actor
+        .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            nick: "mercutio".into(),
+            real_jid: remote.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("remote-attached occupant");
+    let targets = Arc::new(Mutex::new(Vec::new()));
+    crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                Arc::clone(&targets),
+            ),
+            fixture.send("remote-occupant-join"),
+        )
+        .await
+        .expect("send");
+    assert_eq!(*targets.lock().expect("targets"), vec![remote]);
+    assert_eq!(presences(&fixture.drain()).len(), 1, "local occupant too");
+    fixture.close(f).await;
+}
+
 #[tokio::test]
 async fn extension_remote_requester_send_sqlite() {
     let f = IngressFixture::sqlite().await;
@@ -635,5 +667,17 @@ async fn extension_remote_signed_launch_sqlite() {
 async fn extension_remote_signed_launch_postgres() {
     if let Some(f) = IngressFixture::postgres("extension_remote_signed_launch").await {
         signed_on_owner(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_bot_join_presence_remote_occupant_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    join_presence_reaches_remote_occupant(f).await;
+}
+#[tokio::test]
+async fn extension_bot_join_presence_remote_occupant_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_bot_join_presence_remote_occupant").await {
+        join_presence_reaches_remote_occupant(f).await;
     }
 }

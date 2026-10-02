@@ -495,11 +495,15 @@ pub(crate) async fn plan_extension_bot_groupchat(
                             &mut presence,
                             &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
                         );
-                        let _ = state
-                            .deps
-                            .protocol
-                            .connection_registry
-                            .try_send_to(&existing.jid, Stanza::Presence(presence));
+                        // XEP-0045 §7.2.3: occupants attached through another
+                        // node receive the join through the cluster route.
+                        crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                            state,
+                            &room_jid,
+                            &existing.jid,
+                            Stanza::Presence(presence),
+                        )
+                        .await;
                     }
                 }
             }
