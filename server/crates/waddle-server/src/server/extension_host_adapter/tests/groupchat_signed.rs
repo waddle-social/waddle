@@ -6,7 +6,7 @@ use waddle_extensions::{
     ExtensionCapability, ExtensionConfig, ExtensionManager, ExtensionModuleConfig, PluginId,
 };
 
-async fn signed_manager() -> Arc<ExtensionManager> {
+pub(super) async fn signed_manager() -> Arc<ExtensionManager> {
     // Extend the existing real component's manifest capability list. WIT enum
     // indices are MessageEnrich=1, Launch=12, HostMessageSend=9.
     let fixture = include_str!("../../../../../waddle-extensions/tests/fixtures/message_hook.wat");

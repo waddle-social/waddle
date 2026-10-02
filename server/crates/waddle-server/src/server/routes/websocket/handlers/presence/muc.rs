@@ -390,19 +390,57 @@ pub(crate) async fn route_room_presence_to_occupant(
     if try_deliver_registered_remote_resource(state, recipient, &stanza).await {
         return;
     }
-    // #1263: `DroppedFull` was previously treated as delivered, so a
-    // client whose channel was momentarily full silently missed a room
-    // presence and kept a stale occupant roster forever. The frame is
-    // provably never enqueued on `DroppedFull`, so retry ONCE
-    // immediately — but never sleep: this helper sits inside the
-    // sequential join/leave broadcast loops whose non-blocking contract
-    // is load-bearing (a zombied consumer must not stall the join path,
-    // or "Timed out waiting for self-presence" cascades return; SM
-    // review on PR #1277). A persistently full channel surfaces the
-    // loss (metric + warn) instead of reporting success — the
-    // recipient's roster is stale until its next rejoin/resync, and a
-    // genuinely wedged consumer is torn down by the send-stall
-    // backstop, whose disconnect cleanup re-syncs occupancy.
+    let delivered = deliver_room_presence_locally(state, room_jid, recipient, &stanza);
+    #[cfg(not(feature = "clustering"))]
+    let _ = delivered;
+    #[cfg(feature = "clustering")]
+    if !delivered {
+        let deps =
+            crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None)
+                .with_ordered_relay_origin(Some(
+                    crate::server::routes::interpret::OrderedRelayRouteOrigin::room(room_jid),
+                ));
+        let replies = crate::server::routes::interpret::route_to_connection(
+            &deps,
+            jid::Jid::from(recipient.clone()),
+            Box::new(stanza),
+            0,
+            None,
+        )
+        .await;
+        if !replies.is_empty() {
+            warn!(
+                room = %room_jid,
+                recipient = %recipient,
+                reply_count = replies.len(),
+                "MUC presence fan-out produced unexpected route fallback replies"
+            );
+        }
+    }
+}
+
+/// Local socket delivery of a room presence; `false` when no local socket
+/// takes it.
+///
+/// #1263: `DroppedFull` was previously treated as delivered, so a
+/// client whose channel was momentarily full silently missed a room
+/// presence and kept a stale occupant roster forever. The frame is
+/// provably never enqueued on `DroppedFull`, so retry ONCE
+/// immediately — but never sleep: this helper sits inside the
+/// sequential join/leave broadcast loops whose non-blocking contract
+/// is load-bearing (a zombied consumer must not stall the join path,
+/// or "Timed out waiting for self-presence" cascades return; SM
+/// review on PR #1277). A persistently full channel surfaces the
+/// loss (metric + warn) instead of reporting success — the
+/// recipient's roster is stale until its next rejoin/resync, and a
+/// genuinely wedged consumer is torn down by the send-stall
+/// backstop, whose disconnect cleanup re-syncs occupancy.
+pub(crate) fn deliver_room_presence_locally(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    recipient: &FullJid,
+    stanza: &Stanza,
+) -> bool {
     let mut retried = false;
     loop {
         match state
@@ -411,7 +449,7 @@ pub(crate) async fn route_room_presence_to_occupant(
             .connection_registry
             .try_send_to(recipient, stanza.clone())
         {
-            waddle_xmpp::registry::BroadcastOutcome::Delivered => return,
+            waddle_xmpp::registry::BroadcastOutcome::Delivered => return true,
             waddle_xmpp::registry::BroadcastOutcome::DroppedFull => {
                 if !retried {
                     retried = true;
@@ -424,39 +462,11 @@ pub(crate) async fn route_room_presence_to_occupant(
                     "MUC presence fan-out: recipient channel full; dropped — \
                      occupant roster stale until resync"
                 );
-                return;
+                return true;
             }
             waddle_xmpp::registry::BroadcastOutcome::NotConnected
-            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => break,
+            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => return false,
         }
-    }
-    #[cfg(not(feature = "clustering"))]
-    let _ = room_jid;
-    #[cfg(feature = "clustering")]
-    let deps = {
-        let deps =
-            crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
-        deps.with_ordered_relay_origin(Some(
-            crate::server::routes::interpret::OrderedRelayRouteOrigin::room(room_jid),
-        ))
-    };
-    #[cfg(feature = "clustering")]
-    let replies = crate::server::routes::interpret::route_to_connection(
-        &deps,
-        jid::Jid::from(recipient.clone()),
-        Box::new(stanza),
-        0,
-        None,
-    )
-    .await;
-    #[cfg(feature = "clustering")]
-    if !replies.is_empty() {
-        warn!(
-            room = %room_jid,
-            recipient = %recipient,
-            reply_count = replies.len(),
-            "MUC presence fan-out produced unexpected route fallback replies"
-        );
     }
 }
 

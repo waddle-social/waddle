@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xmpp_parsers::jid::{BareJid, FullJid, Jid};
 
@@ -8,7 +9,9 @@ use crate::types::{
     RoomJid, StanzaId, ThreadId,
 };
 
-#[derive(Debug, Clone)]
+/// Serializable because a clustered host forwards room sends to the room's
+/// owning node with this context; a wire change needs a new relay message id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationContext {
     pub waddle_id: crate::types::WaddleId,
     pub plugin_id: crate::types::PluginId,
@@ -18,7 +21,7 @@ pub struct InvocationContext {
     pub provider_room_grants: Vec<BareJid>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationKind {
     RoomMessageObserve,
     MessageHook,
@@ -201,12 +204,12 @@ pub enum MessageTarget {
     Direct(BareJid),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageMarkupKind {
     Blockquote,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageMarkupSpan {
     pub kind: MessageMarkupKind,
     pub start: u32,
@@ -247,7 +250,7 @@ pub struct PubSubGetItemsResponse {
     pub items: Vec<PubSubStoredItem>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostToolErrorCode {
     Denied,
     InvalidRequest,
@@ -256,7 +259,7 @@ pub enum HostToolErrorCode {
     TemporaryFailure,
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[error("{code:?}: {message}")]
 pub struct HostToolError {
     pub code: HostToolErrorCode,

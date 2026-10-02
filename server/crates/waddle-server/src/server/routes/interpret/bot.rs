@@ -258,6 +258,7 @@ pub(super) async fn plan_bot_groupchat_message(
         ),
         digest_input,
         joined_occupancy: None,
+        join_stragglers: Vec::new(),
     })
 }
 
@@ -281,6 +282,9 @@ pub(crate) struct PlannedExtensionBotGroupchat {
         waddle_xmpp::muc::MucOccupantNick,
         waddle_xmpp_core::OccupancySessionGeneration,
     )>,
+    /// Join presence routes to other nodes still running after the cap. A
+    /// revoked join awaits them so its unavailable cannot overtake the join.
+    pub join_stragglers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Option<Element> {
@@ -327,11 +331,15 @@ pub(crate) enum ExtensionBotDispatchError {
     MissingCanonicalStanzaId,
 }
 
+/// `host_state` owns cross-node join presence routes that outlive planning.
+/// A forwarded send's `commit_deadline` also bounds the wait for them.
 pub(crate) async fn plan_extension_bot_groupchat(
     deps: &Deps<'_>,
     room_jid: BareJid,
     bot_full: FullJid,
     response: ExtensionRoomMessage,
+    host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
+    commit_deadline: Option<tokio::time::Instant>,
 ) -> Result<PlannedExtensionBotGroupchat, ExtensionBotDispatchError> {
     #[cfg(feature = "clustering")]
     require_local_room(deps, &room_jid).await?;
@@ -431,6 +439,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
         })
         .collect();
     let mut joined_occupancy = None;
+    let mut join_stragglers = Vec::new();
     if !initial_snapshot
         .occupants
         .iter()
@@ -457,6 +466,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
             Ok(join) => {
                 joined_occupancy = Some((joined_nick, session));
                 if !join.is_same_bare_multi_session_join {
+                    let mut join_presences = Vec::new();
                     for existing in join.existing_occupants {
                         let from = match room_jid.clone().with_resource_str(&bot_nick) {
                             Ok(from) => from,
@@ -495,12 +505,16 @@ pub(crate) async fn plan_extension_bot_groupchat(
                             &mut presence,
                             &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
                         );
-                        let _ = state
-                            .deps
-                            .protocol
-                            .connection_registry
-                            .try_send_to(&existing.jid, Stanza::Presence(presence));
+                        join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }
+                    join_stragglers = route_join_presences(
+                        state,
+                        host_state,
+                        &room_jid,
+                        join_presences,
+                        commit_deadline,
+                    )
+                    .await;
                 }
             }
             Err(error) => {
@@ -563,17 +577,87 @@ pub(crate) async fn plan_extension_bot_groupchat(
     )
     .await?;
     planned.joined_occupancy = joined_occupancy;
+    planned.join_stragglers = join_stragglers;
     Ok(planned)
 }
 
-#[cfg(feature = "clustering")]
-async fn require_local_room(deps: &Deps<'_>, room: &BareJid) -> Result<(), PlanFailure> {
-    let Some(state) = deps.web_socket_state else {
-        return Ok(());
+/// The longest planning waits for cross-node join presences. A healthy peer
+/// acks a frame in milliseconds; this leaves most of a forwarded send's 1.5 s
+/// commit budget and keeps a local command far inside the 15 s backstop.
+const JOIN_PRESENCE_CAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(test)]
+pub(crate) type TestJoinPresenceRoute = std::sync::Arc<
+    dyn Fn(FullJid, Stanza) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Replaces the cross-node route of a bot join presence.
+    pub(crate) static TEST_JOIN_PRESENCE_ROUTE: TestJoinPresenceRoute;
+}
+
+/// XEP-0045 §7.2.3. Local sockets get the join first and in order, ahead of
+/// the message. Occupants on other nodes are routed concurrently and waited
+/// for up to [`JOIN_PRESENCE_CAP`]; a route still running then is detached
+/// and finishes on its own, so a slow peer may see the message first. The
+/// routes still running are returned.
+async fn route_join_presences(
+    state: &crate::server::routes::websocket::WebSocketState,
+    host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
+    room: &BareJid,
+    presences: Vec<(FullJid, Stanza)>,
+    commit_deadline: Option<tokio::time::Instant>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    use crate::server::routes::websocket::handlers::presence::{
+        deliver_room_presence_locally, route_room_presence_to_occupant,
     };
+    let mut routes = Vec::new();
+    for (occupant, presence) in presences {
+        let local = state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&occupant)
+            .is_some_and(|entry| entry.is_locally_hosted());
+        if local && deliver_room_presence_locally(state, room, &occupant, &presence) {
+            continue;
+        }
+        #[cfg(test)]
+        if let Ok(route) = TEST_JOIN_PRESENCE_ROUTE.try_with(std::sync::Arc::clone) {
+            routes.push(tokio::spawn(route(occupant, presence)));
+            continue;
+        }
+        let state = std::sync::Arc::clone(host_state);
+        let room = room.clone();
+        routes.push(tokio::spawn(async move {
+            route_room_presence_to_occupant(&state, &room, &occupant, presence).await;
+        }));
+    }
+    let cap = tokio::time::Instant::now() + JOIN_PRESENCE_CAP;
+    let bound = commit_deadline.map_or(cap, |deadline| deadline.min(cap));
+    if tokio::time::timeout_at(bound, futures::future::join_all(routes.iter_mut()))
+        .await
+        .is_err()
+    {
+        warn!(
+            room = %room,
+            "Extension bot join presence is still routing to another node; continuing"
+        );
+    }
+    routes.retain(|route| !route.is_finished());
+    routes
+}
+
+/// The remote node owning `room`'s actor claim, or `None` when this node runs it.
+#[cfg(feature = "clustering")]
+pub(crate) async fn extension_room_owner(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+) -> Result<Option<waddle_xmpp::ownership::NodeIdentity>, PlanFailure> {
     let clustering = &state.deps.app_state.clustering_claims;
     let Some(store) = clustering.claim_store.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
     let entity = waddle_xmpp::ownership::Entity::new(
         waddle_xmpp::ownership::EntityType::RoomActor,
@@ -584,19 +668,32 @@ async fn require_local_room(deps: &Deps<'_>, room: &BareJid) -> Result<(), PlanF
         .await
         .map_err(|_| PlanFailure::OwnershipLookup)?
     else {
-        return Ok(());
+        return Ok(None);
     };
     if !claim.owner_lease_fresh {
         return Err(PlanFailure::RoomClaimStale);
     }
-    if !clustering
+    if clustering
         .node_identity
         .as_ref()
         .is_some_and(|identity| identity.current() == claim.owner)
     {
-        return Err(PlanFailure::ExtensionRemoteRoomUnsupported);
+        return Ok(None);
     }
-    Ok(())
+    Ok(Some(claim.owner))
+}
+
+/// The host forwards remote-owned rooms before planning; a claim that moved
+/// since then must not run here.
+#[cfg(feature = "clustering")]
+async fn require_local_room(deps: &Deps<'_>, room: &BareJid) -> Result<(), PlanFailure> {
+    let Some(state) = deps.web_socket_state else {
+        return Ok(());
+    };
+    match extension_room_owner(state, room).await? {
+        None => Ok(()),
+        Some(_) => Err(PlanFailure::RoomOwnedRemotely),
+    }
 }
 
 #[cfg(test)]

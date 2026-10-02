@@ -12,6 +12,26 @@ use std::time::Duration;
 use waddle_xmpp::pending_delivery::QuotaPolicy;
 
 pub(super) async fn adapter(f: &IngressFixture) -> ExtensionHostAdapter {
+    let adapter = node(f).await;
+    f.execute("INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES ('juliet@example.com', 'juliet', 'juliet', ?, ?)", crate::db_params![chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
+    f.execute("INSERT INTO roster_items (user_jid, contact_jid, subscription, approved, groups, updated_at) VALUES ('romeo@example.com', 'juliet@example.com', 'both', FALSE, '[]', ?)", crate::db_params![chrono::Utc::now().to_rfc3339()]).await;
+    let mut tx = f.uow.begin().await.expect("grant tx");
+    ExtensionGrantRepository::sync_configured(
+        &mut tx,
+        &[ConfiguredPluginGrants {
+            plugin: plugin(),
+            can_send: true,
+            provider_rooms: vec![],
+        }],
+    )
+    .await
+    .expect("configured send grant");
+    tx.commit().await.expect("grant commit");
+    adapter
+}
+
+/// Another server node over the same database, without seeding shared rows.
+pub(super) async fn node(f: &IngressFixture) -> ExtensionHostAdapter {
     crate::pubsub::DatabasePubSubStorage::open(Some(f.db.database_url()))
         .await
         .expect("notification policy schema");
@@ -41,20 +61,6 @@ pub(super) async fn adapter(f: &IngressFixture) -> ExtensionHostAdapter {
     NotificationOutboxStore::new(f.db.clone())
         .await
         .expect("outbox schema");
-    f.execute("INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES ('juliet@example.com', 'juliet', 'juliet', ?, ?)", crate::db_params![chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
-    f.execute("INSERT INTO roster_items (user_jid, contact_jid, subscription, approved, groups, updated_at) VALUES ('romeo@example.com', 'juliet@example.com', 'both', FALSE, '[]', ?)", crate::db_params![chrono::Utc::now().to_rfc3339()]).await;
-    let mut tx = f.uow.begin().await.expect("grant tx");
-    ExtensionGrantRepository::sync_configured(
-        &mut tx,
-        &[ConfiguredPluginGrants {
-            plugin: plugin(),
-            can_send: true,
-            provider_rooms: vec![],
-        }],
-    )
-    .await
-    .expect("configured send grant");
-    tx.commit().await.expect("grant commit");
     ExtensionHostAdapter::new(state)
 }
 
@@ -82,6 +88,7 @@ pub(super) fn request(origin: &str) -> HostSendMessage {
         reply_to: None,
         markup: vec![],
         extensions: None,
+        commit_deadline: None,
     }
 }
 

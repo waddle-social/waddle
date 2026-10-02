@@ -118,6 +118,7 @@ enum RelayDispatchKind {
     ReassertMediaGrants,
     ResourcePresence,
     RecipientInventory,
+    ExtensionRoomSend,
 }
 
 impl RelayDispatchKind {
@@ -138,6 +139,7 @@ impl RelayDispatchKind {
             Self::ReassertMediaGrants => "reassert_media_grants",
             Self::ResourcePresence => "resource_presence",
             Self::RecipientInventory => "recipient_inventory",
+            Self::ExtensionRoomSend => "extension_room_send",
         }
     }
 }
@@ -1149,6 +1151,58 @@ impl Message<RelayRecipientInventory> for RelayActor {
                 Ok(inventory) => RelayRecipientInventoryReply::Inventory(inventory),
                 Err(()) => RelayRecipientInventoryReply::Unavailable,
             }
+        })
+    }
+}
+
+/// An extension host `send_message` into a room whose actor this node owns
+/// (#1893). The origin forwards the host call, not a stanza: the owner runs
+/// its unchanged local send path (ACL, grants, bot join and hat, envelope
+/// signing, ingress commit). The origin mints `offered_id` once and reuses it
+/// on a re-ask, so a retried call resolves to the committed message through
+/// the ingress origin alias. The context carries no session token; the owner
+/// rebuilds the invocation from the requester bare JID. A peer that predates
+/// this id answers `UnknownMessage` before any handler runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayExtensionRoomSend {
+    pub context: waddle_extensions::host_tools::InvocationContext,
+    pub room: jid::BareJid,
+    pub offered_id: waddle_extensions::StanzaId,
+    /// How much longer the origin waits for this send, measured when the ask
+    /// leaves it. The owner never begins a commit the origin cannot learn of.
+    pub origin_budget: std::time::Duration,
+    pub body: waddle_extensions::DisplayText,
+    pub thread_id: Option<waddle_extensions::ThreadId>,
+    pub reply_to: Option<waddle_extensions::ReplyTarget>,
+    pub markup: Vec<waddle_extensions::MessageMarkupSpan>,
+    pub extensions: Option<waddle_extensions::ExtensionEnvelope>,
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayExtensionRoomSendReply {
+    /// The room's canonical XEP-0359 stanza id for the committed message.
+    Sent(waddle_extensions::StanzaId),
+    HostError(waddle_extensions::host_tools::HostToolError),
+    /// The room actor claim moved away from the receiver; nothing ran.
+    NotOwner,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.extension_room_send.v1")]
+impl Message<RelayExtensionRoomSend> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayExtensionRoomSendReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayExtensionRoomSend,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::ExtensionRoomSend, &msg.trace);
+        span.record("jid", tracing::field::display(&msg.room));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge.extension_room_send_local(msg).await
         })
     }
 }
@@ -2379,6 +2433,32 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
             .map_err(send_error)
+    }
+
+    /// Stamps the origin's remaining wait after the relay lookup, so lookup
+    /// time never counts toward the owner's window.
+    pub(crate) async fn extension_room_send(
+        &mut self,
+        mut message: RelayExtensionRoomSend,
+        origin_deadline: tokio::time::Instant,
+    ) -> Result<RelayExtensionRoomSendReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = async {
+                let remote_ref = self.resolve().await?;
+                message.origin_budget =
+                    origin_deadline.saturating_duration_since(tokio::time::Instant::now());
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            } => result,
+        }
     }
 
     async fn demote_inner(

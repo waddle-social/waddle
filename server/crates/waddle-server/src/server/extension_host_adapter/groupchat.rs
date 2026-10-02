@@ -17,6 +17,8 @@ use super::{interpret, ExtensionHostAdapter, ExtensionHostAdapterError, Extensio
 #[derive(Default)]
 pub struct BotRoomLocks {
     entries: dashmap::DashMap<(waddle_extensions::PluginId, BareJid), Arc<tokio::sync::Mutex<()>>>,
+    #[cfg(feature = "clustering")]
+    pub(super) relayed: super::remote_room::RelayedRoomSends,
 }
 
 impl BotRoomLocks {
@@ -40,6 +42,7 @@ impl ExtensionHostAdapter {
         invocation: &ExtensionInvocation,
         room: BareJid,
         response: interpret::ExtensionRoomMessage,
+        commit_deadline: Option<tokio::time::Instant>,
     ) -> Result<StanzaId, ExtensionHostAdapterError> {
         let offered_id = response.stanza_id.clone().ok_or_else(|| {
             ExtensionHostAdapterError::Protocol("host message has no offered stanza id".to_owned())
@@ -71,27 +74,49 @@ impl ExtensionHostAdapter {
             .extension_bot_rooms
             .lock(&invocation.plugin_id, &room)
             .await;
+        // A forwarded send whose origin has stopped waiting must not commit:
+        // the origin would report a failure for a message that was posted.
+        // Time spent on authorization and this lock counts, so a send that
+        // already expired never joins the bot.
+        let expired =
+            || commit_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+        if expired() {
+            return Err(ExtensionHostAdapterError::DeadlineExceeded);
+        }
         let deps = self.interpret_deps(invocation.session.as_ref());
-        let planned =
-            interpret::plan_extension_bot_groupchat(&deps, room.clone(), sender.clone(), response)
-                .await
-                .map_err(|error| match error {
-                    interpret::ExtensionBotDispatchError::InvalidEnvelope => {
-                        ExtensionHostAdapterError::NotAuthorized
-                    }
-                    interpret::ExtensionBotDispatchError::Plan(failure) => {
-                        ExtensionHostAdapterError::Plan(failure)
-                    }
-                    interpret::ExtensionBotDispatchError::Digest(error) => {
-                        ExtensionHostAdapterError::Unsupported(error.to_string())
-                    }
-                    interpret::ExtensionBotDispatchError::RoomNotRegistered => {
-                        ExtensionHostAdapterError::RoomNotFound(room.clone())
-                    }
-                    other => ExtensionHostAdapterError::Protocol(other.to_string()),
-                })?;
+        let planned = interpret::plan_extension_bot_groupchat(
+            &deps,
+            room.clone(),
+            sender.clone(),
+            response,
+            &self.state,
+            commit_deadline,
+        )
+        .await
+        .map_err(|error| match error {
+            interpret::ExtensionBotDispatchError::InvalidEnvelope
+            | interpret::ExtensionBotDispatchError::BotOutcast => {
+                ExtensionHostAdapterError::NotAuthorized
+            }
+            interpret::ExtensionBotDispatchError::Plan(failure) => {
+                ExtensionHostAdapterError::Plan(failure)
+            }
+            interpret::ExtensionBotDispatchError::Digest(error) => {
+                ExtensionHostAdapterError::Unsupported(error.to_string())
+            }
+            interpret::ExtensionBotDispatchError::RoomNotRegistered => {
+                ExtensionHostAdapterError::RoomNotFound(room.clone())
+            }
+            other => ExtensionHostAdapterError::Protocol(other.to_string()),
+        })?;
         if let Some(failure) = planned.plan.failure {
             return Err(ExtensionHostAdapterError::Plan(failure));
+        }
+        // A join made here stays: it is the occupancy every successful send
+        // leaves behind, and the grant still holds. Revoking it would only
+        // churn presence and make the origin's next attempt join again.
+        if expired() {
+            return Err(ExtensionHostAdapterError::DeadlineExceeded);
         }
         let submission = IngressSubmission {
             identity: IngressStreamIdentity::Extension {
@@ -124,6 +149,11 @@ impl ExtensionHostAdapter {
             ))
         ) {
             if let Some((nick, session)) = planned.joined_occupancy {
+                // Occupants on other nodes must see the join before its
+                // unavailable, or they keep a ghost bot.
+                for route in planned.join_stragglers {
+                    let _ = route.await;
+                }
                 // Revoke only this dispatch's join, before another send can reuse it.
                 // The normal departure path emits unavailable presence and retains
                 // interrupted actor cleanup for the departure janitor.

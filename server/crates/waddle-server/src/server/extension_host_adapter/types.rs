@@ -106,6 +106,9 @@ pub struct HostSendMessage {
     pub reply_to: Option<ReplyTarget>,
     pub markup: Vec<waddle_extensions::MessageMarkupSpan>,
     pub extensions: Option<waddle_extensions::ExtensionEnvelope>,
+    /// A room send must begin its commit before this instant, or fail with
+    /// nothing committed. Set on the owner of a forwarded send.
+    pub commit_deadline: Option<tokio::time::Instant>,
 }
 
 #[derive(Debug, Error)]
@@ -128,4 +131,6 @@ pub enum ExtensionHostAdapterError {
     Plan(crate::server::routes::interpret::effects::PlanFailure),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    #[error("the send could not commit before its deadline")]
+    DeadlineExceeded,
 }

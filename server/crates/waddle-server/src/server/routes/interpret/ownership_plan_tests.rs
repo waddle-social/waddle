@@ -18,17 +18,21 @@ use waddle_xmpp::{
 };
 
 pub(crate) struct PlanningClaims {
-    owner: NodeIdentity,
+    owner: std::sync::Mutex<NodeIdentity>,
     failed: AtomicBool,
     stale: AtomicBool,
 }
 impl PlanningClaims {
     pub(crate) fn new(owner: NodeIdentity) -> Self {
         Self {
-            owner,
+            owner: std::sync::Mutex::new(owner),
             failed: AtomicBool::new(false),
             stale: AtomicBool::new(false),
         }
+    }
+    /// Moves every claim, as a demotion and reacquisition would.
+    pub(crate) fn set_owner(&self, owner: NodeIdentity) {
+        *self.owner.lock().expect("planning owner") = owner;
     }
     pub(crate) fn fail_reads(&self, value: bool) {
         self.failed.store(value, Ordering::SeqCst);
@@ -71,7 +75,7 @@ impl ClaimStore for PlanningClaims {
             return Err(ClaimError::Backend("ownership fixture unavailable".into()));
         }
         Ok(Some(ClaimSnapshot {
-            owner: self.owner.clone(),
+            owner: self.owner.lock().expect("planning owner").clone(),
             claim_epoch: ClaimEpoch(1),
             owner_lease_fresh: !self.stale.load(Ordering::SeqCst),
         }))

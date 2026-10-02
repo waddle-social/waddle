@@ -108,8 +108,9 @@ pub enum RoomExecutionPath {
 /// A required Phase-A read or authority check failed; this plan cannot be accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PlanFailure {
-    #[error("extension messages do not support remote-owned rooms")]
-    ExtensionRemoteRoomUnsupported,
+    /// The room actor claim moved to another node after the host routed the send.
+    #[error("room is owned by another node")]
+    RoomOwnedRemotely,
     #[error("carbon resource inventory could not be read")]
     CarbonInventoryRead,
     #[error("ownership lookup infrastructure is unavailable")]

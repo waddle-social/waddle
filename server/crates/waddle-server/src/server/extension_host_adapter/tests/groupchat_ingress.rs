@@ -47,7 +47,11 @@ pub(super) fn groupchat_message(wire: &[Stanza]) -> &xmpp_parsers::message::Mess
 
 impl GroupchatFixture {
     pub async fn new(f: &IngressFixture) -> Self {
-        let adapter = direct_ingress::adapter(f).await;
+        Self::on(f, direct_ingress::adapter(f).await).await
+    }
+
+    /// The same persistent room and live member on `adapter`'s node.
+    pub async fn on(f: &IngressFixture, adapter: ExtensionHostAdapter) -> Self {
         let room: BareJid = "extension-room@muc.example.com".parse().expect("room");
         let actor = adapter
             .state
