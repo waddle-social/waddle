@@ -38,8 +38,13 @@ identity is `Extension { plugin, requester }`, backed by `ExtensionPrincipal`
 and `TransportGeneration::Host`; it does not assert a synthetic authenticated
 session. Direct sends use the requester as effective sender, room sends the
 plugin actor. Provider webhooks require a grant for the exact room and cannot
-send direct messages. Remote-owned room sends are refused as typed
-`ExtensionRemoteRoomUnsupported`; the ordered relay now uses `deliver_ordered.v11`.
+send direct messages. A room send whose room actor another node owns is
+forwarded as the host call (`waddle.clustering.relay.extension_room_send.v1`)
+and runs the local send path on the owner. The origin mints the offered stanza
+id once and re-asks with it after an ambiguous transport failure, so the
+owner's origin alias returns the committed canonical id without a second
+fanout. `NotOwner` re-resolves the claim once; a peer that predates the
+message (`UnknownMessage`) is a `TemporaryFailure`.
 
 V1018 stores grants in `extension_grants`: scope `0` is plugin send authority
 (`room_jid IS NULL`), scope `1` is provider-room authority. Partial unique indexes

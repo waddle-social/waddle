@@ -28,10 +28,7 @@ pub(super) fn host_tool_error(error: ExtensionHostAdapterError) -> ext_host::Hos
             }
         },
         ExtensionHostAdapterError::RoomNotFound(_) => ext_host::HostToolErrorCode::NotFound,
-        ExtensionHostAdapterError::Unsupported(_)
-        | ExtensionHostAdapterError::Plan(
-            crate::server::routes::interpret::effects::PlanFailure::ExtensionRemoteRoomUnsupported,
-        ) => ext_host::HostToolErrorCode::Unsupported,
+        ExtensionHostAdapterError::Unsupported(_) => ext_host::HostToolErrorCode::Unsupported,
         ExtensionHostAdapterError::Plan(_)
         | ExtensionHostAdapterError::Refused(_)
         | ExtensionHostAdapterError::RoomActor(_)

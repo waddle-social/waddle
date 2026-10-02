@@ -566,14 +566,15 @@ pub(crate) async fn plan_extension_bot_groupchat(
     Ok(planned)
 }
 
+/// The remote node owning `room`'s actor claim, or `None` when this node runs it.
 #[cfg(feature = "clustering")]
-async fn require_local_room(deps: &Deps<'_>, room: &BareJid) -> Result<(), PlanFailure> {
-    let Some(state) = deps.web_socket_state else {
-        return Ok(());
-    };
+pub(crate) async fn extension_room_owner(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+) -> Result<Option<waddle_xmpp::ownership::NodeIdentity>, PlanFailure> {
     let clustering = &state.deps.app_state.clustering_claims;
     let Some(store) = clustering.claim_store.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
     let entity = waddle_xmpp::ownership::Entity::new(
         waddle_xmpp::ownership::EntityType::RoomActor,
@@ -584,19 +585,32 @@ async fn require_local_room(deps: &Deps<'_>, room: &BareJid) -> Result<(), PlanF
         .await
         .map_err(|_| PlanFailure::OwnershipLookup)?
     else {
-        return Ok(());
+        return Ok(None);
     };
     if !claim.owner_lease_fresh {
         return Err(PlanFailure::RoomClaimStale);
     }
-    if !clustering
+    if clustering
         .node_identity
         .as_ref()
         .is_some_and(|identity| identity.current() == claim.owner)
     {
-        return Err(PlanFailure::ExtensionRemoteRoomUnsupported);
+        return Ok(None);
     }
-    Ok(())
+    Ok(Some(claim.owner))
+}
+
+/// The host forwards remote-owned rooms before planning; a claim that moved
+/// since then must not run here.
+#[cfg(feature = "clustering")]
+async fn require_local_room(deps: &Deps<'_>, room: &BareJid) -> Result<(), PlanFailure> {
+    let Some(state) = deps.web_socket_state else {
+        return Ok(());
+    };
+    match extension_room_owner(state, room).await? {
+        None => Ok(()),
+        Some(_) => Err(PlanFailure::RoomOwnedRemotely),
+    }
 }
 
 #[cfg(test)]

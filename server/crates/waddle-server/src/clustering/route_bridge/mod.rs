@@ -75,6 +75,7 @@ const MAX_REMOTE_OWNER_REGISTRATION_LOCKS: usize = 4096;
 const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 mod delivery;
+mod extension_room;
 mod presence;
 mod reassert;
 mod recipient_inventory;

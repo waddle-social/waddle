@@ -197,30 +197,11 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
         context: &ext_host::InvocationContext,
         request: ext_host::SendMessageRequest,
     ) -> Result<ext_host::SendMessageResponse, ext_host::HostToolError> {
-        let invocation = self.invocation_for_context(context).await?;
-        let target = match request.target {
-            ext_host::MessageTarget::Muc(room) => HostMessageTarget::Room(room),
-            ext_host::MessageTarget::Direct(jid) => HostMessageTarget::Direct(Jid::from(jid)),
-        };
-        let stanza_id = waddle_extensions::StanzaId::new(uuid::Uuid::new_v4().to_string())
+        let offered_id = waddle_extensions::StanzaId::new(uuid::Uuid::new_v4().to_string())
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
             })?;
-        let stanza_id = self
-            .send_message(
-                &invocation,
-                HostSendMessage {
-                    target,
-                    stanza_id: stanza_id.clone(),
-                    body: request.body.into_string(),
-                    thread_id: request.thread_id,
-                    reply_to: request.reply_to,
-                    markup: request.markup,
-                    extensions: request.extensions,
-                },
-            )
-            .await
-            .map_err(host_tool_error)?;
+        let stanza_id = self.send_host_message(context, request, offered_id).await?;
         Ok(ext_host::SendMessageResponse { stanza_id })
     }
 
@@ -303,7 +284,55 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
 }
 
 impl ExtensionHostAdapter {
-    async fn invocation_for_context(
+    /// The host-tool send entry. `offered_id` is minted once per host call.
+    pub(super) async fn send_host_message(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::SendMessageRequest,
+        offered_id: waddle_extensions::StanzaId,
+    ) -> Result<waddle_extensions::StanzaId, ext_host::HostToolError> {
+        let invocation = self.invocation_for_context(context).await?;
+        let target = match request.target {
+            #[cfg(feature = "clustering")]
+            ext_host::MessageTarget::Muc(room) => {
+                return self
+                    .send_room_routed(
+                        &invocation,
+                        crate::clustering::relay::RelayExtensionRoomSend {
+                            context: context.clone(),
+                            room,
+                            offered_id,
+                            body: request.body,
+                            thread_id: request.thread_id,
+                            reply_to: request.reply_to,
+                            markup: request.markup,
+                            extensions: request.extensions,
+                            trace: Default::default(),
+                        },
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "clustering"))]
+            ext_host::MessageTarget::Muc(room) => HostMessageTarget::Room(room),
+            ext_host::MessageTarget::Direct(jid) => HostMessageTarget::Direct(Jid::from(jid)),
+        };
+        self.send_message(
+            &invocation,
+            HostSendMessage {
+                target,
+                stanza_id: offered_id,
+                body: request.body.into_string(),
+                thread_id: request.thread_id,
+                reply_to: request.reply_to,
+                markup: request.markup,
+                extensions: request.extensions,
+            },
+        )
+        .await
+        .map_err(host_tool_error)
+    }
+
+    pub(super) async fn invocation_for_context(
         &self,
         context: &ext_host::InvocationContext,
     ) -> Result<ExtensionInvocation, ext_host::HostToolError> {

@@ -35,11 +35,15 @@ mod direct;
 mod groupchat;
 mod host_tools;
 mod queries;
+#[cfg(feature = "clustering")]
+mod remote_room;
 mod settlement;
 mod types;
 
 use conversions::*;
 pub use groupchat::BotRoomLocks;
+#[cfg(feature = "clustering")]
+pub(crate) use remote_room::{relayed_room_send, temporary_failure};
 pub use types::*;
 
 #[derive(Clone)]

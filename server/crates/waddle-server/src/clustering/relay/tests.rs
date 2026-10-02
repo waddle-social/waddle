@@ -251,6 +251,89 @@ fn resource_presence_is_a_new_message_id_with_a_round_tripping_reply() {
     );
 }
 
+/// #1893: forwarding an extension room send is a NEW message id; the ordered
+/// relay envelope is untouched. The request carries no session token, and an
+/// old peer's `UnknownMessage` is a no-effect failure the origin reports as
+/// temporary instead of re-asking.
+#[test]
+fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
+    use waddle_extensions::host_tools::{
+        HostToolError, HostToolErrorCode, InvocationContext, InvocationKind,
+    };
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayExtensionRoomSend>>::REMOTE_ID,
+        "waddle.clustering.relay.extension_room_send.v1"
+    );
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
+        "waddle.clustering.relay.deliver_ordered.v12",
+        "a new relay message must not bump the ordered-relay envelope id"
+    );
+    let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
+    let message = RelayExtensionRoomSend {
+        context: InvocationContext {
+            waddle_id: waddle_extensions::WaddleId::new("space").expect("waddle"),
+            plugin_id: waddle_extensions::PluginId::new("stargate").expect("plugin"),
+            requester: Some("romeo@example.test".parse().expect("requester")),
+            source_room: Some(room.clone()),
+            kind: InvocationKind::Command,
+            provider_room_grants: vec![room.clone()],
+        },
+        room: room.clone(),
+        offered_id: waddle_extensions::StanzaId::new("offered-1893").expect("offered"),
+        body: waddle_extensions::DisplayText::new("hello").expect("body"),
+        thread_id: Some(waddle_extensions::ThreadId::new("thread").expect("thread")),
+        reply_to: None,
+        markup: vec![waddle_extensions::MessageMarkupSpan {
+            kind: waddle_extensions::MessageMarkupKind::Blockquote,
+            start: 0,
+            end: 5,
+        }],
+        extensions: None,
+        trace: RelayTraceContext::default(),
+    };
+    let decoded: RelayExtensionRoomSend =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&message).expect("encode send"))
+            .expect("decode send");
+    assert_eq!(decoded.room, room);
+    assert_eq!(decoded.offered_id, message.offered_id);
+    assert_eq!(decoded.context.kind, InvocationKind::Command);
+    assert_eq!(decoded.context.requester, message.context.requester);
+    assert_eq!(decoded.markup, message.markup);
+
+    for reply in [
+        RelayExtensionRoomSendReply::Sent(
+            waddle_extensions::StanzaId::new("canonical").expect("id"),
+        ),
+        RelayExtensionRoomSendReply::HostError(HostToolError {
+            code: HostToolErrorCode::Denied,
+            message: waddle_extensions::DisplayText::new("denied").expect("message"),
+        }),
+        RelayExtensionRoomSendReply::NotOwner,
+    ] {
+        let decoded: RelayExtensionRoomSendReply =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode reply"))
+                .expect("decode reply");
+        assert_eq!(decoded, reply);
+    }
+
+    let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
+        actor_remote_id: "actor".into(),
+        message_remote_id: "waddle.clustering.relay.extension_room_send.v1".into(),
+    });
+    assert!(
+        matches!(
+            old_peer,
+            RelayAskError::Send {
+                failure: RelaySendFailure::Codec,
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+        ),
+        "a peer that predates the message is a no-effect failure: {old_peer:?}"
+    );
+}
+
 #[test]
 fn incomplete_carbons_reply_has_new_remote_message_id() {
     assert_eq!(
