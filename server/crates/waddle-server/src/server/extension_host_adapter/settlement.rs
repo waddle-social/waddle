@@ -8,7 +8,7 @@ use crate::ingress::{
 
 use super::ExtensionHostAdapterError;
 
-const SETTLEMENT_RESPONSE_DEADLINE: Duration = Duration::from_secs(2);
+pub(super) const SETTLEMENT_RESPONSE_DEADLINE: Duration = Duration::from_secs(2);
 
 pub(super) async fn finish_nested(
     outcome: NestedOutcome,

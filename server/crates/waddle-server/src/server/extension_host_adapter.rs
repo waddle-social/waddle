@@ -43,7 +43,10 @@ mod types;
 use conversions::*;
 pub use groupchat::BotRoomLocks;
 #[cfg(feature = "clustering")]
-pub(crate) use remote_room::{relayed_room_send, temporary_failure};
+pub(crate) use remote_room::{
+    relayed_room_send, temporary_failure, EXTENSION_ROOM_MAILBOX_TIMEOUT,
+    EXTENSION_ROOM_REPLY_TIMEOUT,
+};
 pub use types::*;
 
 #[derive(Clone)]
@@ -101,7 +104,8 @@ impl ExtensionHostAdapter {
                 }) {
                     return Err(ExtensionHostAdapterError::NotAuthorized);
                 }
-                self.dispatch_groupchat(invocation, room, response).await
+                self.dispatch_groupchat(invocation, room, response, request.commit_deadline)
+                    .await
             }
             HostMessageTarget::Direct(target) => {
                 if invocation.kind == InvocationKind::ProviderWebhook {

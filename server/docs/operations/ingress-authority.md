@@ -44,7 +44,12 @@ and runs the local send path on the owner. The origin mints the offered stanza
 id once and re-asks with it after an ambiguous transport failure, so the
 owner's origin alias returns the committed canonical id without a second
 fanout. `NotOwner` re-resolves the claim once; a peer that predates the
-message (`UnknownMessage`) is a `TemporaryFailure`.
+message (`UnknownMessage`) is a `TemporaryFailure`. Each ask allows 1 s of
+mailbox and 4 s of reply, so both asks fit inside the 15 s stanza-handler
+backstop. The owner begins its commit only within 1.5 s of receiving the ask
+and otherwise refuses with nothing committed; a re-ask shares the first
+attempt's outcome. The bot's join presence reaches occupants on other nodes
+through the cluster route, outside the bot room lock.
 
 V1018 stores grants in `extension_grants`: scope `0` is plugin send authority
 (`room_jid IS NULL`), scope `1` is provider-room authority. Partial unique indexes

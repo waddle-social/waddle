@@ -17,6 +17,8 @@ use super::{interpret, ExtensionHostAdapter, ExtensionHostAdapterError, Extensio
 #[derive(Default)]
 pub struct BotRoomLocks {
     entries: dashmap::DashMap<(waddle_extensions::PluginId, BareJid), Arc<tokio::sync::Mutex<()>>>,
+    #[cfg(feature = "clustering")]
+    pub(super) relayed: super::remote_room::RelayedRoomSends,
 }
 
 impl BotRoomLocks {
@@ -40,6 +42,7 @@ impl ExtensionHostAdapter {
         invocation: &ExtensionInvocation,
         room: BareJid,
         response: interpret::ExtensionRoomMessage,
+        commit_deadline: Option<tokio::time::Instant>,
     ) -> Result<StanzaId, ExtensionHostAdapterError> {
         let offered_id = response.stanza_id.clone().ok_or_else(|| {
             ExtensionHostAdapterError::Protocol("host message has no offered stanza id".to_owned())
@@ -72,7 +75,7 @@ impl ExtensionHostAdapter {
             .lock(&invocation.plugin_id, &room)
             .await;
         let deps = self.interpret_deps(invocation.session.as_ref());
-        let planned =
+        let mut planned =
             interpret::plan_extension_bot_groupchat(&deps, room.clone(), sender.clone(), response)
                 .await
                 .map_err(|error| match error {
@@ -91,8 +94,22 @@ impl ExtensionHostAdapter {
                     }
                     other => ExtensionHostAdapterError::Protocol(other.to_string()),
                 })?;
+        let join_presences = (!planned.join_presences.is_empty()).then(|| {
+            route_join_presences(
+                Arc::clone(&self.state),
+                room.clone(),
+                std::mem::take(&mut planned.join_presences),
+            )
+        });
         if let Some(failure) = planned.plan.failure {
             return Err(ExtensionHostAdapterError::Plan(failure));
+        }
+        // A forwarded send whose origin has stopped waiting must not commit:
+        // the origin would report a failure for a message that was posted.
+        if commit_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            self.revoke_join(&room, &sender, planned.joined_occupancy, join_presences)
+                .await;
+            return Err(ExtensionHostAdapterError::DeadlineExceeded);
         }
         let submission = IngressSubmission {
             identity: IngressStreamIdentity::Extension {
@@ -124,20 +141,8 @@ impl ExtensionHostAdapter {
                 IngressDecisionClass::PrincipalMissing
             ))
         ) {
-            if let Some((nick, session)) = planned.joined_occupancy {
-                // Revoke only this dispatch's join, before another send can reuse it.
-                // The normal departure path emits unavailable presence and retains
-                // interrupted actor cleanup for the departure janitor.
-                let _ = crate::server::routes::websocket::handlers::presence::handle_muc_leave(
-                    &self.state,
-                    &room,
-                    &sender,
-                    nick.as_str(),
-                    session,
-                    None,
-                )
+            self.revoke_join(&room, &sender, planned.joined_occupancy, join_presences)
                 .await;
-            }
         }
         drop(room_guard);
         let archive_ids = super::settlement::finish_nested(outcome).await?;
@@ -150,4 +155,61 @@ impl ExtensionHostAdapter {
             .and_then(|(_, id)| StanzaId::new(id.id).ok())
             .unwrap_or(offered_id))
     }
+
+    /// Revoke only this dispatch's join, before another send can reuse it.
+    /// The normal departure path emits unavailable presence and retains
+    /// interrupted actor cleanup for the departure janitor.
+    async fn revoke_join(
+        &self,
+        room: &BareJid,
+        sender: &jid::FullJid,
+        joined: Option<(
+            waddle_xmpp::muc::MucOccupantNick,
+            waddle_xmpp_core::OccupancySessionGeneration,
+        )>,
+        join_presences: Option<tokio::task::JoinHandle<()>>,
+    ) {
+        let Some((nick, session)) = joined else {
+            return;
+        };
+        // Occupants on other nodes see the join before its unavailable.
+        if let Some(join_presences) = join_presences {
+            let _ = join_presences.await;
+        }
+        let _ = crate::server::routes::websocket::handlers::presence::handle_muc_leave(
+            &self.state,
+            room,
+            sender,
+            nick.as_str(),
+            session,
+            None,
+        )
+        .await;
+    }
+}
+
+/// Cross-node routing can take a relay round trip per occupant, so it must not
+/// hold the bot room lock or delay the commit. A revoked join awaits it so the
+/// unavailable presence cannot overtake the join.
+fn route_join_presences(
+    state: Arc<crate::server::routes::websocket::WebSocketState>,
+    room: BareJid,
+    presences: Vec<(jid::FullJid, waddle_xmpp::Stanza)>,
+) -> tokio::task::JoinHandle<()> {
+    let route = async move {
+        for (occupant, presence) in presences {
+            crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                &state, &room, &occupant, presence,
+            )
+            .await;
+        }
+    };
+    #[cfg(all(test, feature = "clustering"))]
+    if let Ok(controlled) = interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY.try_with(Clone::clone)
+    {
+        return tokio::spawn(
+            interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY.scope(controlled, route),
+        );
+    }
+    tokio::spawn(route)
 }

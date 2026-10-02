@@ -16,8 +16,14 @@ use crate::{
     ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
     ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     server::{
-        extension_host_adapter::remote_room::{TestRoomOwnerRelay, TEST_ROOM_OWNER_RELAY},
-        routes::{interpret::PlanningClaims, websocket::WebSocketState},
+        extension_host_adapter::remote_room::{
+            relayed_room_send_within, TestRoomOwnerRelay, OWNER_COMMIT_BUDGET,
+            TEST_ROOM_OWNER_RELAY,
+        },
+        routes::{
+            interpret::{BotSnapshotGate, PlanningClaims, TEST_BOT_SNAPSHOT_GATE},
+            websocket::WebSocketState,
+        },
     },
 };
 use std::{
@@ -61,6 +67,9 @@ enum Fault {
     MoveToOrigin,
     /// The owner answers `NotOwner` without running.
     NotOwner,
+    /// The connection drops while the owner is still planning; the owner
+    /// keeps running and the re-ask arrives before it finishes.
+    DropWhileRunning,
 }
 
 struct Transport {
@@ -68,6 +77,9 @@ struct Transport {
     claims: Arc<PlanningClaims>,
     faults: Mutex<VecDeque<Fault>>,
     asks: AtomicUsize,
+    commit_budget: Duration,
+    gate: Arc<BotSnapshotGate>,
+    detached: Mutex<Vec<tokio::task::JoinHandle<RelayExtensionRoomSendReply>>>,
 }
 
 impl Transport {
@@ -90,14 +102,32 @@ impl Transport {
             }
             Some(Fault::NotOwner) => return Ok(RelayExtensionRoomSendReply::NotOwner),
             Some(Fault::MoveToOrigin) => self.claims.set_owner(origin_node()),
-            Some(Fault::LoseReply) | None => {}
+            Some(Fault::LoseReply | Fault::DropWhileRunning) | None => {}
         }
         let send: RelayExtensionRoomSend =
             rmp_serde::from_slice(&rmp_serde::to_vec_named(&send).expect("encode request"))
                 .expect("decode request");
+        if matches!(fault, Some(Fault::DropWhileRunning)) {
+            // Like kameo's delegated reply, the owner task outlives the ask.
+            let first = tokio::spawn(TEST_BOT_SNAPSHOT_GATE.scope(
+                Arc::clone(&self.gate),
+                relayed_room_send_within(Arc::clone(&self.owner), send, self.commit_budget),
+            ));
+            self.gate.reached.notified().await;
+            self.detached.lock().expect("detached").push(first);
+            let gate = Arc::clone(&self.gate);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                gate.release.notify_one();
+            });
+            return Err(RelayAskError::Send {
+                failure: RelaySendFailure::Transport,
+                effect: RelaySendEffect::MaybeCommitted,
+                message: "connection closed".into(),
+            });
+        }
         let reply =
-            crate::server::extension_host_adapter::relayed_room_send(Arc::clone(&self.owner), send)
-                .await;
+            relayed_room_send_within(Arc::clone(&self.owner), send, self.commit_budget).await;
         let reply = rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode reply"))
             .expect("decode reply");
         if matches!(fault, Some(Fault::LoseReply)) {
@@ -142,11 +172,22 @@ impl Cluster {
     }
 
     fn transport(&self, faults: impl IntoIterator<Item = Fault>) -> Arc<Transport> {
+        self.transport_within(faults, OWNER_COMMIT_BUDGET)
+    }
+
+    fn transport_within(
+        &self,
+        faults: impl IntoIterator<Item = Fault>,
+        commit_budget: Duration,
+    ) -> Arc<Transport> {
         Arc::new(Transport {
             owner: Arc::clone(&self.owner.adapter.state),
             claims: Arc::clone(&self.claims),
             faults: Mutex::new(faults.into_iter().collect()),
             asks: AtomicUsize::new(0),
+            commit_budget,
+            gate: Arc::default(),
+            detached: Mutex::default(),
         })
     }
 
@@ -497,6 +538,79 @@ async fn denials_cross_nodes(f: IngressFixture) {
     cluster.close(f).await;
 }
 
+/// The origin stops waiting after its reply timeout, so an owner that could
+/// not begin its commit in time refuses with nothing committed.
+async fn owner_past_deadline_commits_nothing(f: IngressFixture) {
+    let mut cluster = Cluster::new(&f).await;
+    let transport = cluster.transport_within([], Duration::ZERO);
+    let context = cluster.provider(direct_ingress::plugin());
+    let error = cluster
+        .send(&transport, &context, "late-owner", cluster.request())
+        .await
+        .expect_err("a late owner does not commit");
+    assert_eq!(error.code, HostToolErrorCode::TemporaryFailure);
+    assert_eq!(
+        transport.asks.load(Ordering::SeqCst),
+        1,
+        "a refusal is final"
+    );
+    assert_eq!(f.count("ingress_messages").await, 0);
+    assert_eq!(f.count("mam_messages").await, 0);
+    let bot = cluster.bot(&direct_ingress::plugin());
+    assert!(
+        !Cluster::bot_joined(&cluster.owner, &bot).await,
+        "the late attempt revokes its join"
+    );
+    let wire = cluster.owner.drain();
+    let presences = presences(&wire);
+    assert_eq!(presences.len(), 2, "join then compensating unavailable");
+    assert_eq!(
+        presences[1].type_,
+        xmpp_parsers::presence::Type::Unavailable
+    );
+    assert!(!has_groupchat(&wire));
+    assert!(cluster.origin.drain().is_empty());
+    cluster.close(f).await;
+}
+
+/// A re-ask that arrives while the first attempt still runs on the owner
+/// shares that attempt's outcome instead of planning a second send.
+async fn concurrent_reask_shares_first_attempt(f: IngressFixture) {
+    let mut cluster = Cluster::new(&f).await;
+    let transport = cluster.transport([Fault::DropWhileRunning]);
+    let context = cluster.provider(direct_ingress::plugin());
+    // A second planning pass would wait at the gate, which opens only once.
+    let id = tokio::time::timeout(
+        Duration::from_secs(10),
+        TEST_BOT_SNAPSHOT_GATE.scope(
+            Arc::clone(&transport.gate),
+            cluster.send(&transport, &context, "concurrent-reask", cluster.request()),
+        ),
+    )
+    .await
+    .expect("the re-ask does not plan again")
+    .expect("the re-ask returns the first attempt's id");
+    assert_eq!(transport.asks.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.gate.arrivals.load(Ordering::SeqCst), 1);
+    let first = transport
+        .detached
+        .lock()
+        .expect("detached")
+        .pop()
+        .expect("first attempt");
+    assert_eq!(
+        first.await.expect("first attempt task"),
+        RelayExtensionRoomSendReply::Sent(id.clone())
+    );
+    assert_eq!(f.count("ingress_messages").await, 1);
+    assert_eq!(f.count("mam_messages").await, 1);
+    assert_eq!(id.as_str(), archived_id(&f).await);
+    let wire = cluster.owner.drain();
+    groupchat_message(&wire);
+    assert_eq!(presences(&wire).len(), 1, "one join, one fanout");
+    cluster.close(f).await;
+}
+
 async fn signed_on_owner(f: IngressFixture) {
     let mut cluster = Cluster::new(&f).await;
     Arc::get_mut(&mut cluster.owner.adapter.state)
@@ -581,6 +695,14 @@ async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
         )
         .await
         .expect("send");
+    // Cross-node routing runs off the room lock.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while targets.lock().expect("targets").is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the join reaches the cross-node route");
     assert_eq!(*targets.lock().expect("targets"), vec![remote]);
     assert_eq!(presences(&fixture.drain()).len(), 1, "local occupant too");
     fixture.close(f).await;
@@ -655,6 +777,30 @@ async fn extension_remote_denials_sqlite() {
 async fn extension_remote_denials_postgres() {
     if let Some(f) = IngressFixture::postgres("extension_remote_denials").await {
         denials_cross_nodes(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_remote_owner_past_deadline_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    owner_past_deadline_commits_nothing(f).await;
+}
+#[tokio::test]
+async fn extension_remote_owner_past_deadline_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_remote_owner_past_deadline").await {
+        owner_past_deadline_commits_nothing(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_remote_concurrent_reask_sqlite() {
+    let f = IngressFixture::sqlite().await;
+    concurrent_reask_shares_first_attempt(f).await;
+}
+#[tokio::test]
+async fn extension_remote_concurrent_reask_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_remote_concurrent_reask").await {
+        concurrent_reask_shares_first_attempt(f).await;
     }
 }
 

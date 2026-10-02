@@ -326,6 +326,7 @@ impl ExtensionHostAdapter {
                 reply_to: request.reply_to,
                 markup: request.markup,
                 extensions: request.extensions,
+                commit_deadline: None,
             },
         )
         .await

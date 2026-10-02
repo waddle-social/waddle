@@ -88,6 +88,7 @@ pub(super) fn request(origin: &str) -> HostSendMessage {
         reply_to: None,
         markup: vec![],
         extensions: None,
+        commit_deadline: None,
     }
 }
 
