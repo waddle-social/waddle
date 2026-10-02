@@ -160,6 +160,23 @@ async fn handle_muc_private_message(
             "Requested occupant not found.",
         )]);
     };
+    // The bot behind this occupant JID accepts no private messages; the
+    // room relays its refusal back from the occupant JID (XEP-0045 §7.5).
+    if state
+        .deps
+        .service_domains
+        .extension_bot(&jid::Jid::from(target_occupant.real_jid.clone()))
+        .is_some()
+    {
+        return Some(vec![message_error_frame(
+            incoming,
+            bound_jid,
+            deps,
+            ErrorType::Cancel,
+            DefinedCondition::ServiceUnavailable,
+            "Bots do not accept private messages.",
+        )]);
+    }
     let recipient_bare = target_occupant.real_jid.to_bare();
     let recipient_sessions = snapshot.room.get_occupant_sessions(&target_nick);
 
@@ -795,7 +812,7 @@ fn canonicalize_muc_private_payloads(
     waddle_xmpp::xep::xep0421::set_occupant_id_on_message(message, sender_occupant_id);
 }
 
-fn message_error_frame(
+pub(super) fn message_error_frame(
     incoming: &Message,
     bound_jid: &jid::FullJid,
     deps: &Deps<'_>,

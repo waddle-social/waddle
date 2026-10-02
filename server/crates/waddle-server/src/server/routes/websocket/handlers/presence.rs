@@ -399,6 +399,30 @@ async fn handle_presence_impl(
 
     match parse_subscription_presence(&presence, &sender_jid.to_bare()) {
         Ok(PresenceAction::Subscription(request)) => {
+            // Nothing on the extensions domain accepts a subscription: decline
+            // a request, ignore the rest, and never touch the roster (RFC 6121
+            // §8.5.1).
+            if context
+                .state
+                .deps
+                .service_domains
+                .is_extensions_address(&jid::Jid::from(request.to.clone()))
+            {
+                if request.subscription_type
+                    != waddle_xmpp::presence::subscription::SubscriptionType::Subscribe
+                {
+                    return vec![];
+                }
+                return vec![stanza_to_xml(&Stanza::Presence(
+                    waddle_xmpp::presence::subscription::build_subscription_presence(
+                        waddle_xmpp::presence::subscription::SubscriptionType::Unsubscribed,
+                        &request.to,
+                        &request.from,
+                        None,
+                        &[],
+                    ),
+                ))];
+            }
             if try_handle_remote_subscription_presence(
                 context.state,
                 &request,

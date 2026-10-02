@@ -151,6 +151,24 @@ async fn dispatch_early_handlers(
             state.deps.auth_state.base_url.as_str(),
             &state.deps.link_preview,
         );
+        // Nothing on the extensions domain accepts messages: bots are not DM
+        // peers. Refuse before the sender archive, inbox and carbons (RFC 6121
+        // §8.5.1). Errors are never answered with errors (RFC 6120 §8.3.1).
+        if incoming.type_ != xmpp_parsers::message::MessageType::Error
+            && incoming
+                .to
+                .as_ref()
+                .is_some_and(|to| state.deps.service_domains.is_extensions_address(to))
+        {
+            return Some(vec![muc_direct::message_error_frame(
+                incoming,
+                bound_jid,
+                deps,
+                xmpp_parsers::stanza_error::ErrorType::Cancel,
+                xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
+                "Bots do not accept messages.",
+            )]);
+        }
         let session = deps.authenticated_principal.map(ResolvedPrincipal::session);
         if let Some(frames) =
             handle_group_dm_mediated_invite(incoming, state, bound_jid, session, deps).await

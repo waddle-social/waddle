@@ -320,6 +320,8 @@ pub(crate) enum ExtensionBotDispatchError {
     SnapshotFailed,
     #[error("extension bot is outcast from the room")]
     BotOutcast,
+    #[error("extension bots never take part in group DMs")]
+    GroupDm,
     #[error("extension bot could not join the room")]
     BotJoinFailed,
     #[error("extension room message target did not match dispatch room")]
@@ -419,6 +421,12 @@ pub(crate) async fn plan_extension_bot_groupchat(
             return Err(ExtensionBotDispatchError::SnapshotFailed);
         }
     };
+    // A group DM is a conversation between people; a bot never joins one,
+    // even when someone runs an extension command inside it. The type is
+    // fixed at creation, so this snapshot check cannot race a change.
+    if initial_snapshot.config.group_dm {
+        return Err(ExtensionBotDispatchError::GroupDm);
+    }
     #[cfg(test)]
     if let Ok(gate) = TEST_BOT_SNAPSHOT_GATE.try_with(std::sync::Arc::clone) {
         gate.arrivals

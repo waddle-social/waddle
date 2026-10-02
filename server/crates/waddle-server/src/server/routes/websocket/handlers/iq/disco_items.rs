@@ -500,6 +500,31 @@ pub(super) async fn handle_disco_items_iq(
             return vec![iq_to_xml(response)];
         }
 
+        // An extension bot is a leaf entity with no items; any other
+        // address on the extensions domain does not exist (XEP-0030 §4.1).
+        if let Some(target) = target_to
+            .filter(|target| *target != extensions_domain)
+            .and_then(|target| target.parse::<jid::Jid>().ok())
+            .filter(|target| state.deps.service_domains.is_extensions_address(target))
+        {
+            let manager = &state.deps.protocol.extension_manager;
+            let is_bot = state
+                .deps
+                .service_domains
+                .extension_bot(&target)
+                .is_some_and(|plugin| manager.manifest_for_plugin(plugin.as_str()).is_some());
+            if is_bot && query.node.is_none() {
+                let response = build_disco_items_response(request_iq, &[], None);
+                return vec![iq_to_xml(response)];
+            }
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                item_not_found_iq_error("Requested item not found."),
+            )];
+        }
+
         if let Some(target) = target_to {
             if query.node.is_none() {
                 if let Ok(target_bare) = target.parse::<BareJid>() {

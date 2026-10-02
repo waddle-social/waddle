@@ -95,7 +95,8 @@ impl ExtensionHostAdapter {
         .await
         .map_err(|error| match error {
             interpret::ExtensionBotDispatchError::InvalidEnvelope
-            | interpret::ExtensionBotDispatchError::BotOutcast => {
+            | interpret::ExtensionBotDispatchError::BotOutcast
+            | interpret::ExtensionBotDispatchError::GroupDm => {
                 ExtensionHostAdapterError::NotAuthorized
             }
             interpret::ExtensionBotDispatchError::Plan(failure) => {
