@@ -129,8 +129,8 @@ export type ClientEvents = {
   mdsDisplayed: [entry: MdsDisplayedEntry];
   pubsubEvent: [event: PubsubEvent];
   avatarChanged: [event: AvatarChangedEvent];
-  /** `bareJid` null: the nick is held by an occupant whose real JID is not disclosed. */
-  occupantRealJid: [roomJid: string, nick: string, bareJid: string | null];
+  /** `bareJid` null: the nick is held by an occupant whose real JID is not disclosed. `isBot`: the presence carried the server's bot hat. */
+  occupantRealJid: [roomJid: string, nick: string, bareJid: string | null, isBot?: boolean];
   ownProfilePublished: [ownBareJid: string];
   /** Our actual occupant nick in a room (from self-presence), or null after leaving. */
   ownOccupantNick: [roomJid: string, nick: string | null];

@@ -3,6 +3,7 @@ import type { MemberSummary } from "@/lib/chat-types";
 import type { DmConversation, OccupantPresence, RoomPresence, RosterContact } from "@/lib/xmpp/types";
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import { isBotJid } from "@/lib/avatars/author-jid";
 
 /**
  * People rail model: the one place that turns the controller's disjoint
@@ -140,7 +141,7 @@ export function splitKnownPeople(
   const around: KnownPerson[] = [];
   const awayAndOffline: KnownPerson[] = [];
   for (const jid of new Set<string>([...contactByJid.keys(), ...conversationByJid.keys()])) {
-    if (!jid) continue;
+    if (!jid || isBotJid(jid)) continue;
     const contact = contactByJid.get(jid);
     const conversation = conversationByJid.get(jid);
     const presenceShow = conversation?.presenceShow ?? contact?.presenceShow;
@@ -246,7 +247,8 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
   }
 
   function claim(jid: string): boolean {
-    if (!jid || jid === selfKey || seen.has(jid)) return false;
+    // A bot takes no DM, and every rail entry is a "Message" button.
+    if (!jid || jid === selfKey || seen.has(jid) || isBotJid(jid)) return false;
     seen.add(jid);
     return true;
   }

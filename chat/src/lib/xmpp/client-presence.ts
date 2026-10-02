@@ -10,7 +10,7 @@
  */
 import { barePeerJid, fullJidIdentityKey, resourceOf } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
-import { parseMucAffiliation, parseMucRole } from "./types";
+import { BOT_HAT_URI, parseMucAffiliation, parseMucRole } from "./types";
 import type { RoomAuthority, RoomHats, RoomPresence } from "./types";
 import {
   mapPresenceIdleSince,
@@ -227,7 +227,7 @@ export class PresenceManager {
       if (presence.muc_jid) {
         const bare = barePeerJid(presence.muc_jid);
         roomMemberJids[nick] = bare;
-        this.deps.events.emitSafe("occupantRealJid", room, nick, bare);
+        this.deps.events.emitSafe("occupantRealJid", room, nick, bare, roomHats[nick].some((hat) => hat.uri === BOT_HAT_URI));
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, bare);
       } else {
         // An occupant whose real JID is not disclosed to us holds this nick

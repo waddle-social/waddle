@@ -1,4 +1,6 @@
+import { isBotJid } from "@/lib/avatars/author-jid";
 import type { MucAffiliation, MucRole, OccupantAuthority, OccupantHat } from "@/lib/xmpp-client";
+import { BOT_HAT_URI } from "@/lib/xmpp/types";
 
 // Two separate badge layers:
 //
@@ -48,19 +50,34 @@ export function authorityBadge(authority: OccupantAuthority | null | undefined):
 // namespace `urn:xmpp:hats:0` is unchanged because that one is
 // spec-defined.
 const DESCRIPTIVE_HAT_LABELS: Record<string, string> = {
-  "urn:waddle:hats:bot": "BOT",
+  [BOT_HAT_URI]: "BOT",
   "urn:waddle:hats:verified": "VERIFIED",
 };
 
 const DESCRIPTIVE_HAT_COLORS: Record<string, string> = {
-  "urn:waddle:hats:bot": "text-success/75",
+  [BOT_HAT_URI]: "text-success/75",
   "urn:waddle:hats:verified": "text-primary/75",
 };
 
 const DESCRIPTIVE_HAT_RANK: Record<string, number> = {
   "urn:waddle:hats:verified": 1,
-  "urn:waddle:hats:bot": 0,
+  [BOT_HAT_URI]: 0,
 };
+
+/**
+ * Hats for a row by the identity behind it, not the nick. Hats are keyed by
+ * the nick's *current* holder, so a row whose real JID is a known bot always
+ * shows the bot hat (even from history, when the nick is gone or reused), and
+ * a row whose real JID is someone else never inherits a bot hat from a bot
+ * that now holds its nick. Without an identity the nick's hats are all we have.
+ */
+export function identityHats(hats: OccupantHat[] | undefined, jid: string | null | undefined): OccupantHat[] {
+  const nickHats = hats ?? [];
+  if (!jid) return nickHats;
+  const hasBotHat = nickHats.some((hat) => hat.uri === BOT_HAT_URI);
+  if (isBotJid(jid)) return hasBotHat ? nickHats : [{ uri: BOT_HAT_URI, title: "Bot" }];
+  return hasBotHat ? nickHats.filter((hat) => hat.uri !== BOT_HAT_URI) : nickHats;
+}
 
 export function descriptiveBadge(hats: OccupantHat[] | null | undefined): BadgeView | null {
   if (!hats || hats.length === 0) return null;

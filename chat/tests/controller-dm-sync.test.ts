@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { computed, effectScope, nextTick, ref } from "vue";
 import { useChatShellState } from "../src/shell/state";
 import { useDmSync } from "../src/shell/controllers/use-dm-sync";
@@ -11,6 +11,7 @@ import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { ChannelSummary, UserSearchResult } from "../src/lib/chat-types";
 import type { DmConversation } from "../src/lib/xmpp-client";
 import type { ExtensionRouteKey } from "../src/shell/controllers/use-extension-routes";
+import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
 
 function session(): WaddleSession {
   return {
@@ -29,7 +30,8 @@ function session(): WaddleSession {
 function makeHarness() {
   const ui = useChatShellState();
   const searchUsers = mock(async (_query: string): Promise<UserSearchResult[]> => []);
-  const client = { searchUsers } as unknown as BrowserXmppClient;
+  const createGroupDm = mock(async (_name: string, _memberJids: string[]) => ({ roomJid: "group@muc.example.com" }));
+  const client = { searchUsers, createGroupDm } as unknown as BrowserXmppClient;
   const currentClient = ref<BrowserXmppClient | null>(client);
 
   const channels = ref<ChannelSummary[]>([
@@ -99,7 +101,9 @@ function makeHarness() {
 
   return {
     scope,
+    ui,
     searchUsers,
+    createGroupDm,
     currentClient,
     dmSync,
     conversations,
@@ -112,6 +116,52 @@ function makeHarness() {
     cancelPendingRoute,
   };
 }
+
+describe("useDmSync refuses server-hosted bots", () => {
+  const BOT = "helper@extensions.example.com";
+  beforeEach(() => occupantJidDirectory.record("general@muc.example.com", "helper", `${BOT}/bot`, true));
+  afterEach(() => occupantJidDirectory.clear());
+
+  test.each([BOT, `${BOT}/bot`, "Helper@Extensions.example.com"])("opening %s navigates nowhere and never opens a conversation", async (jid) => {
+    const h = makeHarness();
+    await h.dmSync.handleOpenDm(jid);
+    await h.dmSync.handleOpenDm(jid, { intent: "automatic" });
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.cancelPendingRoute).not.toHaveBeenCalled();
+    expect(h.loadMessages).not.toHaveBeenCalled();
+    expect(h.ui.actionError.value).toBe("Bots can't receive direct messages.");
+    h.scope.stop();
+  });
+
+  test("a MUC private message to a bot's occupant is refused through its disclosed real JID", async () => {
+    const h = makeHarness();
+    await h.dmSync.handleOpenDm("general@muc.example.com/helper", { scope: "muc-occupant" });
+    expect(h.openDm).not.toHaveBeenCalled();
+    await h.dmSync.handleOpenDm("general@muc.example.com/sam", { scope: "muc-occupant" });
+    expect(h.openDm).toHaveBeenCalledTimes(1);
+    h.scope.stop();
+  });
+
+  test("a bot is not a recipient, a group-DM seed, or a group-DM member", async () => {
+    const h = makeHarness();
+    h.dmSync.handleAddPeopleToDm(BOT);
+    expect(h.ui.showNewGroupDm.value).toBe(false);
+    expect(h.ui.groupDmSeedPeerJid.value).toBeNull();
+
+    await h.dmSync.handleCreateGroupDm({ name: "", memberJids: ["bob@example.com", BOT] });
+    expect(h.createGroupDm).not.toHaveBeenCalled();
+    expect(h.ui.actionError.value).toBe("Bots can't receive direct messages.");
+
+    h.ui.groupDmSeedPeerJid.value = BOT;
+    await h.dmSync.handleCreateGroupDm({ name: "", memberJids: ["bob@example.com"] });
+    expect(h.createGroupDm).not.toHaveBeenCalled();
+
+    h.ui.groupDmSeedPeerJid.value = null;
+    await h.dmSync.handleCreateGroupDm({ name: "", memberJids: ["bob@example.com", "carol@example.com"] });
+    expect(h.createGroupDm).toHaveBeenCalledTimes(1);
+    h.scope.stop();
+  });
+});
 
 describe("useDmSync handleOpenDm / handleNewDm", () => {
   test("opening a full user-domain JID stays a 1:1 even when the node matches a channel id", async () => {

@@ -23,7 +23,7 @@ import {
 } from "@/lib/scroll-direction";
 import { extractDroppedFiles } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
-import { authorAvatarJid, roomOccupantAvatarJid, typingAuthorAvatarJid } from "@/lib/avatars/author-jid";
+import { authorAvatarJid, isBotJid, roomOccupantAvatarJid, typingAuthorAvatarJid } from "@/lib/avatars/author-jid";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { CallMedia } from "@/lib/calls/types";
@@ -188,9 +188,11 @@ const channelHeaderMembers = computed<ChannelHeaderMember[]>(() => {
   const members: ChannelHeaderMember[] = [];
   for (const [nick, p] of Object.entries(presence)) {
     if (me && nick === me) continue;
+    const jid = props.authorJidByNick?.[nick];
     members.push({
       nick,
-      jid: props.authorJidByNick?.[nick],
+      // A bot takes no DM: without a jid the avatar opens the room details instead.
+      jid: isBotJid(jid) ? undefined : jid,
       avatarJid: roomOccupantAvatarJid(props.roomJid, nick),
       presence: p,
     });

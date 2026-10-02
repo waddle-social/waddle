@@ -390,6 +390,9 @@ export interface OccupantHat {
 
 export type RoomHats = Record<string, OccupantHat[]>;
 
+/** Server-assigned XEP-0317 hat on every presence of a server-hosted extension bot. */
+export const BOT_HAT_URI = "urn:waddle:hats:bot";
+
 /** XEP-0045 §5.2 — persistent room-relationship category. Authority,
  * not descriptive metadata. Carried by `<x xmlns='muc#user'><item
  * affiliation='…'/>` on every MUC presence. */

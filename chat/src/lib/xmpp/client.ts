@@ -2138,7 +2138,7 @@ export class BrowserXmppClient {
    * XEP-0045 §7.2.4: a room occupant's real JID was disclosed, for any
    * joined room (not only the focused one).
    */
-  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string | null) => void): () => void {
+  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string | null, isBot?: boolean) => void): () => void {
     return this.events.on("occupantRealJid", handler);
   }
 

@@ -42,17 +42,24 @@ export class OccupantJidDirectory {
   private readonly holders = shallowReactive(new Map<string, string>());
   /** Our actual occupant nick per room (XEP-0045 self-presence; 210 may rename us). */
   private readonly ownNicks = shallowReactive(new Map<string, string>());
+  /**
+   * Bare JIDs seen carrying the server-assigned bot hat in any room. The
+   * hat is the server's word, so a bot stays one for the session even after
+   * it leaves a room.
+   */
+  private readonly bots = shallowReactive(new Set<string>());
 
   /**
    * Record who holds `nick` now. `realJid` null means an occupant whose
    * real JID is not disclosed to us: the previous holder no longer names
-   * the nick.
+   * the nick. `isBot`: the occupant's presence carried the bot hat.
    */
-  record(roomJid: string, nick: string, realJid: string | null): void {
+  record(roomJid: string, nick: string, realJid: string | null, isBot = false): void {
     if (!roomJid || !nick) return;
     const key = occupantKey(roomJid, nick);
     const real = realJid === null ? null : bare(realJid);
     if (real) {
+      if (isBot) this.bots.add(real);
       if (this.holders.get(key) !== real) this.holders.set(key, real);
     } else if (realJid === null) {
       this.holders.delete(key);
@@ -63,6 +70,12 @@ export class OccupantJidDirectory {
   lookup(roomJid: string | null | undefined, nick: string | null | undefined): string | null {
     if (!roomJid || !nick) return null;
     return this.holders.get(occupantKey(roomJid, nick)) ?? null;
+  }
+
+  /** Reactive: `jid` is a known server-hosted bot. */
+  isBot(jid: string | null | undefined): boolean {
+    const real = bare(jid);
+    return !!real && this.bots.has(real);
   }
 
   recordOwnNick(roomJid: string, nick: string | null): void {
@@ -89,6 +102,7 @@ export class OccupantJidDirectory {
   clear(): void {
     this.holders.clear();
     this.ownNicks.clear();
+    this.bots.clear();
   }
 }
 
@@ -145,6 +159,11 @@ export function resolveAuthorJid(
 
 /** Process-wide occupant directory fed by MUC presence. */
 export const occupantJidDirectory = new OccupantJidDirectory();
+
+/** Reactive: `jid` is a known server-hosted bot, which cannot take direct messages. */
+export function isBotJid(jid: string | null | undefined): boolean {
+  return occupantJidDirectory.isBot(jid);
+}
 
 /** {@link resolveAuthorJid} against the process-wide directory. */
 export function authorAvatarJid(author: AuthorRef, selfJid?: string | null): string | null {

@@ -7,6 +7,7 @@ import type { ChatShellState } from "@/shell/state";
 import type { DmConversationScope, BrowserXmppClient } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import { conversationPeerAvatarJid, isBotJid } from "@/lib/avatars/author-jid";
 import { groupDmSpawnPayloadFromDm } from "@/dms/group-dm-spawn";
 import type { UserSearchResult } from "@/lib/chat-types";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
@@ -27,6 +28,9 @@ interface DmSyncDeps {
   updateUrl: () => void;
   selectGroupDm: (roomJid: string, options?: { updateUrl?: boolean }) => Promise<boolean>;
 }
+
+/** Server-hosted bots bounce 1:1 messages and MUC PMs with service-unavailable. */
+const BOT_DM_ERROR = "Bots can't receive direct messages.";
 
 /**
  * Direct-message surface orchestration: opening 1:1 conversations (with
@@ -55,6 +59,12 @@ export function useDmSync(deps: DmSyncDeps) {
   });
 
   async function handleOpenDm(peerJid: string, options: { intent?: ChannelLoadIntent; scope?: DmConversationScope } = {}) {
+    // Refuse before touching navigation state or subscribing to the bot's
+    // presence; a MUC private-message occupant JID resolves to its real JID.
+    if (isBotJid(peerJid) || isBotJid(conversationPeerAvatarJid(peerJid))) {
+      ui.actionError.value = BOT_DM_ERROR;
+      return;
+    }
     if (options.intent !== "automatic") cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
@@ -126,6 +136,10 @@ export function useDmSync(deps: DmSyncDeps) {
   }
 
   function handleAddPeopleToDm(peerJid: string) {
+    if (isBotJid(peerJid)) {
+      ui.actionError.value = BOT_DM_ERROR;
+      return;
+    }
     ui.groupDmSeedPeerJid.value = barePeerJid(peerJid);
     ui.showNewGroupDm.value = true;
   }
@@ -154,6 +168,10 @@ export function useDmSync(deps: DmSyncDeps) {
           name: payload.name.trim() || payload.memberJids.map(groupDmMemberLabel).join(", "),
           memberJids: payload.memberJids,
         };
+    if (createPayload.memberJids.some(isBotJid)) {
+      ui.actionError.value = BOT_DM_ERROR;
+      return;
+    }
     if (createPayload.memberJids.length < 2) {
       ui.actionError.value = seedPeerJid ? "Choose at least one more contact." : "Choose at least two contacts.";
       return;

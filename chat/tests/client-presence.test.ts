@@ -120,6 +120,30 @@ describe("PresenceManager MUC occupant tracking", () => {
     expect(memberJids).toEqual([["sam", "alice@example.com"], ["sam", null]]);
   });
 
+  test("the server's bot hat on a disclosed occupant is reported for any room, focused or not", () => {
+    const { manager, events } = createManager({ currentRoom: () => "other@muc.example.com" });
+    const occupantJids: unknown[] = [];
+    events.on("occupantRealJid", (room, nick, bare, isBot) => occupantJids.push([room, nick, bare, isBot]));
+    const bot = directPresence({
+      from: `${ROOM}/helper`,
+      muc_affiliation: "member",
+      muc_role: "participant",
+      muc_jid: "helper@extensions.example.com/bot",
+      hats: [{ uri: "urn:waddle:hats:bot", title: "Bot" }],
+    });
+
+    manager.handle(bot);
+    manager.handle(directPresence({ from: `${ROOM}/sam`, muc_affiliation: "member", muc_role: "participant", muc_jid: "sam@example.com/web" }));
+    // A later hat-less presence for the bot (e.g. a role change) is not evidence it stopped being one.
+    manager.handle({ ...bot, hats: [], muc_role: "moderator" });
+
+    expect(occupantJids).toEqual([
+      [ROOM, "helper", "helper@extensions.example.com", true],
+      [ROOM, "sam", "sam@example.com", false],
+      [ROOM, "helper", "helper@extensions.example.com", false],
+    ]);
+  });
+
   test("self-presence reports our actual (possibly room-assigned) nick, and clears it on leave", () => {
     const { manager, events } = createManager();
     const ownNicks: unknown[] = [];
