@@ -115,11 +115,9 @@ async fn revoked_after_bot_planning(f: IngressFixture, reuse: bool) {
         .room
         .session_generation(&bot)
         .expect("bot present after regrant");
-    if reuse {
-        assert_eq!(rejoined_session, joined_session);
-    } else {
-        assert_ne!(rejoined_session, joined_session, "regrant must join fresh");
-    }
+    // A bot keeps one published occupancy generation (#1869), so a regrant
+    // rejoins under the same generation; the fresh join is its presence below.
+    assert_eq!(rejoined_session, joined_session);
     let regrant_wire = fixture.drain();
     super::groupchat_ingress::groupchat_message(&regrant_wire);
     assert_eq!(

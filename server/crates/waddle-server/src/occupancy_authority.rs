@@ -76,6 +76,39 @@ pub async fn publish(
     Ok((previous != generation).then_some(previous))
 }
 
+/// Return the full JID's current generation, publishing `candidate` only when
+/// none exists. Host-owned occupants (extension bots) have no bind to mint a
+/// generation, so they keep one stable generation that is never rotated.
+pub async fn ensure(
+    db: &Database,
+    jid: &FullJid,
+    candidate: OccupancySessionGeneration,
+) -> Result<OccupancySessionGeneration, DatabaseError> {
+    let mut tx = db.begin_immediate().await?;
+    tx.execute(
+        "INSERT INTO xmpp_occupancy_authority (full_jid, generation) VALUES (?, ?) \
+         ON CONFLICT (full_jid) DO NOTHING",
+        crate::db_params![jid.to_string(), candidate.to_string()],
+    )
+    .await?;
+    let mut rows = tx
+        .query(
+            "SELECT generation FROM xmpp_occupancy_authority WHERE full_jid = ?",
+            crate::db_params![jid.to_string()],
+        )
+        .await?;
+    let row = rows.next().await?.ok_or_else(|| {
+        DatabaseError::QueryFailed("occupancy authority disappeared during ensure".to_owned())
+    })?;
+    let current: String = row.get(0)?;
+    let current = current.parse().map_err(|_| {
+        DatabaseError::QueryFailed("invalid persisted occupancy generation".to_owned())
+    })?;
+    drop(rows);
+    tx.commit().await?;
+    Ok(current)
+}
+
 pub async fn is_current(
     db: &Database,
     jid: &FullJid,
@@ -118,6 +151,21 @@ pub(crate) async fn lock_current(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ensure_publishes_once_and_never_rotates() {
+        let db = Database::in_memory("occupancy-authority-ensure")
+            .await
+            .unwrap();
+        crate::db::MigrationRunner::global().run(&db).await.unwrap();
+        let bot: FullJid = "stargate@extensions.example.com/bot".parse().unwrap();
+        let first = OccupancySessionGeneration::mint();
+        assert_eq!(ensure(&db, &bot, first).await.unwrap(), first);
+        let later = OccupancySessionGeneration::mint();
+        assert_eq!(ensure(&db, &bot, later).await.unwrap(), first);
+        assert!(is_current(&db, &bot, first).await.unwrap());
+        assert!(!is_current(&db, &bot, later).await.unwrap());
+    }
 
     #[tokio::test]
     async fn replacement_rejects_departed_generation_and_missing_authority() {

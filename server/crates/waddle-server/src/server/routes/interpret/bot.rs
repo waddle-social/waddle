@@ -451,7 +451,18 @@ pub(crate) async fn plan_extension_bot_groupchat(
         );
         let joined_nick = waddle_xmpp::muc::MucOccupantNick::new(bot_nick.clone())
             .ok_or(ExtensionBotDispatchError::BotJoinFailed)?;
-        let session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        // Room joins commit only for the full JID's current generation (#1869).
+        // A bot has no bind, so it keeps one stable published generation.
+        let session = crate::occupancy_authority::ensure(
+            state.deps.app_state.db_pool.global(),
+            &bot_full,
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        )
+        .await
+        .map_err(|error| {
+            warn!(room = %room_jid, %error, "Extension bot occupancy authority failed");
+            ExtensionBotDispatchError::BotJoinFailed
+        })?;
         match room_actor
             .ask(JoinWithAffiliation {
                 sender_jid: bot_full.clone(),
