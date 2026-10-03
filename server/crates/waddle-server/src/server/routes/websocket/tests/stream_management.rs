@@ -8024,6 +8024,9 @@ async fn message_carbons_record_for_detached_enabled_resources() {
 #[tokio::test]
 async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
@@ -8111,6 +8114,9 @@ async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
 async fn roster_set_records_push_for_detached_interested_resource() {
     use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let detached_jid: FullJid = "alice@example.com/web".parse().expect("detached jid");
     let source_jid: FullJid = "alice@example.com/phone".parse().expect("source jid");
@@ -8242,6 +8248,9 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
 async fn subscription_approval_replays_current_presence_from_detached_available_resource() {
     use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_web_jid: FullJid = "alice@example.com/web".parse().expect("alice web jid");
@@ -8337,6 +8346,9 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
 async fn presence_probe_returns_detached_available_resource_presence() {
     use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
@@ -8424,6 +8436,9 @@ async fn presence_probe_returns_detached_available_resource_presence() {
 async fn full_jid_presence_probe_returns_only_that_resources_availability() {
     use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_phone: FullJid = "alice@example.com/phone".parse().expect("alice phone");
@@ -8600,6 +8615,9 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
 #[tokio::test]
 async fn expired_detached_available_session_broadcasts_unavailable_to_subscribers() {
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
@@ -8682,6 +8700,9 @@ async fn expired_detached_available_session_broadcasts_unavailable_to_subscriber
 async fn subscription_approval_records_roster_push_for_detached_interested_resource() {
     use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
@@ -8817,6 +8838,9 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
 async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume() {
     use waddle_xmpp::stream_management::DetachedSession;
     let state = create_test_websocket_state().await;
+    // Roster contacts must be existing local accounts.
+    super::seed_local_account(state.as_ref(), "alice").await;
+    super::seed_local_account(state.as_ref(), "bob").await;
 
     let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
     let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");

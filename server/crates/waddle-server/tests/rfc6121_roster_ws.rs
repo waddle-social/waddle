@@ -264,7 +264,13 @@ async fn roster_get_add_update_remove_uses_durable_state() {
 #[tokio::test]
 async fn roster_set_pushes_only_to_interested_connected_user_resources() {
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
-    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    // Roster contacts must be accounts.
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", "contact-pass"),
+        ("carol", "contact-pass"),
+        ("dave", "contact-pass"),
+    ]);
     let mut desktop = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
@@ -674,6 +680,72 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
             && bob_after_unsubscribe.contains("subscription='from'"),
         "bob roster should reflect unsubscribe state: {bob_after_unsubscribe}"
     );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+/// A roster contact is an existing local account. A subscribe to a name
+/// nobody registered is declined from that JID (RFC 6121 §8.5.1), a roster
+/// add of a non-account is refused, and neither writes or pushes an item.
+/// The same subscribe to a real account still goes through.
+#[tokio::test]
+async fn non_account_contacts_never_reach_the_roster() {
+    let (_server, mut alice, bob) = connect_alice_bob().await;
+    let _initial = send_roster_get(&mut alice, "non-account-initial").await;
+
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribe" to="chat@localhost"/>"#)
+        .await
+        .expect("send subscribe to non-account");
+    let declined = alice
+        .recv_matching(|frame| frame.contains("type='unsubscribed'"))
+        .await
+        .expect("declined subscription");
+    assert!(
+        declined.contains("from='chat@localhost'"),
+        "the non-account declines: {declined}"
+    );
+
+    for (id, jid) in [
+        ("add-phantom", "chat@localhost"),
+        ("add-room", "room@muc.localhost"),
+        ("add-bot", "helper@extensions.localhost"),
+    ] {
+        alice
+            .send(&format!(
+                r#"<iq xmlns="jabber:client" type="set" id="{id}"><query xmlns="jabber:iq:roster"><item jid="{jid}"/></query></iq>"#
+            ))
+            .await
+            .expect("send roster add");
+        let refused = alice
+            .recv_matching(|frame| frame.contains(id))
+            .await
+            .expect("roster add reply");
+        assert!(
+            refused.contains("type='error'") && refused.contains("item-not-found"),
+            "roster add of {jid} must be refused: {refused}"
+        );
+    }
+    assert_no_frame_matching(
+        &mut alice,
+        Duration::from_millis(500),
+        |frame| frame.contains("jabber:iq:roster") && frame.contains("type='set'"),
+        "no roster push for a non-account",
+    )
+    .await;
+    let roster = send_roster_get(&mut alice, "non-account-after").await;
+    assert!(!roster.contains("<item"), "roster stays empty: {roster}");
+
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribe" to="bob@localhost"/>"#)
+        .await
+        .expect("send subscribe to bob");
+    let pending = alice
+        .recv_matching(|frame| frame.contains("ask='subscribe'"))
+        .await
+        .expect("pending subscribe push");
+    assert!(pending.contains("jid='bob@localhost'"), "{pending}");
 
     let _ = bob.close().await;
     let _ = alice.close().await;

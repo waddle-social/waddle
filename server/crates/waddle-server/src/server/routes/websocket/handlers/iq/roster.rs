@@ -156,6 +156,39 @@ async fn handle_roster_set(
         .first()
         .expect("parse_roster_set guarantees one item");
 
+    // A roster contact is an existing local account; removal stays open for
+    // any JID so junk items can be deleted. RFC 6121 §2.3.3 names no
+    // condition for a contact that does not exist: `not-acceptable` there is
+    // for item data the client can fix (type modify), while `item-not-found`
+    // (RFC 6120 §8.3.3.7, type cancel) says the addressed JID cannot be found.
+    if !requested.subscription.is_remove() {
+        match local_account_jid_exists(
+            state.deps.app_state.db_pool.global_actor(),
+            &requested.jid,
+            user_jid.domain().as_str(),
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::item_not_found(Some(
+                        "Roster contacts must be local accounts".to_string(),
+                    )),
+                )];
+            }
+            Err(error) => {
+                mark_span_error("failed to look up roster contact account");
+                warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to look up roster contact account");
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::internal_server_error(None),
+                )];
+            }
+        }
+    }
+
     let mut removed_item = None;
     // Hold the per-user mutation lock from the start of the storage write
     // through the end of push fanout below (XEP-0237 §2.6 — pushes for

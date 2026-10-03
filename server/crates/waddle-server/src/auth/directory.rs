@@ -57,6 +57,22 @@ pub async fn local_account_exists(
     Ok(row.is_some())
 }
 
+/// Returns `true` when `jid` is a registered account on `local_domain`.
+/// Waddle has no s2s, so a JID on any other domain (a room, an extension
+/// bot) or one without a localpart is never an account.
+pub async fn local_account_jid_exists(
+    actor: &ActorRef<DbActor>,
+    jid: &jid::BareJid,
+    local_domain: &str,
+) -> Result<bool, AuthError> {
+    match jid.node() {
+        Some(node) if jid.domain().as_str() == local_domain => {
+            local_account_exists(actor, node.as_str(), local_domain).await
+        }
+        _ => Ok(false),
+    }
+}
+
 /// XEP-0055 directory entries from both account stores. Prefer OIDC profile
 /// data for a shared JID, and rank exact identities before the result limit.
 pub(crate) async fn search_local_accounts(

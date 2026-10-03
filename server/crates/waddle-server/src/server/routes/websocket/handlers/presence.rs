@@ -406,29 +406,38 @@ async fn handle_presence_impl(
 
     match parse_subscription_presence(&presence, &sender_jid.to_bare()) {
         Ok(PresenceAction::Subscription(request)) => {
-            // Nothing on the extensions domain accepts a subscription: decline
-            // a request, ignore the rest, and never touch the roster (RFC 6121
-            // §8.5.1).
-            if context
-                .state
-                .deps
-                .service_domains
-                .is_extensions_address(&jid::Jid::from(request.to.clone()))
+            // A roster contact is an existing local account. Anything else (a
+            // bot, a room, an unknown name) declines a request, ignores the
+            // rest, and never reaches a roster, the pending queue or another
+            // node (RFC 6121 §8.5.1).
+            match crate::auth::local_account_jid_exists(
+                context.state.deps.app_state.db_pool.global_actor(),
+                &request.to,
+                request.from.domain().as_str(),
+            )
+            .await
             {
-                if request.subscription_type
-                    != waddle_xmpp::presence::subscription::SubscriptionType::Subscribe
-                {
+                Ok(true) => {}
+                Ok(false) if request.subscription_type == SubscriptionType::Subscribe => {
+                    return vec![stanza_to_xml(&Stanza::Presence(
+                        build_subscription_presence(
+                            SubscriptionType::Unsubscribed,
+                            &request.to,
+                            &request.from,
+                            None,
+                            &[],
+                        ),
+                    ))];
+                }
+                Ok(false) => return vec![],
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        to = %request.to,
+                        "subscription contact lookup failed; dropping presence"
+                    );
                     return vec![];
                 }
-                return vec![stanza_to_xml(&Stanza::Presence(
-                    waddle_xmpp::presence::subscription::build_subscription_presence(
-                        waddle_xmpp::presence::subscription::SubscriptionType::Unsubscribed,
-                        &request.to,
-                        &request.from,
-                        None,
-                        &[],
-                    ),
-                ))];
             }
             if try_handle_remote_subscription_presence(
                 context.state,

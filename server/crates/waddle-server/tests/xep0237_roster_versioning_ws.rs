@@ -6,9 +6,20 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 
+/// Alice plus the contacts the tests add; roster contacts must be accounts.
+fn accounts(alice_password: &str) -> [(&str, &str); 5] {
+    [
+        ("alice", alice_password),
+        ("bob", "contact-pass"),
+        ("carol", "contact-pass"),
+        ("dan", "contact-pass"),
+        ("ed", "contact-pass"),
+    ]
+}
+
 async fn connect_alice() -> (TestServer, WsXmppClient) {
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
-    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let server = TestServer::start_with_extra_accounts(&accounts(&alice_password));
     let alice = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
@@ -178,7 +189,7 @@ async fn xep0237_mutation_advances_version_and_push_carries_new_ver() {
     // ver on the result of a roster set). The pushed ver must differ from any
     // pre-mutation ver.
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
-    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let server = TestServer::start_with_extra_accounts(&accounts(&alice_password));
 
     let mut r1 = connect_named(&server, "alice", &alice_password, "r1").await;
     let mut r2 = connect_named(&server, "alice", &alice_password, "r2").await;
@@ -243,7 +254,7 @@ async fn xep0237_version_persists_across_server_restart() {
     let v1 = {
         let server = TestServer::start_persistent_with_extra_accounts(
             &database_url,
-            &[("alice", &alice_password)],
+            &accounts(&alice_password),
         );
         let mut alice = connect_named(&server, "alice", &alice_password, "r1").await;
 

@@ -428,6 +428,48 @@ async fn handle_xmpp_frame_roster_get_marks_connection_interested_for_detach() {
     );
 }
 
+/// Roster contacts must be accounts, but `subscription='remove'` skips that
+/// check so a junk item stored before the rule can still be deleted.
+#[tokio::test]
+async fn roster_remove_deletes_an_item_that_is_not_an_account() {
+    let state = create_test_websocket_state().await;
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "INSERT INTO roster_items (user_jid, contact_jid) VALUES (?, ?)".to_string(),
+            params: vec!["alice@example.com".into(), "chat@example.com".into()],
+        })
+        .await
+        .expect("seed junk roster item");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("alice"), false);
+
+    let removed = handle_xmpp_frame(
+        r#"<iq xmlns="jabber:client" type="set" id="remove-junk"><query xmlns="jabber:iq:roster"><item jid="chat@example.com" subscription="remove"/></query></iq>"#,
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        removed
+            .iter()
+            .any(|frame| frame.contains("remove-junk") && frame.contains("type='result'")),
+        "{removed:?}"
+    );
+    let roster = handle_xmpp_frame(
+        r#"<iq xmlns="jabber:client" type="get" id="roster-after"><query xmlns="jabber:iq:roster"/></iq>"#,
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(!roster[0].contains("chat@example.com"), "{roster:?}");
+}
+
 #[tokio::test]
 async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_value() {
     // xmpp-parsers 0.22 tightened `Iq` to reject unknown attributes

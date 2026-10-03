@@ -37,7 +37,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema). `current_version` reads
     // the ledger max, which the waddle namespace (V1020) still dominates
-    // after global V0013.
+    // after global V0014.
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(version, Some(1020));
 }
@@ -246,8 +246,8 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     assert_eq!(
         applied,
         vec![
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
+            1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
 
@@ -2234,8 +2234,8 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     assert_eq!(
         applied,
         vec![
-            6, 7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            6, 7, 8, 9, 10, 11, 12, 13, 14, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2311,8 +2311,8 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            7, 8, 9, 10, 11, 12, 13, 14, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
 
@@ -2432,7 +2432,7 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13, 14]);
 
     let conn = db.guard().await.unwrap();
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -2497,7 +2497,7 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![10, 11, 12, 13]);
+    assert_eq!(applied, vec![10, 11, 12, 13, 14]);
 
     let conn = db.guard().await.unwrap();
     for table in [
@@ -2688,7 +2688,7 @@ async fn sqlite_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12, 13]
+        vec![12, 13, 14]
     );
 
     let conn = db.guard().await.expect("database guard");
@@ -2759,7 +2759,7 @@ async fn postgres_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12, 13]
+        vec![12, 13, 14]
     );
     assert_postgres_column_type(&db, "sessions", "auth_context_id", "text").await;
 
@@ -2768,6 +2768,114 @@ async fn postgres_v0012_makes_auth_context_total() {
     drop(conn);
 
     drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn sqlite_v0014_keeps_only_account_roster_contacts() {
+    let db = Database::in_memory("test-global-v0014-roster-contacts")
+        .await
+        .expect("in-memory database");
+    assert_v0014_roster_cleanup(&db).await;
+}
+
+#[tokio::test]
+async fn postgres_v0014_keeps_only_account_roster_contacts() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V0014 roster cleanup)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("roster_contacts");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    assert_v0014_roster_cleanup(&db).await;
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+/// Alice's roster holds an OIDC account, a native account, a phantom local
+/// name, a room, an extension bot and a foreign JID reusing an OIDC
+/// localpart. V0014 keeps the two accounts, and invalidates Alice's roster
+/// version but not Dave's, whose roster was already clean.
+async fn assert_v0014_roster_cleanup(db: &Database) {
+    let through_v0013 = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .filter(|migration| migration.version <= 13)
+            .chain(waddle::all())
+            .collect(),
+    );
+    through_v0013.run(db).await.expect("migrate through V0013");
+
+    let conn = db.guard().await.expect("database guard");
+    for sql in [
+        "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES \
+         ('alice@example.com', 'alice', 'alice', 'now', 'now'), \
+         ('bob@example.com', 'bob', 'bob', 'now', 'now'), \
+         ('dave@example.com', 'dave', 'dave', 'now', 'now')",
+        "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) \
+         VALUES ('carol', 'example.com', 'hash', 'salt', '', '')",
+        "INSERT INTO roster_items (user_jid, contact_jid) VALUES \
+         ('alice@example.com', 'bob@example.com'), \
+         ('alice@example.com', 'carol@example.com'), \
+         ('alice@example.com', 'chat@example.com'), \
+         ('alice@example.com', 'room@muc.example.com'), \
+         ('alice@example.com', 'helper@extensions.example.com'), \
+         ('alice@example.com', 'bob@other.test'), \
+         ('dave@example.com', 'bob@example.com')",
+        "INSERT INTO roster_versions (user_jid, version) VALUES \
+         ('alice@example.com', 'alice-ver'), ('dave@example.com', 'dave-ver')",
+    ] {
+        conn.execute(sql, ()).await.expect("seed V0014 fixture");
+    }
+    drop(conn);
+
+    assert_eq!(
+        MigrationRunner::global()
+            .run(db)
+            .await
+            .expect("apply V0014"),
+        vec![14]
+    );
+
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            "SELECT user_jid, contact_jid FROM roster_items ORDER BY user_jid, contact_jid",
+            (),
+        )
+        .await
+        .expect("read roster items");
+    let mut items = Vec::new();
+    while let Some(row) = rows.next().await.expect("roster row") {
+        items.push((
+            row.get::<String>(0).expect("owner"),
+            row.get::<String>(1).expect("contact"),
+        ));
+    }
+    drop(rows);
+    assert_eq!(
+        items,
+        [
+            ("alice@example.com", "bob@example.com"),
+            ("alice@example.com", "carol@example.com"),
+            ("dave@example.com", "bob@example.com"),
+        ]
+        .map(|(owner, contact)| (owner.to_string(), contact.to_string()))
+    );
+
+    let mut rows = conn
+        .query("SELECT user_jid, version FROM roster_versions", ())
+        .await
+        .expect("read roster versions");
+    let row = rows
+        .next()
+        .await
+        .expect("version row")
+        .expect("dave version");
+    assert_eq!(row.get::<String>(0).expect("owner"), "dave@example.com");
+    assert_eq!(row.get::<String>(1).expect("version"), "dave-ver");
+    assert!(
+        rows.next().await.expect("version row").is_none(),
+        "alice's roster version must be invalidated"
+    );
 }
 
 #[tokio::test]
@@ -2821,8 +2929,8 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 13, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
+            7, 8, 9, 10, 11, 12, 13, 14, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
         ]
     );
 
@@ -2967,7 +3075,7 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13, 14]);
 
     let conn = db.guard().await.expect("postgres guard");
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -3296,8 +3404,18 @@ async fn postgres_table_exists(db: &Database, table: &str) -> bool {
 
 /// The historical-upgrade fixtures record V0001 as applied. Their focused
 /// schemas must therefore include V0001's session dependencies once a later
-/// migration alters `sessions`.
+/// migration alters `sessions`, and the account and roster columns V0014
+/// reads.
 async fn create_legacy_session_schema(conn: &crate::db::ConnectionGuard) {
+    for statement in [
+        "CREATE TABLE native_users (username TEXT NOT NULL, domain TEXT NOT NULL)",
+        "CREATE TABLE roster_items (user_jid TEXT NOT NULL, contact_jid TEXT NOT NULL)",
+        "CREATE TABLE roster_versions (user_jid TEXT PRIMARY KEY)",
+    ] {
+        conn.execute(statement, ())
+            .await
+            .expect("create legacy account and roster schema");
+    }
     conn.execute(
         r#"
         CREATE TABLE users (

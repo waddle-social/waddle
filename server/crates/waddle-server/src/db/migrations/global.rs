@@ -737,6 +737,50 @@ CREATE TABLE xmpp_occupancy_authority (
 );
 "#;
 
+/// A roster contact is an existing local account: an OIDC `users` localpart
+/// or a `native_users` row on the owner's domain (no s2s). Drop every other
+/// contact (rooms, extension bots, names nobody registered) and the owner's
+/// XEP-0237 version, so a cached roster no longer matches and is refetched.
+pub const V0014_ROSTER_CONTACTS_ARE_ACCOUNTS: &str = r#"
+DELETE FROM roster_versions WHERE user_jid IN (
+    SELECT user_jid FROM roster_items
+    WHERE contact_jid NOT IN (
+        SELECT xmpp_localpart || '@' || substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1) FROM users
+        UNION ALL
+        SELECT username || '@' || domain FROM native_users
+        WHERE domain = substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1)
+    )
+);
+
+DELETE FROM roster_items
+WHERE contact_jid NOT IN (
+    SELECT xmpp_localpart || '@' || substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1) FROM users
+    UNION ALL
+    SELECT username || '@' || domain FROM native_users
+    WHERE domain = substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1)
+);
+"#;
+
+pub const V0014_ROSTER_CONTACTS_ARE_ACCOUNTS_POSTGRES: &str = r#"
+DELETE FROM roster_versions WHERE user_jid IN (
+    SELECT user_jid FROM roster_items
+    WHERE contact_jid NOT IN (
+        SELECT xmpp_localpart || '@' || substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1) FROM users
+        UNION ALL
+        SELECT username || '@' || domain FROM native_users
+        WHERE domain = substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1)
+    )
+);
+
+DELETE FROM roster_items
+WHERE contact_jid NOT IN (
+    SELECT xmpp_localpart || '@' || substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1) FROM users
+    UNION ALL
+    SELECT username || '@' || domain FROM native_users
+    WHERE domain = substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1)
+);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -820,6 +864,12 @@ pub fn all() -> Vec<Migration> {
             description: "Fence occupancy by the current full-JID bind generation".to_string(),
             sql_sqlite: V0013_OCCUPANCY_AUTHORITY,
             sql_postgres: V0013_OCCUPANCY_AUTHORITY,
+        },
+        Migration {
+            version: 14,
+            description: "Keep roster contacts to existing local accounts".to_string(),
+            sql_sqlite: V0014_ROSTER_CONTACTS_ARE_ACCOUNTS,
+            sql_postgres: V0014_ROSTER_CONTACTS_ARE_ACCOUNTS_POSTGRES,
         },
     ]
 }
