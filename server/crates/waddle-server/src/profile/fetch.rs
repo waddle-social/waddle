@@ -551,7 +551,7 @@ async fn try_fetch(
 /// `width * height * channels` bytes (≈16 GB at 65k²×4) before we
 /// could reject it. 4096×4096 covers any sane avatar — the
 /// XEP-0084 §3.1 SHOULD is 96×96 — and caps decoded RGBA at 64 MB.
-const MAX_IMAGE_DIMENSION: u32 = 4096;
+pub(crate) const MAX_IMAGE_DIMENSION: u32 = 4096;
 
 /// Decode `bytes` (declared as `source`) and re-encode as PNG,
 /// aborting if the encoded output exceeds `max_bytes`. The

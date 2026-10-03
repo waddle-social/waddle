@@ -22,7 +22,9 @@ use waddle_extensions::{ArtifactReference, ExtensionManager, Sha256Digest};
 use waddle_xmpp::xep::xep0054::VCardPhoto;
 use waddle_xmpp::xep::xep0084::{self, AvatarInfo};
 
-use crate::profile::{fetch_artifact_avatar_bytes, AvatarBytes, FetchError, FetchPolicy};
+use crate::profile::{
+    fetch_artifact_avatar_bytes, AvatarBytes, FetchError, FetchPolicy, MAX_IMAGE_DIMENSION,
+};
 
 /// Cap on the fetched artifact and on the PNG served for it.
 const MAX_BYTES: usize = 256 * 1024;
@@ -46,14 +48,18 @@ impl BotAvatar {
             .with_guessed_format()
             .map_err(image::ImageError::IoError)?
             .into_dimensions()?;
-        // XEP-0084 §4.2.1: width and height are unsignedShort, "if available".
-        let side = |pixels: u32| (pixels <= u32::from(u16::MAX)).then_some(pixels);
+        // A PNG artifact is served untranscoded: refuse one whose declared
+        // size would make every client that decodes it allocate gigabytes.
+        // Within the cap, both sides fit XEP-0084 §4.2.1's unsignedShort.
+        if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
+            return Err(BotAvatarError::TooLarge { width, height });
+        }
         Ok(Self {
             info: AvatarInfo {
                 id: xep0084::compute_avatar_hash(&image.bytes),
                 mime_type: image.mime,
-                width: side(width),
-                height: side(height),
+                width: Some(width),
+                height: Some(height),
                 bytes: Some(image.bytes.len() as u64),
                 url: None,
             },
@@ -98,6 +104,8 @@ enum BotAvatarError {
     Fetch(#[from] FetchError),
     #[error("unreadable image: {0}")]
     Image(#[from] image::ImageError),
+    #[error("image is {width}x{height}, over {MAX_IMAGE_DIMENSION} pixels a side")]
+    TooLarge { width: u32, height: u32 },
 }
 
 enum Slot {
@@ -351,6 +359,46 @@ pub(crate) mod tests {
             fetch_bot_avatar(&oversized, &policy).await,
             Err(BotAvatarError::Fetch(FetchError::SizeExceeded(MAX_BYTES)))
         ));
+    }
+
+    /// A tiny PNG whose header declares a huge image is refused before
+    /// any client is asked to decode it.
+    #[test]
+    fn refuses_a_png_declaring_huge_dimensions() {
+        fn chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            let crc = !kind.iter().chain(data).fold(!0u32, |crc, &byte| {
+                (0..8).fold(crc ^ u32::from(byte), |crc, _| {
+                    (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg())
+                })
+            });
+            let len = u32::try_from(data.len()).expect("chunk length");
+            png.extend(len.to_be_bytes());
+            png.extend(kind);
+            png.extend(data);
+            png.extend(crc.to_be_bytes());
+        }
+        // Signature, header and no pixel data: a few dozen bytes.
+        let declaring = |width: u32| {
+            let mut header = [width.to_be_bytes(), 1u32.to_be_bytes()].concat();
+            header.extend([8, 2, 0, 0, 0]);
+            let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+            chunk(&mut png, b"IHDR", &header);
+            chunk(&mut png, b"IDAT", &[]);
+            chunk(&mut png, b"IEND", &[]);
+            BotAvatar::new(AvatarBytes {
+                bytes: png,
+                mime: "image/png".to_owned(),
+            })
+        };
+        let side = MAX_IMAGE_DIMENSION + 1;
+        assert!(matches!(
+            declaring(side),
+            Err(BotAvatarError::TooLarge { width, height: 1 }) if width == side
+        ));
+        assert!(
+            declaring(MAX_IMAGE_DIMENSION).is_ok(),
+            "the cap itself is served"
+        );
     }
 
     #[test]
