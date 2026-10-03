@@ -8,11 +8,13 @@ use super::iq::{
 };
 use super::parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
-    parse_upload_slot, resolve_component_services, space_from_disco_item,
+    parse_upload_slot, resolve_component_services, room_bots_from_disco_items,
+    space_from_disco_item,
 };
 use super::types::{
     DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredChannelType,
-    DiscoveredComponentServices, DiscoveredSpace, DiscoveredTopology, SpaceNode, UploadSlot,
+    DiscoveredComponentServices, DiscoveredSpace, DiscoveredTopology, RoomBot, SpaceNode,
+    UploadSlot,
 };
 use super::{
     STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_GROUP_DM_FEATURE_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
@@ -47,6 +49,14 @@ pub trait DiscoveryExt {
         jid: &'a str,
         node: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<Vec<DiscoItem>>> + Send + 'a;
+
+    /// The extension bots that have posted in `room` (Waddle's
+    /// [`NODE_WADDLE_ROOM_BOTS`](super::NODE_WADDLE_ROOM_BOTS) disco#items
+    /// node). Empty for a requester who may not enter the room.
+    fn discover_room_bots<'a>(
+        &'a self,
+        room: &'a BareJid,
+    ) -> impl std::future::Future<Output = ClientResult<Vec<RoomBot>>> + Send + 'a;
 
     /// Discover the HTTP upload service under `server_domain`.
     ///
@@ -142,6 +152,12 @@ impl DiscoveryExt for ClientHandle {
         let iq = build_disco_items_iq(jid, node);
         let result = self.send_iq(iq).await?;
         parse_disco_items_result(&result).ok_or_else(parse_error)
+    }
+
+    async fn discover_room_bots(&self, room: &BareJid) -> ClientResult<Vec<RoomBot>> {
+        self.discover_items(room.as_str(), Some(super::NODE_WADDLE_ROOM_BOTS))
+            .await
+            .map(room_bots_from_disco_items)
     }
 
     async fn discover_upload_service(&self, server_domain: &str) -> ClientResult<Option<String>> {

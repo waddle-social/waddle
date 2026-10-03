@@ -194,6 +194,35 @@ fn parse_disco_items_result_extracts_items() {
 }
 
 #[test]
+fn room_bots_parse_bare_jid_items_from_the_bots_node() {
+    let item = |jid: &str, name: Option<&str>, node: Option<&str>| DiscoItem {
+        jid: jid.to_owned(),
+        name: name.map(str::to_owned),
+        node: node.map(str::to_owned),
+    };
+    let bots = room_bots_from_disco_items(vec![
+        item("polls@extensions.example.com", Some("Polls"), None),
+        item("echo@extensions.example.com", None, None),
+        item("echo@extensions.example.com/bot", None, None),
+        item("polls@extensions.example.com", None, Some("some-node")),
+    ]);
+    assert_eq!(
+        bots,
+        [
+            RoomBot {
+                jid: "polls@extensions.example.com".parse().expect("jid"),
+                name: Some("Polls".to_owned()),
+            },
+            RoomBot {
+                jid: "echo@extensions.example.com".parse().expect("jid"),
+                name: None,
+            },
+        ]
+    );
+    assert_eq!(NODE_WADDLE_ROOM_BOTS, "urn:waddle:room:bots:0");
+}
+
+#[test]
 fn space_from_disco_item_requires_spaces_metadata() {
     let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
     let item = DiscoItem {

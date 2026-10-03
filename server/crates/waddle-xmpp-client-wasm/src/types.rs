@@ -811,6 +811,12 @@ pub struct WaddleRoomMember {
     pub affiliation: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct WaddleRoomBot {
+    pub jid: String,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WaddleInboxConversation {
     pub partner: String,

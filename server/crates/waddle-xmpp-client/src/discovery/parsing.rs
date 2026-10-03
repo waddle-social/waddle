@@ -3,7 +3,7 @@ use minidom::Element;
 
 use super::types::{
     DiscoDataField, DiscoDataForm, DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel,
-    DiscoveredChannelType, DiscoveredSpace, SpaceNode, UploadSlot,
+    DiscoveredChannelType, DiscoveredSpace, RoomBot, SpaceNode, UploadSlot,
 };
 use super::{
     BOOKMARKS_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, PUBSUB_METADATA_FORM_TYPE,
@@ -119,6 +119,21 @@ pub fn parse_disco_items_result(iq: &Element) -> Option<Vec<DiscoItem>> {
         .collect();
 
     Some(items)
+}
+
+/// The bots a room lists on its bots node. An item that is not a bare JID
+/// (or names a node) is not a bot and is skipped.
+pub fn room_bots_from_disco_items(items: Vec<DiscoItem>) -> Vec<RoomBot> {
+    items
+        .into_iter()
+        .filter(|item| item.node.is_none())
+        .filter_map(|item| {
+            Some(RoomBot {
+                jid: item.jid.parse().ok()?,
+                name: item.name,
+            })
+        })
+        .collect()
 }
 
 /// Resolve the MUC and Spaces service JIDs from a server's

@@ -239,6 +239,13 @@ export class WaddleClient {
      */
     join_room(room_jid: string, nick: string): Promise<any>;
     leave_room(room_jid: string, nick: string): Promise<any>;
+    /**
+     * The extension bots that have posted in the room: `[{ jid, name }]`
+     * from XEP-0030 disco#items on the room's `urn:waddle:room:bots:0`
+     * node. Bots hold no affiliation, so `list_room_members` never shows
+     * them; a requester who may not enter the room gets `[]`.
+     */
+    list_room_bots(room_jid: string): Promise<any>;
     list_room_members(room_jid: string, affiliation: string): Promise<any>;
     list_roster_contacts(): Promise<any>;
     mark_inbox_read(partner_jid: string, thread_id?: string | null): Promise<any>;

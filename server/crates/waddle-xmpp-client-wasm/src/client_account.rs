@@ -440,6 +440,28 @@ impl WaddleClient {
         })
     }
 
+    /// The extension bots that have posted in the room: `[{ jid, name }]`
+    /// from XEP-0030 disco#items on the room's `urn:waddle:room:bots:0`
+    /// node. Bots hold no affiliation, so `list_room_members` never shows
+    /// them; a requester who may not enter the room gets `[]`.
+    pub fn list_room_bots(&self, room_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_disco_items_iq(&room_jid, Some(discovery::NODE_WADDLE_ROOM_BOTS));
+            let result = send_iq_command(inner, iq).await?;
+            let items = discovery::parse_disco_items_result(&result)
+                .ok_or_else(|| js_error("could not parse disco#items result"))?;
+            let bots = discovery::room_bots_from_disco_items(items)
+                .into_iter()
+                .map(|bot| WaddleRoomBot {
+                    jid: bot.jid.to_string(),
+                    name: bot.name,
+                })
+                .collect::<Vec<_>>();
+            to_js_value(&bots)
+        })
+    }
+
     pub fn set_room_affiliation(
         &self,
         room_jid: String,

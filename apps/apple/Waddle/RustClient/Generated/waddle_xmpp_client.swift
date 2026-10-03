@@ -1316,6 +1316,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func kickOccupant(roomJid: String, nick: String, reason: String?) async throws
 
     /**
+     * The extension bots that have posted in the room (XEP-0030
+     * disco#items on the room's `urn:waddle:room:bots:0` node). Bots
+     * hold no affiliation, so `list_room_members` never shows them;
+     * a requester who may not enter the room gets an empty list.
+     */
+    func listRoomBots(roomJid: String) async throws  -> [WaddleRoomBot]
+
+    /**
      * XEP-0045 §9.5: retrieve the affiliation list for one tier.
      * Callers query the four tiers (owner/admin/member/outcast)
      * separately and tolerate per-tier `forbidden` /
@@ -3664,6 +3672,29 @@ open func kickOccupant(roomJid: String, nick: String, reason: String?)async thro
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * The extension bots that have posted in the room (XEP-0030
+     * disco#items on the room's `urn:waddle:room:bots:0` node). Bots
+     * hold no affiliation, so `list_room_members` never shows them;
+     * a requester who may not enter the room gets an empty list.
+     */
+open func listRoomBots(roomJid: String)async throws  -> [WaddleRoomBot]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_room_bots(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleRoomBot.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -10156,6 +10187,75 @@ public func FfiConverterTypeWaddleReplyTarget_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeWaddleReplyTarget_lower(_ value: WaddleReplyTarget) -> RustBuffer {
     return FfiConverterTypeWaddleReplyTarget.lower(value)
+}
+
+
+/**
+ * An extension bot that has posted in a room.
+ */
+public struct WaddleRoomBot: Equatable, Hashable {
+    /**
+     * Bare JID of the bot.
+     */
+    public var jid: String
+    /**
+     * The bot's display name, when the service reports one.
+     */
+    public var name: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Bare JID of the bot.
+         */jid: String,
+        /**
+         * The bot's display name, when the service reports one.
+         */name: String?) {
+        self.jid = jid
+        self.name = name
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRoomBot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRoomBot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRoomBot {
+        return
+            try WaddleRoomBot(
+                jid: FfiConverterString.read(from: &buf),
+                name: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRoomBot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomBot_lift(_ buf: RustBuffer) throws -> WaddleRoomBot {
+    return try FfiConverterTypeWaddleRoomBot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomBot_lower(_ value: WaddleRoomBot) -> RustBuffer {
+    return FfiConverterTypeWaddleRoomBot.lower(value)
 }
 
 
@@ -16890,6 +16990,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleReference: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleRoomBot: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleRoomBot]
+
+    public static func write(_ value: [WaddleRoomBot], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleRoomBot.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleRoomBot] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleRoomBot]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleRoomBot.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleRoomMemberEntry]
 
@@ -17610,6 +17735,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant() != 31570) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_bots() != 61834) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members() != 46363) {
