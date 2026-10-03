@@ -1316,29 +1316,81 @@ fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> 
     None
 }
 
-/// The document `<title>`, only when it appears inside `<head>` so inline
-/// SVG `<title>` elements in the body window are never mistaken for it.
+/// The document `<title>`, before explicit or implicit body content. Reuse
+/// the head scanner's tag and raw-text rules so comments, quoted attributes,
+/// and script/style contents cannot supply a title or terminate the head.
 fn head_title(html: &str, max_bytes: usize) -> Option<String> {
-    let head = find_ascii_case_insensitive(html, "</head").map_or(html, |end| &html[..end]);
-    let mut offset = 0;
-    let open_end = loop {
-        let start = offset + find_ascii_case_insensitive(&head[offset..], "<title")?;
-        let after_name = start + "<title".len();
-        match head.as_bytes().get(after_name) {
-            Some(b'>') => break after_name + 1,
-            Some(byte) if byte.is_ascii_whitespace() => {
-                break after_name + head[after_name..].find('>')? + 1;
-            }
-            _ => offset = after_name,
+    let mut remaining = html.strip_prefix('\u{feff}').unwrap_or(html);
+    let mut template_depth = 0usize;
+    loop {
+        remaining = remaining.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if template_depth > 0 {
+            remaining = &remaining[remaining.find('<')?..];
         }
-    };
-    let text = &head[open_end..];
-    let text = &text[..find_ascii_case_insensitive(text, "</title")?];
-    let title = html_escape::decode_html_entities(text)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!title.is_empty()).then(|| truncate_utf8_to_bytes(&title, max_bytes))
+        if let Some(comment) = remaining.strip_prefix("<!--") {
+            remaining = &comment[comment.find("-->")? + 3..];
+            continue;
+        }
+        let tail = remaining.strip_prefix('<')?;
+        let end = find_meta_tag_end(tail)?;
+        let mut tag = HtmlTagScanner::default();
+        // Only the tag name is needed here; attribute boundaries were already
+        // handled by the quote-aware tag-end scan above.
+        for byte in tail[..end].bytes() {
+            tag.consume_unquoted(byte);
+            if tag.name_done {
+                break;
+            }
+        }
+        remaining = &tail[end + 1..];
+        match tag.name.as_slice() {
+            b"template" => {
+                template_depth += 1;
+                continue;
+            }
+            b"/template" if template_depth > 0 => {
+                template_depth -= 1;
+                continue;
+            }
+            _ => {}
+        }
+        // With scripting enabled, noscript is raw text in the head.
+        let closing_name = if tag.name == b"noscript" {
+            Some(b"noscript".as_slice())
+        } else {
+            tag.raw_text_closing_name()
+        };
+        if let Some(closing_name) = closing_name {
+            let mut offset = 0;
+            let (text_end, tag_end) = loop {
+                let start = offset + remaining[offset..].find('<')?;
+                match end_tag_end_index_at(remaining.as_bytes(), start, closing_name) {
+                    EndTagMatch::Complete(end) => break (start, end),
+                    EndTagMatch::Incomplete => return None,
+                    EndTagMatch::NotMatch => offset = start + 1,
+                }
+            };
+            if closing_name == b"title" && template_depth == 0 {
+                let title = html_escape::decode_html_entities(&remaining[..text_end])
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return (!title.is_empty()).then(|| truncate_utf8_to_bytes(&title, max_bytes));
+            }
+            // Textarea starts body content even if </head> was omitted.
+            if closing_name == b"textarea" && template_depth == 0 {
+                return None;
+            }
+            remaining = &remaining[tag_end..];
+        } else if template_depth == 0
+            && !matches!(
+                tag.name.as_slice(),
+                b"!doctype" | b"?xml" | b"html" | b"head" | b"base" | b"link" | b"meta"
+            )
+        {
+            return None;
+        }
+    }
 }
 
 fn same_domain_host(left: &Url, right: &Url) -> bool {
@@ -1828,6 +1880,68 @@ mod tests {
         let html = "<html><head></head><body><svg><title>icon</title></svg></body></html>";
 
         assert!(extract_metadata_from_html(&requested_url, html).is_none());
+    }
+
+    #[test]
+    fn head_title_ignores_comments_and_raw_text() {
+        for prefix in [
+            "<!-- <title>Old title</title> -->",
+            r#"<script>const s = "</head><title>Script title</title>";</script>"#,
+            r#"<style>body::before { content: "</head><title>Style title</title>"; }</style>"#,
+        ] {
+            let html = format!("<head>{prefix}<title>Actual title</title></head>");
+            assert_eq!(head_title(&html, 256).as_deref(), Some("Actual title"));
+        }
+    }
+
+    #[test]
+    fn head_title_skips_noscript_and_nested_templates() {
+        for prefix in [
+            "<noscript><style>body { display: none; }</style></noscript>",
+            "<template><div>inert text</div><title>inert title</title></template>",
+            r#"<template><!-- </template> --><template><script>const s = "</template>";</script><title>nested title</title></template></template>"#,
+        ] {
+            let html = format!("<head>{prefix}<title>Actual title</title></head>");
+            assert_eq!(head_title(&html, 256).as_deref(), Some("Actual title"));
+        }
+    }
+
+    #[test]
+    fn head_title_accepts_a_leading_bom_and_omitted_head_start() {
+        assert_eq!(
+            head_title(
+                "\u{feff}<!doctype html><html><title>Actual title</title>",
+                256
+            )
+            .as_deref(),
+            Some("Actual title")
+        );
+    }
+
+    #[test]
+    fn head_title_accepts_an_xhtml_declaration() {
+        let html = r#"<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Actual title</title></head></html>"#;
+        assert_eq!(head_title(html, 256).as_deref(), Some("Actual title"));
+    }
+
+    #[test]
+    fn head_title_stops_at_body_content_when_head_end_is_omitted() {
+        for html in [
+            "<html><head><body><svg><title>icon</title></svg></body></html>",
+            "<html><head><svg><title>icon</title></svg></html>",
+            "<html><head>body text<title>body title</title></html>",
+        ] {
+            assert_eq!(head_title(html, 256), None);
+        }
+    }
+
+    #[test]
+    fn head_title_respects_tag_boundaries_and_quoted_attributes() {
+        let html = r#"<!doctype html><html><title data-label=">">Actual </title-card> title</TITLE ></html>"#;
+        assert_eq!(
+            head_title(html, 256).as_deref(),
+            Some("Actual </title-card> title")
+        );
     }
 
     #[test]
