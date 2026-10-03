@@ -174,22 +174,16 @@ impl ExtensionGrantRepository {
             return Ok(GrantAssertion::Asserted);
         }
         drop(rows);
-        let username = requester
-            .node()
-            .ok_or(IngressUowError::ExtensionGrantAssertionFailed(
-                GrantAssertionFailure::RequesterGone,
-            ))?;
+        // A native account is keyed by its canonical bare JID, which is the
+        // form a parsed `BareJid` already has.
         let sql = dialect_sql(
             tx,
-            "SELECT username FROM native_users WHERE username = ? AND domain = ? FOR SHARE",
-            "SELECT username FROM native_users WHERE username = ? AND domain = ?",
+            "SELECT 1 FROM native_users WHERE jid_key = ? FOR SHARE",
+            "SELECT 1 FROM native_users WHERE jid_key = ?",
         );
         let mut rows = tx
             .transaction_mut()
-            .query(
-                sql,
-                crate::db_params![username.as_str(), requester.domain().as_str()],
-            )
+            .query(sql, crate::db_params![requester.as_str()])
             .await?;
         if rows.next().await?.is_none() {
             return Err(IngressUowError::ExtensionGrantAssertionFailed(

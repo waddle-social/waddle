@@ -112,7 +112,7 @@ impl IngressFixture {
             sqlite_directory: None,
             lineage,
         };
-        fixture.execute("INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", waddle_server::db_params![fixture.principal.bare_jid().to_string(), "romeo".to_string(), "romeo".to_string(), chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
+        fixture.execute("INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", waddle_server::db_params![fixture.principal.bare_jid().to_string(), "romeo".to_string(), "romeo".to_string(), "romeo".to_string(), chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
         fixture.execute("INSERT INTO sessions (id, user_jid, token_hash, auth_context_id, auth_context_version, principal_auth_epoch, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", waddle_server::db_params!["ingress-session".to_string(), fixture.principal.bare_jid().to_string(), "ingress-token".to_string(), fixture.principal.auth_context_id().as_uuid().to_string(), 3_i64, 5_i64, chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
         fixture
     }

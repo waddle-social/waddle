@@ -142,6 +142,33 @@ async fn exercise(fixture: IngressFixture) {
     fixture.close().await;
 }
 
+/// A native requester is held on its canonical JID key, whatever case its
+/// name was registered in.
+async fn native_requester(fixture: IngressFixture) {
+    fixture
+        .execute("DELETE FROM users WHERE jid = 'romeo@example.com'", ())
+        .await;
+    fixture
+        .execute(
+            "INSERT INTO native_users (username, domain, jid_key, password_hash, salt, stored_key, server_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            waddle_server::db_params!["Romeo", "example.com", "romeo@example.com", "unused", "unused", vec![0_u8; 32], vec![0_u8; 32]],
+        )
+        .await;
+    let mut tx = fixture.uow.begin().await.expect("transaction");
+    assert_eq!(
+        Grants::assert_requester(&mut tx, fixture.principal.bare_jid())
+            .await
+            .expect("requester"),
+        GrantAssertion::Asserted
+    );
+    assert_failure(
+        Grants::assert_requester(&mut tx, &"juliet@example.com".parse().expect("requester")).await,
+        GrantAssertionFailure::RequesterGone,
+    );
+    tx.commit().await.expect("commit");
+    fixture.close().await;
+}
+
 fn assert_failure(
     result: Result<GrantAssertion, IngressUowError>,
     expected: GrantAssertionFailure,
@@ -162,4 +189,17 @@ async fn postgres_extension_grants_lifecycle() {
         return;
     };
     exercise(fixture).await;
+}
+
+#[tokio::test]
+async fn sqlite_extension_grants_native_requester() {
+    native_requester(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_extension_grants_native_requester() {
+    let Some(fixture) = IngressFixture::postgres("extension_grants_native").await else {
+        return;
+    };
+    native_requester(fixture).await;
 }
