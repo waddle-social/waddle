@@ -104,6 +104,11 @@ impl Identity {
         Self::new("automation", "command-node", name)
     }
 
+    /// XEP-0030 registry `client/bot`: an automated client.
+    pub fn client_bot(name: Option<&str>) -> Self {
+        Self::new("client", "bot", name)
+    }
+
     pub fn command_list(name: Option<&str>) -> Self {
         Self::new("automation", "command-list", name)
     }

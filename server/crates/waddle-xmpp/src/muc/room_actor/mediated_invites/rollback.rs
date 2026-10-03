@@ -121,6 +121,7 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
         let updates = super::super::admin_handlers::apply_affiliation_change(
             &mut self.room,
             &self.occupant_id_secret,
+            &self.server_hats,
             msg.grant.invitee.clone(),
             msg.grant.previous_affiliation,
             None,

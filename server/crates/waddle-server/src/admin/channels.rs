@@ -2777,6 +2777,7 @@ pub(crate) fn broadcast_group_dm_leave(
         bare_jid: &sender_bare,
         real_jid: Some(leaving_real_jid),
         secret: &state.occupant_id_secret,
+        hats: &state.server_hats,
     };
     if notify_self {
         let presence = waddle_xmpp::muc::build_leave_presence(
@@ -4932,6 +4933,17 @@ async fn run_set_affiliation(
                 format!("no channel '{}'", args.channel_jid),
             ))))
         })?;
+    // Group-DM membership belongs to the group-dm:* commands, which only
+    // ever admit local people.
+    let config = actor
+        .ask(GetConfig)
+        .await
+        .map_err(send_err("room actor GetConfig"))?;
+    if config.group_dm {
+        return Err(bad_request(
+            "group-dm membership is managed by group-dm commands",
+        ));
+    }
     let previous_affiliation = actor
         .ask(GetAffiliation {
             jid: args.member_jid.clone(),

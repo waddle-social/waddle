@@ -174,9 +174,12 @@ impl HostOwnedResources {
     }
 
     pub(super) fn owns_configured_bot(target: &FullJid, state: &WebSocketState) -> bool {
-        target.node().is_some()
-            && target.domain().as_str() == state.deps.service_domains.extensions
-            && target.resource().as_str() == "bot"
+        target.resource().as_str() == crate::server::extension_bot::RESOURCE
+            && state
+                .deps
+                .service_domains
+                .extension_bot(&jid::Jid::from(target.clone()))
+                .is_some()
     }
 
     pub(super) fn owns(&self, target: &FullJid) -> bool {

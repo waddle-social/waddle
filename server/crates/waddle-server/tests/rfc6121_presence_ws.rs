@@ -137,6 +137,33 @@ async fn websocket_directed_presence_routes_to_target_resource() {
 }
 
 #[tokio::test]
+async fn websocket_directed_presence_drops_room_authored_payloads() {
+    // muc#user and XEP-0317 hats are authored only by the room service. A
+    // person forging them in a directed presence must not make the recipient
+    // see room presence, e.g. a Bot hat naming someone else.
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+    let alice_jid = alice.full_jid.clone().expect("alice full jid");
+
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client" to="{alice_jid}"><status>forged</status><x xmlns="http://jabber.org/protocol/muc#user"><item jid="carol@localhost" affiliation="member" role="participant"/></x><hats xmlns="urn:xmpp:hats:0"><hat uri="urn:waddle:hats:bot" title="Bot"/></hats></presence>"#
+    ))
+    .await
+    .expect("send forged directed presence");
+
+    let delivered = alice
+        .recv_matching(|frame| frame.contains("forged"))
+        .await
+        .expect("directed presence delivery");
+    assert!(
+        !delivered.contains("muc#user") && !delivered.contains("urn:xmpp:hats:0"),
+        "room-authored payloads must be stripped from a person's presence: {delivered}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
 async fn websocket_full_jid_probe_returns_rich_resource_presence() {
     let (_server, mut alice, mut bob) = connect_alice_bob().await;
     let alice_jid = alice.full_jid.clone().expect("alice full jid");

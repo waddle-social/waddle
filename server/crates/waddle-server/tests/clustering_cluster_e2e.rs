@@ -2234,8 +2234,12 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     let occupant_id_secret =
         OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
             .expect("valid test occupant-id secret");
-    let room_registry =
-        RoomRegistry::spawn("muc.example.com".to_string(), occupant_id_secret, None);
+    let room_registry = RoomRegistry::spawn(
+        "muc.example.com".to_string(),
+        occupant_id_secret,
+        waddle_xmpp::xep::xep0317::ServerHats::default(),
+        None,
+    );
     room_registry
         .wire_clustering_claims(
             std::sync::Arc::clone(&claim_store),

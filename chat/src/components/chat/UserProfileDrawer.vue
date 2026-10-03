@@ -5,6 +5,8 @@ import AppDrawer from "@/components/ui/AppDrawer.vue";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { formatPepKeyword } from "@/lib/status-publication-ui";
+import { isBotJid } from "@/lib/avatars/author-jid";
+import { identityHats } from "./message-card-badges";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { OccupantHat, OccupantPresence, UserPepProfile } from "@/lib/xmpp-client";
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
@@ -30,6 +32,7 @@ const emit = defineEmits<{
 const pepProfile = ref<UserPepProfile | null>(null);
 const vcard = ref<VCard4Profile | null>(null);
 const loading = ref(false);
+const shownHats = computed(() => identityHats(props.hats, props.jid));
 
 watch(
   () => [open.value, props.jid] as const,
@@ -106,9 +109,9 @@ const hasVCardSection = computed(
       </div>
 
       <!-- Role badges -->
-      <div v-if="hats?.length" class="flex flex-wrap justify-center gap-1.5">
+      <div v-if="shownHats.length" class="flex flex-wrap justify-center gap-1.5">
         <span
-          v-for="hat in hats"
+          v-for="hat in shownHats"
           :key="hat.uri"
           class="type-caption type-emphasis inline-flex h-7 items-center rounded-full border border-border bg-muted/30 px-2 text-muted-foreground"
         >
@@ -198,9 +201,9 @@ const hasVCardSection = computed(
         </section>
       </template>
 
-      <!-- Message button (hidden for own profile) -->
+      <!-- Message button (hidden for own profile and bots, which take no DMs) -->
       <button
-        v-if="!isSelf"
+        v-if="!isSelf && !isBotJid(jid)"
         class="chat-action-button chat-action-button--primary type-action w-full"
         type="button"
         aria-label="Message this person"

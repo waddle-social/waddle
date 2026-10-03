@@ -54,6 +54,9 @@ public enum RoomRole: Hashable, Sendable, Comparable {
 
 /// XEP-0317 hat.
 public struct Hat: Hashable, Sendable {
+    /// The hat the server assigns every extension bot in a room.
+    public static let botURI = "urn:waddle:hats:bot"
+
     public let uri: String
     public let title: String
 

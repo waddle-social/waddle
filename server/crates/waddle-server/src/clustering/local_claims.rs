@@ -1918,6 +1918,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry);
@@ -1945,6 +1946,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry.clone());
@@ -1976,6 +1978,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry.clone());
@@ -2004,6 +2007,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry.clone());
@@ -2053,6 +2057,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry);
@@ -2077,6 +2082,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry.clone());
@@ -2108,6 +2114,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry.clone());
@@ -2245,6 +2252,7 @@ mod tests {
         let registry = waddle_xmpp::muc::RoomRegistry::spawn(
             "muc.example.com".to_string(),
             test_occupant_id_secret(),
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
             None,
         );
         room_local_claims.wire(registry.clone());

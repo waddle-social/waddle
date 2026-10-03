@@ -758,6 +758,7 @@ pub(super) async fn apply_muc_owner_config(
                 let _ = waddle_xmpp::muc::room_actor::enforce_members_only_from_room(
                     &mut room_with_reconciled_config,
                     &state.deps.occupant_id_secret,
+                    &state.deps.app_state.server_hats,
                 );
             }
             recovered_voice_roster = Some(

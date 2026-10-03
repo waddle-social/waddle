@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { ref } from "vue";
 import {
   buildMemberCards,
@@ -12,6 +12,7 @@ import {
 } from "../src/shell/controllers/use-people-rail";
 import type { DmConversation, RosterContact } from "../src/lib/xmpp/types";
 import type { MemberSummary } from "../src/lib/chat-types";
+import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
 
 const ROOM = "general@conference.example.com";
 
@@ -300,5 +301,29 @@ describe("usePeopleRail", () => {
     expect(groups.value.around.map((p) => p.jid)).toEqual(["bob@example.com"]);
     contacts.value = [...contacts.value, contact("amy@example.com", "available")];
     expect(groups.value.around.map((p) => p.jid)).toEqual(["amy@example.com", "bob@example.com"]);
+  });
+});
+
+describe("bots take no DMs, so they are not offered as people", () => {
+  afterEach(() => occupantJidDirectory.clear());
+  const BOT = "helper@extensions.example.com";
+
+  test("the rail and the dashboard's around-now list leave out a known bot", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    const groups = buildPeopleRail(sources({
+      activeRoomJid: ROOM,
+      roomPresence: { helper: "online", bob: "online" },
+      authorJidByNick: { helper: BOT, bob: "bob@example.com" },
+      contacts: [contact(BOT, "available"), contact("carol@example.com", "available")],
+      conversations: [conversation(BOT, "available")],
+    }));
+    expect(groups.room.map((p) => p.jid)).toEqual(["bob@example.com"]);
+    expect(groups.around.map((p) => p.jid)).toEqual(["carol@example.com"]);
+
+    const known = splitKnownPeople(
+      [contact(BOT, "available"), contact("carol@example.com", "available")],
+      [conversation(BOT, "available")],
+    );
+    expect(known.around.map((p) => p.jid)).toEqual(["carol@example.com"]);
   });
 });

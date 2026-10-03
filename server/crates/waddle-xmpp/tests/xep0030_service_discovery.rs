@@ -200,6 +200,11 @@ fn xep0030_identity_constructors_match_spec_disco_categories() {
 
     assert_eq!(Identity::pubsub_leaf(None).category, "pubsub");
     assert_eq!(Identity::pubsub_leaf(None).type_, "leaf");
+
+    // An automated client (an extension bot) is the registry's
+    // `client/bot`, never a service.
+    assert_eq!(Identity::client_bot(None).category, "client");
+    assert_eq!(Identity::client_bot(None).type_, "bot");
 }
 
 #[test]

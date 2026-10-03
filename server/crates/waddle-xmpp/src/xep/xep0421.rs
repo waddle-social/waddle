@@ -105,10 +105,10 @@ pub enum OccupantIdSecretError {
     TooShort { got: usize, min: usize },
 }
 
-/// Bundled occupant-identity inputs for XEP-0045/0421 presence stamping.
+/// Bundled occupant-identity inputs for XEP-0045/0421/0317 presence stamping.
 ///
-/// Three fields that always travel together when a presence-builder needs
-/// to stamp an `<occupant-id/>`:
+/// Fields that always travel together when a presence-builder needs
+/// to stamp an `<occupant-id/>` and server-assigned hats:
 ///
 /// - `bare_jid` — the user's bare JID. **Always required.** The room
 ///   service knows who the occupant is regardless of whether the real
@@ -118,8 +118,10 @@ pub enum OccupantIdSecretError {
 ///   `<item jid='…'>`. The choice is independent of `bare_jid`;
 ///   XEP-0421 occupant-id stamping still uses the bare JID input.
 /// - `secret` — the per-deployment HMAC key.
+/// - `hats` — the deployment's server-assigned XEP-0317 hats, resolved
+///   from `bare_jid`.
 ///
-/// Bundling these three drops public `build_*_presence` argument counts
+/// Bundling these drops public `build_*_presence` argument counts
 /// below clippy's `too_many_arguments` threshold without an `#[allow]`,
 /// and is the typed-payloads-rule-conformant shape for "occupant
 /// identity context" crossing the legacy presence builders' boundary.
@@ -127,6 +129,7 @@ pub struct OccupantIdentity<'a> {
     pub bare_jid: &'a jid::BareJid,
     pub real_jid: Option<&'a jid::FullJid>,
     pub secret: &'a OccupantIdSecret,
+    pub hats: &'a crate::xep::xep0317::ServerHats,
 }
 
 /// An opaque occupant identifier.

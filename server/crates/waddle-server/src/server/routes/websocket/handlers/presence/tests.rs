@@ -107,6 +107,7 @@ fn muc_join_presence_carries_authority_in_xep_0045_payload_only() {
         warn_nonanonymous_join: false,
         muji: None,
         in_call: waddle_xmpp::xep::InCallPresenceState::default(),
+        server_hats: &waddle_xmpp::xep::xep0317::ServerHats::default(),
     });
 
     // XEP-0045: authority lives in the muc#user payload.

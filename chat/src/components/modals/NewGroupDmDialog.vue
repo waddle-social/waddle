@@ -4,6 +4,7 @@ import { Check, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import type { RosterContact } from "@/lib/xmpp/types";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
+import { isBotJid } from "@/lib/avatars/author-jid";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -28,7 +29,7 @@ const selectableContacts = computed(() => {
   return props.contacts
     .filter((contact) => {
       const bare = barePeerJid(contact.jid).toLowerCase();
-      return bare !== self && !excluded.has(bare);
+      return bare !== self && !excluded.has(bare) && !isBotJid(bare);
     })
     .sort((a, b) => contactLabel(a).localeCompare(contactLabel(b), undefined, { sensitivity: "base" }));
 });

@@ -466,6 +466,7 @@ async fn drain_claimed(
         &claimed.row.room_jid,
         &claimed.row.effect,
         &state.deps.occupant_id_secret,
+        &state.deps.app_state.server_hats,
     );
     let mut acks = Vec::new();
     let mut inline = Vec::new();

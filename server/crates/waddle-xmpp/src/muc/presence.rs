@@ -331,18 +331,19 @@ fn add_presence_identity_payloads(
     // The room service knows `bare_jid`; real-JID disclosure is governed
     // independently by `identity.real_jid`.
     //
-    // No XEP-0317 hats are derived here: hats are descriptive social
-    // metadata, not a duplicate of authority. MUC affiliation and role
-    // are already carried by the `<x xmlns='muc#user'><item …/>`
-    // payload the caller attaches above. Out-of-band descriptive hats
-    // (today, only the extension-bot path) install themselves via
-    // `crate::xep::xep0317::set_hats` after this helper returns.
     let occupant_id = crate::xep::xep0421::generate_occupant_id(
         identity.bare_jid,
         &from_room_jid.to_bare(),
         identity.secret,
     );
     crate::xep::xep0421::set_occupant_id_on_presence(presence, &occupant_id);
+    // XEP-0317 hats are descriptive, never a duplicate of the authority
+    // the muc#user `<item/>` above already carries. Only the deployment
+    // assigns them, so every server-built presence for the occupant
+    // (join, replay, role/affiliation change, leave) wears the same set.
+    if let Some(hats) = identity.hats.resolve(identity.bare_jid) {
+        crate::xep::xep0317::set_hats(presence, &hats);
+    }
 }
 
 /// Build a kick presence notification (role changed to none).

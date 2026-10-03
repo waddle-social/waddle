@@ -5,7 +5,7 @@ pub(super) async fn handle_extensions_disco_info<'a>(
     state: &WebSocketState,
 ) -> Option<DiscoInfoResponse<'a>> {
     if req.target_to != Some(req.extensions_domain) {
-        return None;
+        return handle_extension_bot_disco_info(req, state);
     }
 
     if req.node == Some(NODE_COMMANDS) {
@@ -120,6 +120,37 @@ pub(super) async fn handle_extensions_disco_info<'a>(
         Feature::new("urn:waddle:extension:1"),
     ];
     features.extend(extension_features_for_disco(state));
+    let response = build_disco_info_response(req.request_iq, &identities, &features, None);
+    Some(DiscoInfoResponse::iq(response))
+}
+
+/// XEP-0030 on an extension bot's bare JID or `/bot`: the server answers for
+/// the host-owned entity with the registry's `client/bot` identity. Any other
+/// address on the extensions domain does not exist.
+fn handle_extension_bot_disco_info<'a>(
+    req: &'a DiscoInfoRequest<'a>,
+    state: &WebSocketState,
+) -> Option<DiscoInfoResponse<'a>> {
+    let target: jid::Jid = req.target_to?.parse().ok()?;
+    let domains = &state.deps.service_domains;
+    if !domains.is_extensions_address(&target) {
+        return None;
+    }
+    let manager = &state.deps.protocol.extension_manager;
+    let plugin = domains
+        .extension_bot(&target)
+        .filter(|plugin| manager.manifest_for_plugin(plugin.as_str()).is_some());
+    let Some(plugin) = plugin.filter(|_| req.node.is_none()) else {
+        return Some(DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            item_not_found_iq_error("Requested item not found."),
+        ));
+    };
+    let name = crate::server::extension_bot::bot_name(manager, &plugin);
+    let identities = vec![Identity::client_bot(Some(name.as_str()))];
+    let features = vec![Feature::disco_info()];
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))
 }

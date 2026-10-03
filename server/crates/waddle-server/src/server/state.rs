@@ -55,6 +55,8 @@ pub struct AppState {
     pub muc_domain: DomainPart,
     /// Shared secret for XEP-0421 occupant-id generation.
     pub occupant_id_secret: OccupantIdSecret,
+    /// Server-assigned XEP-0317 hats, shared with the room registry.
+    pub server_hats: waddle_xmpp::xep::xep0317::ServerHats,
     /// Shared permission actor handle.
     pub permission_actor: ActorRef<PermissionActor>,
     /// Bare JIDs of server owners (resolved from
@@ -116,10 +118,11 @@ impl AppState {
         let occupant_id_secret =
             OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
                 .expect("test occupant-id secret meets length floor");
-        let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
-            muc_domain.to_string(),
-            occupant_id_secret.clone(),
-        ));
+        let server_hats = waddle_xmpp::xep::xep0317::ServerHats::default();
+        let room_registry = RoomRegistryActor::spawn(
+            RoomRegistryActor::new(muc_domain.to_string(), occupant_id_secret.clone())
+                .with_server_hats(server_hats.clone()),
+        );
         let spaces_jid: BareJid = "spaces.localhost"
             .parse()
             .expect("test spaces JID 'spaces.localhost' parses as BareJid");
@@ -138,6 +141,7 @@ impl AppState {
             spaces_jid,
             muc_domain,
             occupant_id_secret,
+            server_hats,
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
             node_lifecycle: crate::clustering::NodeLifecycle::new(),
@@ -166,6 +170,7 @@ impl AppState {
             spaces_jid,
             muc_domain,
             occupant_id_secret,
+            server_hats,
             permission_actor,
             server_owner_jids,
             node_lifecycle,
@@ -184,6 +189,7 @@ impl AppState {
             spaces_jid,
             muc_domain,
             occupant_id_secret,
+            server_hats,
             permission_actor,
             server_owner_jids,
             node_lifecycle,
@@ -318,6 +324,7 @@ pub struct AppStateDeps {
     pub spaces_jid: BareJid,
     pub muc_domain: DomainPart,
     pub occupant_id_secret: OccupantIdSecret,
+    pub server_hats: waddle_xmpp::xep::xep0317::ServerHats,
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,
     pub node_lifecycle: crate::clustering::NodeLifecycle,

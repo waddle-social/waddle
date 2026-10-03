@@ -684,6 +684,7 @@ export class BrowserXmppClient {
     this.presence = new PresenceManager({
       events: this.events,
       currentRoom: () => this.currentRoom,
+      isKnownMucRoom: (bareJid) => this.isKnownMucRoom(bareJid),
       ownFullJidCandidates: () => this.ownFullJidCandidates(),
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
       handleMucPresenceError: (presence) => this.handleMucPresenceError(presence),
@@ -2138,7 +2139,7 @@ export class BrowserXmppClient {
    * XEP-0045 §7.2.4: a room occupant's real JID was disclosed, for any
    * joined room (not only the focused one).
    */
-  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string | null) => void): () => void {
+  addOccupantRealJidHandler(handler: (roomJid: string, nick: string, bareJid: string | null, isBot?: boolean) => void): () => void {
     return this.events.on("occupantRealJid", handler);
   }
 

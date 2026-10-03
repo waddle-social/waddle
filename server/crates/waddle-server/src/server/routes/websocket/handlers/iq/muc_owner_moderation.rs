@@ -498,6 +498,7 @@ async fn complete_destroy_snapshot(
                 bare_jid: &occupant_bare,
                 real_jid: Some(&session_jid),
                 secret: &state.deps.occupant_id_secret,
+                hats: &state.deps.app_state.server_hats,
             };
             let presence = build_destroy_notification(
                 &room_jid,

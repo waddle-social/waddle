@@ -7,7 +7,7 @@ import type { AvatarChangedEvent } from "../src/lib/xmpp/client-events";
 /** Client double with a real multi-listener bus: unsubscribe really unsubscribes. */
 function fakeClient() {
   const changed = new Set<(event: AvatarChangedEvent) => void>();
-  const occupants = new Set<(roomJid: string, nick: string, bareJid: string) => void>();
+  const occupants = new Set<(roomJid: string, nick: string, bareJid: string, isBot?: boolean) => void>();
   const ownProfile = new Set<(ownBareJid: string) => void>();
   const forgotten: string[] = [];
   const on = <T>(set: Set<T>, handler: T) => {
@@ -25,7 +25,7 @@ function fakeClient() {
   return {
     client,
     forgotten,
-    emitOccupant: (roomJid: string, nick: string, bareJid: string) => { for (const h of occupants) h(roomJid, nick, bareJid); },
+    emitOccupant: (roomJid: string, nick: string, bareJid: string, isBot?: boolean) => { for (const h of occupants) h(roomJid, nick, bareJid, isBot); },
     emitAvatarChanged: (event: AvatarChangedEvent) => { for (const h of changed) h(event); },
   };
 }
@@ -53,6 +53,19 @@ describe("avatar binding", () => {
     expect(directory.lookup("room@muc.example.com", "sam")).toBeNull();
     expect(store.urlFor("alice@example.com")).toBeNull();
     expect(store.isKnownAbsent("carol@example.com")).toBe(false);
+  });
+
+  test("bots reported by the client are remembered until logout", () => {
+    const directory = new OccupantJidDirectory();
+    const binding = createAvatarBinding(new AvatarStore(), directory);
+    const client = fakeClient();
+    binding.bind(client.client);
+    client.emitOccupant("room@muc.example.com", "helper", "helper@extensions.example.com", true);
+    client.emitOccupant("room@muc.example.com", "sam", "alice@example.com", false);
+    expect(directory.isBot("helper@extensions.example.com")).toBe(true);
+    expect(directory.isBot("alice@example.com")).toBe(false);
+    binding.logout();
+    expect(directory.isBot("helper@extensions.example.com")).toBe(false);
   });
 
   test("binding a new client replaces the old one's handlers", () => {

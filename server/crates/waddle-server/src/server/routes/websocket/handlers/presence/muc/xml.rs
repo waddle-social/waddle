@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) struct MucJoinPresence<'a> {
     pub(crate) occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    pub(crate) server_hats: &'a waddle_xmpp::xep::xep0317::ServerHats,
     pub(crate) room_jid: &'a BareJid,
     pub(crate) nick: &'a str,
     pub(crate) to_jid: &'a FullJid,
@@ -61,6 +62,7 @@ pub(super) fn build_muc_join_presence_stanza(
             bare_jid: &real_bare,
             real_jid: visible_real_jid,
             secret: params.occupant_id_secret,
+            hats: params.server_hats,
         },
     );
     if let Some(muji) = params.muji {
@@ -177,6 +179,7 @@ pub(super) fn build_muc_self_unavailable_xml(
             bare_jid: &sender_bare,
             real_jid: Some(sender_jid),
             secret: &state.deps.occupant_id_secret,
+            hats: &state.deps.app_state.server_hats,
         },
     );
     stanza_to_xml(&Stanza::Presence(presence))

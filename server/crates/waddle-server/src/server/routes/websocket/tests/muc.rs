@@ -993,6 +993,178 @@ async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
     }
 }
 
+/// The XEP-0317 `<hat/>` elements an occupant presence frame carries.
+fn presence_hats_for_test(frame: &str) -> waddle_xmpp::xep::xep0317::HatSet {
+    let presence = Element::from_str(frame).expect("presence XML");
+    assert_eq!(presence.name(), "presence", "{frame}");
+    presence
+        .get_child("hats", waddle_xmpp::xep::xep0317::NS_HATS)
+        .map(waddle_xmpp::xep::xep0317::parse_hats_element)
+        .unwrap_or_default()
+}
+
+fn muc_admin_item_frame(id: &str, room_jid: &BareJid, item: &[(&str, &str)]) -> String {
+    let mut item_element = Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN);
+    for (name, value) in item {
+        item_element = item_element.attr(
+            minidom::rxml::NcName::try_from(*name).expect("item attribute name"),
+            *value,
+        );
+    }
+    element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                    .append(item_element.build())
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+/// XEP-0317 §3: the Bot hat is server-assigned from the occupant's real JID,
+/// so it rides every server-built presence for an extension bot, not only the
+/// one built when the bot joined. A bot that is already in the room wears it
+/// for a late joiner's replay and for role and affiliation changes, while the
+/// humans around it wear none.
+#[tokio::test]
+async fn xep_0317_extension_bot_hat_rides_join_replay_and_admin_updates() {
+    use waddle_xmpp::xep::xep0317::{Hat, HatSet};
+
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "bot-hat@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let witness: FullJid = "witness@example.com/web".parse().expect("witness jid");
+    let bot: FullJid = "helper@extensions.example.com/bot"
+        .parse()
+        .expect("bot jid");
+    let bot_hat = HatSet::new().with_hat(Hat::bot());
+    let (bob_tx, mut bob_rx) = mpsc::channel(16);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    for (jid, nick, session) in [
+        (&alice, "alice", Some(alice_session.clone())),
+        (&bob, "bob", None),
+    ] {
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            jid,
+            nick,
+            None,
+            &session,
+        )
+        .await;
+    }
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(waddle_xmpp::muc::room_actor::Join {
+            session: OccupancySessionGeneration::mint(),
+            nick: "helper".into(),
+            real_jid: bot.clone(),
+            role: waddle_xmpp::Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("bot joins");
+
+    let replay = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &witness,
+        "witness",
+        None,
+        &None,
+    )
+    .await;
+    let frame_from = |responses: &[String], nick: &str| {
+        let from = format!("{room_jid}/{nick}");
+        responses
+            .iter()
+            .find(|frame| {
+                Element::from_str(frame).is_ok_and(|element| {
+                    element.name() == "presence" && element.attr("from") == Some(from.as_str())
+                })
+            })
+            .unwrap_or_else(|| panic!("no presence from {from}: {responses:?}"))
+            .clone()
+    };
+    assert_eq!(
+        presence_hats_for_test(&frame_from(&replay, "helper")),
+        bot_hat,
+        "late joiner's replay of the bot carries the Bot hat: {replay:?}"
+    );
+    for human in ["alice", "bob"] {
+        assert!(
+            presence_hats_for_test(&frame_from(&replay, human)).is_empty(),
+            "{human} wears no hat"
+        );
+    }
+    while bob_rx.try_recv().is_ok() {}
+
+    let ready = ready_phase(&alice);
+    for (id, item, expected) in [
+        (
+            "bot-role",
+            vec![("nick", "helper"), ("role", "moderator")],
+            "role='moderator'",
+        ),
+        (
+            "bot-affiliation",
+            vec![
+                ("jid", "helper@extensions.example.com"),
+                ("affiliation", "admin"),
+            ],
+            "affiliation='admin'",
+        ),
+    ] {
+        let responses = handle_iq(
+            &muc_admin_item_frame(id, &room_jid, &item),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(alice_session.clone()),
+            &ready,
+        )
+        .await;
+        assert!(
+            responses[0].contains("type='result'"),
+            "{id}: {responses:?}"
+        );
+        let mut frames: Vec<String> = responses[1..].to_vec();
+        frames.extend(
+            std::iter::from_fn(|| bob_rx.try_recv().ok())
+                .map(|outbound| stanza_to_xml(&outbound.stanza)),
+        );
+        let updates: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.contains(&format!("{room_jid}/helper")))
+            .collect();
+        assert!(
+            !updates.is_empty() && updates.iter().all(|frame| frame.contains(expected)),
+            "{id} broadcasts the bot's new {expected}: {frames:?}"
+        );
+        for update in updates {
+            assert_eq!(
+                presence_hats_for_test(update),
+                bot_hat,
+                "{id} keeps the Bot hat on the bot's update presence: {update}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn managed_members_only_join_requires_explicit_channel_member_affiliation() {
     // #1440: every join denial now increments

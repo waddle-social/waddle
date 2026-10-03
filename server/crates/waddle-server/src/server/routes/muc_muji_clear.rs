@@ -341,6 +341,7 @@ pub(crate) fn broadcast_muji_clear(
                 bare_jid: &owner_bare,
                 real_jid: Some(owner_jid),
                 secret: &state.deps.occupant_id_secret,
+                hats: &state.deps.app_state.server_hats,
             };
             let is_self = recipient.to_bare() == owner_bare;
             let mut presence = build_occupant_presence(

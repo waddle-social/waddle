@@ -223,6 +223,13 @@ async fn handle_presence_impl(
     context: PresenceHandlerContext<'_>,
 ) -> Vec<String> {
     strip_client_authored_delay(&mut presence);
+    if presence
+        .to
+        .as_ref()
+        .is_none_or(|jid| jid.domain().as_str() != context.muc_domain)
+    {
+        strip_client_authored_room_payloads(&mut presence);
+    }
     let is_unavailable = presence.type_ == xmpp_parsers::presence::Type::Unavailable;
 
     // Check if this is a MUC presence (to room@muc.domain/nick)
@@ -399,6 +406,30 @@ async fn handle_presence_impl(
 
     match parse_subscription_presence(&presence, &sender_jid.to_bare()) {
         Ok(PresenceAction::Subscription(request)) => {
+            // Nothing on the extensions domain accepts a subscription: decline
+            // a request, ignore the rest, and never touch the roster (RFC 6121
+            // §8.5.1).
+            if context
+                .state
+                .deps
+                .service_domains
+                .is_extensions_address(&jid::Jid::from(request.to.clone()))
+            {
+                if request.subscription_type
+                    != waddle_xmpp::presence::subscription::SubscriptionType::Subscribe
+                {
+                    return vec![];
+                }
+                return vec![stanza_to_xml(&Stanza::Presence(
+                    waddle_xmpp::presence::subscription::build_subscription_presence(
+                        waddle_xmpp::presence::subscription::SubscriptionType::Unsubscribed,
+                        &request.to,
+                        &request.from,
+                        None,
+                        &[],
+                    ),
+                ))];
+            }
             if try_handle_remote_subscription_presence(
                 context.state,
                 &request,
@@ -476,6 +507,16 @@ fn strip_client_authored_delay(presence: &mut xmpp_parsers::presence::Presence) 
     presence
         .payloads
         .retain(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY));
+}
+
+/// Room occupant identity (muc#user) and XEP-0317 hats are authored only by
+/// the room service. A person's broadcast or directed presence carrying them
+/// would let the recipient mistake it for room presence, e.g. a forged Bot hat.
+fn strip_client_authored_room_payloads(presence: &mut xmpp_parsers::presence::Presence) {
+    waddle_xmpp::xep::xep0317::strip_hats(presence);
+    presence
+        .payloads
+        .retain(|payload| !payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER));
 }
 
 fn is_directed_presence_update(presence: &xmpp_parsers::presence::Presence) -> bool {

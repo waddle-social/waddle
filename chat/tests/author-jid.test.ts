@@ -72,6 +72,28 @@ describe("resolveAuthorJid: identity the row carries, else initials", () => {
   });
 });
 
+describe("the occupant directory remembers bots by real JID for the session", () => {
+  test("a bot stays a bot after its nick is reused or freed, and clear() forgets it", () => {
+    const directory = new OccupantJidDirectory();
+    directory.record(ROOM, "helper", "Helper@extensions.waddle.social/bot", true);
+    expect(directory.isBot("helper@extensions.waddle.social")).toBe(true);
+    expect(directory.isBot("HELPER@extensions.waddle.social/bot")).toBe(true);
+    directory.record(ROOM, "helper", "alice@waddle.social");
+    directory.record(ROOM, "helper", null);
+    expect(directory.isBot("helper@extensions.waddle.social")).toBe(true);
+    expect(directory.isBot("alice@waddle.social")).toBe(false);
+    expect(directory.isBot(null)).toBe(false);
+    directory.clear();
+    expect(directory.isBot("helper@extensions.waddle.social")).toBe(false);
+  });
+
+  test("a bot flag without a disclosed JID records nothing", () => {
+    const directory = new OccupantJidDirectory();
+    directory.record(ROOM, "helper", null, true);
+    expect(directory.isBot(ROOM + "/helper")).toBe(false);
+  });
+});
+
 describe("the occupant directory holds only the current holder", () => {
   test("lookups are reactive to newly disclosed occupants and scoped per room", () => {
     const directory = new OccupantJidDirectory();

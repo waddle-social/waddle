@@ -356,7 +356,6 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         body: DisplayText::new("bot answer").expect("body"),
         room: RoomJid::new(room_jid.to_string()).expect("room"),
         preferred_nick: None,
-        bot_hat_label: None,
         stanza_id: None,
         thread_id: Some(ThreadId::new("root-msg").expect("thread")),
         reply_to: Some(ReplyTarget {

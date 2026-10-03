@@ -1814,6 +1814,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             // state — the late joiner is the one we're trying to help.
             responses.push(build_muc_join_presence_xml(MucJoinPresence {
                 occupant_id_secret: &state.deps.occupant_id_secret,
+                server_hats: &state.deps.app_state.server_hats,
                 room_jid,
                 nick: &existing.nick,
                 to_jid: sender_jid,
@@ -1835,6 +1836,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             }) {
                 responses.push(build_muc_join_presence_xml(MucJoinPresence {
                     occupant_id_secret: &state.deps.occupant_id_secret,
+                    server_hats: &state.deps.app_state.server_hats,
                     room_jid,
                     nick: &extra.nick,
                     to_jid: sender_jid,
@@ -1862,6 +1864,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             for existing in &join_outcome.existing_occupants {
                 let presence_stanza = build_muc_join_presence_stanza(MucJoinPresence {
                     occupant_id_secret: &state.deps.occupant_id_secret,
+                    server_hats: &state.deps.app_state.server_hats,
                     room_jid,
                     nick: &nick,
                     to_jid: &existing.jid,
@@ -1883,6 +1886,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
         // Send self-presence to the joining user (with status code 110)
         responses.push(build_muc_join_presence_xml(MucJoinPresence {
             occupant_id_secret: &state.deps.occupant_id_secret,
+            server_hats: &state.deps.app_state.server_hats,
             room_jid,
             nick: &nick,
             to_jid: sender_jid,
@@ -1913,6 +1917,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
         }) {
             responses.push(build_muc_join_presence_xml(MucJoinPresence {
                 occupant_id_secret: &state.deps.occupant_id_secret,
+                server_hats: &state.deps.app_state.server_hats,
                 room_jid,
                 nick: &nick,
                 to_jid: sender_jid,
@@ -2652,7 +2657,12 @@ mod resolver_sync_retry_tests {
         let member: BareJid = "deposed@example.com".parse().expect("member JID");
         let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
             .expect("occupant-id secret");
-        let registry = RoomRegistry::spawn("muc.example.com".to_string(), secret, None);
+        let registry = RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            secret,
+            waddle_xmpp::xep::xep0317::ServerHats::default(),
+            None,
+        );
         let actor = registry
             .get_or_create_room(
                 room_jid.clone(),

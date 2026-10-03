@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   authorBadge,
   authorBadgeTooltip,
   authorityBadge,
   descriptiveBadge,
+  identityHats,
 } from "../src/components/chat/message-card-badges";
+import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
 import type { OccupantAuthority, OccupantHat } from "../src/lib/xmpp-client";
 
 const owner: OccupantAuthority = { affiliation: "owner", role: "moderator" };
@@ -81,5 +83,36 @@ describe("authorBadgeTooltip", () => {
 
   test("empty when no badges apply", () => {
     expect(authorBadgeTooltip(null, [])).toBe("");
+  });
+});
+
+describe("identityHats: the badge follows the identity behind a row, not its nick", () => {
+  afterEach(() => occupantJidDirectory.clear());
+  const ROOM = "general@muc.example.com";
+  const BOT = "helper@extensions.example.com";
+
+  test("a known bot's row shows BOT even when the nick holds no hats (history)", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    expect(descriptiveBadge(identityHats([], BOT))?.label).toBe("BOT");
+    expect(descriptiveBadge(identityHats(undefined, BOT))?.label).toBe("BOT");
+    // ...even when the nick now belongs to someone else with other hats.
+    expect(identityHats([verifiedHat], BOT)).toEqual([botHat]);
+  });
+
+  test("a non-bot row never inherits the bot hat from a bot that now holds its nick", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    expect(identityHats([botHat], "alice@example.com")).toEqual([]);
+    expect(identityHats([botHat, verifiedHat], "alice@example.com")).toEqual([verifiedHat]);
+  });
+
+  test("a known bot keeps the hats its nick carries", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    const hats = [{ uri: "urn:waddle:hats:bot", title: "Server bot" }, verifiedHat];
+    expect(identityHats(hats, BOT)).toBe(hats);
+  });
+
+  test("without an identity the nick's hats are all there is", () => {
+    expect(identityHats([botHat], null)).toEqual([botHat]);
+    expect(identityHats(undefined, undefined)).toEqual([]);
   });
 });

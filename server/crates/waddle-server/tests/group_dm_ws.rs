@@ -16,6 +16,8 @@ const DOMAIN: &str = "localhost";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
 const NODE_CHANNELS_CREATE: &str = "urn:waddle:admin:channels:create:0";
+const NODE_CHANNELS_AFFILIATIONS: &str = "urn:waddle:admin:channels:affiliations:0";
+const NODE_CHANNELS_SET_AFFILIATION: &str = "urn:waddle:admin:channels:set-affiliation:0";
 const NODE_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
 const NODE_GROUP_DM_LEAVE: &str = "urn:waddle:group-dm:leave:0";
 const NODE_GROUP_DM_RENAME: &str = "urn:waddle:group-dm:rename:0";
@@ -969,6 +971,98 @@ async fn group_dm_member_invites_new_member_with_history_access_extension() {
             .any(|frame| frame.contains("pre-add visible to full")),
         "duplicate invite must not overwrite an existing full-history boundary: {mam:?}"
     );
+}
+
+/// A group DM is a conversation between local people. Create and mediated
+/// invite refuse an extension bot as a peer, and the admin set-affiliation
+/// command leaves group-DM membership to the group-dm commands, so a bot never
+/// ends up a member.
+#[tokio::test]
+async fn group_dm_refuses_extension_bots_and_admin_affiliation_changes() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-bot-alice").await;
+    let mut admin = admin_client(&server, "group-dm-bot-admin").await;
+    let bot = "helper@extensions.localhost";
+
+    let create = send_command(
+        &mut alice,
+        NODE_GROUP_DM_CREATE,
+        "group-dm-create-with-bot",
+        submit_form(
+            NODE_GROUP_DM_CREATE,
+            vec![
+                text_field("name", "Alice, Bob, Helper"),
+                list_multi_field("member_jids", &["alice@localhost", "bob@localhost", bot]),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&create) && create.contains("bad-request"),
+        "a bot is not a group-DM member: {create}"
+    );
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-bot-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+    join_room(&mut alice, &room_jid, "alice").await;
+    let invite = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='invite-bot'>\
+            <x xmlns='{NS_MUC_USER}'><invite to='{bot}'/></x>\
+         </message>"
+    );
+    alice.send(&invite).await.expect("send mediated invite");
+    let rejection = alice
+        .recv_matching(|frame| frame.contains("invite-bot"))
+        .await
+        .expect("invite rejection");
+    assert!(
+        is_error(&rejection) && rejection.contains("bad-request"),
+        "a bot cannot be invited into a group DM: {rejection}"
+    );
+
+    let set_affiliation = send_command(
+        &mut admin,
+        NODE_CHANNELS_SET_AFFILIATION,
+        "group-dm-set-affiliation",
+        submit_form(
+            NODE_CHANNELS_SET_AFFILIATION,
+            vec![
+                text_field("channel_jid", &room_jid),
+                text_field("member_jid", bot),
+                text_field("affiliation", "member"),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&set_affiliation) && set_affiliation.contains("bad-request"),
+        "admin set-affiliation does not manage group-DM membership: {set_affiliation}"
+    );
+
+    let affiliations = send_command(
+        &mut admin,
+        NODE_CHANNELS_AFFILIATIONS,
+        "group-dm-affiliations",
+        submit_form(
+            NODE_CHANNELS_AFFILIATIONS,
+            vec![text_field("channel_jid", &room_jid)],
+        ),
+    )
+    .await;
+    assert!(is_result(&affiliations), "{affiliations}");
+    assert!(
+        affiliations.contains("alice@localhost") && !affiliations.contains(bot),
+        "the bot holds no affiliation in the group DM: {affiliations}"
+    );
+    let _ = alice.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]

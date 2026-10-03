@@ -37,7 +37,7 @@ import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { callThreadAnchorLabel, callThreadAnchorThreadId, useCallAnchorCardState } from "@/lib/call-thread-anchor";
 import { resolveThreadActionTarget } from "@/lib/thread-action-target";
 import type { CallMedia } from "@/lib/calls/types";
-import { authorBadge as authorBadgeFor, authorBadgeTooltip as authorBadgeTooltipFor } from "./message-card-badges";
+import { authorBadge as authorBadgeFor, authorBadgeTooltip as authorBadgeTooltipFor, identityHats } from "./message-card-badges";
 import { eventBandsFor, rendersAsSystemBand } from "./message-system-band";
 import { visibleQuestionScore, visibleSafetyScores } from "./message-safety-scores";
 import { formatThreadRecency } from "./message-thread-recency";
@@ -108,13 +108,14 @@ const emit = defineEmits<{
   unpin: [messageId: string];
 }>();
 
-const authorBadge = computed(() => authorBadgeFor(props.authority, props.hats));
+const rowHats = computed(() => identityHats(props.hats, props.avatarJid));
+const authorBadge = computed(() => authorBadgeFor(props.authority, rowHats.value));
 const safetyScores = computed(() => {
   const scores = props.message.safetyScores;
   if (!scores || props.message.isRetracted) return null;
   return visibleSafetyScores(props.message) || visibleQuestionScore(props.message) ? scores : null;
 });
-const authorBadgeTooltip = computed(() => authorBadgeTooltipFor(props.authority, props.hats));
+const authorBadgeTooltip = computed(() => authorBadgeTooltipFor(props.authority, rowHats.value));
 
 const eventBands = computed(() => eventBandsFor(props.message.extensionAnnotations));
 const renderAsSystemBand = computed(() => rendersAsSystemBand(eventBands.value));

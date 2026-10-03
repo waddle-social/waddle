@@ -97,6 +97,16 @@ struct StoreTests {
         #expect(presence.availability(of: bob) == .away)
     }
 
+    @Test func presenceFlagsBotOccupantByHat() {
+        let presence = PresenceStore(isRoom: { $0 == room })
+        let vip = Hat(uri: "urn:waddle:hats:vip", title: "VIP")
+        let bot = Hat(uri: Hat.botURI, title: "Bot")
+        presence.apply(WirePresence(from: room.with(resource: "helper")!, kind: .available, hats: [vip, bot]))
+        presence.apply(WirePresence(from: room.with(resource: "carol")!, kind: .available, hats: [vip]))
+        #expect(presence.occupant(named: "helper", in: room)?.isBot == true)
+        #expect(presence.occupant(named: "carol", in: room)?.isBot == false)
+    }
+
     @Test func directListOrdersByRecency() {
         let directory = DirectoryStore()
         directory.touchDirect(bob, at: date(1), preview: "one")

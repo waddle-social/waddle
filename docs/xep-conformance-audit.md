@@ -39,7 +39,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 |------|------------------------------------------------------|------------------------------------|-----|------|-------|------------|------------|
 | 0004 | Data Forms                                           | jabber:x:data                      |  -  |  Y   |   ?   | unaudited  | Building block, used by many. |
 | 0012 | Last Activity                                        | jabber:iq:last                     |  Y  |  Y   |   Y   | unaudited  | |
-| 0030 | Service Discovery                                    | http://jabber.org/protocol/disco#* |  Y  |  Y   |   Y   | unaudited  | disco/info.rs |
+| 0030 | Service Discovery                                    | http://jabber.org/protocol/disco#* |  Y  |  Y   |   Y   | unaudited  | disco/info.rs. Extension bots (`<plugin>@extensions.<domain>`, bare or `/bot`) answer as `client/bot` with no items; other extensions-domain addresses return item-not-found. |
 | 0045 | Multi-User Chat                                      | http://jabber.org/protocol/muc     |  Y  |  Y   |   Y   | unaudited  | muc_* feature family |
 | 0047 | In-Band Bytestreams                                  | http://jabber.org/protocol/ibb     |  -  |  Y   |   -   | unaudited  | Impl exists, no advert? |
 | 0048 | Bookmarks (legacy)                                   | storage:bookmarks                  |  -  |  Y   |   -   | unaudited  | Superseded by 0402 |
@@ -81,7 +81,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0300 | Use of Cryptographic Hash Functions in XMPP          | urn:xmpp:hashes:2                  |  -  |  Y   |   -   | unaudited  | |
 | 0308 | Last Message Correction                              | urn:xmpp:message-correct:0         |  Y  |  Y   |   Y   | unaudited  | |
 | 0313 | Message Archive Management                           | urn:xmpp:mam:2 + :2#extended       |  Y  |  Y   |   Y   | unaudited  | Plus Waddle fulltext / thread extensions |
-| 0317 | Hats                                                 | urn:xmpp:hats:0                    |  Y  |  Y   |   Y   | gap (partial) | Server-side authority/hat conflation fixed in **PR #611**. Dedicated test suite added (`tests/xep0317_hats.rs`). Outstanding: client-side `roleHatsForOccupant` mirror (B), MessageCard chip rewiring (C), Waddle-namespace hat URIs (D). |
+| 0317 | Hats                                                 | urn:xmpp:hats:0                    |  Y  |  Y   |   Y   | partial    | Authority stays in XEP-0045 (#611). The deployment assigns hats through `ServerHats`; every server-built occupant presence (join, late-joiner replay, role/affiliation change, leave) carries them, and client-sent hats are stripped. Today only extension bots wear one (`urn:waddle:hats:bot`). Hat list/assign commands (§3.2–3.6) are not implemented. Tests: `waddle-xmpp/tests/xep0317_hats.rs`. |
 | 0319 | Last User Interaction in Presence                    | urn:xmpp:idle:1                    |  -  |  Y   |   -   | unaudited  | |
 | 0333 | Chat Markers                                         | urn:xmpp:chat-markers:0            |  Y  |  Y   |   Y   | unaudited  | |
 | 0334 | Message Processing Hints                             | urn:xmpp:hints                     |  -  |  Y   |   Y   | unaudited  | |

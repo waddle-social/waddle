@@ -7,7 +7,7 @@ export interface AvatarClient {
   fetchUserAvatar: (jid: string) => Promise<string | null>;
   forgetUserAvatar: (jid: string) => void;
   addAvatarChangedHandler: (handler: (event: AvatarChangedEvent) => void) => () => void;
-  addOccupantRealJidHandler: (handler: (roomJid: string, nick: string, bareJid: string | null) => void) => () => void;
+  addOccupantRealJidHandler: (handler: (roomJid: string, nick: string, bareJid: string | null, isBot?: boolean) => void) => () => void;
   addOwnProfilePublishedHandler: (handler: (ownBareJid: string) => void) => () => void;
   addOwnOccupantNickHandler: (handler: (roomJid: string, nick: string | null) => void) => () => void;
 }
@@ -25,7 +25,7 @@ function bindAvatarClient(
   store.setFetcher((jid) => client.fetchUserAvatar(jid));
   store.setEvictionHandler((jid) => client.forgetUserAvatar(jid));
   const offChanged = client.addAvatarChangedHandler((event) => store.handleAvatarChanged(event.jid, event.avatarId));
-  const offOccupant = client.addOccupantRealJidHandler((roomJid, nick, bareJid) => directory.record(roomJid, nick, bareJid));
+  const offOccupant = client.addOccupantRealJidHandler((roomJid, nick, bareJid, isBot) => directory.record(roomJid, nick, bareJid, isBot));
   const offOwnProfile = client.addOwnProfilePublishedHandler((ownJid) => store.invalidate(ownJid));
   const offOwnNick = client.addOwnOccupantNickHandler((roomJid, nick) => directory.recordOwnNick(roomJid, nick));
   return () => {

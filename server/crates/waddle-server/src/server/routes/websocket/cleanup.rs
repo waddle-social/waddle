@@ -253,6 +253,7 @@ pub(crate) async fn echo_muc_self_unavailable(
         bare_jid: &sender_bare,
         real_jid: Some(sender_jid),
         secret: &state.deps.occupant_id_secret,
+        hats: &state.deps.app_state.server_hats,
     };
     let presence = waddle_xmpp::muc::build_leave_presence(
         &from_jid,
@@ -323,6 +324,7 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
             bare_jid: &sender_bare,
             real_jid: Some(sender_jid),
             secret: &state.deps.occupant_id_secret,
+            hats: &state.deps.app_state.server_hats,
         };
         let presence = waddle_xmpp::muc::build_leave_presence(
             &from_jid,
@@ -375,6 +377,7 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining_resumable(
                 bare_jid: &owner_bare,
                 real_jid: Some(owner_jid),
                 secret: &state.deps.occupant_id_secret,
+                hats: &state.deps.app_state.server_hats,
             };
             let is_self = occupant_jid.to_bare() == owner_bare;
             let mut presence = waddle_xmpp::muc::build_occupant_presence(

@@ -4,6 +4,7 @@ import { MessageCircle, X } from "lucide-vue-next";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { formatPepKeyword } from "@/lib/status-publication-ui";
+import { isBotJid } from "@/lib/avatars/author-jid";
 import type { BrowserXmppClient, UserPepProfile } from "@/lib/xmpp-client";
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import type { MemberCardModel } from "@/shell/controllers/use-people-rail";
@@ -178,7 +179,7 @@ const ringClass = computed(() => {
     </template>
 
     <button
-      v-if="!isSelf"
+      v-if="!isSelf && !isBotJid(member.jid)"
       type="button"
       class="community-pill community-pill--primary justify-center"
       :aria-label="`Message ${member.name}`"

@@ -917,6 +917,7 @@ pub struct RoomActor {
     /// when that backlog is full.
     seal_state: RoomSealState,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
+    server_hats: crate::xep::xep0317::ServerHats,
     /// Durable membership hydrated from the deployment's membership
     /// source at spawn (#1135). Kept separate from
     /// `MucRoom.affiliation_list` on purpose: it never grants join /
@@ -1138,6 +1139,7 @@ impl RoomActor {
             superseded_departure_attempts: std::collections::HashMap::new(),
             seal_state: RoomSealState::Open,
             occupant_id_secret,
+            server_hats: Default::default(),
             durable_member_recipients: Vec::new(),
             membership_source: None,
             durable_store: None,
@@ -1146,6 +1148,12 @@ impl RoomActor {
             #[cfg(test)]
             test_projection_apply_hook: None,
         }
+    }
+
+    /// Install the deployment's server-assigned XEP-0317 hats.
+    pub fn with_server_hats(mut self, server_hats: crate::xep::xep0317::ServerHats) -> Self {
+        self.server_hats = server_hats;
+        self
     }
 
     /// Retain one verdict per attempt. A later batch for the same room must
