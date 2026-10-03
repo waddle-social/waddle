@@ -241,7 +241,6 @@ pub(crate) async fn route_to_connection(
         }
 
         if deps.effects.is_planning()
-            && deps.message_dispatcher.is_some()
             && matches!(stanza.as_ref(), Stanza::Message(message)
                 if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal)
                     || (message.type_ == XmppMessageType::Headline && waddle_xmpp::protocol::handlers::archive::is_archivable(message)))
@@ -274,6 +273,13 @@ async fn route_planned_direct_message(
     stanza: Stanza,
     depth: u8,
 ) -> Vec<Stanza> {
+    // An accepted route must already own recipient persistence. Missing
+    // preparation infrastructure cannot delegate it to a live peer instead.
+    if deps.message_dispatcher.is_none() {
+        deps.effects
+            .fail_plan(super::effects::PlanFailure::RecipientDispatcherUnavailable);
+        return Vec::new();
+    }
     let bare = requested.to_bare();
     let inventory = match super::recipient_selection::recipient_inventory(deps, &bare).await {
         Ok(inventory) => inventory,

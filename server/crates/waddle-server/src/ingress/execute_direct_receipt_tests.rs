@@ -30,6 +30,7 @@ async fn direct_receipt(fixture: IngressFixture, partial: bool) {
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.message_dispatcher = Some(&state.deps.protocol.dispatcher);
     deps.mam_storage = Some(&state.deps.protocol.mam_storage);
+    deps.inbox_storage = Some(&state.deps.protocol.inbox_storage);
     deps.effects = &sink;
     let mut submission = fixture.submission(Some("direct-receipt"), "online dm");
     let target: jid::Jid = if partial {
@@ -67,6 +68,29 @@ async fn direct_receipt(fixture: IngressFixture, partial: bool) {
     submission.plan.plan = plan;
     submission.plan.room_execution = execution;
     submission.plan.intents = capture.snapshot().intents;
+    let recipient_intents: Vec<_> = submission
+        .plan
+        .intents
+        .iter()
+        .filter(|intent| match intent {
+            IngressEffectIntent::ArchiveAuthoritative { archive, .. } => {
+                archive == &first.to_bare()
+            }
+            IngressEffectIntent::InboxProject { owner, .. } => owner == &first.to_bare(),
+            _ => false,
+        })
+        .collect();
+    assert_eq!(
+        recipient_intents.len(),
+        2,
+        "the actual recipient pass plans archive and inbox before commitment"
+    );
+    let recipient_receipts: Vec<_> = recipient_intents
+        .iter()
+        .map(|intent| {
+            crate::ingress::durable::receipt_key(intent).expect("recipient persistence receipt")
+        })
+        .collect();
     let route_intent = submission
         .plan
         .intents
@@ -89,6 +113,41 @@ async fn direct_receipt(fixture: IngressFixture, partial: bool) {
             .count(),
         if partial { 2 } else { 1 }
     );
+    let key = decision.message_key.expect("canonical message");
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("committed recipient receipts");
+    for receipt in &recipient_receipts {
+        assert!(
+            EffectReceiptRepository::contains(
+                &mut tx,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash
+            )
+            .await
+            .expect("recipient receipt lookup"),
+            "recipient persistence and its receipt commit before delivery"
+        );
+    }
+    assert!(
+        !EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash
+        )
+        .await
+        .expect("route receipt lookup"),
+        "commit does not yet prove resource delivery"
+    );
+    tx.commit().await.expect("close receipt read");
+    assert!(
+        first_rx.try_recv().is_err(),
+        "commit does not send the original"
+    );
     drop(second_rx);
     deps.effects = &ImmediateSink;
     let report = execute_effects(
@@ -100,9 +159,42 @@ async fn direct_receipt(fixture: IngressFixture, partial: bool) {
         Duration::from_secs(5),
     )
     .await;
-    assert!(first_rx.try_recv().is_ok(), "online peer received DM");
+    let delivered = first_rx.try_recv().expect("online resource received DM");
+    assert!(
+        matches!(
+            delivered.kind,
+            waddle_xmpp::registry::DeliveryKind::DirectFrame
+        ),
+        "prepared delivery must bypass the recipient persistence pipeline"
+    );
+    let Stanza::Message(delivered) = delivered.stanza else {
+        panic!("direct message");
+    };
+    use waddle_xmpp_core::xep0359::StanzaIdCarrier;
+    let recipient_stamp = submission
+        .plan
+        .intents
+        .iter()
+        .find_map(|intent| match intent {
+            IngressEffectIntent::ArchiveAuthoritative {
+                archive, stanza_id, ..
+            } if archive == &first.to_bare() => Some(stanza_id),
+            _ => None,
+        })
+        .expect("frozen recipient archive stamp");
+    assert!(
+        delivered.stanza_ids().contains(recipient_stamp),
+        "DirectFrame carries the committed recipient archive identity"
+    );
+    assert_eq!(
+        delivered.to,
+        Some(if partial {
+            first.to_bare().into()
+        } else {
+            first.clone().into()
+        })
+    );
     assert!(report.receipt_failures.is_empty());
-    let key = decision.message_key.expect("canonical message");
     let mut tx = fixture.uow.begin().await.expect("receipt transaction");
     assert_eq!(
         EffectReceiptRepository::contains(

@@ -35,11 +35,22 @@ and local UserActor detach drains (#1789, #1805). The authorization-failure
 fallback remains unkeyed and at-least-once;
 #1760 now retains immutable proof and replay payload as one durable custody
 unit, with atomic pending-delivery handoff and independent recovery (§3.3a). Live sends remain at-least-once, and maintenance never relays
-remote-hosted resources; (iii) live full-JID delivery prepares recipient archive, inbox and carbon effects in the canonical ingress plan (#1759), then sends a processed copy;
+remote-hosted resources;
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
 connection-generation fence (follow-up issue); (vi) ~~extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.~~ Resolved by #1753: typed extension ingress covers direct and local-room bot sends (§3.1).
 (vii) archive dispatch uses durable predecessor gates and frozen recipient selection (#1770, §3.7).
+
+Former limitation (iii) is resolved (#1759): live full-JID DMs prepare recipient
+archive, inbox and received-carbon obligations in the sender's canonical ingress
+plan. Recipient MAM and keyed inbox effects commit with their receipts before
+delivery. Local and remote delivery send the processed `DirectFrame` without
+rerunning recipient persistence. Retries retain the recorded recipient stanza ID
+and cannot add another archive row or increment unread again. The original
+audience is the addressed full JID; received carbons exclude that resource.
+Recipient preparation failures refuse the plan instead of delegating persistence
+to the destination connection. Live preparation adds neither offline notification
+candidates nor recipient notification activity.
 
 ### Recovery convergence (#1782)
 

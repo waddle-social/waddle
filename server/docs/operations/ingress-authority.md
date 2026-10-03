@@ -752,6 +752,29 @@ unread effects; late concurrent attempts do not enqueue behind newer archive
 positions. Retained-pending GC references are included in the CNPG eligibility
 query and the ordering table is included in storage metrics.
 
+### Live full-JID recipient receipts (#1759)
+
+Live full-JID DMs prepare the recipient once during ingress planning, including
+the recipient's archive identity, keyed inbox projection and received-carbon
+audience. The sender's canonical row records these obligations. Archive and inbox
+writes commit with their receipts; original delivery and carbon receipts follow
+their own execution. A queued original alone is not evidence that every recorded
+obligation has completed.
+
+The original copy retains the addressed full JID and excludes only that resource
+from received carbons. Both local delivery and the processed cluster relay bypass
+the destination's recipient pipeline. Replanning after a disconnect retains the
+recorded archive identity and inbox delivery key, so retries do not create another
+recipient archive row or increment unread again. A missing recipient dispatcher
+or failed blocklist read refuses planning; it must not produce an unreceipted
+`PeerStanza` fallback. Live delivery does not add offline notification candidates
+or recipient notification-activity mutations.
+
+When diagnosing a nonterminal live DM, compare its recorded recipient archive,
+inbox, route and carbon intents with their receipts before attributing the backlog
+to persistence. The delegated full-JID recovery classification below concerns
+older rows without recipient authority; new prepared rows carry that authority.
+
 ## Read-only verification
 
 Use the production context explicitly. Inspect rollout strategy, actual
@@ -1779,7 +1802,8 @@ no relay version or schema change is needed. Local delivery retains the same
 bounded canonical authorization at detach, including its unkeyed fallback.
 This closes the missing-identity duplicate window after local delivery,
 failed progress persistence, detach and recovery; it does not close #1760's
-custody gaps or make recipient archive/inbox effects idempotent (#1759).
+custody gaps. Recipient archive/inbox idempotency is provided separately by
+canonical recipient preparation (#1759), described above.
 
 The owner-to-socket frame
 (`remote_resource_frame.v2`) carries the recorded obligation, and the socket node
@@ -1808,9 +1832,10 @@ time. What stays at-least-once on this path:
   otherwise hold the detach — and the client's `<resume/>` — for up to a minute;
 - a detach that diverts to terminal recovery or is refused for a missing principal
   promotes the drained queue without proofs;
-- a re-executed `PeerStanza` runs the recipient pass before the ledger is read, so
+- a legacy re-executed `PeerStanza` runs the recipient pass before the ledger is read, so
   its archive write and received carbons repeat even though the frame is then
-  dropped. "Exactly once" here means the replay-queue entry and the ledger row;
+  dropped. Prepared ingress DMs use `DirectFrame` and do not take this path.
+  "Exactly once" here means the replay-queue entry and the ledger row;
 - an obligation is proven only while its entry is recovery-owned. The live handler
   records a frame into the SM queue *before* the transport write, so the obligation
   moves onto that entry and the detach proves it with the session snapshot — whether

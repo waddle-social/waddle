@@ -1,5 +1,6 @@
 use super::*;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use waddle_xmpp_core::xep0359::StanzaIdCarrier;
 
 async fn recorded_obligations(state: &WebSocketState) -> Vec<IngressEffectIntent> {
     let key = {
@@ -55,6 +56,18 @@ async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool)
     let full: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     register_test_connection(&state, &full, tx).await;
+    let sibling: jid::FullJid = "bob@example.com/laptop".parse().expect("carbon recipient");
+    let (carbon_tx, mut carbon_rx) = tokio::sync::mpsc::channel(16);
+    if !bare {
+        register_test_connection(&state, &sibling, carbon_tx).await;
+        for resource in [&full, &sibling] {
+            assert!(state
+                .deps
+                .protocol
+                .connection_registry
+                .set_carbons_enabled(resource, true));
+        }
+    }
     let mut conn = connection(&state, true).await;
     let mut message = xmpp_parsers::message::Message::new(Some(if bare {
         full.to_bare().into()
@@ -91,7 +104,104 @@ async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool)
         .messages;
     assert_eq!(archived.len(), 1);
     let original = &archived[0];
+    let Stanza::Message(delivered) = outbound.stanza else {
+        panic!("direct frame must contain the prepared message");
+    };
+    assert_eq!(
+        delivered.to,
+        Some(if bare {
+            full.to_bare().into()
+        } else {
+            full.clone().into()
+        })
+    );
+    assert_eq!(
+        delivered.stanza_id_by(&full.to_bare().into()),
+        Some(original.id.clone())
+    );
+    let inbox = state
+        .deps
+        .protocol
+        .inbox_storage
+        .list(&full.to_bare())
+        .await
+        .expect("recipient inbox");
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].unread, 1);
+    assert_eq!(inbox[0].last_stanza_id, original.id);
     let obligations = recorded_obligations(&state).await;
+    assert_eq!(
+        obligations
+            .iter()
+            .filter(|intent| matches!(intent,
+                    IngressEffectIntent::ArchiveAuthoritative { archive, stanza_id, .. }
+            if archive == &full.to_bare() && stanza_id.id == original.id
+                ))
+            .count(),
+        1,
+        "recipient archive identity is frozen on the sender's canonical row"
+    );
+    assert_eq!(
+        obligations
+            .iter()
+            .filter(|intent| matches!(intent,
+                IngressEffectIntent::InboxProject { owner, .. } if owner == &full.to_bare()
+            ))
+            .count(),
+        1,
+        "recipient inbox mutation is a recorded obligation"
+    );
+    assert!(!obligations.iter().any(|intent| matches!(intent,
+        IngressEffectIntent::NotificationActivityPreview { owner, .. } if owner == &full.to_bare()
+    )), "live delivery adds no recipient notification activity or push candidate");
+    assert!(
+        !obligations
+            .iter()
+            .any(|intent| matches!(intent, IngressEffectIntent::PendingDelivery { .. })),
+        "live delivery adds no offline queue work"
+    );
+    if !bare {
+        assert_eq!(obligations.iter().filter(|intent| matches!(intent,
+            IngressEffectIntent::Carbons { carbon_recipients, excluded_source, kind: waddle_xmpp::protocol::CarbonKind::Received }
+            if carbon_recipients.as_slice() == std::slice::from_ref(&sibling) && excluded_source == &full
+        )).count(), 1, "the sibling carbon excludes exactly the addressed resource");
+        let carbon = carbon_rx
+            .try_recv()
+            .expect("received carbon delivered to sibling");
+        assert!(matches!(
+            carbon.kind,
+            waddle_xmpp::registry::DeliveryKind::DirectFrame
+        ));
+        let Stanza::Message(carbon) = carbon.stanza else {
+            panic!("carbon message");
+        };
+        assert_eq!(carbon.to, Some(sibling.clone().into()));
+        let received = carbon
+            .payloads
+            .iter()
+            .find(|payload| payload.is("received", waddle_xmpp_core::carbons::CARBONS_NS))
+            .expect("received carbon");
+        let forwarded = received
+            .get_child("forwarded", waddle_xmpp::xep::xep0297::NS_FORWARD)
+            .expect("forwarded carbon");
+        let forwarded = xmpp_parsers::message::Message::try_from(
+            forwarded
+                .get_child("message", waddle_xmpp::ns::JABBER_CLIENT)
+                .expect("forwarded message")
+                .clone(),
+        )
+        .expect("typed carbon");
+        assert_eq!(forwarded.to, Some(full.clone().into()));
+        assert_eq!(
+            forwarded.stanza_id_by(&full.to_bare().into()),
+            Some(original.id.clone())
+        );
+        assert!(carbon_rx.try_recv().is_err(), "one carbon per sibling");
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "addressed resource gets one original and no carbon"
+    );
     assert_terminal_with_receipts(&state, &obligations).await;
     state.deps.protocol.connection_registry.unregister(&full);
     let user = state
@@ -136,6 +246,23 @@ async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool)
     assert_eq!(archived[0].timestamp, original.timestamp);
     assert_eq!(archived[0].body, original.body);
     assert_eq!(archived[0].stanza_xml, original.stanza_xml);
+    let retried_inbox = state
+        .deps
+        .protocol
+        .inbox_storage
+        .list(&full.to_bare())
+        .await
+        .expect("recipient inbox after retry");
+    assert_eq!(retried_inbox.len(), 1);
+    assert_eq!(
+        retried_inbox[0].unread, 1,
+        "retry cannot count the same message twice"
+    );
+    assert_eq!(retried_inbox[0].last_stanza_id, inbox[0].last_stanza_id);
+    assert!(
+        carbon_rx.try_recv().is_err(),
+        "retry cannot resend the completed carbon"
+    );
     assert_eq!(recorded_obligations(&state).await, obligations);
     assert_terminal_with_receipts(&state, &obligations).await;
     let ack = handle_xmpp_frame(

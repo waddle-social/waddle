@@ -1,6 +1,9 @@
 //! RFC 0018 §2 and XEP-0198 §4: unavailable ownership cannot accept responsibility.
 use super::super::{
-    effects::{Effect, ExternalEffect, PlanFailure},
+    effects::{
+        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
+        Effect, ExternalEffect, PlanFailure,
+    },
     Deps, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind,
 };
 use super::plan_message_dispatch;
@@ -94,7 +97,7 @@ impl ClaimStore for PlanningClaims {
 async fn ownership_failure(fixture: IngressFixture) {
     use crate::clustering::{route_bridge::OrderedRelayDeliveryBridge, ClusteringHandles};
     use waddle_xmpp::{ingress::WireHandledCount, pending_delivery::SmSessionId};
-    let claims = Arc::new(PlanningClaims::new(NodeIdentity::new("remote", "epoch")));
+    let claims = Arc::new(PlanningClaims::new(NodeIdentity::new("local", "epoch")));
     let state =
         crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
             ClusteringHandles {
@@ -109,7 +112,31 @@ async fn ownership_failure(fixture: IngressFixture) {
             Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
         )
         .await;
-    let mut submission = fixture.submission(Some("ownership-retry"), "remote body");
+    // The planning node owns this recipient. Its claim lookup must succeed
+    // before the bridge permits actor-local recipient inventory.
+    let bridge = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+        .expect("bridge");
+    crate::clustering::route_bridge::wire_for_test(
+        bridge,
+        &state,
+        claims.clone(),
+        SharedNodeIdentity::new(NodeIdentity::new("local", "epoch")),
+    )
+    .await;
+    let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
+    let (recipient_tx, mut recipient_rx) = tokio::sync::mpsc::channel(2);
+    crate::server::routes::websocket::tests::register_test_connection(
+        &state,
+        &recipient,
+        recipient_tx,
+    )
+    .await;
+    let mut submission = fixture.submission(Some("ownership-retry"), "recipient body");
     let stream_id = SmSessionId::new("ownership-read-stream");
     let mut tx = fixture.uow.begin().await.expect("stream transaction");
     let sm_ingress_id = crate::ingress_uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
@@ -130,6 +157,10 @@ async fn ownership_failure(fixture: IngressFixture) {
     );
     let mut deps = Deps::registry_only(&state.deps.protocol.connection_registry);
     deps.web_socket_state = Some(state.as_ref());
+    deps.message_dispatcher = Some(&state.deps.protocol.dispatcher);
+    deps.user_registry = Some(&state.deps.protocol.user_registry);
+    deps.mam_storage = Some(&state.deps.protocol.mam_storage);
+    deps.inbox_storage = Some(&state.deps.protocol.inbox_storage);
     deps.ordered_relay_origin = Some(OrderedRelayRouteOrigin {
         kind: OrderedRelayRouteOriginKind::Entity(entity.clone()),
         sender_entity: entity,
@@ -186,12 +217,16 @@ async fn ownership_failure(fixture: IngressFixture) {
     assert!(submission.plan.plan.iter().any(|effect| matches!(
         &effect.effect,
         Effect::External(ExternalEffect::Delivery(
-            super::super::effects::delivery::ExternalDeliveryEffect::RelayBareJid { .. }
-        ))
+            ExternalDeliveryEffect::RouteToPeer { jid, kind: PeerDeliveryKind::DirectFrame, .. }
+        )) if jid == &recipient
     )));
+    assert!(
+        recipient_rx.try_recv().is_err(),
+        "planning cannot execute recipient delivery"
+    );
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
-        .expect("healthy retry commits relay obligation");
+        .expect("healthy retry commits the prepared recipient obligation");
     assert_eq!(decision.class, IngressDecisionClass::Accepted);
     assert_eq!(
         decision.ordinal,
@@ -226,17 +261,20 @@ async fn ingress_ownership_lookup_failure_retry_postgres() {
     }
 }
 
-/// RFC 0018 §3: real clustered DM planning preserves receipt capture identity.
-#[tokio::test]
-async fn ingress_remote_full_jid_plan_preserves_direct_receipt_identity() {
-    use super::super::effects::delivery::ExternalDeliveryEffect;
+/// RFC 0018 §3: clustered planning requires authoritative recipient inventory.
+async fn full_jid_inventory_plan(remote_unavailable: bool) {
     use crate::clustering::{route_bridge::OrderedRelayDeliveryBridge, ClusteringHandles};
     use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+    let owner = if remote_unavailable {
+        "unavailable-recipient-owner"
+    } else {
+        "local"
+    };
     let state =
         crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
             ClusteringHandles {
                 claim_store: Some(Arc::new(PlanningClaims::new(NodeIdentity::new(
-                    "remote", "epoch",
+                    owner, "epoch",
                 )))),
                 node_identity: Some(SharedNodeIdentity::new(NodeIdentity::new("local", "epoch"))),
                 ordered_relay_delivery_bridge: Some(OrderedRelayDeliveryBridge::new(
@@ -248,11 +286,36 @@ async fn ingress_remote_full_jid_plan_preserves_direct_receipt_identity() {
             Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
         )
         .await;
+    // Bridge and planning identities agree. Only the success case owns the
+    // recipient locally; the remote case must request an unavailable owner.
+    // A local resource is deliberately present in both cases to catch fallback.
+    let clustering = &state.deps.app_state.clustering_claims;
+    crate::clustering::route_bridge::wire_for_test(
+        clustering
+            .ordered_relay_delivery_bridge
+            .as_ref()
+            .expect("bridge"),
+        &state,
+        clustering.claim_store.as_ref().expect("claims").clone(),
+        SharedNodeIdentity::new(NodeIdentity::new("local", "epoch")),
+    )
+    .await;
     let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");
-    let recipient: jid::FullJid = "juliet@example.com/remote".parse().expect("recipient");
+    let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
+    let (recipient_tx, mut recipient_rx) = tokio::sync::mpsc::channel(2);
+    crate::server::routes::websocket::tests::register_test_connection(
+        &state,
+        &recipient,
+        recipient_tx,
+    )
+    .await;
     let entity = Entity::new(EntityType::UserActor, sender.to_bare().to_string());
     let mut deps = Deps::registry_only(&state.deps.protocol.connection_registry);
     deps.web_socket_state = Some(state.as_ref());
+    deps.message_dispatcher = Some(&state.deps.protocol.dispatcher);
+    deps.user_registry = Some(&state.deps.protocol.user_registry);
+    deps.mam_storage = Some(&state.deps.protocol.mam_storage);
+    deps.inbox_storage = Some(&state.deps.protocol.inbox_storage);
     deps.ordered_relay_origin = Some(OrderedRelayRouteOrigin {
         kind: OrderedRelayRouteOriginKind::Entity(entity.clone()),
         sender_entity: entity,
@@ -267,13 +330,40 @@ async fn ingress_remote_full_jid_plan_preserves_direct_receipt_identity() {
         .push(minidom::Element::builder("private", waddle_xmpp_core::carbons::CARBONS_NS).build());
     message
         .bodies
-        .insert(Default::default(), "remote delivery".into());
-    waddle_xmpp_core::xep0359::add_origin_id(&mut message, "remote-full-receipt");
+        .insert(Default::default(), "recipient delivery".into());
+    waddle_xmpp_core::xep0359::add_origin_id(&mut message, "full-receipt");
     let mut dispatcher = StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
     let mut machine = XmppStateMachine::new("example.com", dispatcher);
     machine.transition_to_ready(sender, false);
     let plan = plan_message_dispatch(&mut machine, message, &deps).await;
+    if remote_unavailable {
+        assert_eq!(plan.failure, Some(PlanFailure::OwnershipLookup));
+        assert!(
+            !plan.plan.iter().any(|effect| matches!(
+                effect.effect,
+                Effect::External(ExternalEffect::Delivery(_))
+            )),
+            "failed remote inventory cannot fall back to the local resource"
+        );
+        assert!(
+            !plan.intents.iter().any(|intent| match intent {
+                IngressEffectIntent::RouteDirect {
+                    recipient: bare, ..
+                } => bare == &recipient.to_bare(),
+                IngressEffectIntent::ArchiveAuthoritative { archive, .. } =>
+                    archive == &recipient.to_bare(),
+                IngressEffectIntent::InboxProject { owner, .. } => owner == &recipient.to_bare(),
+                _ => false,
+            }),
+            "unavailable remote inventory cannot run a local recipient pass"
+        );
+        assert!(
+            recipient_rx.try_recv().is_err(),
+            "no unreceipted peer fallback"
+        );
+        return;
+    }
     assert_eq!(plan.failure, None);
     let identity = plan
         .intents
@@ -294,13 +384,50 @@ async fn ingress_remote_full_jid_plan_preserves_direct_receipt_identity() {
         .plan
         .iter()
         .filter_map(|effect| match &effect.effect {
-            Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid {
-                target,
+            Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                jid,
                 route_identity,
+                kind: PeerDeliveryKind::DirectFrame,
+                stanza,
                 ..
-            })) if target == &recipient => Some(route_identity),
+            })) if jid == &recipient => {
+                let waddle_xmpp::Stanza::Message(message) = stanza.as_ref() else {
+                    panic!("prepared recipient message");
+                };
+                assert_eq!(message.to, Some(recipient.clone().into()));
+                use waddle_xmpp_core::xep0359::StanzaIdCarrier;
+                let recipient_stamp = plan
+                    .intents
+                    .iter()
+                    .find_map(|intent| match intent {
+                        IngressEffectIntent::ArchiveAuthoritative {
+                            archive, stanza_id, ..
+                        } if archive == &recipient.to_bare() => Some(stanza_id),
+                        _ => None,
+                    })
+                    .expect("recipient archive obligation");
+                assert!(message.stanza_ids().contains(recipient_stamp));
+                Some(route_identity)
+            }
             _ => None,
         })
         .collect();
     assert_eq!(deliveries, vec![&Some(identity.clone())]);
+    assert!(plan.intents.iter().any(|intent| matches!(intent,
+        IngressEffectIntent::InboxProject { owner, .. } if owner == &recipient.to_bare()
+    )));
+    assert!(
+        recipient_rx.try_recv().is_err(),
+        "planning sends no original"
+    );
+}
+
+#[tokio::test]
+async fn ingress_owner_local_full_jid_plan_preserves_direct_receipt_identity() {
+    full_jid_inventory_plan(false).await;
+}
+
+#[tokio::test]
+async fn ingress_remote_full_jid_inventory_unavailable_rejects_local_fallback() {
+    full_jid_inventory_plan(true).await;
 }
