@@ -5,7 +5,7 @@
 //! would disclose each viewer's IP address to the artifact host. The server
 //! fetches it instead (HTTPS only, non-global addresses refused, no
 //! redirects, size-capped), checks the digest, normalises the image to PNG
-//! (XEP-0084 §3.2) and keeps it in memory. Bots then answer XEP-0084,
+//! (XEP-0084 §4.1) and keeps it in memory. Bots then answer XEP-0084,
 //! vcard-temp and vCard4 with the bytes.
 
 use std::io::Cursor;
@@ -293,7 +293,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// XEP-0084 §3.2/§4.1: the data node carries PNG and the id is the
+    /// XEP-0084 §3.1/§4.1: the data node carries PNG and the id is the
     /// SHA-1 of those PNG bytes, so another format is transcoded first.
     #[tokio::test]
     async fn serves_a_jpeg_artifact_as_png() {

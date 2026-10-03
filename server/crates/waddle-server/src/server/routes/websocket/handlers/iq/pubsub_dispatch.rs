@@ -525,13 +525,13 @@ pub(super) async fn handle_pubsub_iq(
 }
 
 /// The item id of a bot's single-item vCard4 node, as on the vCard4 node
-/// every account has, and of its XEP-0084 §4.3 empty metadata.
+/// every account has, and of its XEP-0084 §3.5 empty metadata.
 const EXTENSION_BOT_PEP_ITEM_ID: &str = "current";
 
 /// The PEP item the server publishes for an installed extension bot: a
 /// XEP-0292 vCard4 with its name, description, `application` kind (§6) and
 /// photo, and its XEP-0084 avatar. Until the server holds the manifest
-/// avatar, the metadata disables avatar publishing (§4.3) and the data node
+/// avatar, the metadata disables avatar publishing (§3.5) and the data node
 /// has no item. `None` for anything else.
 fn extension_bot_pep_item(
     state: &WebSocketState,

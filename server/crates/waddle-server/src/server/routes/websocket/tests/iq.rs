@@ -1476,7 +1476,7 @@ fn vcard_get_frame(to: &str) -> String {
 /// XEP-0084, XEP-0054 and XEP-0292 for an extension bot whose manifest
 /// declares an avatar. The server fetches and verifies the artifact, then
 /// answers in-band, never with a URL: the metadata names the PNG by its
-/// SHA-1 (§4.1), the data node holds it under that id, vcard-temp carries
+/// SHA-1 (§3.2), the data node holds it under that id, vcard-temp carries
 /// PHOTO TYPE and BINVAL, vCard4 the PHOTO as a `data:` URI. Before the
 /// fetch completes, the answers are those of a bot without an avatar.
 #[tokio::test]
