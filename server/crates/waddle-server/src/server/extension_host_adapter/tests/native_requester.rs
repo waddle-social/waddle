@@ -56,12 +56,14 @@ async fn assert_canonical_settled(f: &IngressFixture) -> xmpp_parsers::message::
     envelope.message().clone()
 }
 
+/// Registered as `Romeo`: the requester `romeo@example.com` is found on the
+/// account's canonical JID key, not its name as typed.
 async fn make_requester_native(f: &IngressFixture) {
     f.execute("DELETE FROM users WHERE jid = 'romeo@example.com'", ())
         .await;
     f.execute(
-        "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) VALUES (?, ?, ?, ?, ?, ?)",
-        crate::db_params!["romeo", "example.com", "unused", "unused", vec![0_u8; 32], vec![0_u8; 32]],
+        "INSERT INTO native_users (username, domain, jid_key, password_hash, salt, stored_key, server_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        crate::db_params!["Romeo", "example.com", "romeo@example.com", "unused", "unused", vec![0_u8; 32], vec![0_u8; 32]],
     ).await;
     assert_eq!(f.count("users WHERE jid = 'romeo@example.com'").await, 0);
 }
@@ -164,7 +166,7 @@ async fn missing_requester_denied(f: IngressFixture) {
     f.execute("DELETE FROM users WHERE jid = 'romeo@example.com'", ())
         .await;
     assert_eq!(
-        f.count("native_users WHERE username = 'romeo' AND domain = 'example.com'")
+        f.count("native_users WHERE jid_key = 'romeo@example.com'")
             .await,
         0
     );

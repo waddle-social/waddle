@@ -57,17 +57,16 @@ public struct MessageRoute: Hashable, Sendable {
 }
 
 public extension AccountIdentity {
-    /// A server-hosted extension bot: `<bot>@extensions.<our domain>`, the
-    /// service the server answers as XEP-0030 client/bot and refuses DMs to.
-    /// (`BareJID` already case-folds the domain.)
-    func isExtensionBot(_ other: BareJID) -> Bool {
-        other.localpart != nil && other.domain == "extensions.\(jid.domain)"
-    }
-
     /// Routes a message: groupchat keys on the room bare JID and compares
     /// the occupant nick for authorship; 1:1 keys on the non-own side and
     /// compares bare JIDs (carbons of our own sends route to the peer).
-    func route(from: JID?, to: JID?, isGroupchat: Bool) -> MessageRoute? {
+    /// `nil` means the stanza is not shown anywhere: it names no conversation.
+    func route(from: JID?, to: JID?, isGroupchat: Bool, isMucUser: Bool) -> MessageRoute? {
+        // XEP-0045 `muc#user`: a room private message or invite/decline.
+        // Not a DM, and no surface here answers it privately: in the room it
+        // would read as public and a reply would go to the whole room. So it
+        // is not shown at all: no timeline, unread, recency or alert.
+        if isMucUser { return nil }
         if isGroupchat {
             // A groupchat stanza comes from the room; without a sender it
             // cannot name one (the recipient is our own account).
@@ -81,5 +80,10 @@ public extension AccountIdentity {
         let isMine = sender == jid
         let peer = isMine ? (to?.bare ?? sender) : sender
         return MessageRoute(conversation: .direct(peer), isMine: isMine)
+    }
+
+    /// The single routing point for a parsed stanza.
+    func route(_ message: WireMessage) -> MessageRoute? {
+        route(from: message.from, to: message.to, isGroupchat: message.isGroupchat, isMucUser: message.isMucUser)
     }
 }

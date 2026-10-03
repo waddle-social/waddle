@@ -12,5 +12,5 @@ pub use info::{
 };
 pub use items::{
     build_disco_items_response, is_disco_items_query, parse_disco_items_query, DiscoItem,
-    DiscoItemsQuery, DISCO_ITEMS_NS,
+    DiscoItemsQuery, DISCO_ITEMS_NS, NODE_WADDLE_ROOM_BOTS,
 };

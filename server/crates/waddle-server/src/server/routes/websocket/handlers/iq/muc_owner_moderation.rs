@@ -316,6 +316,15 @@ async fn wipe_destroyed_room_durable_state(
         if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
             return Ok(false);
         }
+        if let Err(error) = crate::server::extension_bot_rooms::delete_room(
+            state.deps.app_state.db_pool.global(),
+            room_jid,
+        )
+        .await
+        {
+            warn!(room = %room_jid, %error, "Failed to delete extension bot rows for destroyed room");
+            return Err(());
+        }
         if let Err(error) =
             crate::server::xmpp_channels::delete_xmpp_channel(db_actor.clone(), &channel_id).await
         {

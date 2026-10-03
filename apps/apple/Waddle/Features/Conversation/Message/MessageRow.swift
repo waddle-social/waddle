@@ -45,7 +45,13 @@ private struct MessageRowContent: View {
     private var avatarSize: CGFloat { isCompact ? Theme.Size.rowAvatar : Theme.Size.avatar }
 
     var body: some View {
-        let author = MessageAuthor.resolve(item, occupant: occupant, authorJID: session.authorJID(of: item))
+        let authorJID = session.authorJID(of: item)
+        let author = MessageAuthor.resolve(
+            item,
+            occupant: occupant,
+            authorJID: authorJID,
+            isBot: authorJID.map { session.roomBots.isDeclared($0, in: item.conversation.jid) } ?? false
+        )
         HStack(alignment: .top, spacing: isCompact ? Theme.Spacing.s : Theme.Spacing.m) {
             gutter(author: author)
                 .frame(width: avatarSize, alignment: .trailing)

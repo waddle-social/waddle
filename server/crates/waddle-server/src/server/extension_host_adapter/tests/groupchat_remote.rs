@@ -5,7 +5,9 @@
 //! send path.
 use super::{
     direct_ingress,
-    groupchat_ingress::{groupchat_message, GroupchatFixture},
+    groupchat_ingress::{
+        close_node, groupchat_message, managed_room, managed_send, GroupchatFixture,
+    },
     groupchat_receipts,
 };
 use crate::{
@@ -374,6 +376,7 @@ async fn runs_on_owner(f: IngressFixture, provider: bool) {
     assert_eq!(f.count("ingress_messages").await, 1);
     assert_eq!(f.count("mam_messages").await, 1);
     assert_eq!(id.as_str(), archived_id(&f).await, "owner's canonical id");
+    cluster.owner.settle().await;
     let wire = cluster.owner.drain();
     let message = groupchat_message(&wire);
     assert_eq!(
@@ -384,10 +387,14 @@ async fn runs_on_owner(f: IngressFixture, provider: bool) {
         .as_deref(),
         Some(id.as_str())
     );
-    assert_eq!(presences(&wire).len(), 1, "one bot join on the owner");
+    assert_eq!(
+        presences(&wire).len(),
+        2,
+        "the bot joins and leaves on the owner"
+    );
     assert!(cluster.origin.drain().is_empty(), "the origin runs nothing");
     let bot = cluster.bot(&direct_ingress::plugin());
-    assert!(Cluster::bot_joined(&cluster.owner, &bot).await);
+    assert!(!Cluster::bot_joined(&cluster.owner, &bot).await);
     assert!(!Cluster::bot_joined(&cluster.origin, &bot).await);
     assert_eq!(
         f.optional_text("SELECT sender_bare_jid FROM ingress_origin_aliases")
@@ -420,9 +427,14 @@ async fn lost_reply_reasks_same_offer(f: IngressFixture) {
     assert_eq!(f.count("ingress_messages").await, 1);
     assert_eq!(f.count("mam_messages").await, 1);
     assert_eq!(id.as_str(), archived_id(&f).await);
+    cluster.owner.settle().await;
     let wire = cluster.owner.drain();
     groupchat_message(&wire);
-    assert_eq!(presences(&wire).len(), 1, "no second join or fanout");
+    assert_eq!(
+        presences(&wire).len(),
+        2,
+        "one join and leave, no second fanout"
+    );
     cluster.close(f).await;
 }
 
@@ -450,7 +462,17 @@ async fn not_owner_reresolves_once(f: IngressFixture) {
         .as_deref(),
         Some(id.as_str())
     );
-    assert!(Cluster::bot_joined(&cluster.origin, &bot).await);
+    assert!(
+        presences(&wire)
+            .iter()
+            .any(|presence| presence.type_ == xmpp_parsers::presence::Type::None),
+        "the bot joined on the origin"
+    );
+    cluster.origin.settle().await;
+    assert!(
+        !Cluster::bot_joined(&cluster.origin, &bot).await,
+        "and left"
+    );
     assert_eq!(f.count("ingress_messages").await, 1);
 
     cluster.claims.set_owner(owner_node());
@@ -564,13 +586,14 @@ async fn denials_cross_nodes(f: IngressFixture) {
             .expect("refused send completes")
             .expect("send task"),
     );
+    cluster.owner.settle().await;
     assert!(
         !Cluster::bot_joined(&cluster.owner, &bot).await,
-        "the owner revokes this call's join"
+        "the owner leaves this call's join"
     );
     let wire = cluster.owner.drain();
     let presences = presences(&wire);
-    assert_eq!(presences.len(), 2, "join then compensating unavailable");
+    assert_eq!(presences.len(), 2, "join then unavailable");
     assert_eq!(
         presences[1].type_,
         xmpp_parsers::presence::Type::Unavailable
@@ -620,9 +643,9 @@ async fn late_ask_commits_nothing(f: IngressFixture) {
     cluster.close(f).await;
 }
 
-/// A deadline that passes during planning refuses the commit but keeps the
-/// join, which is the occupancy every successful send leaves behind.
-async fn deadline_during_planning_keeps_join(f: IngressFixture) {
+/// A deadline that passes during planning refuses the commit; the bot still
+/// leaves the occupancy it joined.
+async fn deadline_during_planning_leaves_join(f: IngressFixture) {
     let mut cluster = Cluster::new(&f).await;
     let transport = cluster.transport([Fault::Budget(Duration::from_millis(200))]);
     let context = cluster.provider(direct_ingress::plugin());
@@ -642,11 +665,21 @@ async fn deadline_during_planning_keeps_join(f: IngressFixture) {
     assert_eq!(f.count("ingress_messages").await, 0);
     assert_eq!(f.count("mam_messages").await, 0);
     let bot = cluster.bot(&direct_ingress::plugin());
-    assert!(Cluster::bot_joined(&cluster.owner, &bot).await);
+    cluster.owner.settle().await;
+    assert!(!Cluster::bot_joined(&cluster.owner, &bot).await);
     let wire = cluster.owner.drain();
-    let presences = presences(&wire);
-    assert_eq!(presences.len(), 1, "the join stays");
-    assert_eq!(presences[0].type_, xmpp_parsers::presence::Type::None);
+    let types: Vec<_> = presences(&wire)
+        .into_iter()
+        .map(|presence| presence.type_.clone())
+        .collect();
+    assert_eq!(
+        types,
+        [
+            xmpp_parsers::presence::Type::None,
+            xmpp_parsers::presence::Type::Unavailable
+        ],
+        "the join is left"
+    );
     assert!(!has_groupchat(&wire));
     cluster.close(f).await;
 }
@@ -704,9 +737,10 @@ async fn concurrent_reask_shares_first_attempt(f: IngressFixture) {
     assert_eq!(f.count("ingress_messages").await, 1);
     assert_eq!(f.count("mam_messages").await, 1);
     assert_eq!(id.as_str(), archived_id(&f).await);
+    cluster.owner.settle().await;
     let wire = cluster.owner.drain();
     groupchat_message(&wire);
-    assert_eq!(presences(&wire).len(), 1, "one join, one fanout");
+    assert_eq!(presences(&wire).len(), 2, "one join and leave, one fanout");
     cluster.close(f).await;
 }
 
@@ -874,15 +908,20 @@ async fn join_presence_reaches_remote_occupant(f: IngressFixture) {
         .expect("send completes")
         .expect("send task")
         .expect("send");
+    fixture.settle().await;
     let wire = fixture.drain();
-    assert_eq!(presences(&wire).len(), 1, "local occupant too");
+    assert_eq!(
+        presences(&wire).len(),
+        2,
+        "local occupant too: join and leave"
+    );
     groupchat_message(&wire);
     fixture.close(f).await;
 }
 
 /// A slow cross-node occupant does not hold the send: planning waits at most
-/// the join presence cap, the local occupant still gets join then message,
-/// and the slow route finishes later on its own, outside the bot room lock.
+/// the join presence cap and the local occupant gets join then message. The
+/// leave waits for the slow join, so the peer never sees unavailable first.
 async fn slow_remote_occupant_is_detached(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     fixture
@@ -921,11 +960,16 @@ async fn slow_remote_occupant_is_detached(f: IngressFixture) {
     let began = std::time::Instant::now();
     tokio::time::timeout(
         Duration::from_secs(5),
-        TEST_JOIN_PRESENCE_ROUTE.scope(route.clone(), fixture.send("slow-peer-first")),
+        TEST_JOIN_PRESENCE_ROUTE.scope(
+            route,
+            fixture
+                .adapter
+                .send_message(&fixture.invocation(), fixture.request("slow-peer")),
+        ),
     )
     .await
     .expect("the send does not wait for the slow peer")
-    .expect("first send");
+    .expect("send");
     assert!(
         began.elapsed() < Duration::from_secs(3),
         "{:?}",
@@ -934,33 +978,31 @@ async fn slow_remote_occupant_is_detached(f: IngressFixture) {
     assert_eq!(started.load(Ordering::SeqCst), 1);
     assert_eq!(finished.load(Ordering::SeqCst), 0, "still routing");
     assert_eq!(f.count("ingress_messages").await, 1);
+    super::super::groupchat::linger_passes().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let bot = fixture.invocation().actor_jid;
+    assert!(
+        Cluster::bot_joined(&fixture, &bot).await,
+        "the leave waits for the slow join"
+    );
+    release.notify_one();
+    fixture.settle().await;
+    assert_eq!(finished.load(Ordering::SeqCst), 1);
+    assert!(!Cluster::bot_joined(&fixture, &bot).await);
     let wire = fixture.drain();
-    let join = wire
-        .iter()
-        .position(|stanza| matches!(stanza, Stanza::Presence(_)))
-        .expect("local join");
+    let at = |unavailable: bool| {
+        wire.iter()
+            .position(|stanza| matches!(stanza, Stanza::Presence(p) if (p.type_ == xmpp_parsers::presence::Type::Unavailable) == unavailable))
+            .expect("local presence")
+    };
     let message = wire
         .iter()
         .position(|stanza| matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat))
         .expect("local message");
-    assert!(join < message, "the local occupant sees the join first");
-    // The lock is free while the slow route still runs.
-    tokio::time::timeout(
-        Duration::from_secs(3),
-        TEST_JOIN_PRESENCE_ROUTE.scope(route, fixture.send("slow-peer-second")),
-    )
-    .await
-    .expect("the bot room lock is not held")
-    .expect("second send");
-    assert_eq!(finished.load(Ordering::SeqCst), 0);
-    release.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while finished.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the detached route finishes");
+    assert!(
+        at(false) < message && message < at(true),
+        "the local occupant sees join, message, leave"
+    );
     fixture.close(f).await;
 }
 
@@ -1019,12 +1061,6 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
         .expect("revoke plugin grants");
     tx.commit().await.expect("durable revocation");
     gate.release();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        routed.lock().expect("routed").is_empty(),
-        "the unavailable waits for the join"
-    );
-    release.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(5), sending)
         .await
         .expect("refused send completes")
@@ -1033,6 +1069,14 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
         matches!(result, Err(ExtensionHostAdapterError::NotAuthorized)),
         "{result:?}"
     );
+    super::super::groupchat::linger_passes().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        routed.lock().expect("routed").is_empty(),
+        "the unavailable waits for the join"
+    );
+    release.notify_one();
+    fixture.settle().await;
     let types: Vec<_> = routed
         .lock()
         .expect("routed")
@@ -1053,6 +1097,72 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
         ]
     );
     fixture.close(f).await;
+}
+
+/// A room another node holds the claim for, not loaded here, refuses the
+/// bot's send as owned remotely when loading it meets that claim: nothing
+/// is loaded, joined or committed on this node.
+async fn claim_held_elsewhere_is_owned_remotely(f: IngressFixture) {
+    use crate::server::routes::interpret::effects::PlanFailure;
+    use waddle_xmpp::{
+        muc::room_registry_actor::{GetRoom, WireClusteringClaims},
+        ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore},
+    };
+    let adapter = direct_ingress::adapter(&f).await;
+    let (room, invocation) = managed_room(&f, &adapter, "text").await;
+    let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    claims
+        .acquire(
+            &Entity::new(EntityType::RoomActor, room.to_string()),
+            &owner_node(),
+        )
+        .await
+        .expect("the owner claims the room");
+    adapter
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(WireClusteringClaims {
+            claim_store: claims,
+            node_identity: SharedNodeIdentity::new(origin_node()),
+            durable_store: None,
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire room claims");
+    let result = managed_send(&adapter, &invocation, &room, "claimed-elsewhere").await;
+    assert!(
+        matches!(
+            result,
+            Err(ExtensionHostAdapterError::Plan(
+                PlanFailure::RoomOwnedRemotely
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(adapter
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom { room_jid: room })
+        .await
+        .expect("room lookup")
+        .is_none());
+    assert_eq!(f.count("ingress_messages").await, 0);
+    close_node(adapter, f).await;
+}
+
+#[tokio::test]
+async fn extension_bot_claim_held_elsewhere_is_owned_remotely_sqlite() {
+    claim_held_elsewhere_is_owned_remotely(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_bot_claim_held_elsewhere_is_owned_remotely_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_bot_claim_elsewhere").await {
+        claim_held_elsewhere_is_owned_remotely(f).await;
+    }
 }
 
 #[tokio::test]
@@ -1166,12 +1276,12 @@ async fn extension_remote_late_ask_postgres() {
 #[tokio::test]
 async fn extension_remote_deadline_during_planning_sqlite() {
     let f = IngressFixture::sqlite().await;
-    deadline_during_planning_keeps_join(f).await;
+    deadline_during_planning_leaves_join(f).await;
 }
 #[tokio::test]
 async fn extension_remote_deadline_during_planning_postgres() {
     if let Some(f) = IngressFixture::postgres("extension_remote_deadline_planning").await {
-        deadline_during_planning_keeps_join(f).await;
+        deadline_during_planning_leaves_join(f).await;
     }
 }
 

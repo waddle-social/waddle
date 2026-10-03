@@ -15,6 +15,13 @@ interface ConversationIo {
     suspend fun ensureJoined() {}
 
     /**
+     * Reload the room's declared bots; no-op for DMs. Slow and
+     * best-effort, so callers launch it apart from [ensureJoined] and
+     * history instead of waiting on it.
+     */
+    suspend fun refreshRoomBots() {}
+
+    /**
      * Fetch one MAM page ending before [beforeId] (the newest page when
      * `null`); `null` result means "not connected / query failed".
      */

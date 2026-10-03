@@ -29,18 +29,30 @@ struct JIDTests {
     }
 
     @Test func routesGroupchatByRoomAndNick() {
-        let mine = me.route(from: jid("general@muc.waddle.test/alice"), to: nil, isGroupchat: true)
+        let mine = me.route(from: jid("general@muc.waddle.test/alice"), to: nil, isGroupchat: true, isMucUser: false)
         #expect(mine == MessageRoute(conversation: roomConversation, isMine: true))
-        let theirs = me.route(from: jid("general@muc.waddle.test/bob"), to: nil, isGroupchat: true)
+        let theirs = me.route(from: jid("general@muc.waddle.test/bob"), to: nil, isGroupchat: true, isMucUser: false)
         #expect(theirs?.isMine == false)
     }
 
     @Test func routesDirectToThePeer() {
-        let incoming = me.route(from: jid("bob@waddle.test/laptop"), to: jid("alice@waddle.test/phone"), isGroupchat: false)
+        let incoming = me.route(from: jid("bob@waddle.test/laptop"), to: jid("alice@waddle.test/phone"), isGroupchat: false, isMucUser: false)
         #expect(incoming == MessageRoute(conversation: bobConversation, isMine: false))
         // A carbon of our own send from another device routes to the peer.
-        let carbon = me.route(from: jid("alice@waddle.test/desktop"), to: jid("bob@waddle.test"), isGroupchat: false)
+        let carbon = me.route(from: jid("alice@waddle.test/desktop"), to: jid("bob@waddle.test"), isGroupchat: false, isMucUser: false)
         #expect(carbon == MessageRoute(conversation: bobConversation, isMine: true))
+    }
+
+    @Test func mucUserTrafficHasNoRoute() {
+        // XEP-0045 private message received from an occupant JID.
+        #expect(me.route(from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/phone"), isGroupchat: false, isMucUser: true) == nil)
+        // Mediated invite or decline from the bare room.
+        #expect(me.route(from: jid("general@muc.waddle.test"), to: jid("alice@waddle.test"), isGroupchat: false, isMucUser: true) == nil)
+        // A carbon of our own private message.
+        #expect(me.route(from: jid("alice@waddle.test/desktop"), to: jid("general@muc.waddle.test/bob"), isGroupchat: false, isMucUser: true) == nil)
+        // The marker alone decides: the same addressing without it is 1:1.
+        let unmarked = me.route(from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/phone"), isGroupchat: false, isMucUser: false)
+        #expect(unmarked == MessageRoute(conversation: .direct(room), isMine: false))
     }
 
     @Test func mentionReferenceResolvesJID() {

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use jid::{BareJid, DomainPart, DomainRef, Jid, NodePart, NodeRef};
+use jid::{BareJid, DomainRef, Jid, NodeRef};
 use waddle_extensions::types::PubSubNode as ExtensionPubSubNode;
 use waddle_extensions::{host_tools as ext_host, DisplayText};
 use waddle_xmpp::mam::MamQuery;
@@ -408,7 +408,8 @@ impl ExtensionHostAdapter {
             .db_pool
             .global_actor()
             .ask(DbQueryOne {
-                sql: "SELECT jid, username, xmpp_localpart FROM users WHERE xmpp_localpart = ? LIMIT 1"
+                // `localpart` is canonical, the form account keys are stored in.
+                sql: "SELECT jid, username, xmpp_localpart FROM users WHERE localpart_key = ? LIMIT 1"
                     .to_string(),
                 params: vec![localpart.as_str().into()],
             })
@@ -440,43 +441,25 @@ impl ExtensionHostAdapter {
         localpart: &NodeRef,
         domain: &DomainRef,
     ) -> Result<Session, ext_host::HostToolError> {
-        let row = self
-            .state
+        let user_jid = BareJid::from_parts(Some(localpart), domain);
+        self.state
             .deps
             .app_state
             .db_pool
             .global_actor()
             .ask(DbQueryOne {
-                sql: "SELECT username, domain FROM native_users WHERE username = ? AND domain = ? LIMIT 1"
-                    .to_string(),
-                params: vec![localpart.as_str().into(), domain.as_str().into()],
+                sql: "SELECT 1 FROM native_users WHERE jid_key = ?".to_string(),
+                params: vec![user_jid.as_str().into()],
             })
             .await
-            .map_err(|error| host_tool_error(ExtensionHostAdapterError::Storage(format!("{error:?}"))))?
+            .map_err(|error| {
+                host_tool_error(ExtensionHostAdapterError::Storage(format!("{error:?}")))
+            })?
             .ok_or_else(|| host_tool_error(ExtensionHostAdapterError::NotAuthorized))?;
-        let username = row_value(&row, 0)
-            .and_then(ValueExt::as_string)
-            .map_err(|error| {
-                host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
-            })?
-            .parse::<NodePart>()
-            .map_err(|error| {
-                host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
-            })?;
-        let domain = row_value(&row, 1)
-            .and_then(ValueExt::as_string)
-            .map_err(|error| {
-                host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
-            })?
-            .parse::<DomainPart>()
-            .map_err(|error| {
-                host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
-            })?;
-        let user_jid = BareJid::from_parts(Some(&username), &domain);
         Ok(Session::new(
             user_jid.as_str(),
-            username.as_str(),
-            username.as_str(),
+            localpart.as_str(),
+            localpart.as_str(),
         ))
     }
 }

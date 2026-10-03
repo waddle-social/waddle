@@ -68,6 +68,10 @@ pub struct WaddleMessage {
     /// XEP-0333 `<displayed id='…'/>` marker target id.
     pub displayed_marker_id: Option<String>,
     pub is_muc: bool,
+    /// Carries XEP-0045 `muc#user`: a room private message or a room
+    /// invite/decline. Never a 1:1 DM, even when `message_type` is `chat`
+    /// or `normal` and `from` is a room JID — route as room traffic.
+    pub muc_user: bool,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,
     /// XEP-0394 message markup spans over the body.
@@ -560,6 +564,9 @@ pub struct WaddleArchivedMessage {
     pub forum_title: Option<String>,
     /// XEP-0449: the archived body is a sticker.
     pub is_sticker: bool,
+    /// Carries XEP-0045 `muc#user`: a room private message or a room
+    /// invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
+    pub muc_user: bool,
     /// XEP-0045 real author JID from the archived `muc#user` payload,
     /// exposed by non-anonymous room archives.
     pub author_real_jid: Option<String>,

@@ -228,7 +228,7 @@ use super::presence::{
     send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
     RoomArchiveAccess,
 };
-use crate::auth::{local_account_exists, Session};
+use crate::auth::{local_account_exists, local_account_jid_exists, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{

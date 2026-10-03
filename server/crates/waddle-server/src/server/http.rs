@@ -712,6 +712,8 @@ async fn create_websocket_state(
         service_domains.clone(),
         Arc::clone(&extension_manager),
     );
+    let bot_avatars = Arc::new(crate::server::extension_bot_avatar::BotAvatars::default());
+    bot_avatars.prefetch(&extension_manager);
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
 
@@ -970,6 +972,12 @@ async fn create_websocket_state(
     // `pubsub_storage`, `room_registry`) wired up via #682/#683.
     crate::admin::spaces::register(&websocket_command_registry, Arc::clone(&state)).await;
     if lineage_attested {
+        // Account lookups match canonical keys only, so every account row
+        // needs its key before the node serves; the roster prune that
+        // follows uses them.
+        crate::auth::directory::reconcile_local_accounts(state.db_pool.global_actor())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
             &state.permission_actor,
@@ -1144,6 +1152,7 @@ async fn create_websocket_state(
                 pending_delivery_storage,
                 command_registry: websocket_command_registry,
                 extension_manager,
+                bot_avatars,
                 dispatcher: stanza_dispatcher,
                 muji_pre_dispatch_terminate_rate_limit: Arc::new(
                     waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit::with_defaults(),
@@ -1341,6 +1350,10 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_room_effect_outbox_janitor(websocket_state);
     spawn_push_service_publish_job_janitor(websocket_state);
     spawn_auth_state_janitor(websocket_state);
+    crate::auth::directory::spawn_account_key_backfill(
+        websocket_state.deps.app_state.db_pool.global_actor(),
+        crate::auth::directory::ACCOUNT_KEY_BACKFILL_INTERVAL,
+    );
     spawn_destroy_completion_janitor(websocket_state);
     spawn_room_dormancy_janitor(websocket_state);
     spawn_user_actor_reaper(websocket_state);

@@ -2,7 +2,6 @@ package social.waddle.android.feature.members
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -31,6 +30,7 @@ import social.waddle.android.client.testSessionInfo
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddlePresenceHat
+import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomMemberEntry
 import social.waddle.client.ffi.WaddleUserSearchEntry
 
@@ -59,7 +59,6 @@ class MembersViewModelTest {
         fun viewModel() = MembersViewModel(
             sessionManager = manager,
             roomJid = ROOM,
-            currentSession = MutableStateFlow(testSessionInfo()),
         )
     }
 
@@ -152,95 +151,174 @@ class MembersViewModelTest {
         assertTrue(drifter.presentNow)
     }
 
-    private fun botPresence(nick: String, jid: String, type: String = "available") = WaddleClientEvent.Presence(
+    private fun bot(jid: String, name: String?) = WaddleRoomBot(jid = jid, name = name)
+
+    /** A bot's transient occupancy: joins hatted with no affiliation. */
+    private fun botPresence(
+        nick: String,
+        jid: String,
+        type: String = "available",
+        room: String = ROOM,
+    ) = WaddleClientEvent.Presence(
         testPresence(
-            from = "$ROOM/$nick",
+            from = "$room/$nick",
             presenceType = type,
-            mucAffiliation = WaddleMucAffiliation.MEMBER,
+            mucAffiliation = WaddleMucAffiliation.NONE,
             mucJid = "$jid/bot",
             hats = listOf(WaddlePresenceHat(uri = HAT_URI_BOT, title = "Bot")),
         ),
     )
 
     @Test
-    fun `bots sort into their own trailing section and never read as present`() = runTest {
+    fun `declared room bots list by name apart from the people`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
         harness.client.roomMembersByTier = mapOf(
-            WaddleMucAffiliation.MEMBER to listOf(
-                entry("alpha@extensions.waddle.test", WaddleMucAffiliation.MEMBER),
-                entry("bob@waddle.test", WaddleMucAffiliation.MEMBER),
-            ),
+            WaddleMucAffiliation.MEMBER to listOf(entry("bob@waddle.test", WaddleMucAffiliation.MEMBER)),
             WaddleMucAffiliation.OWNER to listOf(entry("icepuma@waddle.test", WaddleMucAffiliation.OWNER)),
         )
-        seedSelfAsOwner(harness)
-        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
-        // Presence-only bot (not in the §9.5 list) is a bot row too.
-        harness.factory.emit(botPresence("zeta", "zeta@extensions.waddle.test"))
-        runCurrent()
+        harness.client.roomBots = mapOf(
+            ROOM to listOf(
+                bot("zeta@extensions.waddle.test", "Zeta Bot"),
+                // No name from the service: the JID localpart stands in.
+                bot("alpha@extensions.waddle.test", null),
+            ),
+        )
 
         val viewModel = harness.viewModel()
         runCurrent()
 
-        val rows = viewModel.uiState.value.rows
-        // alpha sorts before bob by name, yet bots trail every person.
+        val state = viewModel.uiState.value
+        assertEquals(listOf("icepuma@waddle.test", "bob@waddle.test"), state.rows.map { it.jid })
         assertEquals(
             listOf(
-                "icepuma@waddle.test",
-                "bob@waddle.test",
-                "alpha@extensions.waddle.test",
-                "zeta@extensions.waddle.test",
+                BotRow("alpha@extensions.waddle.test", "alpha"),
+                BotRow("zeta@extensions.waddle.test", "Zeta Bot"),
             ),
-            rows.map { it.jid },
+            state.bots,
         )
-        assertEquals(listOf(false, false, true, true), rows.map { it.isBot })
-        assertTrue(rows.filter { it.isBot }.none { it.presentNow })
     }
 
     @Test
-    fun `an extensions-domain member never seen in presence lists under bots`() = runTest {
+    fun `an extensions-domain address alone is not a bot`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.roomMembersByTier = mapOf(
-            WaddleMucAffiliation.MEMBER to listOf(
-                entry("Alpha@Extensions.Waddle.Test", WaddleMucAffiliation.MEMBER),
-                // Another account's extension service is not ours.
-                entry("carol@extensions.other.test", WaddleMucAffiliation.MEMBER),
-                entry("bob@waddle.test", WaddleMucAffiliation.MEMBER),
-            ),
-        )
-
-        val viewModel = harness.viewModel()
-        runCurrent()
-
-        // No presence was ever emitted: only the address says "bot".
-        val rows = viewModel.uiState.value.rows
-        assertEquals(
-            listOf("bob@waddle.test", "carol@extensions.other.test", "Alpha@Extensions.Waddle.Test"),
-            rows.map { it.jid },
-        )
-        assertEquals(listOf(false, false, true), rows.map { it.isBot })
-        assertFalse(rows.last().presentNow)
-        assertTrue(rows.last().hats.isEmpty())
-    }
-
-    @Test
-    fun `a bot stays in the bots section after its room presence goes away`() = runTest {
-        val harness = Harness(this)
-        harness.loginReady(this)
+        // Listed as a plain member, absent from the server's bot list.
         harness.client.roomMembersByTier = mapOf(
             WaddleMucAffiliation.MEMBER to listOf(entry("alpha@extensions.waddle.test", WaddleMucAffiliation.MEMBER)),
         )
-        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
-        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
-        runCurrent()
 
         val viewModel = harness.viewModel()
         runCurrent()
 
-        val alpha = viewModel.uiState.value.rows.single()
-        assertTrue(alpha.isBot)
-        assertFalse(alpha.presentNow)
+        assertEquals(listOf("alpha@extensions.waddle.test"), viewModel.uiState.value.rows.map { it.jid })
+        assertTrue(viewModel.uiState.value.bots.isEmpty())
+    }
+
+    @Test
+    fun `a hatted momentary occupant is not listed as a person`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        seedSelfAsOwner(harness)
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+
+        val viewModel = harness.viewModel()
+        runCurrent()
+        // Mid-send: present, hatted, affiliation none — still no person row.
+        assertEquals(listOf("icepuma"), viewModel.uiState.value.rows.map { it.displayName })
+
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
+        runCurrent()
+        assertEquals(listOf("icepuma"), viewModel.uiState.value.rows.map { it.displayName })
+    }
+
+    @Test
+    fun `a bot-hat presence for an unlisted jid refetches the room bots`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = harness.viewModel()
+        runCurrent()
+        assertTrue(viewModel.uiState.value.bots.isEmpty())
+        val initialFetches = harness.client.listRoomBotsCalls.size
+
+        harness.client.roomBots = mapOf(ROOM to listOf(bot("alpha@extensions.waddle.test", "Alpha")))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+        assertEquals(listOf("Alpha"), viewModel.uiState.value.bots.map { it.displayName })
+
+        // Already listed: the same bot arriving again asks nothing more.
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+    }
+
+    @Test
+    fun `a bot already learned in another room still refetches when it first posts here`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        // alpha is hat-learned session-wide from a different room.
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", room = OTHER_ROOM))
+        runCurrent()
+        val viewModel = harness.viewModel()
+        runCurrent()
+        val initialFetches = harness.client.listRoomBotsCalls.size
+
+        // Another room's bot presence says nothing about this room's list.
+        harness.factory.emit(botPresence("beta", "beta@extensions.waddle.test", room = OTHER_ROOM))
+        runCurrent()
+        assertEquals(initialFetches, harness.client.listRoomBotsCalls.size)
+
+        // The server records alpha in this room at join; the list names it only now.
+        harness.client.roomBots = mapOf(ROOM to listOf(bot("alpha@extensions.waddle.test", "Alpha")))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+        assertEquals(listOf("Alpha"), viewModel.uiState.value.bots.map { it.displayName })
+    }
+
+    @Test
+    fun `an unavailable bot presence for an unlisted jid refetches the room bots`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = harness.viewModel()
+        runCurrent()
+        val initialFetches = harness.client.listRoomBotsCalls.size
+
+        // The screen opened mid-send: only the bot's leave is seen.
+        harness.client.roomBots = mapOf(ROOM to listOf(bot("alpha@extensions.waddle.test", "Alpha")))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
+        runCurrent()
+
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+        assertEquals(listOf("Alpha"), viewModel.uiState.value.bots.map { it.displayName })
+    }
+
+    @Test
+    fun `a bot the list still omits refetches once per load, not per presence`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = harness.viewModel()
+        runCurrent()
+        val initialFetches = harness.client.listRoomBotsCalls.size
+
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+
+        // A fresh load asks again; the reload itself fetches the bots too.
+        viewModel.refresh()
+        runCurrent()
+        val afterReload = harness.client.listRoomBotsCalls.size
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+        assertEquals(afterReload + 1, harness.client.listRoomBotsCalls.size)
     }
 
     @Test
@@ -335,5 +413,6 @@ class MembersViewModelTest {
 
     private companion object {
         const val ROOM = "general@muc.waddle.test"
+        const val OTHER_ROOM = "random@muc.waddle.test"
     }
 }

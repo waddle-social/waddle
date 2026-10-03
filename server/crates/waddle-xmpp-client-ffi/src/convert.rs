@@ -841,6 +841,7 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         displayed_marker_requested: msg.displayed_marker_requested,
         displayed_marker_id: msg.displayed_marker_id,
         is_muc,
+        muc_user: msg.muc_pm,
         thread: msg.thread_id.or(msg.thread),
         parent_thread_id: msg.parent_thread_id,
         markup_spans: markup_spans_to_ffi(msg.markup_spans),
@@ -977,6 +978,7 @@ pub(crate) fn archived_to_ffi(
             .and_then(forum_post_kind_to_ffi),
         forum_title: parsed.and_then(|m| m.forum_title.clone()),
         is_sticker: parsed.is_some_and(|m| m.is_sticker),
+        muc_user: parsed.is_some_and(|m| m.muc_pm),
         author_real_jid: archived.author_real_jid,
         call_thread: parsed
             .and_then(|m| m.call_thread.clone())
@@ -1462,6 +1464,99 @@ mod tests {
         assert_eq!(ffi.stanza_ids[0].by, "archive.waddle.test");
         assert_eq!(ffi.stanza_ids[1].id, "sid-room");
         assert_eq!(ffi.stanza_ids[1].by, "room@conf.waddle.test");
+    }
+
+    #[test]
+    fn xep0045_muc_user_marker_survives_inbound_to_ffi() {
+        // §7.5 private message: `chat` from an occupant JID.
+        let private = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' id='pm1' \
+                      from='room@conf.waddle.test/alice'>\
+               <body>psst</body>\
+               <x xmlns='http://jabber.org/protocol/muc#user'/>\
+             </message>",
+        ));
+        assert!(private.muc_user);
+        assert!(!private.is_muc);
+
+        // §7.8.2 mediated invite: `normal` from the bare room, may carry a body.
+        let invite = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='normal' id='inv1' \
+                      from='room@conf.waddle.test'>\
+               <body>join us</body>\
+               <x xmlns='http://jabber.org/protocol/muc#user'>\
+                 <invite from='alice@waddle.test'/>\
+               </x>\
+             </message>",
+        ));
+        assert!(invite.muc_user);
+        assert!(!invite.is_muc);
+
+        // §7.8.4 decline: untyped message, defaults to `normal`.
+        let decline = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' id='dec1' from='room@conf.waddle.test'>\
+               <x xmlns='http://jabber.org/protocol/muc#user'>\
+                 <decline from='bob@waddle.test'/>\
+               </x>\
+             </message>",
+        ));
+        assert!(decline.muc_user);
+    }
+
+    #[test]
+    fn plain_dm_and_groupchat_are_not_muc_user_in_inbound_to_ffi() {
+        let dm = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' id='dm1' from='bob@waddle.test/phone'>\
+               <body>hi</body>\
+             </message>",
+        ));
+        assert!(!dm.muc_user);
+
+        let groupchat = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='groupchat' id='gc1' \
+                      from='room@conf.waddle.test/alice'>\
+               <body>hi</body>\
+               <x xmlns='http://jabber.org/protocol/muc#user'/>\
+             </message>",
+        ));
+        assert!(groupchat.is_muc);
+        assert!(!groupchat.muc_user);
+    }
+
+    #[test]
+    fn xep0045_muc_user_marker_survives_archived_to_ffi() {
+        let marked = archived_to_ffi(parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-pm' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='chat' id='pm-arch' \
+                            from='room@conf.waddle.test/alice'>\
+                     <body>psst</body>\
+                     <x xmlns='http://jabber.org/protocol/muc#user'/>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        ))
+        .expect("parsed archive row must convert");
+        assert!(marked.muc_user);
+
+        let plain = archived_to_ffi(parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-dm' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='chat' id='dm-arch' \
+                            from='bob@waddle.test/phone'>\
+                     <body>hi</body>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        ))
+        .expect("parsed archive row must convert");
+        assert!(!plain.muc_user);
     }
 
     #[test]

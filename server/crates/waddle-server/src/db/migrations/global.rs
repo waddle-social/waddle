@@ -737,6 +737,30 @@ CREATE TABLE xmpp_occupancy_authority (
 );
 "#;
 
+/// Canonical lookup keys for local accounts. A JID localpart is nodeprepped
+/// (Unicode case folding, NFKC), which SQL `lower()` cannot reproduce, so the
+/// server computes the keys in Rust when it writes an account and, for rows
+/// written before this migration, at startup
+/// (`auth::directory::reconcile_local_accounts`). `native_users.jid_key` is
+/// the account's canonical bare JID; `users.localpart_key` is the canonical
+/// localpart of a `users` row, which has no domain.
+pub const V0014_ACCOUNT_JID_KEYS: &str = r#"
+ALTER TABLE native_users ADD COLUMN jid_key TEXT;
+CREATE UNIQUE INDEX idx_native_users_jid_key ON native_users(jid_key);
+ALTER TABLE users ADD COLUMN localpart_key TEXT;
+CREATE INDEX idx_users_localpart_key ON users(localpart_key);
+"#;
+
+/// Rooms where an extension bot has posted, for XEP-0030 room bot listing.
+/// Standalone: rows are keyed by JID and plugin id only.
+pub const V0015_EXTENSION_BOT_ROOMS: &str = r#"
+CREATE TABLE extension_bot_rooms (
+    room_jid TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    PRIMARY KEY (room_jid, plugin_id)
+);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -820,6 +844,18 @@ pub fn all() -> Vec<Migration> {
             description: "Fence occupancy by the current full-JID bind generation".to_string(),
             sql_sqlite: V0013_OCCUPANCY_AUTHORITY,
             sql_postgres: V0013_OCCUPANCY_AUTHORITY,
+        },
+        Migration {
+            version: 14,
+            description: "Canonical JID lookup keys for local accounts".to_string(),
+            sql_sqlite: V0014_ACCOUNT_JID_KEYS,
+            sql_postgres: V0014_ACCOUNT_JID_KEYS,
+        },
+        Migration {
+            version: 15,
+            description: "Record rooms where extension bots have posted".to_string(),
+            sql_sqlite: V0015_EXTENSION_BOT_ROOMS,
+            sql_postgres: V0015_EXTENSION_BOT_ROOMS,
         },
     ]
 }

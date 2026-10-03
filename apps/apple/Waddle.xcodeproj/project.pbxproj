@@ -154,7 +154,6 @@
 		5E8F6B82D60AA012464E9DA0 /* WaddleCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F3BC43606C47023AC920E8 /* WaddleCommands.swift */; };
 		5FF74D9CAA9E5256B21392AA /* AnimatedImageDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26A1114C848081879D77F1F /* AnimatedImageDecoder.swift */; };
 		6033E083125F7FCB3A3088DF /* ComposerSlashSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECDFAEB59C784965933AFB95 /* ComposerSlashSuggestions.swift */; };
-		60986C79163D650C3BD1D0C6 /* MemberRoster.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCA05A781FA9A0E026A9E259 /* MemberRoster.swift */; };
 		612943B882D8BC86485E27FA /* GifSearchClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05E9EECFC4491F0A579C1CC /* GifSearchClient.swift */; };
 		61565B47F0501BCDC60C1D62 /* MessageAccessibilityText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85879D67EF49761A46A414D /* MessageAccessibilityText.swift */; };
 		61694B6B89613588839EE781 /* RemoteImageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D07E5A6765969766CAC741 /* RemoteImageStore.swift */; };
@@ -309,7 +308,6 @@
 		BD17CD49CA658B6C53D3635F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44C43BC9F730169E101C375 /* AppDelegate.swift */; };
 		BD6A9531804E7A5A344BF0DC /* ConversationTimelineList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E5FAD529CCEAEDEACAA2877 /* ConversationTimelineList.swift */; };
 		BDDE170AD7E6B9B0E66B41F0 /* AnimatedImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77EF83062F6AD53EB3E0377 /* AnimatedImageView.swift */; };
-		BE29B52BD10938DA0345FAC7 /* MemberRoster.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCA05A781FA9A0E026A9E259 /* MemberRoster.swift */; };
 		BFB4853E10B1D17713725387 /* FFIXmppPort+ReadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D13CF6890362A3E5A3EE80 /* FFIXmppPort+ReadState.swift */; };
 		C01877A2E48B0C4A03892717 /* ProfileStatusSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A699C3988283081BA15B97DD /* ProfileStatusSection.swift */; };
 		C130A4F16967752B6E065AE6 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA6039ABBCA4C43BE7CFCF32 /* ProfileView.swift */; };
@@ -557,7 +555,6 @@
 		BB8C551551F6E346F2CF6447 /* WaddleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleApp.swift; sourceTree = "<group>"; };
 		BC04CCBB25DF7EFFCEE73622 /* ExtensionCommandStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionCommandStage.swift; sourceTree = "<group>"; };
 		BC9800CE6EF75EE311AFD2F1 /* SignInAuthorizingPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInAuthorizingPanel.swift; sourceTree = "<group>"; };
-		BCA05A781FA9A0E026A9E259 /* MemberRoster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberRoster.swift; sourceTree = "<group>"; };
 		BDB24A68F639E15A8EF908C6 /* ExtensionCommandCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionCommandCopy.swift; sourceTree = "<group>"; };
 		C05E9EECFC4491F0A579C1CC /* GifSearchClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GifSearchClient.swift; sourceTree = "<group>"; };
 		C14B65E512A4E0390FEC7C4E /* AttachmentImageInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImageInfo.swift; sourceTree = "<group>"; };
@@ -710,7 +707,6 @@
 			isa = PBXGroup;
 			children = (
 				92341C99BBB49D538EC5376C /* MemberPermissions.swift */,
-				BCA05A781FA9A0E026A9E259 /* MemberRoster.swift */,
 			);
 			path = Logic;
 			sourceTree = "<group>";
@@ -1486,7 +1482,6 @@
 				8E48B1656CF58F68F1AF0047 /* MeActionLine.swift in Sources */,
 				917B8C026963CF0131FC91B2 /* MemberActions.swift in Sources */,
 				55652EB16569A153C8412189 /* MemberPermissions.swift in Sources */,
-				60986C79163D650C3BD1D0C6 /* MemberRoster.swift in Sources */,
 				345B9F6E8328AA9E3AAC87D1 /* MemberRows.swift in Sources */,
 				9BD799307A94ABE1139C9295 /* MentionCandidates.swift in Sources */,
 				0CE42B684F3500A8BFFE4CFE /* MentionHighlight.swift in Sources */,
@@ -1689,7 +1684,6 @@
 				B015B33E71B1EF7790E575F1 /* MeActionLine.swift in Sources */,
 				50B701DC04CAFEF288D88ED3 /* MemberActions.swift in Sources */,
 				41924BAAF097F3AEDE675306 /* MemberPermissions.swift in Sources */,
-				BE29B52BD10938DA0345FAC7 /* MemberRoster.swift in Sources */,
 				88217DEEB8B68D79BEB98F48 /* MemberRows.swift in Sources */,
 				83FD36173753A3D410016707 /* MentionCandidates.swift in Sources */,
 				A4DC77BF3BFA5D27E6EF6783 /* MentionHighlight.swift in Sources */,

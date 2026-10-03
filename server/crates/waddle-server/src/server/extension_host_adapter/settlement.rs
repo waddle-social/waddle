@@ -10,14 +10,16 @@ use super::ExtensionHostAdapterError;
 
 pub(super) const SETTLEMENT_RESPONSE_DEADLINE: Duration = Duration::from_secs(2);
 
+/// A settlement still running after the deadline stays in `outcome`; check
+/// `JoinHandle::is_finished` before awaiting it again.
 pub(super) async fn finish_nested(
-    outcome: NestedOutcome,
+    outcome: &mut NestedOutcome,
 ) -> Result<Vec<(jid::BareJid, waddle_xmpp_core::xep0359::StanzaId)>, ExtensionHostAdapterError> {
     match outcome {
         NestedOutcome::Refused(NestedRefusal::Decision(IngressDecisionClass::PrincipalMissing)) => {
             Err(ExtensionHostAdapterError::NotAuthorized)
         }
-        NestedOutcome::Refused(reason) => Err(ExtensionHostAdapterError::Refused(reason)),
+        NestedOutcome::Refused(reason) => Err(ExtensionHostAdapterError::Refused(*reason)),
         NestedOutcome::Committed {
             settlement,
             archive_ids,
@@ -33,7 +35,7 @@ pub(super) async fn finish_nested(
                     return Err(ExtensionHostAdapterError::Rejected(Box::new(rejection)));
                 }
             }
-            Ok(archive_ids)
+            Ok(archive_ids.clone())
         }
     }
 }

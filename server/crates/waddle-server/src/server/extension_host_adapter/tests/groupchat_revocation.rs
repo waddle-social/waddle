@@ -1,26 +1,53 @@
-//! Grant refusal compensates only the occupancy created by this dispatch.
-use super::{direct_ingress, groupchat_ingress::GroupchatFixture};
+//! A refused send still leaves the bot occupancy it used.
+use super::{
+    direct_ingress,
+    groupchat_ingress::{seen, GroupchatFixture, Seen},
+};
 use crate::{
     ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
     ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     server::extension_host_adapter::{ExtensionHostAdapter, ExtensionHostAdapterError},
 };
 use std::{sync::Arc, time::Duration};
-use waddle_xmpp::{muc::room_actor::GetSnapshot, Stanza};
+use waddle_xmpp::{
+    muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
+    Stanza,
+};
 use waddle_xmpp_core::xep0359::OriginId;
 use xmpp_parsers::presence::Type;
 
-async fn revoked_after_bot_planning(f: IngressFixture, reuse: bool) {
+/// `leftover`: an interrupted send left the bot in the room, so this send
+/// finds it present instead of joining, and still leaves it.
+async fn revoked_after_bot_planning(f: IngressFixture, leftover: bool) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let bot = fixture.invocation().actor_jid;
-    if reuse {
-        fixture
-            .send("existing-occupancy")
+    if leftover {
+        let revision = fixture
+            .actor
+            .ask(GetSnapshot)
             .await
-            .expect("initial send");
-        fixture.drain();
+            .expect("snapshot")
+            .admission_revision;
+        let session = crate::occupancy_authority::ensure(
+            fixture.adapter.state.deps.app_state.db_pool.global(),
+            &bot,
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        )
+        .await
+        .expect("bot generation");
+        fixture
+            .actor
+            .ask(JoinWithAffiliation {
+                sender_jid: bot.clone(),
+                nick: "leftover".into(),
+                affiliation_grant: JoinAffiliationGrant::HostOwned,
+                local_domain: "example.com".into(),
+                admission_revision: revision,
+                session,
+            })
+            .await
+            .expect("leftover occupancy");
     }
-    let previous_rows = i64::from(reuse);
     let origin = OriginId::new(uuid::Uuid::new_v4().to_string());
     let gate = Registration::before_admission(origin.clone());
     let adapter = ExtensionHostAdapter::new(Arc::clone(&fixture.adapter.state));
@@ -35,8 +62,10 @@ async fn revoked_after_bot_planning(f: IngressFixture, reuse: bool) {
         .ask(GetSnapshot)
         .await
         .expect("joined snapshot");
-    let joined_session = joined.room.session_generation(&bot).expect("bot joined");
-    assert_eq!(f.count("ingress_messages").await, previous_rows);
+    assert!(
+        joined.room.session_generation(&bot).is_some(),
+        "bot present"
+    );
     let mut tx = f.uow.begin().await.expect("revocation transaction");
     assert_eq!(
         ExtensionGrantRepository::sync_configured(&mut tx, &[])
@@ -55,38 +84,36 @@ async fn revoked_after_bot_planning(f: IngressFixture, reuse: bool) {
         matches!(result, Err(ExtensionHostAdapterError::NotAuthorized)),
         "{result:?}"
     );
-    assert_eq!(f.count("ingress_messages").await, previous_rows);
+    fixture.settle().await;
+    assert_eq!(f.count("ingress_messages").await, 0);
+    assert_eq!(
+        f.count("extension_bot_rooms").await,
+        0,
+        "revoking the plugin's grants unlists it"
+    );
+    assert_eq!(
+        f.count("notification_activity").await,
+        0,
+        "a bot's leave is no account activity"
+    );
     let after = fixture
         .actor
         .ask(GetSnapshot)
         .await
         .expect("refusal snapshot");
+    assert!(
+        after.room.session_generation(&bot).is_none(),
+        "the refused send leaves the bot occupancy it used"
+    );
     let wire = fixture.drain();
-    let presences: Vec<_> = wire
-        .iter()
-        .filter_map(|stanza| match stanza {
-            Stanza::Presence(presence) => Some(presence),
-            _ => None,
-        })
+    let types: Vec<_> = super::groupchat_ingress::bot_presences(&wire)
+        .into_iter()
+        .map(|(type_, ..)| type_)
         .collect();
-    if reuse {
-        assert_eq!(after.room.session_generation(&bot), Some(joined_session));
-        assert_eq!(after.occupancy_revision, joined.occupancy_revision);
-        assert!(presences.is_empty(), "reused occupancy must not be parted");
+    if leftover {
+        assert_eq!(types, [Type::Unavailable], "no join, only the leave");
     } else {
-        assert!(
-            after.room.session_generation(&bot).is_none(),
-            "refused admission must remove this call's bot join"
-        );
-        assert_eq!(
-            presences.len(),
-            2,
-            "join followed by compensating unavailable"
-        );
-        assert_eq!(presences[0].type_, Type::None);
-        assert_eq!(presences[1].type_, Type::Unavailable);
-        assert_eq!(presences[0].from, presences[1].from);
-        assert_eq!(presences[0].to, presences[1].to);
+        assert_eq!(types, [Type::None, Type::Unavailable], "join then leave");
     }
     assert!(!wire.iter().any(|stanza| matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat)), "refused message cannot be delivered");
 
@@ -106,56 +133,103 @@ async fn revoked_after_bot_planning(f: IngressFixture, reuse: bool) {
         .send("after-regrant")
         .await
         .expect("regranted send succeeds");
-    let rejoined = fixture
-        .actor
-        .ask(GetSnapshot)
-        .await
-        .expect("regrant snapshot");
-    let rejoined_session = rejoined
-        .room
-        .session_generation(&bot)
-        .expect("bot present after regrant");
-    // A bot keeps one published occupancy generation (#1869), so a regrant
-    // rejoins under the same generation; the fresh join is its presence below.
-    assert_eq!(rejoined_session, joined_session);
     let regrant_wire = fixture.drain();
     super::groupchat_ingress::groupchat_message(&regrant_wire);
     assert_eq!(
-        regrant_wire
-            .iter()
-            .filter(|stanza| matches!(stanza, Stanza::Presence(_)))
-            .count(),
-        usize::from(!reuse)
+        super::groupchat_ingress::bot_presences(&regrant_wire).len(),
+        2,
+        "a fresh join and leave"
     );
-    assert_eq!(f.count("ingress_messages").await, previous_rows + 1);
+    assert!(fixture
+        .actor
+        .ask(GetSnapshot)
+        .await
+        .expect("regrant snapshot")
+        .room
+        .session_generation(&bot)
+        .is_none());
+    assert_eq!(f.count("ingress_messages").await, 1);
     assert_eq!(
         f.count("ingress_messages WHERE terminal_at IS NOT NULL")
             .await,
-        previous_rows + 1
+        1
     );
     fixture.close(f).await;
 }
 
 #[tokio::test]
-async fn extension_groupchat_revocation_compensates_join_sqlite() {
+async fn extension_groupchat_revocation_leaves_join_sqlite() {
     revoked_after_bot_planning(IngressFixture::sqlite().await, false).await;
 }
 
 #[tokio::test]
-async fn extension_groupchat_revocation_compensates_join_postgres() {
+async fn extension_groupchat_revocation_leaves_join_postgres() {
     if let Some(f) = IngressFixture::postgres("bot_join_revoke").await {
         revoked_after_bot_planning(f, false).await;
     }
 }
 
 #[tokio::test]
-async fn extension_groupchat_revocation_preserves_reused_occupancy_sqlite() {
+async fn extension_groupchat_revocation_leaves_leftover_occupancy_sqlite() {
     revoked_after_bot_planning(IngressFixture::sqlite().await, true).await;
 }
 
 #[tokio::test]
-async fn extension_groupchat_revocation_preserves_reused_occupancy_postgres() {
+async fn extension_groupchat_revocation_leaves_leftover_occupancy_postgres() {
     if let Some(f) = IngressFixture::postgres("bot_reuse_revoke").await {
         revoked_after_bot_planning(f, true).await;
+    }
+}
+
+/// A send dropped after its bot joined (the frame backstop cancels a slow
+/// handler) may still commit: the authority owns that work. The bot leaves
+/// once its linger passes, and never before the message it was joined for.
+async fn cancelled_send_leaves(f: IngressFixture) {
+    let mut fixture = GroupchatFixture::new(&f).await;
+    let origin = OriginId::new(uuid::Uuid::new_v4().to_string());
+    let gate = Registration::before_admission(origin.clone());
+    let adapter = ExtensionHostAdapter::new(Arc::clone(&fixture.adapter.state));
+    let invocation = fixture.invocation();
+    let request = fixture.request(origin.as_str());
+    let sending = tokio::spawn(async move { adapter.send_message(&invocation, request).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.entered())
+        .await
+        .expect("the bot joined and the send reached admission");
+    sending.abort();
+    assert!(sending.await.expect_err("cancelled").is_cancelled());
+    super::super::groupchat::linger_passes().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        fixture.bot_present().await,
+        "the leave waits for the cancelled send's commit"
+    );
+    gate.release();
+    fixture.settle().await;
+    assert!(
+        !fixture.bot_present().await,
+        "the cancelled send left the bot occupancy"
+    );
+    assert_eq!(
+        seen(&fixture.drain()),
+        [
+            Seen::Join,
+            Seen::Message(origin.as_str().to_owned()),
+            Seen::Leave
+        ],
+        "the committed message reaches the occupant before the leave"
+    );
+    assert_eq!(f.count("ingress_messages").await, 1);
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_cancelled_send_leaves_sqlite() {
+    cancelled_send_leaves(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_cancelled_send_leaves_postgres() {
+    if let Some(f) = IngressFixture::postgres("bot_cancelled_send").await {
+        cancelled_send_leaves(f).await;
     }
 }

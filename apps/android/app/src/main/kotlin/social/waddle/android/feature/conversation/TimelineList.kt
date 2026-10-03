@@ -40,6 +40,7 @@ fun TimelineList(
     onAtNewestEdgeChanged: (Boolean) -> Unit = {},
     selfBareJid: String? = null,
     authorPresence: Map<String, WaddlePresence> = emptyMap(),
+    declaredBotJids: Set<String> = emptySet(),
     trustedMediaOrigin: String? = null,
 ) {
     val listState = rememberLazyListState()
@@ -96,6 +97,7 @@ fun TimelineList(
                 onOpenThread = onOpenThread,
                 selfBareJid = selfBareJid,
                 authorPresence = authorPresence,
+                declaredBotJids = declaredBotJids,
                 trustedMediaOrigin = trustedMediaOrigin,
                 avatar = storedItem?.let { avatars[avatarKeyOf(it)] },
             )

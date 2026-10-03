@@ -40,15 +40,30 @@ use waddle_xmpp::xep::xep0203::has_delay;
 
 use super::Deps;
 
-/// Resolve the production
-/// [`crate::notification_activity::NotificationActivityStore`] from the
-/// deps surface. Returns `None` in unit-test fixtures whose `Deps`
-/// don't wire `web_socket_state`.
+/// The production
+/// [`crate::notification_activity::NotificationActivityStore`] for
+/// `owner`'s activity. Activity belongs to accounts: an extension bot is
+/// server-spoken, so its posts, joins and leaves record none.
+fn account_activity_store<'a>(
+    state: &'a WebSocketState,
+    owner: &BareJid,
+) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
+    state
+        .deps
+        .service_domains
+        .extension_bot(&jid::Jid::from(owner.clone()))
+        .is_none()
+        .then(|| state.deps.protocol.notification_activity.as_ref())
+}
+
+/// [`account_activity_store`] from the deps surface. Returns `None` in
+/// unit-test fixtures whose `Deps` don't wire `web_socket_state`.
 fn activity_store<'a>(
     deps: &'a Deps<'_>,
+    owner: &BareJid,
 ) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
     deps.web_socket_state
-        .map(|state: &WebSocketState| state.deps.protocol.notification_activity.as_ref())
+        .and_then(|state| account_activity_store(state, owner))
 }
 
 fn capture_notification_activity(
@@ -110,7 +125,7 @@ pub(super) async fn record_chat_state_activity(
         );
         return;
     }
-    let Some(store) = activity_store(deps) else {
+    let Some(store) = activity_store(deps, sender) else {
         return;
     };
     let now_ms = crate::time::now_ms();
@@ -193,7 +208,7 @@ pub(super) async fn record_read_marker_activity(
     owner: &BareJid,
     conversation: &BareJid,
 ) {
-    let Some(store) = activity_store(deps) else {
+    let Some(store) = activity_store(deps, owner) else {
         return;
     };
     let now_ms = crate::time::now_ms();
@@ -259,7 +274,7 @@ pub(super) async fn record_outbound_message_activity(
         );
         return;
     }
-    let Some(store) = activity_store(deps) else {
+    let Some(store) = activity_store(deps, sender) else {
         return;
     };
     let now_ms = crate::time::now_ms();
@@ -308,11 +323,11 @@ pub(crate) async fn record_presence_available_activity_on_state(
     room: &BareJid,
     show: Option<NotificationPresenceShow>,
 ) {
+    let Some(store) = account_activity_store(state, owner) else {
+        return;
+    };
     let now_ms = crate::time::now_ms();
-    if let Err(error) = state
-        .deps
-        .protocol
-        .notification_activity
+    if let Err(error) = store
         .record_presence_available(owner, room, show, now_ms)
         .await
     {
@@ -335,14 +350,11 @@ pub(crate) async fn record_presence_unavailable_activity_on_state(
     owner: &BareJid,
     room: &BareJid,
 ) {
+    let Some(store) = account_activity_store(state, owner) else {
+        return;
+    };
     let now_ms = crate::time::now_ms();
-    if let Err(error) = state
-        .deps
-        .protocol
-        .notification_activity
-        .record_presence_unavailable(owner, room, now_ms)
-        .await
-    {
+    if let Err(error) = store.record_presence_unavailable(owner, room, now_ms).await {
         warn!(
             %owner,
             %room,

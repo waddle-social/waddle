@@ -70,6 +70,14 @@ pub struct DiscoItem {
     pub node: Option<String>,
 }
 
+/// An extension bot that has posted in a room, from the room's
+/// [`NODE_WADDLE_ROOM_BOTS`](super::NODE_WADDLE_ROOM_BOTS) disco#items node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomBot {
+    pub jid: jid::BareJid,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UploadSlot {
     pub put_url: String,

@@ -1,5 +1,5 @@
 //! Room lifecycle + member management exports: XEP-0045 §9.5 member
-//! lists, §5.2 affiliation changes (ban = §9.1 outcast), §8.2 kicks
+//! lists, the room's extension bots (XEP-0030), §5.2 affiliation changes (ban = §9.1 outcast), §8.2 kicks
 //! (role → none), §10.1/§10.2 owner configuration, §10.9 destroy, and
 //! the XEP-0055 user search backing the add-member flow.
 //!
@@ -28,7 +28,7 @@ use waddle_xmpp_client::xep::xep0045_owner::{
 
 use crate::boundary_convert::jid_domain;
 use crate::error::client_error_to_waddle;
-use crate::messaging_verbs::send_iq_with_timeout;
+use crate::messaging_verbs::{send_iq_with_timeout, IQ_TIMEOUT};
 use crate::{WaddleClient, WaddleError, WaddleMucAffiliation};
 
 // ── Typed FFI payloads ───────────────────────────────────────────────
@@ -43,6 +43,15 @@ pub struct WaddleRoomMemberEntry {
     pub nick: Option<String>,
     /// Reason recorded with the affiliation change (e.g. ban reason).
     pub reason: Option<String>,
+}
+
+/// An extension bot that has posted in a room.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct WaddleRoomBot {
+    /// Bare JID of the bot.
+    pub jid: String,
+    /// The bot's display name, when the service reports one.
+    pub name: Option<String>,
 }
 
 /// `urn:waddle:roomconfig:pinpermission` policy values.
@@ -239,6 +248,29 @@ impl WaddleClient {
         Ok(member_entries_from_items(
             parse_muc_admin_affiliation_query(&result).unwrap_or_default(),
         ))
+    }
+
+    /// The extension bots that have posted in the room (XEP-0030
+    /// disco#items on the room's `urn:waddle:room:bots:0` node). Bots
+    /// hold no affiliation, so `list_room_members` never shows them;
+    /// a requester who may not enter the room gets an empty list.
+    pub async fn list_room_bots(
+        &self,
+        room_jid: String,
+    ) -> Result<Vec<WaddleRoomBot>, WaddleError> {
+        let room = self.require_bare_jid(&room_jid)?;
+        let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
+        let bots = tokio::time::timeout(IQ_TIMEOUT, handle.discover_room_bots(&room))
+            .await
+            .map_err(|_| WaddleError::Timeout)?
+            .map_err(|e| client_error_to_waddle(&e))?;
+        Ok(bots
+            .into_iter()
+            .map(|bot| WaddleRoomBot {
+                jid: bot.jid.to_string(),
+                name: bot.name,
+            })
+            .collect())
     }
 
     /// XEP-0045 §5.2 affiliation change addressed by bare JID:

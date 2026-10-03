@@ -1,8 +1,10 @@
 import Foundation
 import WaddleKit
 
-/// A XEP-0317 hat or XEP-0045 standing shown beside an author's name.
+/// A bot the room declares, a XEP-0317 hat or a XEP-0045 standing shown
+/// beside an author's name.
 enum MessageRoleBadge: Hashable {
+    case bot
     case hat(String)
     case owner
     case admin
@@ -10,6 +12,7 @@ enum MessageRoleBadge: Hashable {
 
     var title: String {
         switch self {
+        case .bot: return "Bot"
         case let .hat(title): return title
         case .owner: return "Owner"
         case .admin: return "Admin"
@@ -42,15 +45,30 @@ struct MessageAuthor: Hashable {
     let badge: MessageRoleBadge?
 
     /// `occupant` is the room occupant for the row's nick, when present;
-    /// `authorJID` is `SessionCoordinator.authorJID(of:)`. Callers that
-    /// only need the name may omit both.
-    static func resolve(_ item: TimelineItem, occupant: Occupant?, authorJID: BareJID? = nil) -> MessageAuthor {
+    /// `authorJID` is `SessionCoordinator.authorJID(of:)`; `isBot` is
+    /// whether that JID is a bot the room declares. A bot's badge is the
+    /// declaration, never its nick's occupant: a nick may have changed
+    /// hands. Callers that only need the name may omit all three.
+    static func resolve(
+        _ item: TimelineItem,
+        occupant: Occupant?,
+        authorJID: BareJID? = nil,
+        isBot: Bool = false
+    ) -> MessageAuthor {
         let name = item.authorName.isEmpty ? "Unknown" : item.authorName
+        let badge: MessageRoleBadge?
+        if !item.conversation.isRoom {
+            badge = nil
+        } else if isBot {
+            badge = .bot
+        } else {
+            badge = MessageRoleBadge.of(occupant)
+        }
         return MessageAuthor(
             name: name,
             colorKey: authorJID?.description ?? name,
             avatarJID: authorJID,
-            badge: item.conversation.isRoom ? MessageRoleBadge.of(occupant) : nil
+            badge: badge
         )
     }
 }

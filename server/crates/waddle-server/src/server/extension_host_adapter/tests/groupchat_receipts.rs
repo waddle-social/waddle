@@ -194,10 +194,15 @@ async fn replay_preserves_archive(f: IngressFixture) {
     );
     let replayed = intents(&f).await;
     assert!(replayed.iter().any(|i| matches!(i, IngressEffectIntent::ArchiveAuthoritative { stanza_id, ordinal: Some(ordinal), .. } if stanza_id == &archive.0 && ordinal == &archive.1)));
+    // The bot still joins and leaves for the replay: planning precedes the
+    // dedupe. The replay itself delivers nothing.
+    let wire = fixture.drain();
     assert!(
-        fixture.drain().is_empty(),
-        "settled replay emits no occupant copy or join presence"
+        wire.iter()
+            .all(|stanza| matches!(stanza, Stanza::Presence(_))),
+        "settled replay emits no occupant copy: {wire:?}"
     );
+    assert_eq!(super::groupchat_ingress::bot_presences(&wire).len(), 2);
     fixture.close(f).await;
 }
 

@@ -31,7 +31,8 @@ internal class RoomAdminVerbs(
      * fan-out: one `muc#admin` query per affiliation tier, tolerating
      * per-tier failures (a room commonly forbids e.g. the outcast
      * query to non-admins). The store degrades to `UNAVAILABLE` only
-     * when every tier failed and nothing was collected.
+     * when every tier failed and nothing was collected. The room's
+     * declared bots load alongside ([refreshRoomBots]).
      */
     suspend fun refreshRoomMembers(roomJid: String) {
         val lease = activeSession.captureOwnerLease() ?: return
@@ -60,6 +61,18 @@ internal class RoomAdminVerbs(
         } else {
             activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyLoaded(roomJid, members) }
         }
+        refreshRoomBots(roomJid)
+    }
+
+    /**
+     * The room's declared bots (XEP-0030 `urn:waddle:room:bots:0`).
+     * Bots hold no affiliation, so the member tiers never list them.
+     * A failed query keeps the last known list.
+     */
+    suspend fun refreshRoomBots(roomJid: String) {
+        val lease = activeSession.captureOwnerLease() ?: return
+        val bots = activeSession.fetchIfCurrent(lease) { it.listRoomBots(roomJid) } ?: return
+        activeSession.applyIfCurrent(lease) { stores.roomMembersStore.applyBots(roomJid, bots) }
     }
 
     /** XEP-0045 §5.2 affiliation change (ban = §9.1 `OUTCAST`, remove = `NONE`). */

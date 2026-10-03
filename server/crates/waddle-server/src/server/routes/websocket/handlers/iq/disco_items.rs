@@ -1,5 +1,7 @@
 use super::*;
+use crate::permissions::ListSubjects;
 use waddle_xmpp::xep::xep0059::{build_rsm_response_element, extract_rsm_request};
+use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
 
 /// Snapshot-ask deadline for the instant-room scan: a wedged room
 /// actor must not stall service discovery.
@@ -108,6 +110,65 @@ async fn classify_room_command_target(
             RoomCommandTarget::Failed
         }
     }
+}
+
+/// The bots that have posted in `room`, for anyone who may enter it
+/// (XEP-0313 §5.1's archive gate: the bots are what the archive shows).
+/// Uninstalled and banned bots are left out.
+async fn room_bot_items(
+    state: &WebSocketState,
+    room: &BareJid,
+    requester: Option<&BareJid>,
+) -> Result<Vec<DiscoItem>, ()> {
+    let channel = get_managed_channel_for_room(state, room)
+        .await
+        .map_err(|error| warn!(%room, %error, "Failed to load room for bot listing"))?;
+    match resolve_muc_room_archive_access(state, room, requester, channel.as_ref()).await {
+        RoomArchiveAccess::Allowed => {}
+        RoomArchiveAccess::Denied => return Ok(Vec::new()),
+        RoomArchiveAccess::Error => return Err(()),
+    }
+    let plugins =
+        crate::server::extension_bot_rooms::list(state.deps.app_state.db_pool.global(), room)
+            .await
+            .map_err(|error| warn!(%room, %error, "Failed to list room bots"))?;
+    if plugins.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A managed channel's bans live in its permission tuples, which outlast
+    // the room actor; bots post only in managed channels.
+    let outcasts = match channel.as_ref() {
+        Some(channel) => state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(ListSubjects {
+                object: Object::new(ObjectType::Channel, channel.id.as_str()),
+                relation: Relation::new("outcast"),
+            })
+            .await
+            .map_err(|error| warn!(%room, ?error, "Failed to list room outcasts"))?,
+        None => Vec::new(),
+    };
+    let domains = &state.deps.service_domains;
+    let manager = &state.deps.protocol.extension_manager;
+    Ok(plugins
+        .iter()
+        .filter_map(|plugin| domains.extension_bot_jid(plugin).ok())
+        .filter_map(|bot| {
+            let bot = Jid::from(bot.to_bare());
+            crate::server::extension_bot::installed_bot(domains, manager, &bot)
+                .map(|installed| (bot, installed))
+        })
+        .filter(|(bot, _)| {
+            !outcasts.iter().any(|subject| {
+                subject.subject_type == SubjectType::User
+                    && subject.relation.is_none()
+                    && subject.id == bot.as_str()
+            })
+        })
+        .map(|(bot, installed)| DiscoItem::new(bot.as_str(), Some(installed.name.as_str()), None))
+        .collect())
 }
 
 async fn requester_has_group_dm_membership_tuple(
@@ -266,6 +327,26 @@ pub(super) async fn handle_disco_items_iq(
                 query.append_child(build_rsm_response_element(&rsm_response));
             }
             return vec![iq_to_xml(response)];
+        }
+
+        if query.node.as_deref() == Some(NODE_WADDLE_ROOM_BOTS) {
+            if let Some(room_jid) = target_to
+                .and_then(|target| target.parse::<BareJid>().ok())
+                .filter(|room_jid| room_jid.domain().as_str() == muc_domain)
+            {
+                let requester = phase.bound_jid().map(|jid| jid.to_bare());
+                let Ok(items) = room_bot_items(state, &room_jid, requester.as_ref()).await else {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                };
+                let response =
+                    build_disco_items_response(request_iq, &items, Some(NODE_WADDLE_ROOM_BOTS));
+                return vec![iq_to_xml(response)];
+            }
         }
 
         if query.node.as_deref() == Some(NODE_COMMANDS) {
@@ -507,12 +588,12 @@ pub(super) async fn handle_disco_items_iq(
             .and_then(|target| target.parse::<jid::Jid>().ok())
             .filter(|target| state.deps.service_domains.is_extensions_address(target))
         {
-            let manager = &state.deps.protocol.extension_manager;
-            let is_bot = state
-                .deps
-                .service_domains
-                .extension_bot(&target)
-                .is_some_and(|plugin| manager.manifest_for_plugin(plugin.as_str()).is_some());
+            let is_bot = crate::server::extension_bot::installed_bot(
+                &state.deps.service_domains,
+                &state.deps.protocol.extension_manager,
+                &target,
+            )
+            .is_some();
             if is_bot && query.node.is_none() {
                 let response = build_disco_items_response(request_iq, &[], None);
                 return vec![iq_to_xml(response)];
@@ -553,6 +634,18 @@ pub(super) async fn handle_disco_items_iq(
                     }
                 }
             }
+        }
+
+        // XEP-0030 §4.1: every node an entity hosts is answered above. An
+        // unknown node (on a room, an account or the server) does not exist;
+        // it is never the server's own service list.
+        if query.node.is_some() {
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                item_not_found_iq_error("Unknown disco#items node."),
+            )];
         }
 
         debug!("Disco items query on server");

@@ -94,6 +94,7 @@ async fn signed_replay(f: IngressFixture) {
         )
         .await
         .expect("first signed send");
+    fixture.settle().await;
     let wire = fixture.drain();
     let message = super::groupchat_ingress::groupchat_message(&wire);
     let signed = message
@@ -120,6 +121,7 @@ async fn signed_replay(f: IngressFixture) {
         .scope(later, fixture.adapter.send_message(&invocation, request))
         .await
         .expect("same unsigned origin aliases beyond old signing expiry");
+    fixture.settle().await;
     assert_eq!(f.count("ingress_messages").await, 1, "no AliasConflict row");
     assert_eq!(
         f.count("ingress_messages WHERE terminal_at IS NOT NULL")
@@ -128,7 +130,13 @@ async fn signed_replay(f: IngressFixture) {
     );
     assert_eq!(f.count("notification_candidates").await, candidates);
     assert_eq!(groupchat_receipts::intents(&f).await, before);
-    assert!(fixture.drain().is_empty());
+    assert!(
+        fixture
+            .drain()
+            .iter()
+            .all(|stanza| matches!(stanza, waddle_xmpp::Stanza::Presence(_))),
+        "the aliased replay delivers no message, only the bot's join and leave"
+    );
     fixture.close(f).await;
 }
 

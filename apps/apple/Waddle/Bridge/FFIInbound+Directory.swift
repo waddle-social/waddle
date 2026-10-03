@@ -31,6 +31,11 @@ extension FFIInbound {
         return RoomMember(jid: member, nick: entry.nick, affiliation: roomAffiliation(entry.affiliation))
     }
 
+    static func roomBot(_ entry: WaddleRoomBot) -> RoomBot? {
+        guard let bot = bareJID(entry.jid) else { return nil }
+        return RoomBot(jid: bot, name: entry.name)
+    }
+
     /// One row per JID across the per-affiliation lists, keeping the
     /// highest affiliation (`RoomAffiliation` orders owner first) and
     /// first-seen order.

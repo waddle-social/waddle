@@ -8,6 +8,7 @@ import org.junit.Test
 import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleMucRole
 import social.waddle.client.ffi.WaddlePresenceHat
+import social.waddle.client.ffi.WaddleRoomBot
 
 class AuthorBadgesTest {
 
@@ -81,20 +82,39 @@ class AuthorBadgesTest {
     }
 
     @Test
-    fun `extension bot address is a localpart on extensions of the own domain`() {
-        val own = "icepuma@waddle.test/phone"
-        assertTrue(isExtensionBotJid("alpha@extensions.waddle.test", own))
-        assertTrue(isExtensionBotJid("Alpha@Extensions.WADDLE.test/bot", own))
-        assertTrue(isExtensionBotJid("alpha@extensions.waddle.test", "Icepuma@Waddle.Test"))
-        // The service itself (no localpart), other domains, and people are not bots.
-        assertFalse(isExtensionBotJid("extensions.waddle.test", own))
-        assertFalse(isExtensionBotJid("@extensions.waddle.test", own))
-        assertFalse(isExtensionBotJid("alpha@extensions.other.test", own))
-        assertFalse(isExtensionBotJid("alpha@sub.extensions.waddle.test", own))
-        assertFalse(isExtensionBotJid("extensions@waddle.test", own))
-        // No account yet: nothing to compare against.
-        assertFalse(isExtensionBotJid("alpha@extensions.waddle.test", null))
-        assertFalse(isExtensionBotJid("alpha@extensions.waddle.test", "no-domain"))
+    fun `declared bots are the room bot list plus hat-learned jids, normalized`() {
+        val declared = declaredBotJidsOf(
+            roomBots = listOf(WaddleRoomBot(jid = "Alpha@Extensions.Waddle.Test", name = "Alpha")),
+            hatLearned = setOf("zeta@extensions.waddle.test", "alpha@extensions.waddle.test"),
+        )
+        assertEquals(setOf("alpha@extensions.waddle.test", "zeta@extensions.waddle.test"), declared)
+        assertTrue(declaredBotJidsOf(emptyList(), emptySet()).isEmpty())
+    }
+
+    @Test
+    fun `a declared bot author gets the bot badge without a nick lookup`() {
+        val declared = setOf("alpha@extensions.waddle.test")
+        var lookedUp = false
+        val badge = messageAuthorBadgeOf("Alpha@Extensions.Waddle.Test", declared) {
+            lookedUp = true
+            // A person reusing the bot's nick must not change the badge.
+            testPresence(mucAffiliation = WaddleMucAffiliation.OWNER)
+        }
+        assertEquals(AuthorBadgeKind.BOT, badge?.kind)
+        assertEquals("BOT", badge?.label)
+        assertFalse(lookedUp)
+    }
+
+    @Test
+    fun `other authors keep hat and authority badges from the nick presence`() {
+        val declared = setOf("alpha@extensions.waddle.test")
+        val owner = testPresence(mucAffiliation = WaddleMucAffiliation.OWNER)
+        assertEquals("OWNER", messageAuthorBadgeOf("bob@waddle.test", declared) { owner }?.label)
+        // No pinned author JID yet (e.g. archive row): nick presence decides.
+        assertEquals("OWNER", messageAuthorBadgeOf(null, declared) { owner }?.label)
+        assertNull(messageAuthorBadgeOf("bob@waddle.test", declared) { null })
+        // A bot-looking address alone is not a declaration.
+        assertNull(messageAuthorBadgeOf("alpha@extensions.waddle.test", emptySet()) { null })
     }
 
     @Test

@@ -54,6 +54,11 @@ class ThreadViewModel(
     } else {
         flowOf(emptyMap())
     },
+    botJids = if (isGroupchat) {
+        sessionManager.declaredBotJids(conversationJid)
+    } else {
+        flowOf(emptySet())
+    },
     threadId = threadId,
     uploader = uploader,
     onConversationRead = onConversationRead,

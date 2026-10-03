@@ -77,6 +77,8 @@ pub struct CreateAuthSession {
     pub user_jid: String,
     pub username: String,
     pub xmpp_localpart: String,
+    /// Canonical form of `xmpp_localpart` (`users.localpart_key`).
+    pub localpart_key: Option<jid::NodePart>,
     pub token_hash: String,
     pub auth_context_id: uuid::Uuid,
     pub auth_context_version: u64,
@@ -102,14 +104,15 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT DO NOTHING
                     "#,
                 )
                 .bind(&msg.user_jid)
                 .bind(&msg.username)
                 .bind(&msg.xmpp_localpart)
+                .bind(msg.localpart_key.as_ref().map(|key| key.as_str()))
                 .bind(msg.created_at.clone())
                 .bind(msg.created_at.clone())
                 .execute(&mut *tx)
@@ -146,14 +149,15 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT DO NOTHING
                     "#,
                 )
                 .bind(&msg.user_jid)
                 .bind(&msg.username)
                 .bind(&msg.xmpp_localpart)
+                .bind(msg.localpart_key.as_ref().map(|key| key.as_str()))
                 .bind(msg.created_at.clone())
                 .bind(msg.created_at.clone())
                 .execute(&mut *tx)

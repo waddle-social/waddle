@@ -17,7 +17,7 @@ pub mod session;
 
 use thiserror::Error;
 
-pub use directory::local_account_exists;
+pub use directory::{local_account_exists, local_account_jid_exists};
 pub use identity::IdentityClaims;
 pub use jid::{localpart_to_jid, username_to_localpart};
 pub use native::{NativeUserStore, RegisterRequest};

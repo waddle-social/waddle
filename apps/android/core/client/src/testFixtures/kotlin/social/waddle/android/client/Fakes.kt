@@ -59,6 +59,7 @@ import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
+import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomConfig
 import social.waddle.client.ffi.WaddleRoomConfigPatch
 import social.waddle.client.ffi.WaddleRoomMemberEntry
@@ -538,6 +539,22 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
         listMembersCalls += roomJid to affiliation
         memberListFailure?.let { throw it }
         return roomMembersByTier[affiliation] ?: emptyList()
+    }
+
+    /** Canned bots per room JID for [listRoomBots]. */
+    @Volatile
+    var roomBots: Map<String, List<WaddleRoomBot>> = emptyMap()
+
+    @Volatile
+    var roomBotsFailure: Throwable? = null
+
+    /** Recorded room JIDs of [listRoomBots] queries. */
+    val listRoomBotsCalls = CopyOnWriteArrayList<String>()
+
+    override suspend fun listRoomBots(roomJid: String): List<WaddleRoomBot> {
+        listRoomBotsCalls += roomJid
+        roomBotsFailure?.let { throw it }
+        return roomBots[roomJid] ?: emptyList()
     }
 
     /** Recorded (roomJid, targetJid, affiliation, reason) affiliation sets. */

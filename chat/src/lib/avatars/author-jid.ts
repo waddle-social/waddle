@@ -14,7 +14,7 @@
  * occupant ids are not surfaced by the client yet, so it is keyed by
  * room + nick.
  */
-import { ref, shallowReactive } from "vue";
+import { shallowReactive } from "vue";
 import { barePeerJid, resourceOf } from "@/lib/xmpp/jid";
 import type { TimelineMessage } from "@/lib/chat-ui";
 
@@ -43,22 +43,11 @@ export class OccupantJidDirectory {
   /** Our actual occupant nick per room (XEP-0045 self-presence; 210 may rename us). */
   private readonly ownNicks = shallowReactive(new Map<string, string>());
   /**
-   * Bare JIDs seen carrying the server-assigned bot hat in any room. The
-   * hat is the server's word, so a bot stays one for the session even after
-   * it leaves a room.
+   * Bare JIDs the server vouches for as bots: seen carrying its bot hat in
+   * any room, or listed in a room's declared bot list. A bot stays one for
+   * the session even after it leaves a room.
    */
   private readonly bots = shallowReactive(new Set<string>());
-  /**
-   * The account's extension service (`extensions.<domain>`). Every address
-   * with a localpart there is a server-hosted bot: the server answers it as
-   * XEP-0030 `client/bot` and refuses messages to it. This recognises a bot
-   * whose presence this session never saw, e.g. a room member who is away.
-   */
-  private readonly extensionsDomain = ref<string | null>(null);
-
-  setExtensionsDomain(domain: string | null): void {
-    this.extensionsDomain.value = domain?.toLowerCase() || null;
-  }
 
   /**
    * Record who holds `nick` now. `realJid` null means an occupant whose
@@ -86,10 +75,15 @@ export class OccupantJidDirectory {
   /** Reactive: `jid` is a known server-hosted bot. */
   isBot(jid: string | null | undefined): boolean {
     const real = bare(jid);
-    if (!real) return false;
-    if (this.bots.has(real)) return true;
-    const at = real.indexOf("@");
-    return at > 0 && real.slice(at + 1).toLowerCase() === this.extensionsDomain.value;
+    return !!real && this.bots.has(real);
+  }
+
+  /** Record the bots a room's server-declared bot list names (XEP-0030 `urn:waddle:room:bots:0`). */
+  recordBots(jids: Iterable<string>): void {
+    for (const jid of jids) {
+      const real = bare(jid);
+      if (real) this.bots.add(real);
+    }
   }
 
   recordOwnNick(roomJid: string, nick: string | null): void {
@@ -117,7 +111,6 @@ export class OccupantJidDirectory {
     this.holders.clear();
     this.ownNicks.clear();
     this.bots.clear();
-    this.extensionsDomain.value = null;
   }
 }
 

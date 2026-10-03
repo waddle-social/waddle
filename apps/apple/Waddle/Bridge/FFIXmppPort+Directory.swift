@@ -56,6 +56,12 @@ extension FFIXmppPort {
         return FFIInbound.mergedMembers(members)
     }
 
+    /// XEP-0030 disco#items on the room's `urn:waddle:room:bots:0` node.
+    func listRoomBots(in room: BareJID) async throws -> [RoomBot] {
+        let entries = try await mappingPortErrors { try await client.listRoomBots(roomJid: room.description) }
+        return entries.compactMap(FFIInbound.roomBot)
+    }
+
     func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String?) async throws {
         try await mappingPortErrors {
             try await client.setRoomAffiliation(

@@ -68,7 +68,7 @@ public final class TimelineStore {
     @discardableResult
     public func ingest(_ message: WireMessage, receivedAt: Date = Date()) -> TimelineIngestResult {
         guard let account,
-              let route = account.route(from: message.from, to: message.to, isGroupchat: message.isGroupchat)
+              let route = account.route(message)
         else { return .ignored }
         return ingest(message, route: route, receivedAt: receivedAt)
     }

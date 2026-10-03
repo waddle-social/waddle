@@ -266,14 +266,43 @@ struct AppActivityTests {
 @MainActor
 @Suite("Routing guards")
 struct RoutingGuardTests {
-    @Test func mucPrivateMessagesAndErrorsStayOutOfDMs() {
+    @Test func mucUserTrafficIsShownNowhere() {
+        // The room is deliberately not in the directory: the protocol marker
+        // alone classifies, no domain or list guessing.
         let coordinator = SessionCoordinator(account: me, port: FakePort())
-        coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
-        coordinator.route(directMessage("psst", from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/p"), id: "pm1"))
+        coordinator.directory.setNotifyMode(.always, for: roomConversation)
+        var alerts: [IncomingAlert] = []
+        coordinator.onAlert = { alerts.append($0) }
+
+        // XEP-0045 private message: type chat from the occupant JID.
+        var pm = directMessage("psst", from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/p"), id: "pm1")
+        pm.isMucUser = true
+        coordinator.route(pm)
+        // Mediated invite: type normal from the bare room, with a body.
+        var invite = directMessage("join us", from: jid("general@muc.waddle.test"), to: jid("alice@waddle.test"), id: "inv1")
+        invite.type = .normal
+        invite.isMucUser = true
+        coordinator.route(invite)
+        // Archived twin (history paths ingest through the timeline store).
+        var archived = directMessage("psst", from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/p"), id: "pm2", archiveID: "a1", source: .archive(mamID: "a1"))
+        archived.isMucUser = true
+        #expect(coordinator.timelines.ingest(archived) == .ignored)
         var bounce = directMessage("bounced", from: jid("bob@waddle.test"), to: jid("alice@waddle.test/p"), id: "e1")
         bounce.type = .error
         coordinator.route(bounce)
+
         #expect(coordinator.directory.directConversations.isEmpty)
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.isEmpty)
         #expect(coordinator.unread.total == 0)
+        #expect(alerts.isEmpty)
+
+        // Controls: the same archived stanza without the marker is a DM row,
+        // and ordinary room traffic in the same room is unaffected.
+        archived.isMucUser = false
+        if case .inserted = coordinator.timelines.ingest(archived) {} else { Issue.record("unmarked archived row must insert") }
+        coordinator.route(roomMessage("public", from: "bob", stanzaID: "s1"))
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.map(\.body) == ["public"])
+        #expect(coordinator.unread.count(for: roomConversation) == 1)
+        #expect(alerts.map(\.body) == ["public"])
     }
 }

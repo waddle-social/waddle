@@ -7,6 +7,14 @@ import social.waddle.android.client.bareJid
 import social.waddle.client.ffi.WaddleMessage
 
 /**
+ * True for a genuine 1:1 message (RFC 6121 `type=chat`). A XEP-0045
+ * `muc#user` marker makes it room traffic — a room private message or an
+ * invite/decline — even though its wire type is `chat`/`normal` and its
+ * sender is a room JID: never a DM with the room.
+ */
+fun WaddleMessage.isDirectChat(): Boolean = !isMuc && !mucUser && messageType == "chat"
+
+/**
  * Recent DM peers, most-recent-first: seeded from persisted last-seen
  * conversations at login, then reordered by live chat traffic.
  */
@@ -28,7 +36,7 @@ class DmStore {
     }
 
     fun onChatMessage(ownBareJid: String?, message: WaddleMessage) {
-        if (message.isMuc || message.messageType != "chat") return
+        if (!message.isDirectChat()) return
         val fromBare = message.from?.let(::bareJid)
         val toBare = message.to?.let(::bareJid)
         val peer = (if (fromBare == ownBareJid) toBare else fromBare) ?: return

@@ -38,6 +38,9 @@ pub use avatar_source::{
     AvatarLockGuard, AvatarLockMap, AvatarSource, AvatarSourceStorageError,
 };
 pub use backfill::{run_startup_backfill, BackfillError, BackfillReport};
-pub use fetch::{fetch_avatar_bytes, AvatarBytes, FetchError, FetchPolicy};
+pub(crate) use fetch::MAX_IMAGE_DIMENSION;
+pub use fetch::{
+    fetch_artifact_avatar_bytes, fetch_avatar_bytes, AvatarBytes, FetchError, FetchPolicy,
+};
 pub use publish::{ensure_pep_profile_published, ProfilePublishDeps};
 pub use source::{NameIntent, PhotoIntent, ProfileSource, ProfileSyncError};

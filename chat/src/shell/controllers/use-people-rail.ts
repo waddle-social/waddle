@@ -1,5 +1,5 @@
 import { computed, type ComputedRef, type Ref } from "vue";
-import type { MemberSummary } from "@/lib/chat-types";
+import type { MemberSummary, RoomBotSummary } from "@/lib/chat-types";
 import type { DmConversation, OccupantPresence, RoomPresence, RosterContact } from "@/lib/xmpp/types";
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import { barePeerJid } from "@/lib/xmpp/jid";
@@ -46,7 +46,7 @@ export interface PeopleRailGroups {
   around: PeopleRailPerson[];
   /** Roster contacts and DM peers who are away, offline, or unknown. */
   awayAndOffline: PeopleRailPerson[];
-  /** Known bots, in no presence bucket: their room presence only says when they last posted. */
+  /** The focused room's declared bots plus any hatted occupant, in no presence bucket: a bot's room presence only says when it last posted. */
   bots: PeopleRailPerson[];
 }
 
@@ -58,6 +58,8 @@ export interface PeopleRailSources {
   authorJidByNick: Record<string, string>;
   /** Affiliation list merged with online occupants. */
   members: readonly MemberSummary[];
+  /** Bots the server declares for the focused room; they hold no affiliation. */
+  roomBots: readonly RoomBotSummary[];
   /** Bare room JID of the focused room, or null. */
   activeRoomJid: string | null;
   /** Muji participant nicks keyed by room JID. */
@@ -213,6 +215,10 @@ function bare(jid: string): string {
   return barePeerJid(jid).toLowerCase();
 }
 
+function botPerson(jid: string, name: string): PeopleRailPerson {
+  return { jid, name, presence: undefined, status: "offline", statusText: null, inCall: false };
+}
+
 function memberIndexByJid(members: readonly MemberSummary[]): Map<string, MemberSummary> {
   const index = new Map<string, MemberSummary>();
   for (const member of members) index.set(bare(member.jid), member);
@@ -258,8 +264,19 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
     if (!isBotJid(jid)) return true;
     // A bot takes no DM and joins a room only to post, so it gets no
     // status and no presence bucket: the rail lists it apart.
-    bots.push({ jid, name: knownName(jid, fallbackName), presence: undefined, status: "offline", statusText: null, inCall: false });
+    bots.push(botPerson(jid, knownName(jid, fallbackName)));
     return false;
+  }
+
+  // The server's declared list names a room's bots even with no presence
+  // (after a restart), so it comes first and an occupant never repeats one.
+  if (sources.activeRoomJid) {
+    for (const bot of sources.roomBots) {
+      const jid = bare(bot.jid);
+      if (seen.has(jid)) continue;
+      seen.add(jid);
+      bots.push(botPerson(jid, bot.name));
+    }
   }
 
   // ── In a huddle ────────────────────────────────────────────────────
@@ -368,6 +385,8 @@ export interface MemberCardSources {
   /** True when a room is focused: cards come from its affiliation list. */
   roomActive: boolean;
   members: readonly MemberSummary[];
+  /** Bots the server declares for the focused room; they hold no affiliation. */
+  roomBots: readonly RoomBotSummary[];
   roomPresence: RoomPresence;
   authorJidByNick: Record<string, string>;
   contacts: readonly RosterContact[];
@@ -408,10 +427,6 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
     presence: OccupantPresence | undefined,
     affiliation: MemberCardModel["affiliation"],
   ): MemberCardModel {
-    // A bot's presence only says when it last posted: no status, no bucket.
-    if (isBotJid(jid)) {
-      return { jid, name, presence: undefined, status: "offline", statusText: null, inCall: false, affiliation, bot: true };
-    }
     const status = statusFor(jid, presence);
     return {
       jid,
@@ -426,6 +441,13 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
   }
 
   if (sources.roomActive) {
+    // Bots hold no affiliation, so they come from the server's declared list.
+    for (const bot of sources.roomBots) {
+      const jid = bare(bot.jid);
+      if (seen.has(jid)) continue;
+      seen.add(jid);
+      cards.push({ ...botPerson(jid, bot.name), affiliation: null, bot: true });
+    }
     for (const member of sources.members) {
       const jid = bare(member.jid);
       if (!jid || seen.has(jid)) continue;
@@ -456,6 +478,7 @@ export interface PeopleRailDeps {
   roomPresence: Ref<RoomPresence>;
   authorJidByNick: Ref<Record<string, string>> | ComputedRef<Record<string, string>>;
   members: Ref<readonly MemberSummary[]> | ComputedRef<readonly MemberSummary[]>;
+  roomBots: Ref<readonly RoomBotSummary[]> | ComputedRef<readonly RoomBotSummary[]>;
   activeRoomJid: Ref<string | null> | ComputedRef<string | null>;
   callParticipants: Ref<Record<string, readonly string[]>> | ComputedRef<Record<string, readonly string[]>>;
   callParticipantOwners: Ref<Record<string, readonly { nick: string; realJid?: string }[]>>;
@@ -475,6 +498,7 @@ export function usePeopleRail(deps: PeopleRailDeps): ComputedRef<PeopleRailGroup
       roomPresence: deps.roomPresence.value,
       authorJidByNick: deps.authorJidByNick.value,
       members: deps.members.value,
+      roomBots: deps.roomBots.value,
       activeRoomJid: deps.activeRoomJid.value,
       callParticipants: deps.callParticipants.value,
       callParticipantOwners: deps.callParticipantOwners.value,

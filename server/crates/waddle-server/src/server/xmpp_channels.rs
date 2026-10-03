@@ -25,6 +25,26 @@ pub(crate) struct XmppChannelRecord {
     pub updated_at: Option<String>,
 }
 
+impl XmppChannelRecord {
+    /// The room configuration a managed channel's room actor starts from,
+    /// including after a dormant room was evicted.
+    pub(crate) fn room_config(&self) -> waddle_xmpp::muc::RoomConfig {
+        waddle_xmpp::muc::RoomConfig {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            members_only: self.members_only,
+            public_room: self.public_room,
+            moderated: self.channel_type == "announcement",
+            forum: self.channel_type == "forum",
+            group_dm: self.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
+            // #422: the persisted pin policy, so the actor's snapshot matches
+            // the channel's last-saved value even after eviction.
+            pin_permission: self.pin_permission,
+            ..Default::default()
+        }
+    }
+}
+
 pub(crate) struct XmppChannelUpsert {
     pub id: String,
     pub name: String,

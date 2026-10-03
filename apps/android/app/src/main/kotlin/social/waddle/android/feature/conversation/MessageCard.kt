@@ -64,8 +64,8 @@ import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.AuthorBadge
 import social.waddle.android.client.AuthorBadgeKind
 import social.waddle.android.client.FileDisposition
-import social.waddle.android.client.authorBadgeOf
 import social.waddle.android.client.isImageUrl
+import social.waddle.android.client.messageAuthorBadgeOf
 import social.waddle.android.client.messageMentionsBareJid
 import social.waddle.android.client.richBlocksOf
 import social.waddle.android.client.store.ReactionGroup
@@ -100,6 +100,8 @@ fun MessageCard(
     selfBareJid: String? = null,
     /** MUC occupant presence by nick (XEP-0317 hats / XEP-0045 badges). */
     authorPresence: Map<String, WaddlePresence> = emptyMap(),
+    /** Bare JIDs the server declares as bots: their rows carry the BOT badge. */
+    declaredBotJids: Set<String> = emptySet(),
     /** Origin whose cached XEP-0363 preview images may load (web parity). */
     trustedMediaOrigin: String? = null,
     /** Leading avatar gutter for a received row; `null` = no gutter. */
@@ -117,6 +119,7 @@ fun MessageCard(
             onOpenThread = onOpenThread,
             selfBareJid = selfBareJid,
             authorPresence = authorPresence,
+            declaredBotJids = declaredBotJids,
             trustedMediaOrigin = trustedMediaOrigin,
             avatar = avatar,
             modifier = modifier,
@@ -141,6 +144,7 @@ private fun StoredMessageCard(
     onOpenThread: ((TimelineItem) -> Unit)?,
     selfBareJid: String?,
     authorPresence: Map<String, WaddlePresence>,
+    declaredBotJids: Set<String>,
     trustedMediaOrigin: String?,
     avatar: MessageAvatar?,
     modifier: Modifier = Modifier,
@@ -212,7 +216,11 @@ private fun StoredMessageCard(
         modifier = modifier,
         authorColor = consistentColor(author),
         leading = leading,
-        badge = if (isGroupchat(item)) authorBadgeOf(authorPresence[author]) else null,
+        badge = if (isGroupchat(item)) {
+            messageAuthorBadgeOf(item.authorJid, declaredBotJids) { authorPresence[author] }
+        } else {
+            null
+        },
         header = {
             item.replyToId?.let { replyToId ->
                 val quoted = resolveQuoted(replyToId)

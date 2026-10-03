@@ -104,6 +104,8 @@ class TimelineStore(
      * the timeline itself never renders as new content.
      */
     fun onLiveMessage(message: WaddleMessage, authorJid: String? = null): Boolean {
+        // `muc#user` traffic is never shown (see onArchivedMessage).
+        if (message.mucUser) return false
         val isGroupchat = message.isMuc || message.messageType == "groupchat"
         // The avatar identity of this row, fixed at ingest: the disclosed
         // occupant JID, else — for OUR undelayed reflection only, proven
@@ -159,6 +161,10 @@ class TimelineStore(
     }
 
     fun onArchivedMessage(message: WaddleArchivedMessage) {
+        // XEP-0045 `muc#user` rows (room PMs, invites) are never shown: no
+        // native surface answers them privately, and in the room they
+        // would read as public. History pages reach this store directly.
+        if (message.mucUser) return
         val isGroupchat = message.messageType == "groupchat"
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,

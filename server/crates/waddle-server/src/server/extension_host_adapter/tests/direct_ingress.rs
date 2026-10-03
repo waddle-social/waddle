@@ -13,7 +13,7 @@ use waddle_xmpp::pending_delivery::QuotaPolicy;
 
 pub(super) async fn adapter(f: &IngressFixture) -> ExtensionHostAdapter {
     let adapter = node(f).await;
-    f.execute("INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES ('juliet@example.com', 'juliet', 'juliet', ?, ?)", crate::db_params![chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
+    f.execute("INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at) VALUES ('juliet@example.com', 'juliet', 'juliet', 'juliet', ?, ?)", crate::db_params![chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
     f.execute("INSERT INTO roster_items (user_jid, contact_jid, subscription, approved, groups, updated_at) VALUES ('romeo@example.com', 'juliet@example.com', 'both', FALSE, '[]', ?)", crate::db_params![chrono::Utc::now().to_rfc3339()]).await;
     let mut tx = f.uow.begin().await.expect("grant tx");
     ExtensionGrantRepository::sync_configured(

@@ -9,6 +9,10 @@ use crate::CoreError;
 /// Service Discovery items namespace (XEP-0030).
 pub const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
 
+/// Waddle disco#items node on a MUC room JID: the extension bots that have
+/// posted in the room, one item per bot bare JID named by its display name.
+pub const NODE_WADDLE_ROOM_BOTS: &str = "urn:waddle:room:bots:0";
+
 /// Parsed disco#items query.
 #[derive(Debug, Clone)]
 pub struct DiscoItemsQuery {

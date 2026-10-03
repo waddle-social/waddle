@@ -85,6 +85,18 @@ describe("mention helpers", () => {
     ]);
   });
 
+  test("a posting bot wearing the Bot hat resolves its nick but is never a member", () => {
+    const merged = mergeMentionMembers({
+      members: [],
+      roomHats: { Helper: [{ uri: "urn:waddle:hats:bot", title: "Bot" }] },
+      roomPresence: { Helper: "online", bob: "online" },
+      memberJidsByNick: { Helper: "helper@extensions.example.com", bob: "bob@example.com" },
+    });
+
+    expect(merged.members.map((member) => member.username)).toEqual(["bob"]);
+    expect(merged.authorJidByNick.Helper).toBe("helper@extensions.example.com");
+  });
+
   test("autocomplete includes merged presence occupants alongside broadcast mentions", () => {
     const merged = mergeMentionMembers({
       members: [{ jid: "alice@example.com", username: "alice", affiliation: "owner", joined_at: "" }],

@@ -6,6 +6,7 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.messageMentionsBareJid
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.store.isDirectChat
 import social.waddle.android.client.store.isTimelineMutation
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
@@ -51,7 +52,10 @@ class NotificationPolicy(
         if (!userPrefs.notificationsEnabled.first()) return null
         val session = currentSession.value ?: return null
         val isGroupchat = message.isMuc || message.messageType == MESSAGE_TYPE_GROUPCHAT
-        if (!isGroupchat && message.messageType != MESSAGE_TYPE_CHAT) return null
+        // Room private messages/invites (`muc#user`) carry `type=chat|normal`
+        // from the room JID but are not 1:1 DMs, and neither the DM nor the
+        // room reply path can answer them — they never notify.
+        if (!isGroupchat && !message.isDirectChat()) return null
         val (conversationJid, sender) =
             foreignSenderOf(message.from, isGroupchat, session) ?: return null
         val isMention = messageMentionsBareJid(
@@ -133,6 +137,5 @@ class NotificationPolicy(
 
     private companion object {
         const val MESSAGE_TYPE_GROUPCHAT = "groupchat"
-        const val MESSAGE_TYPE_CHAT = "chat"
     }
 }

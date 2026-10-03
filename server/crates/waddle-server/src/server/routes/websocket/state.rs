@@ -1465,6 +1465,8 @@ pub struct ProtocolServices {
     pub command_registry: Arc<CommandRegistry>,
     /// Runtime extension manager for message embeds + feature advertisements.
     pub extension_manager: Arc<ExtensionManager>,
+    /// Extension bots' manifest avatars, fetched and served in-band.
+    pub(crate) bot_avatars: Arc<crate::server::extension_bot_avatar::BotAvatars>,
     /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session,
     /// carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.

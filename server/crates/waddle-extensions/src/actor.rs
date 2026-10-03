@@ -68,6 +68,21 @@ impl WasmExtensionActor {
         self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_profile_avatar(&mut self, avatar: crate::types::ArtifactReference) {
+        let display_name = self.manifest.name.clone();
+        self.manifest
+            .profile
+            .get_or_insert(crate::types::ExtensionProfile {
+                display_name,
+                description: None,
+                accent: None,
+                avatar: None,
+                bot_hat_label: None,
+            })
+            .avatar = Some(avatar);
+    }
+
     pub fn with_host_tools(mut self, host_tools: Arc<dyn ExtensionHostTools>) -> Self {
         self.host_tools = host_tools;
         self

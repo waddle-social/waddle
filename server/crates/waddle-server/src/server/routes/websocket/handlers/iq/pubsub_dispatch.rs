@@ -309,6 +309,24 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
+                // XEP-0163: the server answers an extension bot's PEP reads
+                // from its manifest profile. Any other node does not exist.
+                if let Some(item) =
+                    extension_bot_pep_item(state, &Jid::from(target_jid.clone()), &node)
+                {
+                    // XEP-0060 §6.5.8: a request for particular items gets
+                    // only those.
+                    let items: Vec<_> = std::iter::once(item)
+                        .filter(|item| {
+                            item_ids.is_empty()
+                                || item.id.as_ref().is_some_and(|id| item_ids.contains(id))
+                        })
+                        .collect();
+                    return vec![iq_to_xml(waddle_xmpp::pubsub::build_pubsub_items_result(
+                        iq, &node, &items,
+                    ))];
+                }
+
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
                 // A legacy Presence avatar node (e.g. created by an old pod
                 // after the last startup sweep) is repaired on a peer's
@@ -504,6 +522,71 @@ pub(super) async fn handle_pubsub_iq(
         }
     }
     Vec::new()
+}
+
+/// The item id of a bot's single-item vCard4 node, as on the vCard4 node
+/// every account has, and of its XEP-0084 §3.5 empty metadata.
+const EXTENSION_BOT_PEP_ITEM_ID: &str = "current";
+
+/// The PEP item the server publishes for an installed extension bot: a
+/// XEP-0292 vCard4 with its name, description, `application` kind (§6) and
+/// photo, and its XEP-0084 avatar. Until the server holds the manifest
+/// avatar, the metadata disables avatar publishing (§3.5) and the data node
+/// has no item. `None` for anything else.
+fn extension_bot_pep_item(
+    state: &WebSocketState,
+    target: &Jid,
+    node: &str,
+) -> Option<waddle_xmpp::pubsub::PubSubItem> {
+    use waddle_xmpp::xep::{xep0084, xep0292};
+
+    if node != xep0292::PEP_NODE_VCARD4
+        && node != xep0084::NODE_AVATAR_METADATA
+        && node != xep0084::NODE_AVATAR_DATA
+    {
+        return None;
+    }
+    let bot = crate::server::extension_bot::installed_bot(
+        &state.deps.service_domains,
+        &state.deps.protocol.extension_manager,
+        target,
+    )?;
+    let avatar = bot
+        .avatar
+        .as_ref()
+        .and_then(|avatar| state.deps.protocol.bot_avatars.get(avatar));
+    let item = |id: &str, payload| {
+        Some(waddle_xmpp::pubsub::PubSubItem::new(
+            Some(id.to_string()),
+            Some(payload),
+        ))
+    };
+    match (node, avatar) {
+        (xep0084::NODE_AVATAR_DATA, avatar) => {
+            let avatar = avatar?;
+            item(avatar.id(), avatar.data())
+        }
+        (xep0084::NODE_AVATAR_METADATA, Some(avatar)) => item(avatar.id(), avatar.metadata()),
+        (xep0084::NODE_AVATAR_METADATA, None) => item(
+            EXTENSION_BOT_PEP_ITEM_ID,
+            Element::builder("metadata", xep0084::NS_AVATAR_METADATA).build(),
+        ),
+        (_, avatar) => {
+            let mut vcard = xep0292::VCard4::new()
+                .with_full_name(bot.name)
+                .with_kind(xep0292::KIND_APPLICATION);
+            if let Some(description) = bot.description {
+                vcard = vcard.with_note(description);
+            }
+            if let Some(avatar) = avatar {
+                vcard = vcard.with_photo(avatar.vcard4_photo_uri());
+            }
+            item(
+                EXTENSION_BOT_PEP_ITEM_ID,
+                xep0292::build_vcard4_element(&vcard),
+            )
+        }
+    }
 }
 
 /// Detect XEP-0084 §4.3's empty-`<metadata/>` "I have no avatar"

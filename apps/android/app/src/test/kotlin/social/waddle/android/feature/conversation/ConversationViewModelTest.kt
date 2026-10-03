@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -45,6 +46,15 @@ class ConversationViewModelTest {
 
         override suspend fun ensureJoined() {
             joinedCount += 1
+        }
+
+        /** Completed by a test to release a pending bot-list query. */
+        val botsGate = CompletableDeferred<Unit>()
+        var botRefreshCalls = 0
+
+        override suspend fun refreshRoomBots() {
+            botRefreshCalls += 1
+            botsGate.await()
         }
 
         override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? {
@@ -125,6 +135,22 @@ class ConversationViewModelTest {
         assertEquals(1, state.rows.size)
         assertTrue(state.rows.single() is ConversationRow.Stored)
         assertFalse(state.reachedHistoryStart)
+    }
+
+    @Test
+    fun `a slow room bot refresh does not hold the first history page`() = runTest {
+        io.pages += testMamPage(
+            messages = listOf(archived(mamId = "mam-1", stanzaId = "s1")),
+            isComplete = false,
+        )
+        val viewModel = createViewModel()
+        runCurrent()
+
+        // The bot query is still pending (botsGate never completed).
+        assertEquals(1, io.botRefreshCalls)
+        assertFalse(io.botsGate.isCompleted)
+        assertEquals(listOf(50u to null), io.fetchCalls)
+        assertEquals(1, viewModel.uiState.value.rows.size)
     }
 
     @Test

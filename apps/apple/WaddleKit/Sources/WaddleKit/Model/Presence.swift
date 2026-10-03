@@ -131,6 +131,11 @@ public struct WirePresence: Hashable, Sendable {
         self.idleSince = idleSince
     }
 
+    /// Wears the server-assigned bot hat.
+    public var isBot: Bool {
+        hats.contains { $0.uri == Hat.botURI }
+    }
+
     public var availability: Availability {
         switch kind {
         case .available: return Availability(show: show)

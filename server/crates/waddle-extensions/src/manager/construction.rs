@@ -232,6 +232,25 @@ impl ExtensionManager {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl ExtensionManager {
+    /// Declare `avatar` on a loaded plugin's manifest profile, as an
+    /// operator-installed manifest would.
+    pub fn with_profile_avatar(
+        mut self,
+        plugin: &PluginId,
+        avatar: crate::types::ArtifactReference,
+    ) -> Self {
+        self.actors
+            .iter_mut()
+            .find(|actor| actor.manifest().id == *plugin)
+            .and_then(Arc::get_mut)
+            .expect("the plugin is loaded and its actor not yet shared")
+            .set_profile_avatar(avatar);
+        self
+    }
+}
+
 fn parse_provider_room_grants(module: &ExtensionModuleConfig) -> Result<Vec<BareJid>> {
     module
         .provider_room_grants

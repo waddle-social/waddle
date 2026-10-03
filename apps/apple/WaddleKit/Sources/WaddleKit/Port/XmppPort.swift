@@ -98,6 +98,8 @@ public protocol DirectoryPort: AnyObject, Sendable {
     func joinRoom(_ room: BareJID, nick: String) async
     func leaveRoom(_ room: BareJID, nick: String) async
     func listMembers(of room: BareJID) async throws -> [RoomMember]
+    /// The bots the room declares; the affiliation lists never name them.
+    func listRoomBots(in room: BareJID) async throws -> [RoomBot]
     func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String?) async throws
     func kick(nick: String, from room: BareJID, reason: String?) async throws
     func searchUsers(_ query: String) async throws -> [UserSearchResult]

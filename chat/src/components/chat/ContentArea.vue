@@ -340,9 +340,12 @@ const extensionPaletteRef = ref<ExtensionPaletteHandle | null>(null);
 const setExtensionPaletteRef = (instance: ExtensionPaletteHandle | null) => {
   extensionPaletteRef.value = instance;
 };
+// Extensions act in channels. A group DM is a conversation between people
+// like a 1:1 DM, and the server refuses bots there.
+const extensionRoomJid = computed(() => (props.channel?.isGroupDm ? null : props.roomJid));
 const extensionLauncher = useExtensionLauncher({
   xmppClient: computed(() => props.xmppClient),
-  roomJid: computed(() => props.roomJid),
+  roomJid: extensionRoomJid,
   invokeExtensionAction: computed(() => props.invokeExtensionAction),
   sendPublicChannelMessage: computed(() => props.sendPublicChannelMessage),
   focusPalette: () => extensionPaletteRef.value?.focus(),
@@ -379,7 +382,7 @@ async function dispatchSlashCommand(
   }
   return ok;
 }
-const inMucContext = computed(() => !!props.roomJid);
+const inMucContext = computed(() => !!extensionRoomJid.value);
 const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
 // The call-anchor card keys its live/ended state on the conversation: the room
 // JID for channels, the peer JID for DMs. `callRoomJid` is null for DMs, so a

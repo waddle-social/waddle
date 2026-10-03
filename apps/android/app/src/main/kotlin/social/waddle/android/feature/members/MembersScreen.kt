@@ -67,8 +67,9 @@ private sealed interface PendingAction {
  * Member management screen (web `MemberManagement.vue` parity):
  * affiliation-sorted member list merged with live occupancy, XEP-0317
  * hats, and — for owners/admins — promote/demote/remove/ban/kick plus
- * the XEP-0055 add-member search. Owner rows are immutable. Bots
- * (XEP-0317 bot hat) list last in their own section without presence.
+ * the XEP-0055 add-member search. Owner rows are immutable. The
+ * room's declared bots list last in their own section: no presence,
+ * no actions.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -223,7 +224,7 @@ private fun StatusBanner(state: MembersUiState) {
 
 @Composable
 private fun MemberList(state: MembersUiState, onRowClick: (MemberRow) -> Unit) {
-    if (state.rows.isEmpty() && state.status == MemberListStatus.LOADED) {
+    if (state.rows.isEmpty() && state.bots.isEmpty() && state.status == MemberListStatus.LOADED) {
         Text(
             text = stringResource(R.string.members_empty),
             style = MaterialTheme.typography.bodyMedium,
@@ -232,11 +233,9 @@ private fun MemberList(state: MembersUiState, onRowClick: (MemberRow) -> Unit) {
         )
         return
     }
-    // Bots sort last (see memberRowsOf): own section, no presence.
-    val (bots, people) = remember(state.rows) { state.rows.partition { it.isBot } }
     LazyColumn {
-        memberItems(people, onRowClick)
-        if (bots.isNotEmpty()) {
+        memberItems(state.rows, onRowClick)
+        if (state.bots.isNotEmpty()) {
             item(key = "bots-header") {
                 Text(
                     text = stringResource(R.string.members_bots_section),
@@ -245,7 +244,7 @@ private fun MemberList(state: MembersUiState, onRowClick: (MemberRow) -> Unit) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
-            memberItems(bots, onRowClick)
+            items(items = state.bots, key = { "bot:${it.jid}" }) { bot -> BotListRow(bot) }
         }
     }
 }
@@ -254,6 +253,15 @@ private fun LazyListScope.memberItems(rows: List<MemberRow>, onRowClick: (Member
     items(items = rows, key = { "${it.jid ?: it.displayName}:${it.inferred}" }) { row ->
         MemberListRow(row = row, onClick = { onRowClick(row) })
     }
+}
+
+@Composable
+private fun BotListRow(bot: BotRow) {
+    ListItem(
+        headlineContent = { Text(text = bot.displayName) },
+        supportingContent = { Text(text = bot.jid, style = MaterialTheme.typography.bodySmall) },
+        leadingContent = { PeerAvatar(jid = bot.jid, displayName = bot.displayName, size = LIST_AVATAR_SIZE) },
+    )
 }
 
 @Composable

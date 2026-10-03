@@ -1,14 +1,15 @@
 //! Extension bots: automated XMPP entities at `<plugin>@<extensions domain>/bot`.
 //!
 //! A bot has no account; the server speaks for it. It is identified the
-//! way XMPP intends: XEP-0030 identity `client/bot` for the entity,
-//! the server-assigned XEP-0317 Bot hat in rooms, and XEP-0045
-//! affiliation/role for authority only.
+//! way XMPP intends: XEP-0030 identity `client/bot` for the entity and
+//! the server-assigned XEP-0317 Bot hat in rooms. It holds a room
+//! occupancy only while it posts, without an affiliation; the rooms it
+//! posted in are listed on the room's `urn:waddle:room:bots:0` node.
 
 use std::sync::Arc;
 
 use jid::{BareJid, Jid};
-use waddle_extensions::{ExtensionManager, PluginId};
+use waddle_extensions::{ArtifactReference, ExtensionManager, ExtensionManifest, PluginId};
 use waddle_xmpp::xep::xep0317::{well_known, Hat, HatSet, ServerHats};
 
 use crate::server::routes::websocket::XmppServiceDomains;
@@ -46,8 +47,14 @@ impl XmppServiceDomains {
 
 /// Room nick and disco identity name: profile display name, else manifest name, else id.
 pub(crate) fn bot_name(manager: &ExtensionManager, plugin: &PluginId) -> String {
-    manager
-        .manifest_for_plugin(plugin.as_str())
+    manifest_bot_name(
+        manager.manifest_for_plugin(plugin.as_str()).as_ref(),
+        plugin,
+    )
+}
+
+fn manifest_bot_name(manifest: Option<&ExtensionManifest>, plugin: &PluginId) -> String {
+    manifest
         .map(|manifest| {
             manifest
                 .profile
@@ -59,6 +66,37 @@ pub(crate) fn bot_name(manager: &ExtensionManager, plugin: &PluginId) -> String 
         })
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| plugin.as_str().to_string())
+}
+
+/// An extension bot that exists: its plugin is installed on this node.
+pub(crate) struct InstalledBot {
+    pub name: String,
+    /// The manifest profile's description.
+    pub description: Option<String>,
+    /// The manifest profile's avatar artifact.
+    pub avatar: Option<ArtifactReference>,
+}
+
+/// The installed bot `jid` addresses (bare JID or `/bot`), if any. Every
+/// answer the server gives on a bot's behalf starts here.
+pub(crate) fn installed_bot(
+    domains: &XmppServiceDomains,
+    manager: &ExtensionManager,
+    jid: &Jid,
+) -> Option<InstalledBot> {
+    let plugin = domains.extension_bot(jid)?;
+    let manifest = manager.manifest_for_plugin(plugin.as_str())?;
+    let name = manifest_bot_name(Some(&manifest), &plugin);
+    let profile = manifest.profile;
+    Some(InstalledBot {
+        name,
+        description: profile
+            .as_ref()
+            .and_then(|profile| profile.description.as_ref())
+            .map(|description| description.as_str().trim().to_string())
+            .filter(|description| !description.is_empty()),
+        avatar: profile.and_then(|profile| profile.avatar),
+    })
 }
 
 /// Give every extension bot the Bot hat, titled by its manifest label. A bot

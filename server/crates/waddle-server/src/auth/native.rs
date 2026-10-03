@@ -23,6 +23,7 @@ use waddle_xmpp::ScramCredentials;
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 
+use super::directory::canonical_account_jid;
 use super::AuthError;
 
 /// Default PBKDF2 iteration count for SCRAM key derivation.
@@ -66,6 +67,9 @@ impl NativeUserStore {
     pub async fn register(&self, request: RegisterRequest) -> Result<i64, AuthError> {
         // Validate username format (must be valid JID localpart)
         validate_username(&request.username)?;
+        let jid = canonical_account_jid(&request.username, &request.domain).ok_or_else(|| {
+            AuthError::InvalidUsername("Username is not a valid JID localpart".to_string())
+        })?;
 
         // Check if username already exists
         if self.user_exists(&request.username, &request.domain).await? {
@@ -95,14 +99,15 @@ impl NativeUserStore {
             .actor
             .ask(DbQuery {
                 sql: r#"
-                    INSERT INTO native_users (username, domain, password_hash, salt, iterations, stored_key, server_key, email)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO native_users (username, domain, jid_key, password_hash, salt, iterations, stored_key, server_key, email)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
                 "#
                 .to_string(),
                 params: vec![
                     request.username.as_str().into(),
                     request.domain.as_str().into(),
+                    jid.as_str().into(),
                     password_hash.into(),
                     scram_salt_b64.into(),
                     i64::from(DEFAULT_SCRAM_ITERATIONS).into(),
@@ -139,18 +144,24 @@ impl NativeUserStore {
         Ok(user_id)
     }
 
-    /// Check if a username exists in the given domain.
+    /// Check if an account holds the JID `username@domain`, in whatever case
+    /// or Unicode form it was registered. A row a node predating the lookup
+    /// keys wrote counts before the backfill keys it, so registering a
+    /// case variant of its name cannot take its JID meanwhile.
     pub async fn user_exists(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(false);
+        };
         let row = self
             .actor
             .ask(DbQueryOne {
-                sql: "SELECT 1 FROM native_users WHERE username = ? AND domain = ?".to_string(),
-                params: vec![username.into(), domain.into()],
+                sql: "SELECT 1 FROM native_users WHERE jid_key = ?".to_string(),
+                params: vec![jid.as_str().into()],
             })
             .await
             .map_err(db_err)?;
 
-        Ok(row.is_some())
+        Ok(row.is_some() || !self.unkeyed_ids(&jid).await?.is_empty())
     }
 
     /// Get SCRAM credentials for a user.
@@ -159,16 +170,19 @@ impl NativeUserStore {
         username: &str,
         domain: &str,
     ) -> Result<Option<ScramCredentials>, AuthError> {
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(None);
+        };
         let row = self
             .actor
             .ask(DbQueryOne {
                 sql: r#"
                     SELECT salt, iterations, stored_key, server_key
                     FROM native_users
-                    WHERE username = ? AND domain = ?
+                    WHERE jid_key = ?
                 "#
                 .to_string(),
-                params: vec![username.into(), domain.into()],
+                params: vec![jid.as_str().into()],
             })
             .await
             .map_err(db_err)?;
@@ -226,12 +240,14 @@ impl NativeUserStore {
     ) -> Result<bool, AuthError> {
         use argon2::password_hash::PasswordVerifier;
 
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(false);
+        };
         let row = self
             .actor
             .ask(DbQueryOne {
-                sql: "SELECT password_hash FROM native_users WHERE username = ? AND domain = ?"
-                    .to_string(),
-                params: vec![username.into(), domain.into()],
+                sql: "SELECT password_hash FROM native_users WHERE jid_key = ?".to_string(),
+                params: vec![jid.as_str().into()],
             })
             .await
             .map_err(db_err)?;
@@ -284,7 +300,7 @@ impl NativeUserStore {
                 sql: r#"
                     UPDATE native_users
                     SET password_hash = ?, salt = ?, stored_key = ?, server_key = ?, updated_at = datetime('now')
-                    WHERE username = ? AND domain = ?
+                    WHERE jid_key = ?
                 "#
                 .to_string(),
                 params: vec![
@@ -292,8 +308,10 @@ impl NativeUserStore {
                     scram_salt_b64.into(),
                     stored_key.into(),
                     server_key.into(),
-                    username.into(),
-                    domain.into(),
+                    canonical_account_jid(username, domain)
+                        .as_ref()
+                        .map(|jid| jid.as_str())
+                        .into(),
                 ],
             })
             .await
@@ -307,16 +325,21 @@ impl NativeUserStore {
         Ok(())
     }
 
-    /// Delete a native user.
+    /// Delete the native account holding the JID `username@domain`, and any
+    /// row naming that JID that was written without its lookup key.
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
-        let affected = self
-            .actor
-            .ask(DbExecute {
-                sql: "DELETE FROM native_users WHERE username = ? AND domain = ?".to_string(),
-                params: vec![username.into(), domain.into()],
-            })
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete user: {}", e)))?;
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(false);
+        };
+        let mut affected = 0;
+        for id in self.unkeyed_ids(&jid).await? {
+            affected += self
+                .delete_rows("DELETE FROM native_users WHERE id = ?", id)
+                .await?;
+        }
+        affected += self
+            .delete_rows("DELETE FROM native_users WHERE jid_key = ?", jid.as_str())
+            .await?;
 
         if affected > 0 {
             debug!(username = %username, domain = %domain, "Native user deleted");
@@ -324,6 +347,54 @@ impl NativeUserStore {
         } else {
             Ok(false)
         }
+    }
+
+    /// Rows naming `jid` that were written without a lookup key: before the
+    /// keys existed, or by a node predating them during a rolling upgrade,
+    /// until the periodic backfill keys them. Usually none, so the names are
+    /// compared in Rust, the only place their canonical form is computed.
+    async fn unkeyed_ids(&self, jid: &jid::BareJid) -> Result<Vec<i64>, AuthError> {
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: "SELECT id, username, domain FROM native_users WHERE jid_key IS NULL"
+                    .to_string(),
+                params: vec![],
+            })
+            .await
+            .map_err(db_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let crate::db::Value::Integer(id) = *row_value(&row, 0).map_err(db_err)? else {
+                return Err(AuthError::DatabaseError(
+                    "invalid native user id".to_string(),
+                ));
+            };
+            let username = row_value(&row, 1)
+                .and_then(ValueExt::as_string)
+                .map_err(db_err)?;
+            let domain = row_value(&row, 2)
+                .and_then(ValueExt::as_string)
+                .map_err(db_err)?;
+            if canonical_account_jid(&username, &domain).as_ref() == Some(jid) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn delete_rows(
+        &self,
+        sql: &str,
+        param: impl Into<crate::db::Value>,
+    ) -> Result<u64, AuthError> {
+        self.actor
+            .ask(DbExecute {
+                sql: sql.to_string(),
+                params: vec![param.into()],
+            })
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete user: {}", e)))
     }
 }
 

@@ -428,6 +428,48 @@ async fn handle_xmpp_frame_roster_get_marks_connection_interested_for_detach() {
     );
 }
 
+/// Roster contacts must be accounts, but `subscription='remove'` skips that
+/// check so a junk item stored before the rule can still be deleted.
+#[tokio::test]
+async fn roster_remove_deletes_an_item_that_is_not_an_account() {
+    let state = create_test_websocket_state().await;
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(crate::db::actor::DbExecute {
+            sql: "INSERT INTO roster_items (user_jid, contact_jid) VALUES (?, ?)".to_string(),
+            params: vec!["alice@example.com".into(), "chat@example.com".into()],
+        })
+        .await
+        .expect("seed junk roster item");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("alice"), false);
+
+    let removed = handle_xmpp_frame(
+        r#"<iq xmlns="jabber:client" type="set" id="remove-junk"><query xmlns="jabber:iq:roster"><item jid="chat@example.com" subscription="remove"/></query></iq>"#,
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        removed
+            .iter()
+            .any(|frame| frame.contains("remove-junk") && frame.contains("type='result'")),
+        "{removed:?}"
+    );
+    let roster = handle_xmpp_frame(
+        r#"<iq xmlns="jabber:client" type="get" id="roster-after"><query xmlns="jabber:iq:roster"/></iq>"#,
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(!roster[0].contains("chat@example.com"), "{roster:?}");
+}
+
 #[tokio::test]
 async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_value() {
     // xmpp-parsers 0.22 tightened `Iq` to reject unknown attributes
@@ -1151,6 +1193,498 @@ async fn handle_iq_disco_items_for_extension_bots_are_empty() {
         .await;
         assert_item_not_found_for_test(&reply, &target);
     }
+}
+
+/// `(jid, name, node)` of each disco#items item.
+fn named_disco_items_for_test(query: &Element) -> Vec<(String, Option<String>)> {
+    query
+        .children()
+        .filter(|child| child.name() == "item")
+        .map(|child| {
+            assert_eq!(child.attr("node"), None, "a bot item names no node");
+            (
+                child.attr("jid").expect("item jid").to_owned(),
+                child.attr("name").map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// XEP-0030 on a room JID, node `urn:waddle:room:bots:0`: the installed,
+/// unbanned bots that have posted in the room, by bare JID and display name,
+/// for anyone who may enter it. Others get an empty list. An unknown node on
+/// the room does not exist.
+#[tokio::test]
+async fn handle_iq_disco_items_lists_room_bots() {
+    use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
+    let state = create_test_websocket_state_with_fixture_bot().await;
+    upsert_test_channel(state.as_ref(), "bot-room", true).await;
+    let room: BareJid = "bot-room@muc.example.com".parse().expect("room");
+    let member: FullJid = "alice@example.com/web".parse().expect("alice");
+    let stranger: FullJid = "mallory@example.com/web".parse().expect("mallory");
+    let permissions = &state.deps.app_state.permission_actor;
+    permissions
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "bot-room"),
+                Relation::new("member"),
+                Subject::user(member.to_bare().to_string()),
+            ),
+        })
+        .await
+        .expect("member tuple");
+    let db = state.deps.app_state.db_pool.global();
+    let fixture = waddle_extensions::PluginId::new(FIXTURE_BOT_PLUGIN).expect("plugin");
+    for plugin in [
+        fixture.clone(),
+        waddle_extensions::PluginId::new("uninstalled").expect("plugin"),
+    ] {
+        crate::server::extension_bot_rooms::record(db, &room, &plugin)
+            .await
+            .expect("record bot room");
+    }
+    let bot = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    );
+    let name =
+        crate::server::extension_bot::bot_name(&state.deps.protocol.extension_manager, &fixture);
+    let list = |requester: &FullJid| {
+        let (state, phase) = (Arc::clone(&state), ready_phase(requester));
+        async move {
+            let reply = disco_reply_for_test(
+                &state,
+                &phase,
+                &disco_items_iq_frame(
+                    "room-bots",
+                    "bot-room@muc.example.com",
+                    Some(NODE_WADDLE_ROOM_BOTS),
+                ),
+            )
+            .await;
+            assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+            let query = reply
+                .get_child("query", waddle_xmpp::disco::DISCO_ITEMS_NS)
+                .expect("disco#items result");
+            assert_eq!(query.attr("node"), Some(NODE_WADDLE_ROOM_BOTS));
+            named_disco_items_for_test(query)
+        }
+    };
+
+    assert_eq!(
+        list(&member).await,
+        [(bot.clone(), Some(name))],
+        "the installed bot, not the uninstalled plugin"
+    );
+    assert!(
+        list(&stranger).await.is_empty(),
+        "a non-member of a members-only room sees none"
+    );
+
+    permissions
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "bot-room"),
+                Relation::new("outcast"),
+                Subject::user(bot),
+            ),
+        })
+        .await
+        .expect("ban the bot");
+    assert!(list(&member).await.is_empty(), "a banned bot is not listed");
+
+    // XEP-0030 §4.1: an unknown node is not the server's service list.
+    for target in [
+        "bot-room@muc.example.com",
+        "alice@example.com",
+        "example.com",
+    ] {
+        let reply = disco_reply_for_test(
+            &state,
+            &ready_phase(&member),
+            &disco_items_iq_frame("unknown-node", target, Some("urn:example:unknown")),
+        )
+        .await;
+        assert_item_not_found_for_test(&reply, target);
+    }
+}
+
+/// A PEP items request for `node` on `to`, for one particular item if
+/// `item_id` is given (XEP-0060 §6.5.8).
+fn pubsub_items_iq_frame(id: &str, to: &str, node: &str, item_id: Option<&str>) -> String {
+    let mut items = Element::builder("items", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+    if let Some(item_id) = item_id {
+        items = items.append(
+            Element::builder("item", waddle_xmpp::pubsub::NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                .build(),
+        );
+    }
+    stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination")),
+        id: id.to_string(),
+        payload: Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+            .append(items.build())
+            .build(),
+    })))
+}
+
+/// The PEP `<item/>`s the server returns for `node` on `to`.
+async fn pep_items_for_test(
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    to: &str,
+    node: &str,
+    item_id: Option<&str>,
+) -> Vec<Element> {
+    let reply = disco_reply_for_test(
+        state,
+        phase,
+        &pubsub_items_iq_frame("pep-bot", to, node, item_id),
+    )
+    .await;
+    assert_eq!(reply.attr("type"), Some("result"), "{node}: {reply:?}");
+    let items = reply
+        .get_child("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", waddle_xmpp::pubsub::NS_PUBSUB))
+        .expect("items");
+    assert_eq!(items.attr("node"), Some(node));
+    items.children().cloned().collect()
+}
+
+/// The single PEP item the server returns for `node` on `to`: its payload,
+/// under `item_id`.
+async fn pep_item_for_test(
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    to: &str,
+    node: &str,
+    item_id: &str,
+) -> Element {
+    let items = pep_items_for_test(state, phase, to, node, None).await;
+    assert_eq!(items.len(), 1, "{node}: exactly one item: {items:?}");
+    assert_eq!(items[0].attr("id"), Some(item_id), "{node}: {items:?}");
+    items[0].children().next().expect("item payload").clone()
+}
+
+/// XEP-0054, XEP-0292 and XEP-0084 for an extension bot, which has no account:
+/// the server answers from its manifest. vcard-temp carries FN (and DESC),
+/// the vCard4 PEP node one `current` item with fn (and note) and the
+/// `application` kind XEP-0292 §6 recommends for automated entities, the avatar
+/// metadata node one item with publishing disabled. Other PEP nodes and
+/// unknown bots do not exist.
+#[tokio::test]
+async fn handle_iq_answers_profiles_for_extension_bots() {
+    let state = create_test_websocket_state_with_fixture_bot().await;
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let extensions = state.deps.service_domains.extensions.clone();
+    let bot = format!("{FIXTURE_BOT_PLUGIN}@{extensions}");
+    let installed = crate::server::extension_bot::installed_bot(
+        &state.deps.service_domains,
+        &state.deps.protocol.extension_manager,
+        &bot.parse().expect("bot jid"),
+    )
+    .expect("fixture bot is installed");
+
+    let vcard_get = |to: &str| {
+        stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
+            from: None,
+            to: Some(to.parse().expect("valid iq destination")),
+            id: "vcard-bot".to_string(),
+            payload: Element::builder("vCard", waddle_xmpp::xep::xep0054::NS_VCARD).build(),
+        })))
+    };
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get(&bot)).await;
+    assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+    let vcard = reply
+        .get_child("vCard", waddle_xmpp::xep::xep0054::NS_VCARD)
+        .expect("vCard");
+    let text = |name: &str| {
+        vcard
+            .get_child(name, waddle_xmpp::xep::xep0054::NS_VCARD)
+            .map(|child| child.text())
+    };
+    assert_eq!(text("FN"), Some(installed.name.clone()));
+    assert_eq!(text("DESC"), installed.description.clone());
+    assert_eq!(text("PHOTO"), None, "the manifest declares no avatar");
+    let reply = disco_reply_for_test(
+        &state,
+        &phase,
+        &vcard_get(&format!("unknown-plugin@{extensions}")),
+    )
+    .await;
+    assert_item_not_found_for_test(&reply, "unknown bot vCard");
+
+    let vcard4 = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4,
+        "current",
+    )
+    .await;
+    let parsed = waddle_xmpp::xep::xep0292::parse_vcard4(&vcard4);
+    assert_eq!(parsed.full_name.as_deref(), Some(installed.name.as_str()));
+    assert_eq!(parsed.note, installed.description);
+    assert_eq!(
+        parsed.kind.as_deref(),
+        Some(waddle_xmpp::xep::xep0292::KIND_APPLICATION)
+    );
+    assert_eq!(parsed.photo_uri, None);
+
+    let metadata = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA,
+        "current",
+    )
+    .await;
+    assert!(metadata.is("metadata", waddle_xmpp::xep::xep0084::NS_AVATAR_METADATA));
+    assert_eq!(
+        metadata.children().count(),
+        0,
+        "avatar publishing is disabled"
+    );
+
+    for node in [
+        "http://jabber.org/protocol/mood",
+        "http://jabber.org/protocol/tune",
+    ] {
+        let reply = disco_reply_for_test(
+            &state,
+            &phase,
+            &pubsub_items_iq_frame("pep-bot", &bot, node, None),
+        )
+        .await;
+        assert_item_not_found_for_test(&reply, node);
+    }
+}
+
+/// A vcard-temp get to `to`, as the shared client sends it.
+fn vcard_get_frame(to: &str) -> String {
+    stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination")),
+        id: "vcard-bot".to_string(),
+        payload: Element::builder("vCard", waddle_xmpp::xep::xep0054::NS_VCARD).build(),
+    })))
+}
+
+/// XEP-0084, XEP-0054 and XEP-0292 for an extension bot whose manifest
+/// declares an avatar. The server fetches and verifies the artifact, then
+/// answers in-band, never with a URL: the metadata names the PNG by its
+/// SHA-1 (§3.2), the data node holds it under that id, vcard-temp carries
+/// PHOTO TYPE and BINVAL, vCard4 the PHOTO as a `data:` URI. Before the
+/// fetch completes, the answers are those of a bot without an avatar.
+#[tokio::test]
+async fn handle_iq_serves_extension_bot_avatars_in_band() {
+    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
+
+    let artifacts = wiremock::MockServer::start().await;
+    let png = encode_image(5, 3, image::ImageFormat::Png);
+    let reference = serve_artifact(&artifacts, &png, png.clone(), "image/png").await;
+    let state = create_test_websocket_state_with_fixture_bot_avatar(reference.clone()).await;
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let bot = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    );
+    let id = xep0084::compute_avatar_hash(&png);
+
+    let metadata = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        xep0084::NODE_AVATAR_METADATA,
+        "current",
+    )
+    .await;
+    assert_eq!(metadata.children().count(), 0, "not fetched yet");
+    state
+        .deps
+        .protocol
+        .bot_avatars
+        .fetch(&reference)
+        .await
+        .expect("the manifest avatar verifies");
+
+    let metadata =
+        pep_item_for_test(&state, &phase, &bot, xep0084::NODE_AVATAR_METADATA, &id).await;
+    let infos: Vec<_> = metadata.children().collect();
+    assert_eq!(infos.len(), 1, "one in-band format: {metadata:?}");
+    assert!(infos[0].is("info", xep0084::NS_AVATAR_METADATA));
+    let png_len = png.len().to_string();
+    for (attribute, value) in [
+        ("id", Some(id.as_str())),
+        ("type", Some("image/png")),
+        ("bytes", Some(png_len.as_str())),
+        ("width", Some("5")),
+        ("height", Some("3")),
+        ("url", None),
+    ] {
+        assert_eq!(infos[0].attr(attribute), value, "{attribute}: {metadata:?}");
+    }
+
+    let data = pep_item_for_test(&state, &phase, &bot, xep0084::NODE_AVATAR_DATA, &id).await;
+    assert!(data.is("data", xep0084::NS_AVATAR_DATA));
+    assert_eq!(
+        data.attrs().into_iter().count(),
+        0,
+        "§4.1: <data/> has no attributes"
+    );
+    assert_eq!(BASE64.decode(data.text()).expect("base64"), png);
+    let requested =
+        pep_items_for_test(&state, &phase, &bot, xep0084::NODE_AVATAR_DATA, Some(&id)).await;
+    assert_eq!(requested.len(), 1);
+    assert_eq!(requested[0].attr("id"), Some(id.as_str()));
+    let stale = "0".repeat(40);
+    assert!(
+        pep_items_for_test(
+            &state,
+            &phase,
+            &bot,
+            xep0084::NODE_AVATAR_DATA,
+            Some(&stale)
+        )
+        .await
+        .is_empty(),
+        "XEP-0060 §6.5.8: only the requested item"
+    );
+
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get_frame(&bot)).await;
+    let vcard = xep0054::parse_vcard_element(
+        reply
+            .get_child("vCard", xep0054::NS_VCARD)
+            .expect("vCard result"),
+    )
+    .expect("vCard parses");
+    assert!(matches!(
+        vcard.photo,
+        Some(xep0054::VCardPhoto::Binary { ref mime_type, ref data })
+            if mime_type == "image/png" && BASE64.decode(data).ok() == Some(png.clone())
+    ));
+
+    let vcard4 = pep_item_for_test(&state, &phase, &bot, xep0292::PEP_NODE_VCARD4, "current").await;
+    assert_eq!(
+        xep0292::parse_vcard4(&vcard4).photo_uri,
+        Some(format!("data:image/png;base64,{}", BASE64.encode(&png)))
+    );
+}
+
+/// The shared client resolves a bot's avatar bytes from the server's
+/// answers: XEP-0084 metadata then data, else the vcard-temp PHOTO.
+#[tokio::test]
+async fn shared_client_resolves_extension_bot_avatars() {
+    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use waddle_xmpp_client::avatar::{
+        parse_vcard_photo_response, request_avatar_with_iq, AvatarId, AvatarRequestFailure,
+    };
+
+    let artifacts = wiremock::MockServer::start().await;
+    let png = encode_image(4, 4, image::ImageFormat::Png);
+    let reference = serve_artifact(&artifacts, &png, png.clone(), "image/png").await;
+    let state = create_test_websocket_state_with_fixture_bot_avatar(reference.clone()).await;
+    state.deps.protocol.bot_avatars.fetch(&reference).await;
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let bot: BareJid = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    )
+    .parse()
+    .expect("bot jid");
+
+    let avatar = request_avatar_with_iq(&bot, |iq| {
+        let (state, phase) = (&state, &phase);
+        async move {
+            let reply = disco_reply_for_test(state, phase, &String::from(&iq)).await;
+            if reply.attr("type") == Some("result") {
+                Ok(reply)
+            } else {
+                Err(AvatarRequestFailure::<std::convert::Infallible>::StanzaError)
+            }
+        }
+    })
+    .await
+    .expect("no transport failure")
+    .expect("the bot has an avatar");
+    assert_eq!(avatar.data, png);
+    assert_eq!(avatar.mime_type, "image/png");
+    assert!(
+        matches!(avatar.id, AvatarId::Item(ref id) if id.as_str() == waddle_xmpp::xep::xep0084::compute_avatar_hash(&png))
+    );
+
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get_frame(&bot.to_string())).await;
+    let photo = parse_vcard_photo_response(&reply).expect("vcard-temp PHOTO");
+    assert_eq!(photo.data, Some(png));
+    assert_eq!(photo.mime_type.as_deref(), Some("image/png"));
+}
+
+/// An artifact whose bytes do not match the manifest digest is never
+/// served: the bot answers as one without an avatar.
+#[tokio::test]
+async fn handle_iq_serves_no_extension_bot_avatar_on_digest_mismatch() {
+    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
+
+    let artifacts = wiremock::MockServer::start().await;
+    let png = encode_image(2, 2, image::ImageFormat::Png);
+    let reference = serve_artifact(&artifacts, b"the pinned avatar", png, "image/png").await;
+    let state = create_test_websocket_state_with_fixture_bot_avatar(reference.clone()).await;
+    assert!(
+        state
+            .deps
+            .protocol
+            .bot_avatars
+            .fetch(&reference)
+            .await
+            .is_none(),
+        "the digest does not verify"
+    );
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let bot = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    );
+
+    let metadata = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        xep0084::NODE_AVATAR_METADATA,
+        "current",
+    )
+    .await;
+    assert_eq!(
+        metadata.children().count(),
+        0,
+        "avatar publishing is disabled"
+    );
+    let reply = disco_reply_for_test(
+        &state,
+        &phase,
+        &pubsub_items_iq_frame("pep-bot", &bot, xep0084::NODE_AVATAR_DATA, None),
+    )
+    .await;
+    assert!(
+        reply
+            .get_child("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", waddle_xmpp::pubsub::NS_PUBSUB))
+            .is_none_or(|items| items.children().next().is_none()),
+        "no avatar data: {reply:?}"
+    );
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get_frame(&bot)).await;
+    assert!(reply
+        .get_child("vCard", xep0054::NS_VCARD)
+        .expect("vCard result")
+        .get_child("PHOTO", xep0054::NS_VCARD)
+        .is_none());
+    let vcard4 = pep_item_for_test(&state, &phase, &bot, xep0292::PEP_NODE_VCARD4, "current").await;
+    assert_eq!(xep0292::parse_vcard4(&vcard4).photo_uri, None);
 }
 
 #[tokio::test]

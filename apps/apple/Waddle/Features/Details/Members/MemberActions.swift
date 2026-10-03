@@ -47,9 +47,9 @@ struct MemberActionsMenu: ViewModifier {
         )
     }
 
-    /// A real JID that is not our own account or an extension bot.
+    /// A real JID that is not our own account.
     private var messageablePeer: BareJID? {
-        guard !subject.isBot, let jid = subject.jid, jid != session.account.jid else { return nil }
+        guard let jid = subject.jid, jid != session.account.jid else { return nil }
         return jid
     }
 

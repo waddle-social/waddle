@@ -232,7 +232,7 @@ async fn extension_host_boundary_known_rejection_survives_receipt_failure() {
         nested::{NestedOutcome, SettlementOutcome},
         IngressDecisionClass,
     };
-    let outcome = NestedOutcome::Committed {
+    let mut outcome = NestedOutcome::Committed {
         decision_class: IngressDecisionClass::Accepted,
         archive_ids: vec![],
         settlement: tokio::spawn(async {
@@ -245,7 +245,7 @@ async fn extension_host_boundary_known_rejection_survives_receipt_failure() {
         }),
     };
     assert!(
-        matches!(super::super::settlement::finish_nested(outcome).await,
+        matches!(super::super::settlement::finish_nested(&mut outcome).await,
         Err(super::super::ExtensionHostAdapterError::Rejected(error))
             if error.type_ == xmpp_parsers::stanza_error::ErrorType::Cancel)
     );
@@ -332,7 +332,7 @@ async fn extension_host_boundary_nested_refusal_stays_typed() {
         nested::{NestedOutcome, NestedRefusal},
         IngressDecisionClass,
     };
-    let error = super::super::settlement::finish_nested(NestedOutcome::Refused(
+    let error = super::super::settlement::finish_nested(&mut NestedOutcome::Refused(
         NestedRefusal::Decision(IngressDecisionClass::Storage),
     ))
     .await
@@ -427,7 +427,7 @@ async fn extension_host_boundary_decision_error_codes() {
             host::HostToolErrorCode::TemporaryFailure,
         ),
     ] {
-        let error = super::super::settlement::finish_nested(NestedOutcome::Refused(
+        let error = super::super::settlement::finish_nested(&mut NestedOutcome::Refused(
             NestedRefusal::Decision(class),
         ))
         .await

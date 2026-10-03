@@ -47,6 +47,7 @@ class ChannelViewModel(
     occupantPresence = sessionManager.presenceStore.occupants
         .map { rooms -> rooms[roomJid].orEmpty() },
     occupantJids = sessionManager.occupantJidStore.jidsIn(roomJid),
+    botJids = sessionManager.declaredBotJids(roomJid),
     // No public/private discriminator on the topology yet (web
     // parity): every MUC resolves as a private group (§3: always).
     notifyMode = sessionManager.notifySettingsStore.modeFlow(roomJid, ConversationKind.PRIVATE_GROUP),
@@ -96,6 +97,8 @@ internal class ChannelIo(
         }
         sessionManager.refreshRoomPins(roomJid)
     }
+
+    override suspend fun refreshRoomBots() = sessionManager.refreshRoomBots(roomJid)
 
     override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         sessionManager.fetchRoomHistory(roomJid, maxMessages, beforeId)

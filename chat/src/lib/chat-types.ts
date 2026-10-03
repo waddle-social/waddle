@@ -46,6 +46,12 @@ export interface GroupDmSummary {
  * without translation. */
 export type PinPermission = "admins-only" | "anyone";
 
+/** A bot the server declares for a room (XEP-0030 `urn:waddle:room:bots:0`). Bots hold no affiliation, so they are never `MemberSummary` rows. */
+export interface RoomBotSummary {
+  jid: string;
+  name: string;
+}
+
 export interface MemberSummary {
   jid: string;
   user_id?: string;

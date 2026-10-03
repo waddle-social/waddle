@@ -105,16 +105,12 @@ pub(crate) async fn seed_fixed_test_account(
     config: &FixedTestAccountConfig,
 ) -> Result<()> {
     let native_user_store = NativeUserStore::new(db_pool.global_actor().clone());
-    if native_user_store
-        .user_exists(&config.username, &config.domain)
+    // Seeding runs before the startup key backfill, so this also removes a
+    // row an older node wrote without its key; it would block the insert.
+    native_user_store
+        .delete_user(&config.username, &config.domain)
         .await
-        .map_err(|err| anyhow::anyhow!("Failed checking fixed test account: {err}"))?
-    {
-        native_user_store
-            .delete_user(&config.username, &config.domain)
-            .await
-            .map_err(|err| anyhow::anyhow!("Failed resetting fixed test account: {err}"))?;
-    }
+        .map_err(|err| anyhow::anyhow!("Failed resetting fixed test account: {err}"))?;
 
     native_user_store
         .register(RegisterRequest {

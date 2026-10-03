@@ -53,6 +53,9 @@ async fn two_bots(f: IngressFixture) {
     fixture.close(f).await;
 }
 
+/// One bot's sends into one room run one at a time: the next send cannot
+/// race this send's admission. A send queued behind another reuses its
+/// lingering occupancy, so occupants see one join, both messages, one leave.
 async fn concurrent(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let gate = Arc::new(interpret::BotSnapshotGate::default());
@@ -86,64 +89,59 @@ async fn concurrent(f: IngressFixture) {
         .await
         .expect("first send reached settlement after commit");
     assert_eq!(f.count("ingress_messages").await, 1);
-    let second_commit = tokio::time::timeout(Duration::from_secs(1), async {
-        gate.reached.notified().await;
-        gate.release.notify_one();
-        loop {
-            if f.count("ingress_messages").await == 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
     assert!(
-        second_commit.is_ok(),
-        "second send must commit before the first settlement response deadline"
+        tokio::time::timeout(Duration::from_millis(150), gate.reached.notified())
+            .await
+            .is_err(),
+        "second send waits until the first send is done"
     );
+    // The first send replies at its response deadline while its settlement
+    // still runs; the bot's next message still waits for that work.
+    tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .expect("first send replies at its response deadline")
+        .expect("task")
+        .expect("first committed");
     assert!(
-        !first.is_finished(),
-        "first send still awaits gated settlement"
+        tokio::time::timeout(Duration::from_millis(150), gate.reached.notified())
+            .await
+            .is_err(),
+        "second send waits for the first send's settlement"
     );
     settlement_gate.release.notify_one();
-    first.await.expect("task").expect("first committed");
-    second
+    tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
         .await
-        .expect("task")
-        .expect("second committed without stale room generation");
+        .expect("second send plans once the first is delivered");
+    gate.release.notify_one();
+    second.await.expect("task").expect("second committed");
+    fixture.settle().await;
     assert_eq!(gate.arrivals.load(Ordering::SeqCst), 2);
-    // The second committed archive entry may defer dispatch while the first
-    // reflection is awaiting settlement. Recovery releases it after that proof.
-    assert_eq!(
-        crate::ingress::maintenance::run_maintenance_pass(
-            &f.db,
-            &f.uow,
-            crate::ingress::maintenance::MaintenanceBudget {
-                grace: chrono::Duration::zero(),
-                ..crate::ingress::maintenance::MaintenanceBudget::DEFAULT
-            },
-            Some(Arc::clone(&fixture.adapter.state) as Arc<dyn crate::ingress::RecoveryEnvironment>),
-        ).await,
-        crate::ingress::maintenance::MaintenanceOutcome::Complete,
-    );
     let snapshot = fixture.actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot
+        .room
+        .find_occupant_by_real_jid(&fixture.invocation().actor_jid)
+        .is_none());
+    use xmpp_parsers::{message::MessageType, presence::Type};
+    let wire: Vec<_> = fixture
+        .drain()
+        .into_iter()
+        .filter_map(|stanza| match stanza {
+            Stanza::Presence(presence) => Some(format!("{:?}", presence.type_)),
+            Stanza::Message(message) if message.type_ == MessageType::Groupchat => {
+                message.id.map(|id| id.0).or(Some("groupchat".to_owned()))
+            }
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        snapshot
-            .room
-            .occupants
-            .values()
-            .filter(|occupant| occupant.real_jid == fixture.invocation().actor_jid)
-            .count(),
-        1
-    );
-    assert_eq!(
-        fixture
-            .drain()
-            .iter()
-            .filter(|stanza| matches!(stanza, Stanza::Presence(_)))
-            .count(),
-        1,
-        "only one join presence"
+        wire,
+        [
+            format!("{:?}", Type::None),
+            "concurrent-a".to_owned(),
+            "concurrent-b".to_owned(),
+            format!("{:?}", Type::Unavailable),
+        ],
+        "the queued send reused the occupancy"
     );
     assert_eq!(
         f.count("ingress_messages WHERE terminal_at IS NOT NULL")

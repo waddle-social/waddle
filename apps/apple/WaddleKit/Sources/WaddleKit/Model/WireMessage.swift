@@ -83,6 +83,10 @@ public struct WireMessage: Hashable, Sendable {
     /// occupant when an undelayed live message arrived. The first stamp a
     /// row gets is kept.
     public var authorRealJID: BareJID?
+    /// Carries XEP-0045 `muc#user`: a room private message or a room
+    /// invite/decline. Never a 1:1 DM, even though its type is `chat` or
+    /// `normal` and its sender is a room JID.
+    public var isMucUser: Bool
 
     public init(
         source: Source = .live,
@@ -115,7 +119,8 @@ public struct WireMessage: Hashable, Sendable {
         linkPreviews: [LinkPreview] = [],
         pinEvent: PinEvent? = nil,
         displayedCursors: [DisplayedCursor]? = nil,
-        authorRealJID: BareJID? = nil
+        authorRealJID: BareJID? = nil,
+        isMucUser: Bool = false
     ) {
         self.source = source
         self.type = type
@@ -148,6 +153,7 @@ public struct WireMessage: Hashable, Sendable {
         self.pinEvent = pinEvent
         self.displayedCursors = displayedCursors
         self.authorRealJID = authorRealJID
+        self.isMucUser = isMucUser
     }
 
     public var isGroupchat: Bool { type == .groupchat }

@@ -26,12 +26,12 @@ pub use iq::{
 };
 pub use parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
-    parse_upload_slot, space_from_disco_item,
+    parse_upload_slot, room_bots_from_disco_items, space_from_disco_item,
 };
 pub use types::{
     DiscoDataField, DiscoDataForm, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,
     DiscoveredChannel, DiscoveredChannelType, DiscoveredComponentServices, DiscoveredSpace,
-    DiscoveredTopology, MucAdminAffiliationItem, RosterResult, SpaceNode, UploadSlot,
+    DiscoveredTopology, MucAdminAffiliationItem, RoomBot, RosterResult, SpaceNode, UploadSlot,
     UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult, WaddleInboxMarkRead,
 };
 
@@ -74,6 +74,7 @@ pub const WADDLE_GROUP_DM_FEATURE_NS: &str = "urn:waddle:group-dm:0";
 pub const STANDALONE_SPACE_ID: &str = "standalone";
 pub const USER_SEARCH_NS: &str = "jabber:iq:search";
 pub const MUC_ADMIN_NS: &str = "http://jabber.org/protocol/muc#admin";
+pub use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
 pub use waddle_xmpp_core::roster::ROSTER_NS;
 
 #[cfg(test)]

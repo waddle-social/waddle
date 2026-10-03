@@ -869,6 +869,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_ro
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_bots(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users(
@@ -1111,6 +1113,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_destroy_room(`
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_config(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_kick_occupant(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`nick`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_room_bots(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_room_members(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`affiliation`: RustBuffer.ByValue,
 ): Long
@@ -1554,6 +1558,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant() != 31570) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_bots() != 61834) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members() != 46363) {
@@ -2867,6 +2874,14 @@ public interface WaddleClientInterface {
      * affiliation is untouched and they may rejoin.
      */
     suspend fun `kickOccupant`(`roomJid`: kotlin.String, `nick`: kotlin.String, `reason`: kotlin.String?)
+
+    /**
+     * The extension bots that have posted in the room (XEP-0030
+     * disco#items on the room's `urn:waddle:room:bots:0` node). Bots
+     * hold no affiliation, so `list_room_members` never shows them;
+     * a requester who may not enter the room gets an empty list.
+     */
+    suspend fun `listRoomBots`(`roomJid`: kotlin.String): List<WaddleRoomBot>
 
     /**
      * XEP-0045 §9.5: retrieve the affiliation list for one tier.
@@ -5596,6 +5611,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * The extension bots that have posted in the room (XEP-0030
+     * disco#items on the room's `urn:waddle:room:bots:0` node). Bots
+     * hold no affiliation, so `list_room_members` never shows them;
+     * a requester who may not enter the room gets an empty list.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `listRoomBots`(`roomJid`: kotlin.String) : List<WaddleRoomBot> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_room_bots(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleRoomBot.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * XEP-0045 §9.5: retrieve the affiliation list for one tier.
      * Callers query the four tiers (owner/admin/member/outcast)
      * separately and tolerate per-tier `forbidden` /
@@ -7259,6 +7301,12 @@ data class WaddleArchivedMessage (
     var `isSticker`: kotlin.Boolean
     ,
     /**
+     * Carries XEP-0045 `muc#user`: a room private message or a room
+     * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
+     */
+    var `mucUser`: kotlin.Boolean
+    ,
+    /**
      * XEP-0045 real author JID from the archived `muc#user` payload,
      * exposed by non-anonymous room archives.
      */
@@ -7340,6 +7388,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadAnchor.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadEnded.read(buf),
@@ -7386,6 +7435,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
             FfiConverterOptionalString.allocationSize(value.`forumTitle`) +
             FfiConverterBoolean.allocationSize(value.`isSticker`) +
+            FfiConverterBoolean.allocationSize(value.`mucUser`) +
             FfiConverterOptionalString.allocationSize(value.`authorRealJid`) +
             FfiConverterOptionalTypeWaddleCallThreadAnchor.allocationSize(value.`callThread`) +
             FfiConverterOptionalTypeWaddleCallThreadEnded.allocationSize(value.`callThreadEnded`) +
@@ -7431,6 +7481,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
             FfiConverterOptionalString.write(value.`forumTitle`, buf)
             FfiConverterBoolean.write(value.`isSticker`, buf)
+            FfiConverterBoolean.write(value.`mucUser`, buf)
             FfiConverterOptionalString.write(value.`authorRealJid`, buf)
             FfiConverterOptionalTypeWaddleCallThreadAnchor.write(value.`callThread`, buf)
             FfiConverterOptionalTypeWaddleCallThreadEnded.write(value.`callThreadEnded`, buf)
@@ -9568,6 +9619,13 @@ data class WaddleMessage (
     ,
     var `isMuc`: kotlin.Boolean
     ,
+    /**
+     * Carries XEP-0045 `muc#user`: a room private message or a room
+     * invite/decline. Never a 1:1 DM, even when `message_type` is `chat`
+     * or `normal` and `from` is a room JID — route as room traffic.
+     */
+    var `mucUser`: kotlin.Boolean
+    ,
     var `thread`: kotlin.String?
     ,
     var `parentThreadId`: kotlin.String?
@@ -9721,6 +9779,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypeWaddleMarkupSpan.read(buf),
@@ -9770,6 +9829,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterBoolean.allocationSize(value.`displayedMarkerRequested`) +
             FfiConverterOptionalString.allocationSize(value.`displayedMarkerId`) +
             FfiConverterBoolean.allocationSize(value.`isMuc`) +
+            FfiConverterBoolean.allocationSize(value.`mucUser`) +
             FfiConverterOptionalString.allocationSize(value.`thread`) +
             FfiConverterOptionalString.allocationSize(value.`parentThreadId`) +
             FfiConverterSequenceTypeWaddleMarkupSpan.allocationSize(value.`markupSpans`) +
@@ -9818,6 +9878,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterBoolean.write(value.`displayedMarkerRequested`, buf)
             FfiConverterOptionalString.write(value.`displayedMarkerId`, buf)
             FfiConverterBoolean.write(value.`isMuc`, buf)
+            FfiConverterBoolean.write(value.`mucUser`, buf)
             FfiConverterOptionalString.write(value.`thread`, buf)
             FfiConverterOptionalString.write(value.`parentThreadId`, buf)
             FfiConverterSequenceTypeWaddleMarkupSpan.write(value.`markupSpans`, buf)
@@ -10632,6 +10693,53 @@ public object FfiConverterTypeWaddleReplyTarget: FfiConverterRustBuffer<WaddleRe
     override fun write(value: WaddleReplyTarget, buf: ByteBuffer) {
             FfiConverterString.write(value.`authorJid`, buf)
             FfiConverterString.write(value.`messageId`, buf)
+    }
+}
+
+
+
+/**
+ * An extension bot that has posted in a room.
+ */
+data class WaddleRoomBot (
+    /**
+     * Bare JID of the bot.
+     */
+    var `jid`: kotlin.String
+    ,
+    /**
+     * The bot's display name, when the service reports one.
+     */
+    var `name`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRoomBot: FfiConverterRustBuffer<WaddleRoomBot> {
+    override fun read(buf: ByteBuffer): WaddleRoomBot {
+        return WaddleRoomBot(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRoomBot) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterOptionalString.allocationSize(value.`name`)
+    )
+
+    override fun write(value: WaddleRoomBot, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
     }
 }
 
@@ -16637,6 +16745,34 @@ public object FfiConverterSequenceTypeWaddleReference: FfiConverterRustBuffer<Li
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleReference.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleRoomBot: FfiConverterRustBuffer<List<WaddleRoomBot>> {
+    override fun read(buf: ByteBuffer): List<WaddleRoomBot> {
+        val len = buf.getInt()
+        return List<WaddleRoomBot>(len) {
+            FfiConverterTypeWaddleRoomBot.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleRoomBot>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleRoomBot.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleRoomBot>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleRoomBot.write(it, buf)
         }
     }
 }

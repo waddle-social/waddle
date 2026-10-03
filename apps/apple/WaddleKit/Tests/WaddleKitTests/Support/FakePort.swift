@@ -16,6 +16,9 @@ final class FakePort: XmppPort {
     var publishedCursors: [DisplayedCursor] = []
     var chatStates: [(ChatState, ConversationID)] = []
     var joined: [BareJID] = []
+    var roomBots: [BareJID: [RoomBot]] = [:]
+    var roomBotRequests: [BareJID] = []
+    var failsRoomBots = false
     var inboxReads: [BareJID] = []
     /// Every `<mark-read/>` with its thread, in order.
     var inboxReadRequests: [(partner: BareJID, threadID: String?)] = []
@@ -178,6 +181,11 @@ final class FakePort: XmppPort {
 
     func leaveRoom(_ room: BareJID, nick: String) async {}
     func listMembers(of room: BareJID) async throws -> [RoomMember] { [] }
+    func listRoomBots(in room: BareJID) async throws -> [RoomBot] {
+        roomBotRequests.append(room)
+        if failsRoomBots { throw PortError.failed }
+        return roomBots[room] ?? []
+    }
     func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String?) async throws {}
     func kick(nick: String, from room: BareJID, reason: String?) async throws {}
     func searchUsers(_ query: String) async throws -> [UserSearchResult] { [] }
