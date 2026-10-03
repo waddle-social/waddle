@@ -342,7 +342,9 @@ const setExtensionPaletteRef = (instance: ExtensionPaletteHandle | null) => {
 };
 const extensionLauncher = useExtensionLauncher({
   xmppClient: computed(() => props.xmppClient),
-  roomJid: computed(() => props.roomJid),
+  // Extensions act in channels. A group DM is a conversation between people
+  // like a 1:1 DM, and the server refuses bots there.
+  roomJid: computed(() => (props.channel?.isGroupDm ? null : props.roomJid)),
   invokeExtensionAction: computed(() => props.invokeExtensionAction),
   sendPublicChannelMessage: computed(() => props.sendPublicChannelMessage),
   focusPalette: () => extensionPaletteRef.value?.focus(),
