@@ -167,6 +167,9 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       return;
     }
     avatars.bind(client);
+    client.addOccupantRealJidHandler((roomJid, _nick, jid, isBot) => {
+      if (isBot && jid) waddles.reloadRoomBotsIfUnlisted(roomJid, jid);
+    });
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);

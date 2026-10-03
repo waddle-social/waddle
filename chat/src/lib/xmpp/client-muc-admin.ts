@@ -5,7 +5,7 @@
  * probe, and the Waddle admin V1/V2 ad-hoc command wrappers for users,
  * spaces, and channels.
  */
-import type { MemberSummary } from "../chat-types";
+import type { MemberSummary, RoomBotSummary } from "../chat-types";
 import { jidLocalpart } from "./jid";
 import { stanzaErrorContext } from "./stanza-error-context";
 import type { ListRoomMembersOptions, XmppErrorEvent } from "./types";
@@ -21,6 +21,7 @@ import type {
   WasmAdminSpacesListResult,
   WasmAdminSpacesMembersResult,
   WasmAdminSpacesSetRoleResult,
+  WasmRoomBot,
   WasmRoomMember,
 } from "./wasm-types";
 
@@ -55,6 +56,7 @@ export class RoomMemberListUnavailableError extends Error {
  */
 export type MucAdminWasmClient = {
   list_room_members?: (roomJid: string, affiliation: string) => Promise<WasmRoomMember[] | null | undefined>;
+  list_room_bots?: (roomJid: string) => Promise<WasmRoomBot[] | null | undefined>;
   set_room_affiliation?: (roomJid: string, jid: string, affiliation: string) => Promise<unknown>;
   is_community_owner?: () => Promise<boolean>;
   admin_users_list?: (
@@ -102,6 +104,14 @@ export class MucAdmin {
       throw new RoomMemberListUnavailableError();
     }
     return members;
+  }
+
+  /** The bots the server declares for a room; they hold no affiliation, so `listRoomMembers` never returns them. */
+  async listRoomBots(channelId: string, options?: ListRoomMembersOptions): Promise<RoomBotSummary[]> {
+    const xmpp = await this.deps.requireConnectedXmpp();
+    if (!xmpp.list_room_bots) throw new Error("missing list_room_bots");
+    const bots = await xmpp.list_room_bots(options?.roomJid ?? this.deps.roomJidForChannel(channelId));
+    return (bots ?? []).filter((bot) => bot.jid).map((bot) => ({ jid: bot.jid, name: bot.name || jidLocalpart(bot.jid) }));
   }
 
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> {

@@ -96,6 +96,30 @@ describe("MucAdmin.listRoomMembers", () => {
   });
 });
 
+describe("MucAdmin.listRoomBots", () => {
+  test("lists the server-declared bots by JID and name, falling back to the localpart", async () => {
+    const rooms: string[] = [];
+    const { admin } = createAdmin({
+      list_room_bots: async (roomJid) => {
+        rooms.push(roomJid);
+        return [{ jid: "helper@extensions.example.com", name: "Helper" }, { jid: "quiet@extensions.example.com", name: null }, { jid: "" }];
+      },
+    });
+
+    expect(await admin.listRoomBots("general")).toEqual([
+      { jid: "helper@extensions.example.com", name: "Helper" },
+      { jid: "quiet@extensions.example.com", name: "quiet" },
+    ]);
+    await admin.listRoomBots("general", { roomJid: "room-123@conference.example.net" });
+    expect(rooms).toEqual(["general@muc.example.com", "room-123@conference.example.net"]);
+  });
+
+  test("an empty answer is no bots, and a missing binding rejects", async () => {
+    expect(await createAdmin({ list_room_bots: async () => null }).admin.listRoomBots("general")).toEqual([]);
+    await expect(createAdmin({}).admin.listRoomBots("general")).rejects.toThrow("missing list_room_bots");
+  });
+});
+
 describe("MucAdmin admin V2 wrappers", () => {
   test("adminSpacesList passes snake_case args verbatim to the wasm binding", async () => {
     const calls: unknown[] = [];

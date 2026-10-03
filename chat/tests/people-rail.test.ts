@@ -11,7 +11,7 @@ import {
   type PeopleRailSources,
 } from "../src/shell/controllers/use-people-rail";
 import type { DmConversation, RosterContact } from "../src/lib/xmpp/types";
-import type { MemberSummary } from "../src/lib/chat-types";
+import type { MemberSummary, RoomBotSummary } from "../src/lib/chat-types";
 import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
 import { renderVueComponent } from "./helpers/render-vue-sfc";
 
@@ -35,6 +35,7 @@ function sources(overrides: Partial<PeopleRailSources> = {}): PeopleRailSources 
     roomPresence: {},
     authorJidByNick: {},
     members: [],
+    roomBots: [],
     activeRoomJid: null,
     callParticipants: {},
     callParticipantOwners: {},
@@ -188,6 +189,7 @@ describe("presenceFromShow / filterPeople", () => {
 
 describe("buildMemberCards", () => {
   const base = {
+    roomBots: [],
     roomPresence: {},
     authorJidByNick: {},
     contacts: [],
@@ -288,6 +290,7 @@ describe("usePeopleRail", () => {
       roomPresence: ref({}),
       authorJidByNick: ref({}),
       members: ref<MemberSummary[]>([]),
+      roomBots: ref<RoomBotSummary[]>([]),
       activeRoomJid: ref<string | null>(null),
       callParticipants: ref({}),
       callParticipantOwners: ref({}),
@@ -349,11 +352,11 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
     expect(known.awayAndOffline).toEqual([]);
   });
 
-  test("member cards mark a bot, keep its affiliation, and give it no status", () => {
-    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+  test("member cards list the room's declared bots apart from its members, with no status", () => {
     const cards = buildMemberCards({
       roomActive: true,
-      members: [member("bob@example.com"), member(BOT)],
+      members: [member("bob@example.com")],
+      roomBots: [{ jid: BOT, name: "Helper" }],
       roomPresence: { helper: "online", bob: "online" },
       authorJidByNick: { helper: BOT, bob: "bob@example.com" },
       contacts: [],
@@ -363,9 +366,9 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
       peerInCall: () => false,
     });
 
-    expect(cards.map((c) => [c.jid, c.bot, c.status, c.presence, c.statusText, c.inCall, c.affiliation])).toEqual([
-      ["bob@example.com", false, "available", "online", "available", false, "member"],
-      [BOT, true, "offline", undefined, null, false, "member"],
+    expect(cards.map((c) => [c.jid, c.name, c.bot, c.status, c.presence, c.statusText, c.inCall, c.affiliation])).toEqual([
+      ["bob@example.com", "bob", false, "available", "online", "available", false, "member"],
+      [BOT, "Helper", true, "offline", undefined, null, false, null],
     ]);
   });
 
@@ -412,15 +415,44 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
 
 describe("people rail after a restart", () => {
   afterEach(() => occupantJidDirectory.clear());
+  const BOT = "helper@extensions.example.com";
 
-  test("a bot that is only a room member is listed under Bots", () => {
-    occupantJidDirectory.setExtensionsDomain("extensions.example.com");
+  test("a declared room bot with no presence at all is listed under Bots by name", () => {
     const groups = buildPeopleRail(sources({
       activeRoomJid: ROOM,
-      members: [member("helper@extensions.example.com"), member("bob@example.com")],
+      members: [member("bob@example.com")],
+      roomBots: [{ jid: BOT, name: "Helper" }],
     }));
-    expect(groups.bots.map((bot) => bot.jid)).toEqual(["helper@extensions.example.com"]);
+    expect(groups.bots).toEqual([
+      { jid: BOT, name: "Helper", presence: undefined, status: "offline", statusText: null, inCall: false },
+    ]);
     expect(groups.room).toEqual([]);
   });
 
+  test("a bot that is both declared and present is listed once", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    const groups = buildPeopleRail(sources({
+      activeRoomJid: ROOM,
+      roomPresence: { helper: "online" },
+      authorJidByNick: { helper: BOT },
+      roomBots: [{ jid: BOT, name: "Helper" }, { jid: BOT.toUpperCase(), name: "Helper" }],
+    }));
+    expect(groups.bots.map((bot) => [bot.jid, bot.name])).toEqual([[BOT, "Helper"]]);
+    expect(groups.room).toEqual([]);
+  });
+
+  test("a hatted occupant the declared list lacks is still a bot, not a person", () => {
+    occupantJidDirectory.record(ROOM, "newbie", "newbie@extensions.example.com/bot", true);
+    const groups = buildPeopleRail(sources({
+      activeRoomJid: ROOM,
+      roomPresence: { newbie: "online" },
+      authorJidByNick: { newbie: "newbie@extensions.example.com" },
+    }));
+    expect(groups.bots.map((bot) => bot.jid)).toEqual(["newbie@extensions.example.com"]);
+    expect(groups.room).toEqual([]);
+  });
+
+  test("declared bots belong to the focused room: with no room, none are listed", () => {
+    expect(buildPeopleRail(sources({ roomBots: [{ jid: BOT, name: "Helper" }] })).bots).toEqual([]);
+  });
 });

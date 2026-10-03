@@ -406,6 +406,11 @@ export interface WasmRoomMember {
   affiliation: string;
 }
 
+export interface WasmRoomBot {
+  jid: string;
+  name?: string | null;
+}
+
 export interface WasmUserSearchResult {
   jid: string;
   username?: string;

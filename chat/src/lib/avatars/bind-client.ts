@@ -1,7 +1,6 @@
 import type { AvatarChangedEvent } from "@/lib/xmpp/client-events";
 import { avatarStore, type AvatarStore } from "./avatar-store";
 import { occupantJidDirectory, type OccupantJidDirectory } from "./author-jid";
-import { extensionServiceJidForUserJid } from "@/lib/xmpp/extension-commands";
 
 /** The slice of `BrowserXmppClient` the avatar layer drives. */
 export interface AvatarClient {
@@ -11,7 +10,6 @@ export interface AvatarClient {
   addOccupantRealJidHandler: (handler: (roomJid: string, nick: string, bareJid: string | null, isBot?: boolean) => void) => () => void;
   addOwnProfilePublishedHandler: (handler: (ownBareJid: string) => void) => () => void;
   addOwnOccupantNickHandler: (handler: (roomJid: string, nick: string | null) => void) => () => void;
-  readonly bareJid: string;
 }
 
 /**
@@ -24,7 +22,6 @@ function bindAvatarClient(
   store: AvatarStore = avatarStore,
   directory: OccupantJidDirectory = occupantJidDirectory,
 ): () => void {
-  directory.setExtensionsDomain(extensionServiceJidForUserJid(client.bareJid));
   store.setFetcher((jid) => client.fetchUserAvatar(jid));
   store.setEvictionHandler((jid) => client.forgetUserAvatar(jid));
   const offChanged = client.addAvatarChangedHandler((event) => store.handleAvatarChanged(event.jid, event.avatarId));

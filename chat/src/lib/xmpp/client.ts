@@ -3,7 +3,7 @@ import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
 import type { BroadcastShow } from "@/presence/effective-show";
-import type { MemberSummary, UserSearchResult } from "../chat-types";
+import type { MemberSummary, RoomBotSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
 import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 import { $callState, applyCallEvent, clearPendingDmCallTerminate, flushPendingDmCallTerminate, reportCallError, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
@@ -2781,6 +2781,7 @@ export class BrowserXmppClient {
     this.autoJoinRoomJids = [...autoJoinRooms.values()];
   }
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> { return this.mucAdmin.listRoomMembers(channelId, options); }
+  async listRoomBots(channelId: string, options?: ListRoomMembersOptions): Promise<RoomBotSummary[]> { return this.mucAdmin.listRoomBots(channelId, options); }
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> { return this.mucAdmin.setRoomAffiliation(channelId, jid, affiliation); }
   async isCommunityOwner(): Promise<boolean> { return this.mucAdmin.isCommunityOwner(); }
   async adminUsersList(opts: { prefix?: string | null; pageSize?: number | null; afterCursor?: string | null } = {}): Promise<AdminUsersPage> { return this.mucAdmin.adminUsersList(opts); }

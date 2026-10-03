@@ -1,7 +1,8 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import { useWaddleDirectory } from "../src/waddles/directory";
-import type { MemberSummary } from "../src/lib/chat-types";
+import type { MemberSummary, RoomBotSummary } from "../src/lib/chat-types";
+import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 
 const ALICE: MemberSummary = { jid: "alice@example.com", username: "alice", affiliation: "member", joined_at: "" };
@@ -17,10 +18,12 @@ const BASE_TOPOLOGY = {
 
 function makeClient(overrides: {
   listRoomMembers?: (id: string, opts?: { roomJid?: string }) => Promise<MemberSummary[]>;
+  listRoomBots?: (id: string, opts?: { roomJid?: string }) => Promise<RoomBotSummary[]>;
   discoverTopology?: () => Promise<unknown>;
 } = {}): BrowserXmppClient {
   return {
     listRoomMembers: overrides.listRoomMembers ?? mock(async () => []),
+    listRoomBots: overrides.listRoomBots ?? mock(async () => []),
     discoverTopology: overrides.discoverTopology ?? mock(async () => BASE_TOPOLOGY),
     agent: null,
   } as unknown as BrowserXmppClient;
@@ -264,5 +267,69 @@ describe("useWaddleDirectory.reloadChannelMembers", () => {
     expect(w.members.value).toEqual([]);
     expect(w.memberLoadState.value).toBe("idle");
     expect(actionError.value).toBe("");
+  });
+});
+
+describe("useWaddleDirectory room bots", () => {
+  afterEach(() => occupantJidDirectory.clear());
+  const HELPER: RoomBotSummary = { jid: "helper@extensions.example.com", name: "Helper" };
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  test("loads the focused room's declared bots with its members and tells the occupant directory", async () => {
+    const listRoomBots = mock(async (_id: string, _opts?: { roomJid?: string }) => [HELPER]);
+    const { w } = makeWaddles(makeClient({ listRoomBots }));
+
+    await w.loadStructure("random");
+    await flush();
+
+    expect(listRoomBots).toHaveBeenCalledWith("random", { roomJid: "random@conference.example.com" });
+    expect(w.roomBots.value).toEqual([HELPER]);
+    expect(occupantJidDirectory.isBot(HELPER.jid)).toBe(true);
+
+    // Bots are per room: another room has none until it is loaded.
+    w.activeChannelId.value = "general";
+    expect(w.roomBots.value).toEqual([]);
+  });
+
+  test("a failed bot load keeps the last list and never fails the member load", async () => {
+    const warn = mock(() => {});
+    const previousWarn = console.warn;
+    console.warn = warn;
+    const listRoomBots = mock(async (_id: string): Promise<RoomBotSummary[]> => [HELPER]);
+    const { w } = makeWaddles(makeClient({ listRoomBots, listRoomMembers: async () => [ALICE] }));
+
+    try {
+      await w.loadStructure();
+      await flush();
+      listRoomBots.mockImplementation(async () => { throw new Error("service-unavailable"); });
+
+      await w.reloadChannelMembers("general");
+      await flush();
+
+      expect(w.roomBots.value).toEqual([HELPER]);
+      expect(w.members.value).toEqual([ALICE]);
+      expect(w.memberLoadState.value).toBe("ready");
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      console.warn = previousWarn;
+    }
+  });
+
+  test("a bot-hatted occupant missing from the focused room's list asks the server again; a listed or foreign one does not", async () => {
+    const listRoomBots = mock(async (_id: string, _opts?: { roomJid?: string }) => [HELPER]);
+    const { w } = makeWaddles(makeClient({ listRoomBots }));
+    await w.loadStructure();
+    await flush();
+    listRoomBots.mockClear();
+
+    w.reloadRoomBotsIfUnlisted("general@conference.example.com", HELPER.jid.toUpperCase());
+    w.reloadRoomBotsIfUnlisted("random@conference.example.com", "new@extensions.example.com");
+    await flush();
+    expect(listRoomBots).not.toHaveBeenCalled();
+
+    w.reloadRoomBotsIfUnlisted("general@conference.example.com", "new@extensions.example.com");
+    await flush();
+    expect(listRoomBots).toHaveBeenCalledTimes(1);
+    expect(listRoomBots).toHaveBeenCalledWith("general", { roomJid: "general@conference.example.com" });
   });
 });

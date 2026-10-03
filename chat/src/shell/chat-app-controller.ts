@@ -499,6 +499,7 @@ export function useChatAppController() {
     appUpdate,
     version,
     displayedMembers: memberDirectory.displayedMembers,
+    roomBots: waddles.roomBots,
     inferredMemberJids: memberDirectory.inferredMemberJids,
     authorHatsByNick: memberDirectory.authorHatsByNick,
     authorAuthorityByNick: memberDirectory.authorAuthorityByNick,

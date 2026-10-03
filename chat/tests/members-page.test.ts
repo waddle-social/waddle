@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { computed, ref } from "vue";
 import { renderVueComponent } from "./helpers/render-vue-sfc";
-import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
+import type { MemberSummary, RoomBotSummary } from "../src/lib/chat-types";
 import type { DmConversation, RosterContact } from "../src/lib/xmpp/types";
 
 function contact(jid: string, presenceShow?: RosterContact["presenceShow"], name?: string): RosterContact {
@@ -12,32 +12,38 @@ function conversation(peerJid: string, presenceShow?: DmConversation["presenceSh
   return { peerJid, peerUsername: peerJid.split("@")[0] ?? peerJid, unreadCount: 0, presenceShow };
 }
 
+interface FakeRoom {
+  members: MemberSummary[];
+  roomBots: RoomBotSummary[];
+}
+
 /**
  * The Members page mounts only after `openMembers()` / the `/members`
- * route cleared the focused channel, so the directory is always the
- * roster merged with DM peers. Only the controller fields the page reads
- * are faked here.
+ * route cleared the focused channel, so the directory is the roster
+ * merged with DM peers; a `room` fakes the focused-room variant. Only the
+ * controller fields the page reads are faked here.
  */
-function fakeController(contacts: RosterContact[], conversations: DmConversation[]) {
+function fakeController(contacts: RosterContact[], conversations: DmConversation[], room?: FakeRoom) {
   return {
     connectionStore: { session: { jid: "me@example.com", username: "me" } },
     xmppClient: computed(() => null),
-    messaging: { roomPresence: ref({}) },
+    messaging: { roomPresence: ref(room ? { bob: "online" } : {}) },
     rosterContacts: { contacts: ref(contacts) },
     dmConversations: { conversations: ref(conversations) },
-    displayedMembers: ref([]),
+    displayedMembers: ref(room?.members ?? []),
+    roomBots: ref(room?.roomBots ?? []),
     displayedMemberState: ref("ready"),
-    authorJidByNick: ref({}),
-    activeChannelRoomJid: ref(null),
-    activeRoomChannel: ref(null),
+    authorJidByNick: ref(room ? { bob: "bob@example.com" } : {}),
+    activeChannelRoomJid: ref(room ? "general@conference.example.com" : null),
+    activeRoomChannel: ref(room ? { name: "general" } : null),
     handleOpenDm: () => undefined,
   };
 }
 
-async function renderMembersPage(contacts: RosterContact[], conversations: DmConversation[]) {
+async function renderMembersPage(contacts: RosterContact[], conversations: DmConversation[], room?: FakeRoom) {
   return renderVueComponent(
     "../src/components/community/pages/MembersPage.vue",
-    { controller: fakeController(contacts, conversations) },
+    { controller: fakeController(contacts, conversations, room) },
     import.meta.url,
   );
 }
@@ -67,17 +73,13 @@ describe("MembersPage", () => {
 });
 
 describe("MembersPage bots", () => {
-  afterEach(() => occupantJidDirectory.clear());
   const BOT = "helper@extensions.example.com";
+  const bob: MemberSummary = { jid: "bob@example.com", username: "Bob B", affiliation: "member", joined_at: "" };
 
-  test("a bot is listed under Bots, not counted as a person, and shows no status", async () => {
-    occupantJidDirectory.record("general@conference.example.com", "helper", `${BOT}/bot`, true);
-    const html = await renderMembersPage(
-      [contact(BOT, "available", "Helper"), contact("bob@example.com", "available", "Bob B")],
-      [conversation(BOT, "available")],
-    );
+  test("a declared bot is listed under Bots, not counted as a member, and shows no status", async () => {
+    const html = await renderMembersPage([], [], { members: [bob], roomBots: [{ jid: BOT, name: "Helper" }] });
 
-    expect(html).toContain("1 person</h1>");
+    expect(html).toContain("1 member</h1>");
     expect(html).toContain("1 here now.");
     expect(html).toContain("Bots · 1");
     expect(html).toContain('aria-label="Helper, bot"');
@@ -86,11 +88,10 @@ describe("MembersPage bots", () => {
     expect(html.match(/data-show=/g)).toHaveLength(1);
   });
 
-  test("a bot is never here now, but is still listed when nobody else is", async () => {
-    occupantJidDirectory.record("general@conference.example.com", "helper", `${BOT}/bot`, true);
-    const html = await renderMembersPage([contact(BOT, "available", "Helper")], []);
+  test("a declared bot is never here now, but is still listed when nobody else is", async () => {
+    const html = await renderMembersPage([], [], { members: [], roomBots: [{ jid: BOT, name: "Helper" }] });
 
-    expect(html).toContain("0 people</h1>");
+    expect(html).toContain("0 members</h1>");
     expect(html).toContain("0 here now.");
     expect(html).toContain("Bots · 1");
   });

@@ -29,6 +29,7 @@ const {
   rosterContacts,
   dmConversations,
   displayedMembers,
+  roomBots,
   displayedMemberState,
   authorJidByNick,
   activeChannelRoomJid,
@@ -67,6 +68,7 @@ const cards = computed<MemberCardModel[]>(() =>
   buildMemberCards({
     roomActive: roomActive.value,
     members: displayedMembers.value,
+    roomBots: roomBots.value,
     roomPresence: messaging.roomPresence.value,
     authorJidByNick: authorJidByNick.value,
     contacts: rosterContacts.contacts.value,

@@ -1,5 +1,5 @@
 import { ref, computed, watch, type Ref } from "vue";
-import type { SpaceSummary, ChannelSummary, GroupDmSummary, MemberSummary } from "@/lib/chat-types";
+import type { SpaceSummary, ChannelSummary, GroupDmSummary, MemberSummary, RoomBotSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
@@ -14,6 +14,7 @@ import {
 } from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
+import { occupantJidDirectory } from "@/lib/avatars/author-jid";
 
 interface LoadSpaceOptions {
   loadStructure?: boolean;
@@ -38,6 +39,8 @@ export function useWaddleDirectory(
   const groupDms = ref<GroupDmSummary[]>([]);
   const members = ref<MemberSummary[]>([]);
   const memberLoadState = ref<MemberLoadState>("idle");
+  /** Bots the server declares per room: they hold no affiliation, so `members` never has them. */
+  const botsByChannelId = ref<Record<string, RoomBotSummary[]>>({});
   const serverRole = ref<SpaceSummary["role"]>(null);
   const mucServiceJid = ref<string | null>(null);
   const spacesServiceJid = ref<string | null>(null);
@@ -52,6 +55,7 @@ export function useWaddleDirectory(
   let spaceRequestId = 0;
   let structureRequestId = 0;
   let memberRequestId = 0;
+  let botRequestId = 0;
   let selectionRequestId = 0;
   const memberSnapshotsByChannelId = new Map<string, MemberSummary[]>();
 
@@ -87,6 +91,8 @@ export function useWaddleDirectory(
   const isEmptyDeployment = computed(() =>
     waddles.value.length === 0 && channels.value.length === 0 && !isLoadingStructure.value,
   );
+
+  const roomBots = computed(() => botsByChannelId.value[activeChannelId.value ?? ""] ?? []);
 
   const currentRole = computed(() => {
     if (!session.value || !currentSpace.value) return null;
@@ -180,6 +186,28 @@ export function useWaddleDirectory(
     memberLoadState.value = "unavailable";
   }
 
+  async function reloadRoomBots(channelId: string, roomJid?: string): Promise<void> {
+    if (!xmppClient.value) return;
+    const requestId = ++botRequestId;
+    try {
+      const bots = await xmppClient.value.listRoomBots(channelId, { roomJid });
+      if (requestId !== botRequestId) return;
+      occupantJidDirectory.recordBots(bots.map((bot) => bot.jid));
+      botsByChannelId.value = { ...botsByChannelId.value, [channelId]: bots };
+    } catch (e) {
+      console.warn("Unable to load room bots", e);
+    }
+  }
+
+  /** A bot-hatted occupant of the focused room that the room's declared bot list lacks: ask the server again. */
+  function reloadRoomBotsIfUnlisted(roomJid: string, botJid: string) {
+    const channel = currentChannel.value;
+    const bare = (jid: string) => barePeerJid(jid).toLowerCase();
+    if (!channel?.jid || bare(channel.jid) !== bare(roomJid)) return;
+    if (roomBots.value.some((bot) => bare(bot.jid) === bare(botJid))) return;
+    void reloadRoomBots(channel.id, channel.jid);
+  }
+
   function prepareCreateChannelForContext(spaceId: string | null = currentSpace.value?.id ?? null) {
     createChannelForm.value = defaultCreateFormForContext(spaceId);
   }
@@ -264,6 +292,7 @@ export function useWaddleDirectory(
       if (nextChannelId && xmppClient.value) {
         const memberReqId = ++memberRequestId;
         beginMemberLoad(nextChannelId);
+        void reloadRoomBots(nextChannelId, nextChannel?.jid);
         try {
           const freshMembers = await xmppClient.value.listRoomMembers(nextChannelId, { roomJid: nextChannel?.jid });
           if (requestId === structureRequestId && memberReqId === memberRequestId) {
@@ -313,6 +342,7 @@ export function useWaddleDirectory(
     const channel = channels.value.find((c) => c.id === channelId);
     const requestId = ++memberRequestId;
     beginMemberLoad(channelId);
+    void reloadRoomBots(channelId, channel?.jid);
 
     try {
       const freshMembers = await xmppClient.value.listRoomMembers(channelId, { roomJid: channel?.jid });
@@ -571,6 +601,8 @@ export function useWaddleDirectory(
     members.value = [];
     memberLoadState.value = "idle";
     memberSnapshotsByChannelId.clear();
+    botRequestId++;
+    botsByChannelId.value = {};
     serverRole.value = null;
     mucServiceJid.value = null;
     spacesServiceJid.value = null;
@@ -584,6 +616,7 @@ export function useWaddleDirectory(
     channels,
     groupDms,
     members,
+    roomBots,
     memberLoadState,
     serverRole,
     mucServiceJid,
@@ -608,6 +641,7 @@ export function useWaddleDirectory(
     loadSpace,
     loadStructure,
     reloadChannelMembers,
+    reloadRoomBotsIfUnlisted,
     prepareCreateChannelForContext,
     updateWaddle,
     deleteWaddle,
