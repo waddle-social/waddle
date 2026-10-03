@@ -5,7 +5,9 @@
 //! send path.
 use super::{
     direct_ingress,
-    groupchat_ingress::{groupchat_message, GroupchatFixture},
+    groupchat_ingress::{
+        close_node, groupchat_message, managed_room, managed_send, GroupchatFixture,
+    },
     groupchat_receipts,
 };
 use crate::{
@@ -1095,6 +1097,72 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
         ]
     );
     fixture.close(f).await;
+}
+
+/// A room another node holds the claim for, not loaded here, refuses the
+/// bot's send as owned remotely when loading it meets that claim: nothing
+/// is loaded, joined or committed on this node.
+async fn claim_held_elsewhere_is_owned_remotely(f: IngressFixture) {
+    use crate::server::routes::interpret::effects::PlanFailure;
+    use waddle_xmpp::{
+        muc::room_registry_actor::{GetRoom, WireClusteringClaims},
+        ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore},
+    };
+    let adapter = direct_ingress::adapter(&f).await;
+    let (room, invocation) = managed_room(&f, &adapter, "text").await;
+    let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    claims
+        .acquire(
+            &Entity::new(EntityType::RoomActor, room.to_string()),
+            &owner_node(),
+        )
+        .await
+        .expect("the owner claims the room");
+    adapter
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(WireClusteringClaims {
+            claim_store: claims,
+            node_identity: SharedNodeIdentity::new(origin_node()),
+            durable_store: None,
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire room claims");
+    let result = managed_send(&adapter, &invocation, &room, "claimed-elsewhere").await;
+    assert!(
+        matches!(
+            result,
+            Err(ExtensionHostAdapterError::Plan(
+                PlanFailure::RoomOwnedRemotely
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(adapter
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom { room_jid: room })
+        .await
+        .expect("room lookup")
+        .is_none());
+    assert_eq!(f.count("ingress_messages").await, 0);
+    close_node(adapter, f).await;
+}
+
+#[tokio::test]
+async fn extension_bot_claim_held_elsewhere_is_owned_remotely_sqlite() {
+    claim_held_elsewhere_is_owned_remotely(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_bot_claim_held_elsewhere_is_owned_remotely_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_bot_claim_elsewhere").await {
+        claim_held_elsewhere_is_owned_remotely(f).await;
+    }
 }
 
 #[tokio::test]
