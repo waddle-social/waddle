@@ -96,8 +96,9 @@ internal class ChannelIo(
             sessionManager.joinRoom(roomJid, nick)
         }
         sessionManager.refreshRoomPins(roomJid)
-        sessionManager.refreshRoomBots(roomJid)
     }
+
+    override suspend fun refreshRoomBots() = sessionManager.refreshRoomBots(roomJid)
 
     override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         sessionManager.fetchRoomHistory(roomJid, maxMessages, beforeId)

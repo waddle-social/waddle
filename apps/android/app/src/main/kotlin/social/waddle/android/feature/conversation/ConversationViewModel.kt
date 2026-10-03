@@ -213,6 +213,7 @@ open class ConversationViewModel(
         }
         viewModelScope.launch {
             io.ensureJoined()
+            refreshRoomBots()
             loadOlder()
         }
         viewModelScope.launch { events.collect(::onEvent) }
@@ -230,10 +231,16 @@ open class ConversationViewModel(
                 // live without waiting for a reconnect (no-op when
                 // already joined).
                 io.ensureJoined()
+                refreshRoomBots()
                 refreshHistory()
             }
             else -> Unit
         }
+    }
+
+    /** Fire and forget: the bot list may take up to the IQ timeout and must not hold history. */
+    private fun refreshRoomBots() {
+        viewModelScope.launch { io.refreshRoomBots() }
     }
 
     /** Fetch the next older MAM page; single-flight and budgeted. */
