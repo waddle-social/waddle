@@ -10665,3 +10665,127 @@ async fn muji_and_in_call_updates_from_a_superseded_generation_are_refused() {
         .expect("ask");
     assert!(applied.is_some(), "the current generation's update applies");
 }
+
+fn host_owned_join(bot: &FullJid, admission_revision: u64) -> JoinWithAffiliation {
+    JoinWithAffiliation {
+        sender_jid: bot.clone(),
+        nick: "helper".to_string(),
+        affiliation_grant: JoinAffiliationGrant::HostOwned,
+        local_domain: "example.com".to_string(),
+        admission_revision,
+        session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+    }
+}
+
+/// An extension bot's host-owned occupancy lasts one send: it enters a
+/// members-only, moderated room unaffiliated, speaks as a Participant,
+/// writes no affiliation, never becomes a durable recipient, and the room is
+/// dormant again once it leaves.
+#[tokio::test]
+async fn host_owned_join_is_transient_and_unaffiliated() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        moderated: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let bot: FullJid = "helper@extensions.example.com/bot"
+        .parse()
+        .expect("bot jid");
+    let revision = current_admission_revision(&actor).await;
+
+    let outcome = actor
+        .ask(host_owned_join(&bot, revision))
+        .await
+        .expect("a host-owned join enters a members-only room");
+    assert_eq!(outcome.new_occupant_affiliation, Affiliation::None);
+    assert_eq!(outcome.new_occupant_role, Role::Participant);
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.occupants["helper"].role, Role::Participant);
+    assert!(
+        snapshot.room.get_all_affiliations().is_empty(),
+        "no affiliation entry is written"
+    );
+    assert_eq!(snapshot.admission_revision, revision);
+    let chain = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: bot.clone(),
+        })
+        .await
+        .expect("chain snapshot");
+    assert!(chain.durable_recipient_bare_jids.is_empty());
+    assert!(!actor.ask(IsDormant).await.expect("dormancy").dormant);
+
+    let attempt = actor
+        .ask(LeaveByRealJid {
+            sender_jid: bot,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: LeaveOrigin::Fresh,
+        })
+        .await
+        .map(departed)
+        .expect("bot leaves")
+        .acknowledge;
+    actor
+        .ask(AckDepartureReceipt { attempt })
+        .await
+        .expect("acknowledge departure");
+    let status = actor.ask(IsDormant).await.expect("dormancy");
+    assert!(status.dormant, "the bot left nothing that keeps the room");
+}
+
+/// A ban still binds a host-owned join, and a group DM never admits one.
+#[tokio::test]
+async fn host_owned_join_refuses_outcast_and_group_dm() {
+    let bot: FullJid = "helper@extensions.example.com/bot"
+        .parse()
+        .expect("bot jid");
+    let actor = spawn_room_actor().await;
+    actor
+        .ask(ChangeAffiliation {
+            jid: bot.to_bare(),
+            affiliation: Affiliation::Outcast,
+        })
+        .await
+        .expect("ban the bot");
+    let outcome = actor
+        .ask(host_owned_join(
+            &bot,
+            current_admission_revision(&actor).await,
+        ))
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(SendError::HandlerError(RoomActorError::JoinForbidden {
+                reason: JoinDenialReason::Banned
+            }))
+        ),
+        "{outcome:?}"
+    );
+
+    let group_dm = spawn_room_actor_with_config(RoomConfig {
+        group_dm: true,
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let outcome = group_dm
+        .ask(host_owned_join(
+            &bot,
+            current_admission_revision(&group_dm).await,
+        ))
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(SendError::HandlerError(RoomActorError::JoinForbidden {
+                reason: JoinDenialReason::MembersOnly
+            }))
+        ),
+        "{outcome:?}"
+    );
+}

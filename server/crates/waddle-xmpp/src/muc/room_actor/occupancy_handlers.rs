@@ -16,7 +16,7 @@ use crate::muc::{
     },
     RoomConfig,
 };
-use crate::types::Affiliation;
+use crate::types::{Affiliation, Role};
 
 /// The affiliation a join request carries into the room, typed by
 /// where it came from (#1110/#1134).
@@ -36,6 +36,13 @@ pub enum JoinAffiliationGrant {
     /// the room creator and receives Owner. Stored as an explicit
     /// grant — it is not reconstructible from any resolver.
     CreatorOwner,
+    /// A host-owned entity (an extension bot) holding a transient
+    /// occupancy for one server-authored send. Nothing is written to
+    /// the affiliation list and the admission revision does not move,
+    /// so the occupant is never a durable recipient and never blocks
+    /// dormancy. It enters a members-only room unless outcast (never a
+    /// group DM) and speaks as at least a Participant.
+    HostOwned,
 }
 
 pub struct JoinWithAffiliation {
@@ -138,9 +145,17 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     self.invalidate_invite_grant(&msg.sender_jid.to_bare());
                 }
             }
+            JoinAffiliationGrant::HostOwned => {}
         }
 
-        if !self.room.can_user_join(&msg.sender_jid.to_bare()) {
+        let admitted = match msg.affiliation_grant {
+            JoinAffiliationGrant::HostOwned => {
+                !self.room.config.group_dm
+                    && self.room.get_affiliation(&joining_bare_jid) != Affiliation::Outcast
+            }
+            _ => self.room.can_user_join(&joining_bare_jid),
+        };
+        if !admitted {
             // XEP-0045 §7.2.8: a ban (outcast) is <forbidden/> even in a
             // members-only room — never <registration-required/>, which
             // would invite the banned user to apply for membership
@@ -257,21 +272,26 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             let joined_at =
                 OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
             let joined_jid = msg.sender_jid.clone();
-            let new_occupant = actor
-                .room
-                .add_occupant_with_affiliation(
-                    msg.sender_jid,
-                    msg.nick.clone(),
-                    Some(msg.local_domain.as_str()),
-                    joined_at,
-                    msg.session,
-                )
-                .clone();
+            let new_occupant = actor.room.add_occupant_with_affiliation(
+                msg.sender_jid,
+                msg.nick.clone(),
+                Some(msg.local_domain.as_str()),
+                joined_at,
+                msg.session,
+            );
+            // A host-owned sender is unaffiliated by design; in a moderated
+            // room that alone would make it a voiceless Visitor.
+            let new_occupant_role = match (msg.affiliation_grant, new_occupant.role) {
+                (JoinAffiliationGrant::HostOwned, Role::Visitor) => Role::Participant,
+                (_, role) => role,
+            };
+            let new_occupant_affiliation = new_occupant.affiliation;
+            if let Some(occupant) = actor.room.occupants.get_mut(&msg.nick) {
+                occupant.role = new_occupant_role;
+            }
             actor.room.set_session_order(&joined_jid, join_order);
             actor.room.set_session_generation(&joined_jid, msg.session);
             actor.note_session_joined(&joined_jid);
-            let new_occupant_affiliation = new_occupant.affiliation;
-            let new_occupant_role = new_occupant.role;
             let occupant_count = actor.room.occupant_count();
             crate::metrics::record_muc_presence("join");
             crate::metrics::adjust_muc_occupant_total(
