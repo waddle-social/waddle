@@ -1309,39 +1309,64 @@ async fn handle_iq_disco_items_lists_room_bots() {
     }
 }
 
-fn pubsub_items_iq_frame(id: &str, to: &str, node: &str) -> String {
-    let items = Element::builder("items", waddle_xmpp::pubsub::NS_PUBSUB)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-        .build();
+/// A PEP items request for `node` on `to`, for one particular item if
+/// `item_id` is given (XEP-0060 §6.5.8).
+fn pubsub_items_iq_frame(id: &str, to: &str, node: &str, item_id: Option<&str>) -> String {
+    let mut items = Element::builder("items", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+    if let Some(item_id) = item_id {
+        items = items.append(
+            Element::builder("item", waddle_xmpp::pubsub::NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                .build(),
+        );
+    }
     stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
         from: None,
         to: Some(to.parse().expect("valid iq destination")),
         id: id.to_string(),
         payload: Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
-            .append(items)
+            .append(items.build())
             .build(),
     })))
 }
 
-/// The single PEP item the server returns for `node` on `to`.
-async fn pep_item_for_test(
+/// The PEP `<item/>`s the server returns for `node` on `to`.
+async fn pep_items_for_test(
     state: &WebSocketState,
     phase: &ConnectionPhase,
     to: &str,
     node: &str,
-) -> Element {
-    let reply =
-        disco_reply_for_test(state, phase, &pubsub_items_iq_frame("pep-bot", to, node)).await;
+    item_id: Option<&str>,
+) -> Vec<Element> {
+    let reply = disco_reply_for_test(
+        state,
+        phase,
+        &pubsub_items_iq_frame("pep-bot", to, node, item_id),
+    )
+    .await;
     assert_eq!(reply.attr("type"), Some("result"), "{node}: {reply:?}");
     let items = reply
         .get_child("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
         .and_then(|pubsub| pubsub.get_child("items", waddle_xmpp::pubsub::NS_PUBSUB))
         .expect("items");
     assert_eq!(items.attr("node"), Some(node));
-    let all: Vec<_> = items.children().collect();
-    assert_eq!(all.len(), 1, "{node}: exactly one item: {reply:?}");
-    assert_eq!(all[0].attr("id"), Some("current"));
-    all[0].children().next().expect("item payload").clone()
+    items.children().cloned().collect()
+}
+
+/// The single PEP item the server returns for `node` on `to`: its payload,
+/// under `item_id`.
+async fn pep_item_for_test(
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    to: &str,
+    node: &str,
+    item_id: &str,
+) -> Element {
+    let items = pep_items_for_test(state, phase, to, node, None).await;
+    assert_eq!(items.len(), 1, "{node}: exactly one item: {items:?}");
+    assert_eq!(items[0].attr("id"), Some(item_id), "{node}: {items:?}");
+    items[0].children().next().expect("item payload").clone()
 }
 
 /// XEP-0054, XEP-0292 and XEP-0084 for an extension bot, which has no account:
@@ -1383,6 +1408,7 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
     };
     assert_eq!(text("FN"), Some(installed.name.clone()));
     assert_eq!(text("DESC"), installed.description.clone());
+    assert_eq!(text("PHOTO"), None, "the manifest declares no avatar");
     let reply = disco_reply_for_test(
         &state,
         &phase,
@@ -1396,6 +1422,7 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
         &phase,
         &bot,
         waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4,
+        "current",
     )
     .await;
     let parsed = waddle_xmpp::xep::xep0292::parse_vcard4(&vcard4);
@@ -1405,12 +1432,14 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
         parsed.kind.as_deref(),
         Some(waddle_xmpp::xep::xep0292::KIND_APPLICATION)
     );
+    assert_eq!(parsed.photo_uri, None);
 
     let metadata = pep_item_for_test(
         &state,
         &phase,
         &bot,
         waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA,
+        "current",
     )
     .await;
     assert!(metadata.is("metadata", waddle_xmpp::xep::xep0084::NS_AVATAR_METADATA));
@@ -1427,11 +1456,235 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
         let reply = disco_reply_for_test(
             &state,
             &phase,
-            &pubsub_items_iq_frame("pep-bot", &bot, node),
+            &pubsub_items_iq_frame("pep-bot", &bot, node, None),
         )
         .await;
         assert_item_not_found_for_test(&reply, node);
     }
+}
+
+/// A vcard-temp get to `to`, as the shared client sends it.
+fn vcard_get_frame(to: &str) -> String {
+    stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination")),
+        id: "vcard-bot".to_string(),
+        payload: Element::builder("vCard", waddle_xmpp::xep::xep0054::NS_VCARD).build(),
+    })))
+}
+
+/// XEP-0084, XEP-0054 and XEP-0292 for an extension bot whose manifest
+/// declares an avatar. The server fetches and verifies the artifact, then
+/// answers in-band, never with a URL: the metadata names the PNG by its
+/// SHA-1 (§4.1), the data node holds it under that id, vcard-temp carries
+/// PHOTO TYPE and BINVAL, vCard4 the PHOTO as a `data:` URI. Before the
+/// fetch completes, the answers are those of a bot without an avatar.
+#[tokio::test]
+async fn handle_iq_serves_extension_bot_avatars_in_band() {
+    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
+
+    let artifacts = wiremock::MockServer::start().await;
+    let png = encode_image(5, 3, image::ImageFormat::Png);
+    let reference = serve_artifact(&artifacts, &png, png.clone(), "image/png").await;
+    let state = create_test_websocket_state_with_fixture_bot_avatar(reference.clone()).await;
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let bot = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    );
+    let id = xep0084::compute_avatar_hash(&png);
+
+    let metadata = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        xep0084::NODE_AVATAR_METADATA,
+        "current",
+    )
+    .await;
+    assert_eq!(metadata.children().count(), 0, "not fetched yet");
+    state
+        .deps
+        .protocol
+        .bot_avatars
+        .fetch(&reference)
+        .await
+        .expect("the manifest avatar verifies");
+
+    let metadata =
+        pep_item_for_test(&state, &phase, &bot, xep0084::NODE_AVATAR_METADATA, &id).await;
+    let infos: Vec<_> = metadata.children().collect();
+    assert_eq!(infos.len(), 1, "one in-band format: {metadata:?}");
+    assert!(infos[0].is("info", xep0084::NS_AVATAR_METADATA));
+    let png_len = png.len().to_string();
+    for (attribute, value) in [
+        ("id", Some(id.as_str())),
+        ("type", Some("image/png")),
+        ("bytes", Some(png_len.as_str())),
+        ("width", Some("5")),
+        ("height", Some("3")),
+        ("url", None),
+    ] {
+        assert_eq!(infos[0].attr(attribute), value, "{attribute}: {metadata:?}");
+    }
+
+    let data = pep_item_for_test(&state, &phase, &bot, xep0084::NODE_AVATAR_DATA, &id).await;
+    assert!(data.is("data", xep0084::NS_AVATAR_DATA));
+    assert_eq!(
+        data.attrs().into_iter().count(),
+        0,
+        "§4.1: <data/> has no attributes"
+    );
+    assert_eq!(BASE64.decode(data.text()).expect("base64"), png);
+    let requested =
+        pep_items_for_test(&state, &phase, &bot, xep0084::NODE_AVATAR_DATA, Some(&id)).await;
+    assert_eq!(requested.len(), 1);
+    assert_eq!(requested[0].attr("id"), Some(id.as_str()));
+    let stale = "0".repeat(40);
+    assert!(
+        pep_items_for_test(
+            &state,
+            &phase,
+            &bot,
+            xep0084::NODE_AVATAR_DATA,
+            Some(&stale)
+        )
+        .await
+        .is_empty(),
+        "XEP-0060 §6.5.8: only the requested item"
+    );
+
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get_frame(&bot)).await;
+    let vcard = xep0054::parse_vcard_element(
+        reply
+            .get_child("vCard", xep0054::NS_VCARD)
+            .expect("vCard result"),
+    )
+    .expect("vCard parses");
+    assert!(matches!(
+        vcard.photo,
+        Some(xep0054::VCardPhoto::Binary { ref mime_type, ref data })
+            if mime_type == "image/png" && BASE64.decode(data).ok() == Some(png.clone())
+    ));
+
+    let vcard4 = pep_item_for_test(&state, &phase, &bot, xep0292::PEP_NODE_VCARD4, "current").await;
+    assert_eq!(
+        xep0292::parse_vcard4(&vcard4).photo_uri,
+        Some(format!("data:image/png;base64,{}", BASE64.encode(&png)))
+    );
+}
+
+/// The shared client resolves a bot's avatar bytes from the server's
+/// answers: XEP-0084 metadata then data, else the vcard-temp PHOTO.
+#[tokio::test]
+async fn shared_client_resolves_extension_bot_avatars() {
+    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use waddle_xmpp_client::avatar::{
+        parse_vcard_photo_response, request_avatar_with_iq, AvatarId, AvatarRequestFailure,
+    };
+
+    let artifacts = wiremock::MockServer::start().await;
+    let png = encode_image(4, 4, image::ImageFormat::Png);
+    let reference = serve_artifact(&artifacts, &png, png.clone(), "image/png").await;
+    let state = create_test_websocket_state_with_fixture_bot_avatar(reference.clone()).await;
+    state.deps.protocol.bot_avatars.fetch(&reference).await;
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let bot: BareJid = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    )
+    .parse()
+    .expect("bot jid");
+
+    let avatar = request_avatar_with_iq(&bot, |iq| {
+        let (state, phase) = (&state, &phase);
+        async move {
+            let reply = disco_reply_for_test(state, phase, &String::from(&iq)).await;
+            if reply.attr("type") == Some("result") {
+                Ok(reply)
+            } else {
+                Err(AvatarRequestFailure::<std::convert::Infallible>::StanzaError)
+            }
+        }
+    })
+    .await
+    .expect("no transport failure")
+    .expect("the bot has an avatar");
+    assert_eq!(avatar.data, png);
+    assert_eq!(avatar.mime_type, "image/png");
+    assert!(
+        matches!(avatar.id, AvatarId::Item(ref id) if id.as_str() == waddle_xmpp::xep::xep0084::compute_avatar_hash(&png))
+    );
+
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get_frame(&bot.to_string())).await;
+    let photo = parse_vcard_photo_response(&reply).expect("vcard-temp PHOTO");
+    assert_eq!(photo.data, Some(png));
+    assert_eq!(photo.mime_type.as_deref(), Some("image/png"));
+}
+
+/// An artifact whose bytes do not match the manifest digest is never
+/// served: the bot answers as one without an avatar.
+#[tokio::test]
+async fn handle_iq_serves_no_extension_bot_avatar_on_digest_mismatch() {
+    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
+
+    let artifacts = wiremock::MockServer::start().await;
+    let png = encode_image(2, 2, image::ImageFormat::Png);
+    let reference = serve_artifact(&artifacts, b"the pinned avatar", png, "image/png").await;
+    let state = create_test_websocket_state_with_fixture_bot_avatar(reference.clone()).await;
+    assert!(
+        state
+            .deps
+            .protocol
+            .bot_avatars
+            .fetch(&reference)
+            .await
+            .is_none(),
+        "the digest does not verify"
+    );
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let bot = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    );
+
+    let metadata = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        xep0084::NODE_AVATAR_METADATA,
+        "current",
+    )
+    .await;
+    assert_eq!(
+        metadata.children().count(),
+        0,
+        "avatar publishing is disabled"
+    );
+    let reply = disco_reply_for_test(
+        &state,
+        &phase,
+        &pubsub_items_iq_frame("pep-bot", &bot, xep0084::NODE_AVATAR_DATA, None),
+    )
+    .await;
+    assert!(
+        reply
+            .get_child("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", waddle_xmpp::pubsub::NS_PUBSUB))
+            .is_none_or(|items| items.children().next().is_none()),
+        "no avatar data: {reply:?}"
+    );
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get_frame(&bot)).await;
+    assert!(reply
+        .get_child("vCard", xep0054::NS_VCARD)
+        .expect("vCard result")
+        .get_child("PHOTO", xep0054::NS_VCARD)
+        .is_none());
+    let vcard4 = pep_item_for_test(&state, &phase, &bot, xep0292::PEP_NODE_VCARD4, "current").await;
+    assert_eq!(xep0292::parse_vcard4(&vcard4).photo_uri, None);
 }
 
 #[tokio::test]

@@ -135,6 +135,8 @@ tokio = { workspace = true, features = ["test-util"] }
 waddle-ws-test-support = { path = "../waddle-ws-test-support" }
 tokio-test = "0.4"
 wiremock = "0.6"
+# The shared client's avatar resolution, run against server answers.
+waddle-xmpp-client = { path = "../waddle-xmpp-client", default-features = false }
 # The exact codec kameo 0.20 uses for remote messages
 # (`rmp_serde::to_vec_named` / `from_slice`). Tests encode and decode relay
 # messages through it directly to pin mixed-version rolling-deploy behavior
