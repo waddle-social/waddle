@@ -58,6 +58,9 @@
 //!   header itself is attacker-controlled); then the bytes are
 //!   transcoded to PNG so callers always see a single canonical
 //!   format on the wire.
+//! - **Digest pin:** [`fetch_artifact_avatar_bytes`] additionally
+//!   requires the body, as served and before any transcode, to hash to
+//!   the content-addressed artifact's SHA-256 ([`FetchError::DigestMismatch`]).
 //! - **Timeouts:** 5s connect, 10s total.
 //! - **Retries:** one retry on transient failures (5xx, connect
 //!   timeout, network error). No backoff.
@@ -77,6 +80,7 @@ use reqwest::Client;
 use thiserror::Error;
 use tracing::{debug, warn};
 use url::{Host, Url};
+use waddle_extensions::Sha256Digest;
 
 /// Hard cap on both the source response body (OOM defense) and
 /// the post-transcode PNG (wire-frame + per-stanza fan-out budget).
@@ -198,6 +202,8 @@ pub enum FetchError {
     MimeRejected(Option<String>),
     #[error("response body did not start with the magic-byte signature for the declared MIME")]
     MagicByteMismatch,
+    #[error("response body does not hash to the pinned sha256 digest")]
+    DigestMismatch,
     #[error("response exceeds {0}-byte cap")]
     SizeExceeded(usize),
     #[error("could not transcode source bytes to image/png: {0}")]
@@ -217,6 +223,7 @@ impl FetchError {
             FetchError::Http(_) => "permanent_4xx",
             FetchError::MimeRejected(_) => "mime_rejected",
             FetchError::MagicByteMismatch => "magic_byte_mismatch",
+            FetchError::DigestMismatch => "digest_mismatch",
             FetchError::SizeExceeded(_) => "size_exceeded",
             FetchError::TranscodeFailed(_) => "transcode_failed",
         }
@@ -329,6 +336,24 @@ pub async fn fetch_avatar_bytes(
     url: &Url,
     policy: &FetchPolicy,
 ) -> Result<AvatarBytes, FetchError> {
+    fetch(url, None, policy).await
+}
+
+/// Fetch a content-addressed avatar artifact per the policy: the body
+/// must hash to `sha256` before it is decoded or transcoded.
+pub async fn fetch_artifact_avatar_bytes(
+    url: &Url,
+    sha256: &Sha256Digest,
+    policy: &FetchPolicy,
+) -> Result<AvatarBytes, FetchError> {
+    fetch(url, Some(sha256), policy).await
+}
+
+async fn fetch(
+    url: &Url,
+    sha256: Option<&Sha256Digest>,
+    policy: &FetchPolicy,
+) -> Result<AvatarBytes, FetchError> {
     if url.scheme() != "https" && !policy.allow_http_for_tests {
         return Err(FetchError::InvalidScheme(url.scheme().to_string()));
     }
@@ -406,7 +431,7 @@ pub async fn fetch_avatar_bytes(
         .build()
         .map_err(|e| FetchError::Network(e.to_string()))?;
 
-    match try_fetch(&client, url, policy).await {
+    match try_fetch(&client, url, sha256, policy).await {
         Ok(ok) => Ok(ok),
         Err(error) => {
             let transient = matches!(error, FetchError::Network(_) | FetchError::Http(_))
@@ -419,7 +444,7 @@ pub async fn fetch_avatar_bytes(
                 url = %url,
                 "transient avatar fetch failure; retrying once"
             );
-            try_fetch(&client, url, policy).await
+            try_fetch(&client, url, sha256, policy).await
         }
     }
 }
@@ -427,6 +452,7 @@ pub async fn fetch_avatar_bytes(
 async fn try_fetch(
     client: &Client,
     url: &Url,
+    sha256: Option<&Sha256Digest>,
     policy: &FetchPolicy,
 ) -> Result<AvatarBytes, FetchError> {
     let mut response = client
@@ -468,6 +494,13 @@ async fn try_fetch(
             return Err(FetchError::SizeExceeded(policy.max_bytes));
         }
         buf.extend_from_slice(&chunk);
+    }
+
+    if sha256.is_some_and(|expected| {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&buf)) != expected.as_str()
+    }) {
+        return Err(FetchError::DigestMismatch);
     }
 
     if !declared.matches_magic(&buf) {
@@ -855,6 +888,7 @@ mod tests {
         assert_eq!(FetchError::Http(503).kind(), "transient_5xx");
         assert_eq!(FetchError::SizeExceeded(100).kind(), "size_exceeded");
         assert_eq!(FetchError::MagicByteMismatch.kind(), "magic_byte_mismatch");
+        assert_eq!(FetchError::DigestMismatch.kind(), "digest_mismatch");
         assert_eq!(
             FetchError::MimeRejected(Some("application/pdf".into())).kind(),
             "mime_rejected"
@@ -1116,6 +1150,41 @@ mod tests {
             baseline,
             compute_fetch_policy_digest(MAX_BYTES, MAX_IMAGE_DIMENSION, same_order),
             "identical inputs must produce the same digest"
+        );
+    }
+
+    /// The artifact fetch accepts exactly the pinned bytes: the served
+    /// body passes its digest, any other body is `DigestMismatch`.
+    #[tokio::test]
+    async fn artifact_fetch_verifies_the_pinned_digest() {
+        use sha2::{Digest, Sha256};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let png = encode_test_image(image::ImageFormat::Png);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(png.clone(), "image/png"))
+            .mount(&server)
+            .await;
+        let policy = FetchPolicy {
+            block_non_global_ips: false,
+            allow_http_for_tests: true,
+            ..FetchPolicy::default()
+        };
+        let url: Url = format!("{}/avatar.png", server.uri()).parse().unwrap();
+
+        let pinned = Sha256Digest::new(hex::encode(Sha256::digest(&png))).unwrap();
+        let fetched = fetch_artifact_avatar_bytes(&url, &pinned, &policy)
+            .await
+            .expect("pinned bytes");
+        assert_eq!(fetched.bytes, png);
+
+        let other = Sha256Digest::new(hex::encode(Sha256::digest(b"other"))).unwrap();
+        let result = fetch_artifact_avatar_bytes(&url, &other, &policy).await;
+        assert!(
+            matches!(result, Err(FetchError::DigestMismatch)),
+            "{result:?}"
         );
     }
 
