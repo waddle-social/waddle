@@ -480,6 +480,7 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       if (state === "online" && previousState !== "online") {
         missingStructureOnlineEpoch += 1;
         void refreshMissingStructureAfterReconnect();
+        waddles.reloadFocusedRoomBots();
       }
     },
   );

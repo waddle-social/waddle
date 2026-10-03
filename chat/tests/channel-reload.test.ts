@@ -332,4 +332,17 @@ describe("useWaddleDirectory room bots", () => {
     expect(listRoomBots).toHaveBeenCalledTimes(1);
     expect(listRoomBots).toHaveBeenCalledWith("general", { roomJid: "general@conference.example.com" });
   });
+
+  test("a reconnect reloads the focused room's bots", async () => {
+    const listRoomBots = mock(async (_id: string, _opts?: { roomJid?: string }) => [HELPER]);
+    const { w } = makeWaddles(makeClient({ listRoomBots }));
+    await w.loadStructure();
+    await flush();
+    listRoomBots.mockClear();
+
+    w.reloadFocusedRoomBots();
+    await flush();
+
+    expect(listRoomBots).toHaveBeenCalledWith("general", { roomJid: "general@conference.example.com" });
+  });
 });

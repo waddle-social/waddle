@@ -208,6 +208,12 @@ export function useWaddleDirectory(
     void reloadRoomBots(channel.id, channel.jid);
   }
 
+  /** Bots that first posted while we were offline: reload the focused room's list after a reconnect. */
+  function reloadFocusedRoomBots() {
+    const channel = currentChannel.value;
+    if (channel) void reloadRoomBots(channel.id, channel.jid);
+  }
+
   function prepareCreateChannelForContext(spaceId: string | null = currentSpace.value?.id ?? null) {
     createChannelForm.value = defaultCreateFormForContext(spaceId);
   }
@@ -642,6 +648,7 @@ export function useWaddleDirectory(
     loadStructure,
     reloadChannelMembers,
     reloadRoomBotsIfUnlisted,
+    reloadFocusedRoomBots,
     prepareCreateChannelForContext,
     updateWaddle,
     deleteWaddle,
