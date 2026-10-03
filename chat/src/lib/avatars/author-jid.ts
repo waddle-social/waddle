@@ -56,6 +56,18 @@ export class OccupantJidDirectory {
    */
   private readonly extensionsDomain = ref<string | null>(null);
 
+  /** The MUC service or a known room: never a person, e.g. a stale contact entry. */
+  private roomPredicate: ((jid: string) => boolean) | null = null;
+
+  setRoomPredicate(predicate: ((jid: string) => boolean) | null): void {
+    this.roomPredicate = predicate;
+  }
+
+  isRoom(jid: string | null | undefined): boolean {
+    const real = bare(jid);
+    return !!real && !!this.roomPredicate?.(real);
+  }
+
   setExtensionsDomain(domain: string | null): void {
     this.extensionsDomain.value = domain?.toLowerCase() || null;
   }
@@ -118,6 +130,7 @@ export class OccupantJidDirectory {
     this.ownNicks.clear();
     this.bots.clear();
     this.extensionsDomain.value = null;
+    this.roomPredicate = null;
   }
 }
 
@@ -174,6 +187,11 @@ export function resolveAuthorJid(
 
 /** Process-wide occupant directory fed by MUC presence. */
 export const occupantJidDirectory = new OccupantJidDirectory();
+
+/** `jid` is the MUC service or a room, never a person. */
+export function isRoomJid(jid: string | null | undefined): boolean {
+  return occupantJidDirectory.isRoom(jid);
+}
 
 /** Reactive: `jid` is a known server-hosted bot, which cannot take direct messages. */
 export function isBotJid(jid: string | null | undefined): boolean {

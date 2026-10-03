@@ -409,3 +409,26 @@ describe("bots take no DMs and have no presence, so they are listed apart from p
     expect(await avatar("bob@example.com")).toContain('data-show="available"');
   });
 });
+
+describe("people rail after a restart", () => {
+  afterEach(() => occupantJidDirectory.clear());
+
+  test("a bot that is only a room member is listed under Bots", () => {
+    occupantJidDirectory.setExtensionsDomain("extensions.example.com");
+    const groups = buildPeopleRail(sources({
+      activeRoomJid: ROOM,
+      members: [member("helper@extensions.example.com"), member("bob@example.com")],
+    }));
+    expect(groups.bots.map((bot) => bot.jid)).toEqual(["helper@extensions.example.com"]);
+    expect(groups.room).toEqual([]);
+  });
+
+  test("a room in the roster or DMs is never listed as a person", () => {
+    occupantJidDirectory.setRoomPredicate((jid) => jid.endsWith("@conference.example.com"));
+    const groups = buildPeopleRail(sources({
+      contacts: [contact("chat@conference.example.com"), contact("bob@example.com")],
+      conversations: [conversation("chat@conference.example.com")],
+    }));
+    expect([...groups.around, ...groups.awayAndOffline].map((person) => person.jid)).toEqual(["bob@example.com"]);
+  });
+});
