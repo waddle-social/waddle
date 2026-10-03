@@ -98,7 +98,11 @@ async fn room_authority(fixture: IngressFixture, archived: bool) {
                 )
             })
             .expect("parent-bearing thread");
-        thread.set_attr("parent", "forged-parent");
+        thread.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("parent").to_owned(),
+            "forged-parent",
+        );
         assert!(
             check_canonical_obligation(&fixture.db, &Stanza::Message(changed_parent), &obligation)
                 .await

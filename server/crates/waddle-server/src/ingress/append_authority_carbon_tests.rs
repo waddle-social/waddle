@@ -125,7 +125,11 @@ async fn carbon_append_authority(fixture: IngressFixture) {
                 )
             })
             .expect("parent-bearing thread")
-            .set_attr("parent", "forged-parent");
+            .set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("parent").to_owned(),
+                "forged-parent",
+            );
         for invalid in [
             wrapper(original, &owner, &target, wrong_direction),
             wrapper(original, &owner, &excluded, kind),
@@ -220,6 +224,28 @@ async fn archive_free_carbon_stamps(fixture: IngressFixture) {
             add_stanza_id(
                 &mut inner,
                 &StanzaId::new("recipient-stamp", owner.clone().into()),
+            );
+        }
+        assert!(inner.thread.is_none(), "canonical message has no thread");
+        for id in ["", " ", "\t\n"] {
+            let mut forged_thread = inner.clone();
+            forged_thread.payloads.push(
+                minidom::Element::builder("thread", waddle_xmpp_core::xep0201::CLIENT_STANZA_NS)
+                    .attr("parent", "forged")
+                    .append(id)
+                    .build(),
+            );
+            assert_eq!(
+                authority
+                    .accept_live_delivery(
+                        &context,
+                        &target,
+                        &wrapper(&forged_thread, &owner, &target, kind),
+                        || panic!("invalid thread must not disappear during carbon authorization"),
+                    )
+                    .await,
+                FullJidDeliveryOutcome::MaybeCommitted,
+                "{kind:?} carbon with invalid thread {id:?} must be rejected",
             );
         }
         let mut changed_payload = inner.clone();
