@@ -222,7 +222,9 @@ async fn authorize_room_route(
         };
         if let Ok(source) = super::room_canonical::source(&envelope, source_intent) {
             let expected = super::room_canonical::occupant_copy_message(source, target);
-            if *room == obligation.sender_bare && occupants.contains(target) && expected == *message
+            if *room == obligation.sender_bare
+                && occupants.contains(target)
+                && same_message_content(&expected, message)
             {
                 return Ok(());
             }
@@ -249,6 +251,64 @@ pub(crate) async fn check_canonical_sender(
         return Err(AppendAuthorityRejection::CanonicalSenderMismatch);
     }
     Ok(())
+}
+
+/// Compare the frozen message with its recipient-pass copy. Messages omitted
+/// from archives still get an XEP-0359 recipient stamp, but have no intent to
+/// persist that generated ID. Permit precisely that one typed stamp and compare
+/// every other field, including sender-owned IDs and extension payloads.
+pub(super) fn recipient_copy_matches(
+    expected: &xmpp_parsers::message::Message,
+    offered: &xmpp_parsers::message::Message,
+    recipient: &jid::BareJid,
+    archived_recipient: bool,
+) -> bool {
+    if same_message_content(expected, offered) {
+        return true;
+    }
+    if archived_recipient
+        || waddle_xmpp::protocol::handlers::archive::is_archivable(expected)
+        || expected
+            .from
+            .as_ref()
+            .is_none_or(|from| from.to_bare() == *recipient)
+    {
+        return false;
+    }
+    let stamps: Vec<_> = waddle_xmpp_core::xep0359::extract_stanza_ids(offered)
+        .into_iter()
+        .filter(|stamp| stamp.by == *recipient)
+        .collect();
+    let [stamp] = stamps.as_slice() else {
+        return false;
+    };
+    let mut expected = expected.clone();
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut expected, stamp);
+    same_message_content(&expected, offered)
+}
+
+/// Stored parent-bearing threads are parsed back into the last payload slot.
+/// Room and recipient processing may have appended stamps after that slot in
+/// the live copy. Normalize only this parser representation; every thread
+/// attribute, payload, and the ordering of all other extensions remains exact.
+fn same_message_content(
+    expected: &xmpp_parsers::message::Message,
+    offered: &xmpp_parsers::message::Message,
+) -> bool {
+    if expected == offered {
+        return true;
+    }
+    let normalize = |message: &xmpp_parsers::message::Message| {
+        let mut normalized = message.clone();
+        normalized.payloads.sort_by_key(|payload| {
+            waddle_xmpp_core::xep0201::is_thread_element_for_stanza(
+                payload,
+                waddle_xmpp_core::xep0201::CLIENT_STANZA_NS,
+            )
+        });
+        normalized
+    };
+    normalize(expected) == normalize(offered)
 }
 
 /// Record failed authority validation at a relay or accepted-frame drain boundary.

@@ -1002,8 +1002,10 @@ jobs lacking node/incarnation evidence as `started` with
 have invoked a plugin; expiry is not permission to invoke again. Untouched
 pending work (`attempt = 0`) remains eligible, and no completion receipt is
 fabricated for quarantined work.
-Unrecorded best-effort frames and the existing authorization-degraded detach
-fallback retain their separate guarantees.
+Best-effort `InboxPush` projection refreshes retain their terminal-on-attempt
+behavior described above; they are not recipient message-delivery copies and do
+not acquire a send lease. Unrecorded frames, sender response/host frames and the
+existing authorization-degraded detach fallback retain their separate guarantees.
 
 To diagnose an unresolved attempt, inspect its durable state without resetting it:
 

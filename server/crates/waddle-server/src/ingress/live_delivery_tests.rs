@@ -514,3 +514,107 @@ async fn frozen_pin_notification_allows_sender_copy_but_rejects_substituted_payl
     );
     authority.drain_and_join(Duration::from_secs(1)).await;
 }
+
+async fn unarchived_recipient_stamp(hint: Option<waddle_xmpp::xep::xep0334::Hint>) {
+    use waddle_xmpp::xep::xep0353::{build_propose, CallOffer};
+    use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
+    let fixture = IngressFixture::sqlite().await;
+    let authority = fixture.authority().await;
+    let target: FullJid = "juliet@example.com/phone".parse().expect("target");
+    let route = IngressEffectIntent::RouteDirect {
+        recipient: target.to_bare(),
+        fanout: vec![target.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
+    };
+    let mut submission = fixture.submission(None, "nonarchived signal body");
+    let message = &mut submission.plan.sanitized_message;
+    if hint.is_none() {
+        message.bodies.clear();
+    }
+    message.type_ = xmpp_parsers::message::MessageType::Normal;
+    message.payloads.push(build_propose(
+        xmpp_parsers::jingle::SessionId("call-offer".into()),
+        CallOffer::audio_video(),
+    ));
+    add_stanza_id(
+        message,
+        &StanzaId::new("sender-signal", submission.sender.to_bare().into()),
+    );
+    if let Some(hint) = hint {
+        waddle_xmpp::xep::xep0334::add_hint(message, hint);
+    }
+    submission.plan.intents = vec![route.clone()];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("signal authority");
+    let context = SmIngressAppendContext {
+        message_key: decision.message_key.expect("key"),
+        receipt: crate::ingress::receipt_key(&route).expect("route receipt"),
+        received_at: None,
+        archive_positions: vec![],
+        dispatch_stream: None,
+    };
+    let mut delivered = submission.plan.sanitized_message.clone();
+    add_stanza_id(
+        &mut delivered,
+        &StanzaId::new("recipient-signal", target.to_bare().into()),
+    );
+    let mut changed_offer = delivered.clone();
+    changed_offer.payloads[0] = build_propose(
+        xmpp_parsers::jingle::SessionId("other-call".into()),
+        CallOffer::audio_only(),
+    );
+    let mut changed_sender_stamp = delivered.clone();
+    add_stanza_id(
+        &mut changed_sender_stamp,
+        &StanzaId::new("forged-sender-id", submission.sender.to_bare().into()),
+    );
+    let mut wrong_stamp_owner = submission.plan.sanitized_message.clone();
+    add_stanza_id(
+        &mut wrong_stamp_owner,
+        &StanzaId::new(
+            "foreign-signal",
+            "mallory@example.com".parse().expect("foreign authority"),
+        ),
+    );
+    let mut duplicate_recipient_stamp = delivered.clone();
+    duplicate_recipient_stamp
+        .payloads
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
+            "duplicate",
+            &target.to_bare().into(),
+        ));
+    for forged in [
+        changed_offer,
+        changed_sender_stamp,
+        wrong_stamp_owner,
+        duplicate_recipient_stamp,
+    ] {
+        assert_eq!(
+            authority
+                .accept_live_delivery(&context, &target, &Stanza::Message(forged), || panic!(
+                    "unauthorized signal change"
+                ))
+                .await,
+            FullJidDeliveryOutcome::MaybeCommitted
+        );
+    }
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+    assert_eq!(
+        authority
+            .accept_live_delivery(&context, &target, &Stanza::Message(delivered), || {
+                BroadcastOutcome::Delivered
+            })
+            .await,
+        FullJidDeliveryOutcome::Delivered
+    );
+    authority.drain_and_join(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn unarchived_jmi_accepts_recipient_stamp_but_rejects_payload_and_other_stamp_changes() {
+    use waddle_xmpp::xep::xep0334::Hint;
+    for hint in [None, Some(Hint::NoStore), Some(Hint::NoPermanentStore)] {
+        unarchived_recipient_stamp(hint).await;
+    }
+}

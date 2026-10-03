@@ -373,17 +373,25 @@ async fn authorize_direct_stanza(
     }
     if super::recovery_rebuild::rebuildable_direct_route(&envelope, intents, intent) {
         let mut expected = envelope.message().clone();
+        let recipient = target.to_bare();
+        let mut archived_recipient = false;
         for intent in intents {
             if let IngressEffectIntent::ArchiveAuthoritative {
                 archive, stanza_id, ..
             } = intent
             {
-                if *archive == target.to_bare() {
+                if *archive == recipient {
+                    archived_recipient = true;
                     waddle_xmpp_core::xep0359::add_stanza_id(&mut expected, stanza_id);
                 }
             }
         }
-        if expected != *message {
+        if !super::append_authority::recipient_copy_matches(
+            &expected,
+            message,
+            &recipient,
+            archived_recipient,
+        ) {
             return Err(IngressUowError::EffectIntentConflict);
         }
     } else if matches!(
