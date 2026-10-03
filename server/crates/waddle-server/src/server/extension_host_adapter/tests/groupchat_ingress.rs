@@ -929,3 +929,45 @@ async fn extension_groupchat_cancelled_join_routing_still_leaves_postgres() {
         cancelled_join_routing_still_leaves(f).await;
     }
 }
+
+/// A join route to another node that never finishes holds the bot's leave
+/// for a bounded time only.
+async fn hung_join_route_bounds_the_leave(f: IngressFixture) {
+    let fixture = GroupchatFixture::new(&f).await;
+    // An occupant without a local socket gets the join over the node route.
+    fixture
+        .actor
+        .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            nick: "juliet".into(),
+            real_jid: "juliet@example.com/phone".parse().expect("juliet"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("juliet joins");
+    let route: crate::server::routes::interpret::TestJoinPresenceRoute =
+        Arc::new(|_occupant, _presence| Box::pin(futures::future::pending()));
+    crate::server::routes::interpret::TEST_JOIN_PRESENCE_ROUTE
+        .scope(route, fixture.post("hung-join"))
+        .await
+        .expect("send");
+    super::super::groupchat::linger_passes().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(fixture.bot_present().await, "the leave waits for the join");
+    // Moves the clock past the leave's bound on that wait.
+    fixture.settle().await;
+    assert!(!fixture.bot_present().await, "the bot left");
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_hung_join_route_bounds_the_leave_sqlite() {
+    hung_join_route_bounds_the_leave(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_groupchat_hung_join_route_bounds_the_leave_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_hung_join").await {
+        hung_join_route_bounds_the_leave(f).await;
+    }
+}

@@ -19,6 +19,11 @@ use super::{interpret, ExtensionHostAdapter, ExtensionHostAdapterError, Extensio
 /// messages, then one leave, instead of a join and leave around each post.
 pub(super) const BOT_LINGER: Duration = Duration::from_secs(60);
 
+/// The longest a leave waits for the bot's join to reach occupants on other
+/// nodes. A healthy peer takes milliseconds; a hung route must not keep the
+/// bot in the room forever.
+const JOIN_STRAGGLER_WAIT: Duration = Duration::from_secs(10);
+
 /// What a bot's sends into one room hand on to one another: the occupancy
 /// still to leave and the work that leave waits for.
 #[derive(Default)]
@@ -299,8 +304,21 @@ async fn leave(
     occupancy
         .join_stragglers
         .retain(|route| !route.is_finished());
-    futures::future::join_all(occupancy.join_stragglers.iter_mut()).await;
-    occupancy.join_stragglers.clear();
+    if tokio::time::timeout(
+        JOIN_STRAGGLER_WAIT,
+        futures::future::join_all(occupancy.join_stragglers.iter_mut()),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            room = %room,
+            "Extension bot join presence is still routing to another node; leaving anyway"
+        );
+    }
+    occupancy
+        .join_stragglers
+        .retain(|route| !route.is_finished());
     if let Some((nick, session)) = occupancy.held.take() {
         // The normal departure path emits unavailable presence and retains
         // interrupted actor cleanup for the departure janitor.
