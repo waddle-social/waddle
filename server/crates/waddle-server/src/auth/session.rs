@@ -16,6 +16,7 @@ use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
 
+use crate::auth::directory::canonical_localpart;
 use crate::db::actor::{CreateAuthSession, DbActor, DbExecute, DbQueryOne, RowValues};
 use crate::db::{row_value, ValueExt};
 
@@ -185,6 +186,7 @@ impl SessionManager {
                 user_jid: session.user_jid.clone(),
                 username: session.username.clone(),
                 xmpp_localpart: session.xmpp_localpart.clone(),
+                localpart_key: canonical_localpart(&session.xmpp_localpart),
                 token_hash,
                 auth_context_id: session.auth_context_id,
                 auth_context_version: session.auth_context_version,

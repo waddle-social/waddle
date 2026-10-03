@@ -18,15 +18,131 @@
 //! The admin Users panel already unions both tables for the same reason (see
 //! `admin/users_list.rs`); this is the single-row existence counterpart.
 
-use kameo::actor::ActorRef;
+use std::borrow::Cow;
 
-use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
+use kameo::actor::ActorRef;
+use tracing::warn;
+
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 
 use super::AuthError;
 
 #[cfg(test)]
 mod tests;
+
+/// The JID library's canonical (nodeprepped) form of an account name: the
+/// localpart every session, roster item and stanza carries for it. `None`
+/// when the name is no valid localpart. Native usernames keep the case they
+/// were registered with, so `Äda` is the account behind `äda@…`.
+pub(crate) fn canonical_localpart(name: &str) -> Option<jid::NodePart> {
+    jid::NodePart::new(name).ok().map(Cow::into_owned)
+}
+
+/// The canonical bare JID of the account `name@domain`.
+pub(crate) fn canonical_account_jid(name: &str, domain: &str) -> Option<jid::BareJid> {
+    let node = jid::NodePart::new(name).ok()?;
+    let domain = jid::DomainPart::new(domain).ok()?;
+    Some(jid::BareJid::from_parts(Some(&node), &domain))
+}
+
+/// Startup pass before the node serves: give every account row written
+/// without one its canonical lookup key. Idempotent.
+pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
+    backfill_account_keys(actor).await
+}
+
+// ponytail: one UPDATE per unkeyed row; batch it if a large legacy table makes startup slow.
+async fn backfill_account_keys(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
+    let native = query(
+        actor,
+        "SELECT username, domain FROM native_users WHERE jid_key IS NULL ORDER BY id",
+        vec![],
+    )
+    .await?;
+    for row in native {
+        let username = text(&row, 0)?;
+        let domain = text(&row, 1)?;
+        let Some(jid) = canonical_account_jid(&username, &domain) else {
+            warn!(%username, %domain, "native account name is no JID; it gets no lookup key");
+            continue;
+        };
+        // Registration compared raw names, so differently cased names may
+        // share a JID: the oldest account keeps it.
+        let keyed = execute(
+            actor,
+            "UPDATE native_users SET jid_key = ? \
+             WHERE username = ? AND domain = ? AND jid_key IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM native_users WHERE jid_key = ?)",
+            vec![
+                jid.as_str().into(),
+                username.as_str().into(),
+                domain.as_str().into(),
+                jid.as_str().into(),
+            ],
+        )
+        .await?;
+        if keyed == 0 {
+            warn!(%username, %jid, "native account shares its JID with an older account; it gets no lookup key");
+        }
+    }
+
+    let users = query(
+        actor,
+        "SELECT jid, xmpp_localpart FROM users WHERE localpart_key IS NULL",
+        vec![],
+    )
+    .await?;
+    for row in users {
+        let user_jid = text(&row, 0)?;
+        let localpart = text(&row, 1)?;
+        let Some(key) = canonical_localpart(&localpart) else {
+            warn!(%user_jid, "account localpart is no JID localpart; it gets no lookup key");
+            continue;
+        };
+        execute(
+            actor,
+            "UPDATE users SET localpart_key = ? WHERE jid = ?",
+            vec![key.as_str().into(), user_jid.into()],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn query(
+    actor: &ActorRef<DbActor>,
+    sql: &str,
+    params: Vec<crate::db::Value>,
+) -> Result<Vec<crate::db::actor::RowValues>, AuthError> {
+    actor
+        .ask(DbQuery {
+            sql: sql.to_string(),
+            params,
+        })
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))
+}
+
+async fn execute(
+    actor: &ActorRef<DbActor>,
+    sql: &str,
+    params: Vec<crate::db::Value>,
+) -> Result<u64, AuthError> {
+    actor
+        .ask(DbExecute {
+            sql: sql.to_string(),
+            params,
+        })
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))
+}
+
+fn text(row: &[crate::db::Value], index: usize) -> Result<String, AuthError> {
+    row_value(row, index)
+        .and_then(ValueExt::as_string)
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))
+}
 
 /// Returns `true` when `localpart@domain` resolves to a registered local
 /// account through either the OIDC `users` table or the native `native_users`

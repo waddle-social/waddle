@@ -1,3 +1,4 @@
+use crate::auth::directory::canonical_localpart;
 use crate::auth::{localpart_to_jid, username_to_localpart, AuthError, AuthProviderConfig};
 use kameo::actor::ActorRef;
 
@@ -231,8 +232,8 @@ impl IdentityService {
 
             let insert = r#"
                 INSERT INTO users (
-                    jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#;
 
             let result = self
@@ -243,6 +244,10 @@ impl IdentityService {
                         jid.clone().into(),
                         username.clone().into(),
                         xmpp_localpart.clone().into(),
+                        canonical_localpart(&xmpp_localpart)
+                            .as_ref()
+                            .map(|key| key.as_str())
+                            .into(),
                         claims.name.clone().into(),
                         claims.avatar_url.clone().into(),
                         claims.email.clone().into(),

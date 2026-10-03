@@ -23,6 +23,7 @@ use waddle_xmpp::ScramCredentials;
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 
+use super::directory::canonical_account_jid;
 use super::AuthError;
 
 /// Default PBKDF2 iteration count for SCRAM key derivation.
@@ -66,6 +67,9 @@ impl NativeUserStore {
     pub async fn register(&self, request: RegisterRequest) -> Result<i64, AuthError> {
         // Validate username format (must be valid JID localpart)
         validate_username(&request.username)?;
+        let jid = canonical_account_jid(&request.username, &request.domain).ok_or_else(|| {
+            AuthError::InvalidUsername("Username is not a valid JID localpart".to_string())
+        })?;
 
         // Check if username already exists
         if self.user_exists(&request.username, &request.domain).await? {
@@ -95,14 +99,15 @@ impl NativeUserStore {
             .actor
             .ask(DbQuery {
                 sql: r#"
-                    INSERT INTO native_users (username, domain, password_hash, salt, iterations, stored_key, server_key, email)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO native_users (username, domain, jid_key, password_hash, salt, iterations, stored_key, server_key, email)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
                 "#
                 .to_string(),
                 params: vec![
                     request.username.as_str().into(),
                     request.domain.as_str().into(),
+                    jid.as_str().into(),
                     password_hash.into(),
                     scram_salt_b64.into(),
                     i64::from(DEFAULT_SCRAM_ITERATIONS).into(),

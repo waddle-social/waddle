@@ -737,60 +737,18 @@ CREATE TABLE xmpp_occupancy_authority (
 );
 "#;
 
-/// A roster contact is an existing local account: an OIDC `users` localpart
-/// or a `native_users` row on the owner's domain (no s2s). Drop every other
-/// contact (rooms, extension bots, names nobody registered) and the owner's
-/// XEP-0237 version, so a cached roster no longer matches and is refetched.
-pub const V0014_ROSTER_CONTACTS_ARE_ACCOUNTS: &str = r#"
-DELETE FROM roster_versions WHERE user_jid IN (
-    SELECT r.user_jid FROM roster_items r
-    WHERE NOT EXISTS (
-        SELECT 1 FROM users u
-        WHERE lower(u.xmpp_localpart || '@' || substr(r.user_jid, instr(r.user_jid, '@') + 1)) = lower(r.contact_jid)
-    )
-    AND NOT EXISTS (
-        SELECT 1 FROM native_users n
-        WHERE lower(n.domain) = lower(substr(r.user_jid, instr(r.user_jid, '@') + 1))
-          AND lower(n.username || '@' || n.domain) = lower(r.contact_jid)
-    )
-);
-
-DELETE FROM roster_items
-WHERE NOT EXISTS (
-        SELECT 1 FROM users u
-        WHERE lower(u.xmpp_localpart || '@' || substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1)) = lower(roster_items.contact_jid)
-    )
-    AND NOT EXISTS (
-        SELECT 1 FROM native_users n
-        WHERE lower(n.domain) = lower(substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1))
-          AND lower(n.username || '@' || n.domain) = lower(roster_items.contact_jid)
-    );
-"#;
-
-pub const V0014_ROSTER_CONTACTS_ARE_ACCOUNTS_POSTGRES: &str = r#"
-DELETE FROM roster_versions WHERE user_jid IN (
-    SELECT r.user_jid FROM roster_items r
-    WHERE NOT EXISTS (
-        SELECT 1 FROM users u
-        WHERE lower(u.xmpp_localpart || '@' || substr(r.user_jid, strpos(r.user_jid, '@') + 1)) = lower(r.contact_jid)
-    )
-    AND NOT EXISTS (
-        SELECT 1 FROM native_users n
-        WHERE lower(n.domain) = lower(substr(r.user_jid, strpos(r.user_jid, '@') + 1))
-          AND lower(n.username || '@' || n.domain) = lower(r.contact_jid)
-    )
-);
-
-DELETE FROM roster_items
-WHERE NOT EXISTS (
-        SELECT 1 FROM users u
-        WHERE lower(u.xmpp_localpart || '@' || substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1)) = lower(roster_items.contact_jid)
-    )
-    AND NOT EXISTS (
-        SELECT 1 FROM native_users n
-        WHERE lower(n.domain) = lower(substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1))
-          AND lower(n.username || '@' || n.domain) = lower(roster_items.contact_jid)
-    );
+/// Canonical lookup keys for local accounts. A JID localpart is nodeprepped
+/// (Unicode case folding, NFKC), which SQL `lower()` cannot reproduce, so the
+/// server computes the keys in Rust when it writes an account and, for rows
+/// written before this migration, at startup
+/// (`auth::directory::reconcile_local_accounts`). `native_users.jid_key` is
+/// the account's canonical bare JID; `users.localpart_key` is the canonical
+/// localpart of a `users` row, which has no domain.
+pub const V0014_ACCOUNT_JID_KEYS: &str = r#"
+ALTER TABLE native_users ADD COLUMN jid_key TEXT;
+CREATE UNIQUE INDEX idx_native_users_jid_key ON native_users(jid_key);
+ALTER TABLE users ADD COLUMN localpart_key TEXT;
+CREATE INDEX idx_users_localpart_key ON users(localpart_key);
 "#;
 
 /// Rooms where an extension bot has posted, for XEP-0030 room bot listing.
@@ -889,9 +847,9 @@ pub fn all() -> Vec<Migration> {
         },
         Migration {
             version: 14,
-            description: "Keep roster contacts to existing local accounts".to_string(),
-            sql_sqlite: V0014_ROSTER_CONTACTS_ARE_ACCOUNTS,
-            sql_postgres: V0014_ROSTER_CONTACTS_ARE_ACCOUNTS_POSTGRES,
+            description: "Canonical JID lookup keys for local accounts".to_string(),
+            sql_sqlite: V0014_ACCOUNT_JID_KEYS,
+            sql_postgres: V0014_ACCOUNT_JID_KEYS,
         },
         Migration {
             version: 15,
