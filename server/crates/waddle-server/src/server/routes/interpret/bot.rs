@@ -629,9 +629,6 @@ pub(crate) async fn plan_extension_bot_groupchat(
     .await
 }
 
-/// A managed room with no live actor went dormant and was evicted: load it
-/// the way a member join does, from its channel and durable state. A room
-/// another node claimed meanwhile is that node's to post in.
 /// Whether `error` says the room actor is sealed or stopped (#1108). A
 /// sealed actor is purged too: the registry may still hand it out when the
 /// sweep's destroy timed out, and a retry would meet it again.
@@ -654,6 +651,9 @@ async fn room_gone<M>(
     }
 }
 
+/// A managed room with no live actor went dormant and was evicted: load it
+/// the way a member join does, from its channel and durable state. A room
+/// another node claimed meanwhile is that node's to post in.
 async fn load_managed_room(
     state: &crate::server::routes::websocket::WebSocketState,
     room_jid: &BareJid,
