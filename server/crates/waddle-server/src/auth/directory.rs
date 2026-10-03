@@ -91,16 +91,19 @@ async fn prune_roster_contacts(actor: &ActorRef<DbActor>) -> Result<(), AuthErro
         if keep {
             continue;
         }
+        // The version goes first: a failure between the two leaves an item
+        // the next pass prunes, never an item gone under a version that
+        // still matches the client's cached roster.
         execute(
             actor,
-            "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-            vec![owner.as_str().into(), contact.into()],
+            "DELETE FROM roster_versions WHERE user_jid = ?",
+            vec![owner.as_str().into()],
         )
         .await?;
         execute(
             actor,
-            "DELETE FROM roster_versions WHERE user_jid = ?",
-            vec![owner.into()],
+            "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+            vec![owner.into(), contact.into()],
         )
         .await?;
     }
