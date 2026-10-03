@@ -961,6 +961,50 @@ async fn test_seed_fixed_test_account_replaces_existing_credentials() {
     assert_eq!(credentials.stored_key, stored_key);
 }
 
+/// A fixed account persisted before account lookup keys existed has no key:
+/// seeding replaces it instead of failing on its raw `(username, domain)`
+/// uniqueness at every start.
+#[tokio::test]
+async fn test_seed_fixed_test_account_replaces_an_unkeyed_account() {
+    let state = create_test_state().await;
+    let actor = state.db_pool.global_actor();
+    actor
+        .ask(crate::db::actor::DbExecute {
+            sql: "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) \
+                  VALUES ('admin', 'localhost', 'hash', 'salt', '', '')"
+                .to_string(),
+            params: vec![],
+        })
+        .await
+        .unwrap();
+    let config = fixed_account::FixedTestAccountConfig {
+        username: "admin".to_string(),
+        password: format!("fixed-account-{}", rand::random::<u64>()),
+        domain: "localhost".to_string(),
+        email: None,
+    };
+
+    fixed_account::seed_fixed_test_account(&state.db_pool, &config)
+        .await
+        .unwrap();
+
+    let rows = actor
+        .ask(crate::db::actor::DbQuery {
+            sql: "SELECT jid_key FROM native_users".to_string(),
+            params: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![vec![crate::db::Value::Text("admin@localhost".to_string())]]
+    );
+    assert!(NativeUserStore::new(actor.clone())
+        .verify_password(&config.username, &config.domain, &config.password)
+        .await
+        .unwrap());
+}
+
 async fn test_app() -> Router {
     let state = create_test_state().await;
     test_app_for_state(state).await

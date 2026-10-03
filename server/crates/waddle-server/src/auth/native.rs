@@ -323,19 +323,21 @@ impl NativeUserStore {
         Ok(())
     }
 
-    /// Delete a native user.
+    /// Delete the native account holding the JID `username@domain`, and any
+    /// row naming that JID that was written without its lookup key.
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
         let Some(jid) = canonical_account_jid(username, domain) else {
             return Ok(false);
         };
-        let affected = self
-            .actor
-            .ask(DbExecute {
-                sql: "DELETE FROM native_users WHERE jid_key = ?".to_string(),
-                params: vec![jid.as_str().into()],
-            })
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete user: {}", e)))?;
+        let mut affected = 0;
+        for id in self.unkeyed_ids(&jid).await? {
+            affected += self
+                .delete_rows("DELETE FROM native_users WHERE id = ?", id)
+                .await?;
+        }
+        affected += self
+            .delete_rows("DELETE FROM native_users WHERE jid_key = ?", jid.as_str())
+            .await?;
 
         if affected > 0 {
             debug!(username = %username, domain = %domain, "Native user deleted");
@@ -343,6 +345,54 @@ impl NativeUserStore {
         } else {
             Ok(false)
         }
+    }
+
+    /// Rows naming `jid` that were written without a lookup key: before the
+    /// keys existed, or by a node predating them during a rolling upgrade,
+    /// until the periodic backfill keys them. Usually none, so the names are
+    /// compared in Rust, the only place their canonical form is computed.
+    async fn unkeyed_ids(&self, jid: &jid::BareJid) -> Result<Vec<i64>, AuthError> {
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: "SELECT id, username, domain FROM native_users WHERE jid_key IS NULL"
+                    .to_string(),
+                params: vec![],
+            })
+            .await
+            .map_err(db_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let crate::db::Value::Integer(id) = *row_value(&row, 0).map_err(db_err)? else {
+                return Err(AuthError::DatabaseError(
+                    "invalid native user id".to_string(),
+                ));
+            };
+            let username = row_value(&row, 1)
+                .and_then(ValueExt::as_string)
+                .map_err(db_err)?;
+            let domain = row_value(&row, 2)
+                .and_then(ValueExt::as_string)
+                .map_err(db_err)?;
+            if canonical_account_jid(&username, &domain).as_ref() == Some(jid) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn delete_rows(
+        &self,
+        sql: &str,
+        param: impl Into<crate::db::Value>,
+    ) -> Result<u64, AuthError> {
+        self.actor
+            .ask(DbExecute {
+                sql: sql.to_string(),
+                params: vec![param.into()],
+            })
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete user: {}", e)))
     }
 }
 
