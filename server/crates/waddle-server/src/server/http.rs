@@ -712,6 +712,8 @@ async fn create_websocket_state(
         service_domains.clone(),
         Arc::clone(&extension_manager),
     );
+    let bot_avatars = Arc::new(crate::server::extension_bot_avatar::BotAvatars::default());
+    bot_avatars.prefetch(&extension_manager);
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
 
@@ -1144,6 +1146,7 @@ async fn create_websocket_state(
                 pending_delivery_storage,
                 command_registry: websocket_command_registry,
                 extension_manager,
+                bot_avatars,
                 dispatcher: stanza_dispatcher,
                 muji_pre_dispatch_terminate_rate_limit: Arc::new(
                     waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit::with_defaults(),

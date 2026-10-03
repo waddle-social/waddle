@@ -909,7 +909,32 @@ pub(crate) const FIXTURE_BOT_PLUGIN: &str = "message-hook-fixture";
 
 /// A test state whose extension manager really loads [`FIXTURE_BOT_PLUGIN`].
 pub(crate) async fn create_test_websocket_state_with_fixture_bot() -> Arc<WebSocketState> {
-    let manager = ExtensionManager::from_config(ExtensionConfig {
+    create_test_websocket_state_with_extension_manager(
+        Arc::new(fixture_bot_extension_manager().await),
+        TestStateOverrides::default(),
+    )
+    .await
+}
+
+/// [`create_test_websocket_state_with_fixture_bot`] whose manifest profile
+/// declares `avatar`.
+pub(crate) async fn create_test_websocket_state_with_fixture_bot_avatar(
+    avatar: waddle_extensions::ArtifactReference,
+) -> Arc<WebSocketState> {
+    let plugin = waddle_extensions::PluginId::new(FIXTURE_BOT_PLUGIN).expect("plugin id");
+    create_test_websocket_state_with_extension_manager(
+        Arc::new(
+            fixture_bot_extension_manager()
+                .await
+                .with_profile_avatar(&plugin, avatar),
+        ),
+        TestStateOverrides::default(),
+    )
+    .await
+}
+
+async fn fixture_bot_extension_manager() -> ExtensionManager {
+    ExtensionManager::from_config(ExtensionConfig {
         enabled: true,
         modules: vec![waddle_extensions::ExtensionModuleConfig {
             room_observation: None,
@@ -934,12 +959,7 @@ pub(crate) async fn create_test_websocket_state_with_fixture_bot() -> Arc<WebSoc
         ..Default::default()
     })
     .await
-    .expect("fixture bot extension manager");
-    create_test_websocket_state_with_extension_manager(
-        Arc::new(manager),
-        TestStateOverrides::default(),
-    )
-    .await
+    .expect("fixture bot extension manager")
 }
 
 /// Optional fixture substitutions for one test websocket state; unset fields
@@ -1188,6 +1208,9 @@ async fn create_test_websocket_state_with_extension_manager(
                         registry
                     },
                     extension_manager,
+                    bot_avatars: Arc::new(
+                        crate::server::extension_bot_avatar::BotAvatars::loopback(),
+                    ),
                     dispatcher: Arc::new(dispatcher),
                     muji_pre_dispatch_terminate_rate_limit: Arc::new(
                         waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit::with_defaults(),

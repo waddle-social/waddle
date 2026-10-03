@@ -4,6 +4,7 @@ mod config;
 pub(crate) mod dual_registration;
 pub(crate) mod durable_membership;
 pub(crate) mod extension_bot;
+pub(crate) mod extension_bot_avatar;
 pub(crate) mod extension_bot_rooms;
 mod extension_commands;
 pub mod extension_host_adapter;

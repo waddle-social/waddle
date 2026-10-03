@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use jid::{BareJid, Jid};
-use waddle_extensions::{ExtensionManager, ExtensionManifest, PluginId};
+use waddle_extensions::{ArtifactReference, ExtensionManager, ExtensionManifest, PluginId};
 use waddle_xmpp::xep::xep0317::{well_known, Hat, HatSet, ServerHats};
 
 use crate::server::routes::websocket::XmppServiceDomains;
@@ -73,6 +73,8 @@ pub(crate) struct InstalledBot {
     pub name: String,
     /// The manifest profile's description.
     pub description: Option<String>,
+    /// The manifest profile's avatar artifact.
+    pub avatar: Option<ArtifactReference>,
 }
 
 /// The installed bot `jid` addresses (bare JID or `/bot`), if any. Every
@@ -84,13 +86,16 @@ pub(crate) fn installed_bot(
 ) -> Option<InstalledBot> {
     let plugin = domains.extension_bot(jid)?;
     let manifest = manager.manifest_for_plugin(plugin.as_str())?;
+    let name = manifest_bot_name(Some(&manifest), &plugin);
+    let profile = manifest.profile;
     Some(InstalledBot {
-        name: manifest_bot_name(Some(&manifest), &plugin),
-        description: manifest
-            .profile
-            .and_then(|profile| profile.description)
+        name,
+        description: profile
+            .as_ref()
+            .and_then(|profile| profile.description.as_ref())
             .map(|description| description.as_str().trim().to_string())
             .filter(|description| !description.is_empty()),
+        avatar: profile.and_then(|profile| profile.avatar),
     })
 }
 
