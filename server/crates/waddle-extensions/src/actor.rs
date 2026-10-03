@@ -73,7 +73,7 @@ impl WasmExtensionActor {
         let display_name = self.manifest.name.clone();
         self.manifest
             .profile
-            .get_or_insert_with(|| crate::types::ExtensionProfile {
+            .get_or_insert(crate::types::ExtensionProfile {
                 display_name,
                 description: None,
                 accent: None,
