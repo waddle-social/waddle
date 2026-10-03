@@ -1106,6 +1106,52 @@ INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_archive_d
 GRANT SELECT ON TABLE ingress_archive_dispatch TO pg_monitor;
 "#;
 
+/// Per-resource queue-attempt authority. Started attempts remain ambiguous
+/// until the holder supplies positive completion or no-enqueue evidence.
+pub const V1021_SEND_ATTEMPTS: &str = r#"
+CREATE TABLE ingress_send_attempts (
+    message_key TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL,
+    recipient TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    node_incarnation TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    expires_at_ms BIGINT NOT NULL,
+    state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, recipient),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+"#;
+
+pub const V1021_SEND_ATTEMPTS_POSTGRES: &str = r#"
+CREATE TABLE ingress_send_attempts (
+    message_key UUID NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL,
+    recipient TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    node_incarnation TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    expires_at_ms BIGINT NOT NULL,
+    state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, recipient),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE TRIGGER ingress_send_attempts_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_send_attempts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_send_attempts_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_send_attempts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_send_attempts ENABLE ALWAYS TRIGGER ingress_send_attempts_epoch_guard_dml;
+ALTER TABLE ingress_send_attempts ENABLE ALWAYS TRIGGER ingress_send_attempts_epoch_guard_truncate;
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_send_attempts');
+GRANT SELECT ON TABLE ingress_send_attempts TO pg_monitor;
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1228,6 +1274,12 @@ pub fn all() -> Vec<Migration> {
             description: "Persist archive dispatch predecessors and pending barriers".to_string(),
             sql_sqlite: V1020_ARCHIVE_DISPATCH,
             sql_postgres: V1020_ARCHIVE_DISPATCH_POSTGRES,
+        },
+        Migration {
+            version: 1021,
+            description: "Persist exclusive per-resource queue attempts".to_string(),
+            sql_sqlite: V1021_SEND_ATTEMPTS,
+            sql_postgres: V1021_SEND_ATTEMPTS_POSTGRES,
         },
     ]
 }

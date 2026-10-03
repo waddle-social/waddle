@@ -9,6 +9,10 @@ use waddle_xmpp::ingress::EffectIntentCodecError;
 /// Fail-closed errors from the ingress unit of work.
 #[derive(Debug, Error)]
 pub enum IngressUowError {
+    #[error("send lease duration must be positive and representable")]
+    InvalidSendLeaseDuration,
+    #[error("stored send attempt state is malformed")]
+    InvalidStoredSendAttempt,
     #[error(transparent)]
     Plan(#[from] crate::server::routes::interpret::effects::PlanFailure),
     #[error("planned room delivery is missing its authoritative stanza-id")]
