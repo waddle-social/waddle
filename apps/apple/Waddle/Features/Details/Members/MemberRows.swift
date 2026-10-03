@@ -16,7 +16,8 @@ struct OccupantMemberRow: View {
             status: occupant.status,
             hats: occupant.hats,
             affiliation: occupant.affiliation,
-            isAbsent: false
+            isAbsent: false,
+            showsPresence: !occupant.isBot
         )
         .memberActions(
             MemberSubject(nick: occupant.nick, jid: occupant.realJID, affiliation: occupant.affiliation, isPresent: true, isBot: occupant.isBot),
@@ -61,13 +62,17 @@ struct MemberRowLabel: View {
     let hats: [Hat]
     let affiliation: RoomAffiliation
     let isAbsent: Bool
+    /// False for extension bots, whose room presence is not availability.
+    var showsPresence = true
 
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
             avatar
                 .overlay(alignment: .bottomTrailing) {
-                    PresenceDot(availability: availability, size: 10)
-                        .offset(x: 3, y: 3)
+                    if showsPresence {
+                        PresenceDot(availability: availability, size: 10)
+                            .offset(x: 3, y: 3)
+                    }
                 }
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 HStack(spacing: Theme.Spacing.xs) {

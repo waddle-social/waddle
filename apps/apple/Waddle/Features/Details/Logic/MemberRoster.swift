@@ -13,13 +13,20 @@ struct MemberRoleGroup: Identifiable, Hashable {
 enum MemberRoster {
     static let roleOrder: [RoomRole] = [.moderator, .participant, .visitor]
 
-    /// Present occupants grouped Moderators, Participants, Visitors; empty
-    /// groups dropped; each sorted by nick.
+    /// Present people grouped Moderators, Participants, Visitors; empty
+    /// groups dropped; each sorted by nick. Extension bots are listed by
+    /// `bots` instead.
     static func grouped(_ occupants: [Occupant]) -> [MemberRoleGroup] {
         roleOrder.compactMap { role in
-            let members = occupants.filter { $0.role == role }.sorted(by: nickOrder)
+            let members = occupants.filter { $0.role == role && !$0.isBot }.sorted(by: nickOrder)
             return members.isEmpty ? nil : MemberRoleGroup(role: role, occupants: members)
         }
+    }
+
+    /// Extension bots in the room, sorted by nick. They join a room lazily
+    /// on first post, so their presence says nothing about availability.
+    static func bots(_ occupants: [Occupant]) -> [Occupant] {
+        occupants.filter(\.isBot).sorted(by: nickOrder)
     }
 
     /// XEP-0045 affiliated users not currently in the room. A member counts
