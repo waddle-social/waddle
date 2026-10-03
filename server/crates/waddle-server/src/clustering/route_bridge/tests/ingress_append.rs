@@ -1,4 +1,4 @@
-//! Receiver authority is optional: a rejected key must still deliver the stanza.
+//! A supplied ingress key is mandatory authority: rejected claims never deliver.
 use super::*;
 use crate::ingress::{
     commit::commit_submission, identity::IngressAppendObligationRef, test_support::IngressFixture,
@@ -303,7 +303,10 @@ async fn ingress_append_authority(
                 .await;
             assert_eq!(
                 reply.outcome,
-                if matches!(case, AuthorityCase::ArchivePositionMismatch) {
+                if !matches!(
+                    case,
+                    AuthorityCase::Authorized | AuthorityCase::LiveRecipient
+                ) {
                     RemoteResourceRouteOutcome::Unavailable
                 } else {
                     RemoteResourceRouteOutcome::QueuedDetached
@@ -337,13 +340,16 @@ async fn ingress_append_authority(
             let result = bridge
                 .deliver_reserved(&sign_envelope(envelope, &keypair), &mut None)
                 .await;
-            if matches!(case, AuthorityCase::ArchivePositionMismatch) {
+            if !matches!(
+                case,
+                AuthorityCase::Authorized | AuthorityCase::LiveRecipient
+            ) {
                 assert!(matches!(
                     result,
                     Err(OrderedRelayNackReason::TargetUnavailable)
                 ));
             } else {
-                result.expect("unsequenced delivery can proceed without an optional key");
+                result.expect("authorized keyed delivery");
             }
         }
         if let Some(rx) = live_rx.as_mut() {
@@ -373,10 +379,13 @@ async fn ingress_append_authority(
             .await
             .expect("queue read")
             .expect("session");
-        if matches!(case, AuthorityCase::ArchivePositionMismatch) {
+        if !matches!(
+            case,
+            AuthorityCase::Authorized | AuthorityCase::LiveRecipient
+        ) {
             assert!(
                 queued.unacked_stanzas.is_empty(),
-                "ordered copies cannot degrade to unkeyed appends"
+                "rejected keyed copies cannot degrade to unkeyed appends"
             );
             assert_eq!(queued.outbound_count, 0);
             continue;

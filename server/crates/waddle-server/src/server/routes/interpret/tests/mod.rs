@@ -211,6 +211,8 @@ fn offline_pass_deps<'a>(
 ) -> Deps<'a> {
     Deps {
         dispatch_probe_budget: None,
+        ingress_delivery_uow: None,
+        ingress_delivery_stop: None,
         delivery_execution_context: super::DeliveryExecutionContext::Live,
         connection_registry: registry,
         user_registry: None,

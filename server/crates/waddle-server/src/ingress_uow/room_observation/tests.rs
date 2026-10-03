@@ -1,3 +1,4 @@
+mod invocation_fence;
 mod reply_fallback;
 
 use chrono::Utc;
@@ -301,6 +302,12 @@ async fn lease_fence_and_publication_share_receipt_commit(fixture: IngressFixtur
         .expect("reclaim")
         .expect("work");
     assert_ne!(first.lease, second.lease);
+    assert!(!Repo::start(&mut tx, &first, start + 180_001)
+        .await
+        .expect("old token"));
+    assert!(Repo::start(&mut tx, &second, start + 180_001)
+        .await
+        .expect("start"));
     tx.commit().await.expect("new lease");
 
     let outcome = RoomObservationOutcome::Completed(RoomObservationResult {
@@ -404,6 +411,13 @@ async fn empty_correction_and_retraction_cancel_prior_work(fixture: IngressFixtu
     )
     .await
     .expect("capture root");
+    let work = Repo::claim(&mut tx, &subscription, now.timestamp_millis())
+        .await
+        .expect("claim")
+        .expect("work");
+    assert!(Repo::start(&mut tx, &work, now.timestamp_millis())
+        .await
+        .expect("start"));
     tx.commit().await.expect("root commit");
 
     let mut edit = message("wire-edit", "room-stanza-edit", Some("edit-origin"), "");
@@ -786,6 +800,9 @@ async fn stale_replica_correction_invalidates_new_generation_result(fixture: Ing
         .await
         .expect("claim")
         .expect("work");
+    assert!(Repo::start(&mut tx, &work, now.timestamp_millis())
+        .await
+        .expect("start"));
     tx.commit().await.expect("claim commit");
     let mut tx = fixture.uow.begin().await.expect("finish");
     assert!(Repo::finish(

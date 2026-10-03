@@ -13,6 +13,12 @@ use crate::types::{
 };
 use xmpp_parsers::jid::FullJid;
 
+/// Host admission is distinct from any error after entering the runtime.
+pub(crate) enum ObservationInvocationError {
+    NotInvoked,
+    Invoked(crate::types::ObservationFailure),
+}
+
 /// An extension loaded into wasmtime and ready to handle typed framework events.
 pub struct WasmExtensionActor {
     manifest: ExtensionManifest,
@@ -127,12 +133,12 @@ impl WasmExtensionActor {
     pub(crate) async fn observe_room_message(
         &self,
         event: crate::types::RoomMessageObserve,
-    ) -> Result<crate::types::ExtensionResponse, crate::types::ObservationFailure> {
+    ) -> Result<crate::types::ExtensionResponse, ObservationInvocationError> {
         let _permit = self
             .observation_permits
             .clone()
             .try_acquire_owned()
-            .map_err(|_| crate::types::ObservationFailure::TemporaryFailure)?;
+            .map_err(|_| ObservationInvocationError::NotInvoked)?;
         let context = InvocationContext {
             // This is a display/runtime context only, never tenant authority.
             waddle_id: WaddleId::new("room-observation").expect("static context"),
@@ -152,6 +158,7 @@ impl WasmExtensionActor {
                 self.allowed_http_origins.clone(),
             )
             .await
+            .map_err(ObservationInvocationError::Invoked)
     }
 
     pub fn manifest(&self) -> ExtensionManifest {

@@ -1338,6 +1338,9 @@ pub(crate) async fn deliver_direct_to_full_locally(
     {
         return outcome;
     }
+    if deps.ingress_append_context.is_some() {
+        return FullJidDeliveryOutcome::Unavailable;
+    }
     let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
     outbound.ingress_append = crate::ingress::identity::IngressAppendObligationRef::for_message(
         deps.ingress_append_context.as_ref(),
@@ -1366,15 +1369,38 @@ pub(crate) async fn deliver_ordered_local_copy(
     stanza: &Stanza,
     kind: waddle_xmpp::registry::DeliveryKind,
 ) -> Option<FullJidDeliveryOutcome> {
-    let context = deps
-        .ingress_append_context
-        .as_ref()
-        .filter(|context| !context.archive_positions.is_empty())?;
-    let state = deps.web_socket_state?;
+    let context = deps.ingress_append_context.as_ref()?;
+    let authority = deps
+        .web_socket_state
+        .map(|state| &state.deps.protocol.ingress);
+    if deps.ingress_delivery_uow.is_none() && authority.is_none() {
+        return Some(FullJidDeliveryOutcome::MaybeCommitted);
+    }
+    // Capture the socket owner before any database await. Status remains
+    // authoritative even after that socket disappears or is replaced.
     let entry = deps
         .connection_registry
         .get_entry(target)
-        .filter(|entry| entry.is_locally_hosted())?;
+        .filter(|entry| entry.is_locally_hosted());
+    let status = match (&deps.ingress_delivery_uow, authority) {
+        (Some(uow), _) => {
+            crate::ingress::live_delivery::live_delivery_status(
+                uow,
+                deps.ingress_delivery_stop.as_ref(),
+                context,
+                target,
+            )
+            .await
+        }
+        (None, Some(authority)) => authority.live_delivery_status(context, target).await,
+        (None, None) => return Some(FullJidDeliveryOutcome::MaybeCommitted),
+    };
+    match status {
+        Ok(Some(outcome)) => return Some(outcome),
+        Ok(None) => {}
+        Err(_) => return Some(FullJidDeliveryOutcome::MaybeCommitted),
+    }
+    let entry = entry?;
     let stream = entry.sm_stream_id();
     if context
         .dispatch_stream
@@ -1383,46 +1409,75 @@ pub(crate) async fn deliver_ordered_local_copy(
     {
         return Some(FullJidDeliveryOutcome::MaybeCommitted);
     }
-    match state
-        .deps
-        .protocol
-        .ingress
-        .socket_delivery_readiness(context, target, stream.as_ref(), None)
-        .await
-    {
-        Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
-            return Some(FullJidDeliveryOutcome::Delivered)
+    if !context.archive_positions.is_empty() {
+        let readiness = match (&deps.ingress_delivery_uow, authority) {
+            (Some(uow), _) => {
+                crate::ingress::socket_delivery_readiness(
+                    uow,
+                    context,
+                    target,
+                    stream.as_ref(),
+                    None,
+                )
+                .await
+            }
+            (None, Some(authority)) => {
+                authority
+                    .socket_delivery_readiness(context, target, stream.as_ref(), None)
+                    .await
+            }
+            (None, None) => return Some(FullJidDeliveryOutcome::MaybeCommitted),
+        };
+        match readiness {
+            Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+                return Some(FullJidDeliveryOutcome::Delivered)
+            }
+            Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
+                return Some(FullJidDeliveryOutcome::MaybeCommitted)
+            }
+            Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
         }
-        Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
-            return Some(FullJidDeliveryOutcome::MaybeCommitted)
-        }
-        Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
     }
     let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
     outbound.kind = kind;
     outbound.ingress_append =
         crate::ingress::identity::IngressAppendObligationRef::for_message(Some(context), stanza)
             .map(|obligation| obligation.into_relayed_for(target.clone()));
-    Some(
-        match deps.connection_registry.try_send_outbound_if_owner(
+    let enqueue = || {
+        let outcome = deps.connection_registry.try_send_outbound_if_owner(
             target,
             &entry.carbons_enabled,
             outbound,
-        ) {
-            waddle_xmpp::registry::BroadcastOutcome::Delivered => {
-                if let Some(kind) = waddle_xmpp::telemetry::messages::delivered_message_kind(stanza)
-                {
-                    waddle_xmpp::telemetry::messages::record_delivered_message(kind);
-                }
-                FullJidDeliveryOutcome::Delivered
+        );
+        if outcome == waddle_xmpp::registry::BroadcastOutcome::Delivered {
+            if let Some(kind) = waddle_xmpp::telemetry::messages::delivered_message_kind(stanza) {
+                waddle_xmpp::telemetry::messages::record_delivered_message(kind);
             }
-            waddle_xmpp::registry::BroadcastOutcome::DroppedFull => FullJidDeliveryOutcome::Dropped,
-            waddle_xmpp::registry::BroadcastOutcome::NotConnected
-            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {
-                FullJidDeliveryOutcome::Unavailable
-            }
-        },
-    )
+        }
+        outcome
+    };
+    let outcome = match (&deps.ingress_delivery_uow, authority) {
+        (Some(uow), _) => {
+            crate::ingress::live_delivery::accept_live_delivery(
+                uow,
+                deps.ingress_delivery_stop.as_ref(),
+                context,
+                target,
+                stanza,
+                enqueue,
+            )
+            .await
+        }
+        (None, Some(authority)) => {
+            authority
+                .accept_live_delivery(context, target, stanza, enqueue)
+                .await
+        }
+        (None, None) => FullJidDeliveryOutcome::MaybeCommitted,
+    };
+    // A closed or replaced queue was definitely not enqueued and its attempt
+    // was released. Preserve the keyed detached/relay fallback in the caller.
+    (outcome != FullJidDeliveryOutcome::Unavailable).then_some(outcome)
 }
 
 #[cfg(all(test, feature = "clustering"))]

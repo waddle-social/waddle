@@ -266,30 +266,18 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
 }
 
 /// Issue #1789: the socket node queues the frame's obligation on the live outbound
-/// entry, bound to the frame's resource and unverified. This is the only place the
+/// entry, canonically authorized and bound to the frame's resource. This is where the
 /// identity crosses from the wire into the queue a detach drain later reads.
 #[tokio::test]
 async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
-    use crate::ingress::identity::IngressAppendObligationRef;
-    use crate::ingress::EffectReceiptKey;
-    use crate::ingress_substrate::EffectReceiptKind;
-    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
-
-    let services = Arc::new(
-        services_with_claims(
-            origin_identity(),
-            receiver_identity(),
-            receiver_identity(),
-            test_peer_id(),
-        )
-        .await,
-    );
+    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
+    let (state, services) = canonical_remote_delivery_services(&fixture).await;
     let bridge = OrderedRelayDeliveryBridge::new(
         CancellationToken::new(),
         &ClusteringMessagingConfig::default(),
     );
     bridge.wire(Arc::clone(&services));
-    let target = target_full();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
     let (tx, mut rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
     let owner = entry.carbons_handle();
@@ -310,26 +298,15 @@ async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
         .get(&target)
         .expect("socket registration")
         .registration_id;
-    let obligation = IngressAppendObligationRef {
-        archive_positions: Vec::new(),
-        dispatch_stream: None,
-        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1789)),
-        sender_bare: sender_full().to_bare(),
-        receipt: EffectReceiptKey {
-            kind: EffectReceiptKind::from_storage(IngressEffectKind::RouteDirect.storage_tag()),
-            semantic_identity_hash: [89; 32],
-        },
-        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
-    };
+    let (obligation, stanza) =
+        canonical_remote_delivery(&fixture, &target, "queued-obligation").await;
 
     let reply = bridge
         .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
             frame: RemoteResourceOutboundFrame {
                 jid: target.clone(),
                 registration_id,
-                stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
-                    target.clone(),
-                ))))),
+                stanza: RemoteStanza(stanza),
                 kind: DeliveryKind::PeerStanza,
                 ingress_append: Some(obligation.clone()),
             },
@@ -343,6 +320,14 @@ async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
         outbound.ingress_append,
         Some(obligation.into_relayed_for(target))
     );
+    state
+        .deps
+        .protocol
+        .ingress
+        .drain_and_join(Duration::from_secs(1))
+        .await;
+    drop(state);
+    fixture.close().await;
 }
 
 #[derive(Clone, Copy)]
@@ -2471,26 +2456,16 @@ async fn relayed_ingress_backstop_timeout_is_metered_once() {
 #[tokio::test]
 async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope() {
     use crate::ingress::identity::IngressAppendObligationRef;
-    use crate::ingress::EffectReceiptKey;
-    use crate::ingress_substrate::EffectReceiptKind;
-    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
     use waddle_xmpp::registry::{GetUser, RegisterUserResource, TrySendDirect, TrySendPeer};
 
-    let services = Arc::new(
-        services_with_claims(
-            origin_identity(),
-            receiver_identity(),
-            receiver_identity(),
-            test_peer_id(),
-        )
-        .await,
-    );
+    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
+    let (state, services) = canonical_remote_delivery_services(&fixture).await;
     let bridge = OrderedRelayDeliveryBridge::new(
         CancellationToken::new(),
         &ClusteringMessagingConfig::default(),
     );
     bridge.wire(Arc::clone(&services));
-    let target = target_full();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
     let (mirror_tx, mut mirror_rx) = mpsc::channel(1);
     services
         .user_registry
@@ -2529,23 +2504,18 @@ async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope
         .get(&target)
         .expect("socket registration")
         .registration_id;
-    let obligation = IngressAppendObligationRef {
-        archive_positions: Vec::new(),
-        dispatch_stream: None,
-        message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1805)),
-        sender_bare: sender_full().to_bare(),
-        receipt: EffectReceiptKey {
-            kind: EffectReceiptKind::from_storage(IngressEffectKind::RouteDirect.storage_tag()),
-            semantic_identity_hash: [5; 32],
-        },
-        received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
-    }
-    .into_relayed_for(target.clone());
-    let mut message = Message::new(Some(target.clone().into()));
-    message.from = Some(sender_full().into());
-    let stanza = Stanza::Message(message);
-
     for kind in [DeliveryKind::DirectFrame, DeliveryKind::PeerStanza] {
+        let (obligation, stanza) = canonical_remote_delivery(
+            &fixture,
+            &target,
+            if kind == DeliveryKind::DirectFrame {
+                "direct"
+            } else {
+                "peer"
+            },
+        )
+        .await;
+        let obligation = obligation.into_relayed_for(target.clone());
         let outcome = match kind {
             DeliveryKind::DirectFrame => actor
                 .ask(TrySendDirect {
@@ -2596,4 +2566,68 @@ async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope
         assert_eq!(delivered.stanza.to_element(), stanza.to_element());
         assert_eq!(delivered.ingress_append, Some(obligation.clone()));
     }
+    state
+        .deps
+        .protocol
+        .ingress
+        .drain_and_join(Duration::from_secs(1))
+        .await;
+    drop(state);
+    fixture.close().await;
+}
+
+async fn canonical_remote_delivery_services(
+    fixture: &crate::ingress::test_support::IngressFixture,
+) -> (
+    Arc<crate::server::routes::websocket::WebSocketState>,
+    Arc<OrderedRelayDeliveryServices>,
+) {
+    let pool = crate::db::DatabasePool::new(
+        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("shared database");
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress(
+        Arc::new(pool), Arc::new(fixture.authority().await),
+    ).await;
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    (state, Arc::new(services))
+}
+
+async fn canonical_remote_delivery(
+    fixture: &crate::ingress::test_support::IngressFixture,
+    target: &jid::FullJid,
+    body: &str,
+) -> (crate::ingress::identity::IngressAppendObligationRef, Stanza) {
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+    let mut submission = fixture.submission(Some(body), body);
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: target.to_bare(),
+        fanout: vec![target.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
+    };
+    let receipt = crate::ingress::receipt_key(&intent).expect("receipt");
+    submission.plan.intents = vec![intent];
+    let decision = crate::ingress::commit::commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("canonical delivery");
+    (
+        crate::ingress::identity::IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
+            message_key: decision.message_key.expect("canonical key"),
+            sender_bare: submission.sender.to_bare(),
+            receipt,
+            received_at: None,
+        },
+        Stanza::Message(submission.plan.sanitized_message),
+    )
 }

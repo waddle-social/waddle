@@ -69,6 +69,12 @@ pub(super) async fn execute(
     };
     let mut immediate = deps.clone();
     immediate.effects = &ImmediateSink;
+    immediate.ingress_delivery_uow = Some(uow.clone());
+    if immediate.ingress_delivery_stop.is_none() {
+        immediate.ingress_delivery_stop = immediate
+            .web_socket_state
+            .map(|state| state.deps.protocol.ingress.delivery_stop_token());
+    }
     let mut destinations = Vec::with_capacity(resources.len());
     let mut persisted = Vec::new();
     let mut completion = SettledCompletion::Incomplete;
@@ -216,6 +222,47 @@ async fn append_resource(
     effect: &ExternalDeliveryEffect,
     resource: &FullJid,
 ) -> ResourceDelivery {
+    if let Some(context) = deps.ingress_append_context.as_ref() {
+        let status = match (&deps.ingress_delivery_uow, deps.web_socket_state) {
+            (Some(uow), _) => {
+                crate::ingress::live_delivery::live_delivery_status(
+                    uow,
+                    deps.ingress_delivery_stop.as_ref(),
+                    context,
+                    resource,
+                )
+                .await
+            }
+            (None, Some(state)) => {
+                state
+                    .deps
+                    .protocol
+                    .ingress
+                    .live_delivery_status(context, resource)
+                    .await
+            }
+            (None, None) => Err(IngressUowError::EffectIntentConflict),
+        };
+        match status {
+            Ok(Some(outcome)) => {
+                return ResourceDelivery {
+                    outcome,
+                    certainty: if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+                        DeliveryCertainty::Uncertain
+                    } else {
+                        DeliveryCertainty::Proven
+                    },
+                }
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return ResourceDelivery {
+                    outcome: FullJidDeliveryOutcome::MaybeCommitted,
+                    certainty: DeliveryCertainty::Uncertain,
+                }
+            }
+        }
+    }
     if let Some(outcome) = crate::server::routes::interpret::existing_ingress_delivery(
         deps.sm_session_registry,
         deps.ingress_append_context.as_ref(),
@@ -259,15 +306,7 @@ async fn append_resource(
         }
         ExternalDeliveryEffect::RouteToPeer { stanza, kind, .. } => match kind {
             PeerDeliveryKind::RegistryFrame => {
-                if deps
-                    .connection_registry
-                    .try_send_to(resource, *stanza.clone())
-                    == waddle_xmpp::registry::BroadcastOutcome::Delivered
-                {
-                    FullJidDeliveryOutcome::Delivered
-                } else {
-                    FullJidDeliveryOutcome::Unavailable
-                }
+                deliver_direct_to_full_locally(deps, resource, stanza).await
             }
             PeerDeliveryKind::PeerStanza => {
                 deliver_peer_to_full_with_registered_remote(deps, resource, stanza).await

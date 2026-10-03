@@ -28,6 +28,8 @@ pub use schema::initialize_room_observations;
 pub enum ObservationError {
     #[error("room observation database operation failed")]
     Database,
+    #[error("room observation node authority is no longer current")]
+    AuthorityStopped,
     #[error("stored room observation data is malformed")]
     Codec,
     #[error("room observation generation has conflicting identity")]
@@ -62,6 +64,7 @@ pub struct ObservationWork {
     pub source: RoomMessageSource,
     pub body: DisplayText,
     pub attempt: u32,
+    owner: waddle_xmpp::ownership::NodeIdentity,
 }
 
 pub(crate) struct CapturedRoomSource<'a> {
@@ -114,6 +117,16 @@ impl RoomObservationRepository {
         now_ms: i64,
     ) -> Result<Option<ObservationWork>, ObservationError> {
         work::claim(tx, subscription, now_ms).await
+    }
+
+    /// Commit a successful start before invoking the callback. Started work
+    /// is never reclaimed, even after lease expiry or process death.
+    pub async fn start(
+        tx: &mut super::IngressUowTransaction<'_>,
+        work: &ObservationWork,
+        now_ms: i64,
+    ) -> Result<bool, ObservationError> {
+        work::start(tx, work, now_ms).await
     }
 
     pub async fn finish(

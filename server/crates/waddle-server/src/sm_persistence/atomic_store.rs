@@ -75,11 +75,37 @@ pub(super) async fn store_session_atomic_with_ingress_append(
     )
 }
 
+pub(super) async fn store_session_atomic_with_ingress_delivery(
+    storage: &DatabaseSmPersistence,
+    session: PersistedSession,
+    unacked: Vec<PersistedUnackedStanza>,
+    append: PersistedIngressAppend,
+) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+    Ok(
+        match store_session_atomic_inner(
+            storage,
+            None,
+            session,
+            unacked,
+            Ledger::NewDelivery(Box::new(append)),
+        )
+        .await?
+        {
+            StoreOutcome::Committed { .. } => KeyedSnapshotOutcome::Committed,
+            StoreOutcome::ObligationAlreadyAllocated { accepting_stream } => {
+                KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream }
+            }
+        },
+    )
+}
+
 /// How a snapshot write touches the ingress allocation ledger.
 enum Ledger {
     Untouched,
     /// One obligation gates the whole write: a conflict commits nothing.
     Exclusive(Box<PersistedIngressAppend>),
+    /// A new delivery additionally excludes a standing live queue attempt.
+    NewDelivery(Box<PersistedIngressAppend>),
     /// Drained entries already hold counted sequences: a conflict withholds only its proof.
     Drained(Vec<PersistedIngressAppend>),
 }
@@ -112,9 +138,13 @@ async fn store_session_atomic_inner(
 
     let mut tx = storage
         .db
-        .begin()
+        .begin_immediate()
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+
+    if let Ledger::NewDelivery(append) = &ledger {
+        ingress_append::authorize_new_delivery(&mut tx, &append.key).await?;
+    }
 
     // Drop any pre-existing unacked rows for this stream_id
     // BEFORE the inserts so a previous `persist_delete_session`
@@ -230,7 +260,7 @@ async fn store_session_atomic_inner(
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
     }
-    if let Ledger::Exclusive(append) = ledger {
+    if let Ledger::Exclusive(append) | Ledger::NewDelivery(append) = ledger {
         match ingress_append::insert(&mut tx, &append).await {
             Ok(()) => {}
             Err(error) => {

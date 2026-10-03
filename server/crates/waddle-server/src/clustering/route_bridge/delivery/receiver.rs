@@ -110,7 +110,7 @@ async fn deliver_ordered_local_copy(
     context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     kind: DeliveryKind,
 ) -> Option<Result<(), OrderedRelayNackReason>> {
-    let context = context.filter(|context| !context.archive_positions.is_empty())?;
+    let context = context?;
     let Some(state) = services.web_socket_state.upgrade() else {
         return Some(Err(OrderedRelayNackReason::Unreachable));
     };

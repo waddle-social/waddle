@@ -67,33 +67,10 @@ impl SendAttemptRepository {
         if !owner.is_active() {
             return Err(IngressUowError::AuthorityStopped);
         }
-        lock(tx, obligation).await?;
-        let (key, clock) = dialect(tx);
-        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
-        let mut rows = tx
-            .transaction_mut()
-            .query(
-                &sql,
-                crate::db_params![
-                    obligation.message.to_storage().to_string(),
-                    obligation.receipt.kind.to_storage(),
-                    obligation.receipt.semantic_identity_hash.to_vec(),
-                    obligation.recipient.to_string()
-                ],
-            )
-            .await?;
-        if let Some(row) = rows.next().await? {
-            let state: i64 = row.get(0)?;
-            let expired: i64 = row.get(1)?;
-            match state {
-                0 if expired == 1 => {}
-                0 => return Ok(SendClaim::Busy),
-                1 => return Ok(SendClaim::Ambiguous),
-                2 => return Ok(SendClaim::Completed),
-                _ => return Err(IngressUowError::InvalidStoredSendAttempt),
-            }
+        if let Some(status) = Self::status(tx, obligation).await? {
+            return Ok(status);
         }
-        drop(rows);
+        let (key, clock) = dialect(tx);
         let lease = SendLease {
             obligation: obligation.clone(),
             owner: owner.clone(),
@@ -116,6 +93,77 @@ impl SendAttemptRepository {
             )
             .await?;
         Ok(SendClaim::Acquired(lease))
+    }
+
+    /// Inspect exclusion without claiming. The canonical lock also interlocks
+    /// this read with new detached custody allocations.
+    pub(crate) async fn status(
+        tx: &mut IngressUowTransaction<'_>,
+        obligation: &SendObligation,
+    ) -> Result<Option<SendClaim>, IngressUowError> {
+        lock(tx, obligation).await?;
+        let (key, clock) = dialect(tx);
+        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let mut rows = tx
+            .transaction_mut()
+            .query(
+                &sql,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let state: i64 = row.get(0)?;
+        let expired: i64 = row.get(1)?;
+        match state {
+            0 if expired == 1 => Ok(None),
+            0 => Ok(Some(SendClaim::Busy)),
+            1 => Ok(Some(SendClaim::Ambiguous)),
+            2 => Ok(Some(SendClaim::Completed)),
+            _ => Err(IngressUowError::InvalidStoredSendAttempt),
+        }
+    }
+
+    /// An SM append keeps custody even after its accepting socket disappears.
+    /// Read it under the SAME canonical lock as a live claim; do not consult the
+    /// in-memory SM registry from inside this transaction.
+    pub(crate) async fn has_custody(
+        tx: &mut IngressUowTransaction<'_>,
+        obligation: &SendObligation,
+    ) -> Result<bool, IngressUowError> {
+        lock(tx, obligation).await?;
+        let mut rows = tx.transaction_mut().query(
+            "SELECT 1 FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
+            crate::db_params![obligation.message.to_storage().to_string(), obligation.receipt.kind.to_storage(), obligation.receipt.semantic_identity_hash.to_vec(), obligation.recipient.to_string()]
+        ).await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    pub(crate) async fn has_resource_receipt(
+        tx: &mut IngressUowTransaction<'_>,
+        obligation: &SendObligation,
+    ) -> Result<bool, IngressUowError> {
+        let (key, _) = dialect(tx);
+        let sql = format!("SELECT 1 FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let mut rows = tx
+            .transaction_mut()
+            .query(
+                &sql,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
     }
 
     /// Commit this transition before queue invocation. A false result revokes

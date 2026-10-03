@@ -65,11 +65,23 @@ impl ExtensionManager {
             Ok(response) => {
                 validated_observation_result(response, |effect| actor.validate_effect(effect))
             }
-            Err(
-                error @ (ObservationFailure::TemporaryFailure
-                | ObservationFailure::DeadlineExceeded),
-            ) => RoomObservationOutcome::RetryableFailure(error),
-            Err(error) => RoomObservationOutcome::PermanentFailure(error),
+            Err(error) => invocation_failure(error),
+        }
+    }
+}
+
+fn invocation_failure(error: crate::actor::ObservationInvocationError) -> RoomObservationOutcome {
+    use crate::actor::ObservationInvocationError;
+    match error {
+        ObservationInvocationError::NotInvoked => RoomObservationOutcome::NotInvoked,
+        ObservationInvocationError::Invoked(
+            error @ (ObservationFailure::TemporaryFailure
+            | ObservationFailure::DeadlineExceeded
+            | ObservationFailure::RuntimeFailure
+            | ObservationFailure::ResourceLimit),
+        ) => RoomObservationOutcome::UnresolvedFailure(error),
+        ObservationInvocationError::Invoked(error) => {
+            RoomObservationOutcome::PermanentFailure(error)
         }
     }
 }
@@ -89,7 +101,7 @@ fn validated_observation_result(
             }
             ExtensionEffect::Noop => {}
             _ => {
-                return RoomObservationOutcome::PermanentFailure(ObservationFailure::InvalidResult)
+                return RoomObservationOutcome::PermanentFailure(ObservationFailure::InvalidResult);
             }
         }
     }
@@ -103,6 +115,32 @@ fn validated_observation_result(
 mod tests {
     use super::*;
     use crate::types::{ExtensionPayload, ExtensionResponse, PayloadNamespace, XmlElement};
+
+    #[test]
+    fn only_pre_invocation_admission_failure_can_retry() {
+        use crate::actor::ObservationInvocationError;
+        assert_eq!(
+            invocation_failure(ObservationInvocationError::NotInvoked),
+            RoomObservationOutcome::NotInvoked
+        );
+        for failure in [
+            ObservationFailure::TemporaryFailure,
+            ObservationFailure::DeadlineExceeded,
+            ObservationFailure::RuntimeFailure,
+            ObservationFailure::ResourceLimit,
+        ] {
+            assert_eq!(
+                invocation_failure(ObservationInvocationError::Invoked(failure)),
+                RoomObservationOutcome::UnresolvedFailure(failure)
+            );
+        }
+        assert_eq!(
+            invocation_failure(ObservationInvocationError::Invoked(
+                ObservationFailure::Denied
+            )),
+            RoomObservationOutcome::PermanentFailure(ObservationFailure::Denied)
+        );
+    }
 
     fn result_effect() -> ExtensionEffect {
         let namespace = PayloadNamespace::new("urn:test:room-result").expect("namespace");

@@ -72,6 +72,8 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
     due_at_ms BIGINT NOT NULL,
     lease_id TEXT,
     lease_until_ms BIGINT,
+    lease_node_id TEXT,
+    lease_node_incarnation TEXT,
     terminal_category TEXT,
     usage_json TEXT,
     UNIQUE (plugin_id, generation, room_jid, source_key, revision)
@@ -79,6 +81,40 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
         (),
     )
     .await?;
+    // This schema predates the migration ledger. Evolve existing installations
+    // under the same startup transaction/advisory lock as table creation.
+    if db.driver() == DatabaseDriver::Postgres {
+        tx.execute("ALTER TABLE extension_room_observation_work ADD COLUMN IF NOT EXISTS lease_node_id TEXT", ()).await?;
+        tx.execute("ALTER TABLE extension_room_observation_work ADD COLUMN IF NOT EXISTS lease_node_incarnation TEXT", ()).await?;
+    } else {
+        let mut rows = tx
+            .query("PRAGMA table_info(extension_room_observation_work)", ())
+            .await?;
+        let mut columns = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await? {
+            columns.insert(row.get::<String>(1)?);
+        }
+        drop(rows);
+        if !columns.contains("lease_node_id") {
+            tx.execute(
+                "ALTER TABLE extension_room_observation_work ADD COLUMN lease_node_id TEXT",
+                (),
+            )
+            .await?;
+        }
+        if !columns.contains("lease_node_incarnation") {
+            tx.execute("ALTER TABLE extension_room_observation_work ADD COLUMN lease_node_incarnation TEXT", ()).await?;
+        }
+    }
+    // Old releases could invoke callbacks while leased, then return them to
+    // pending after a guest temporary failure. Neither state proves the guest
+    // never ran. Preserve that ambiguity, including the original body/token,
+    // without a completion receipt. New admission-only retries retain both
+    // owner columns and are therefore excluded on subsequent startups.
+    tx.execute(
+        "UPDATE extension_room_observation_work SET status = 'started', terminal_category = 'legacy_unknown_attempt' WHERE (lease_node_id IS NULL OR lease_node_incarnation IS NULL) AND (status = 'leased' OR (status = 'pending' AND attempt > 0))",
+        (),
+    ).await?;
     tx.execute(
         r#"CREATE INDEX IF NOT EXISTS extension_room_observation_work_due
     ON extension_room_observation_work(plugin_id, room_jid, status, due_at_ms)"#,

@@ -2743,3 +2743,6 @@ async fn sqlite_unresolved_effects_distinguish_recovery_from_live_execution() {
     );
     fixture.close().await;
 }
+
+#[path = "execute_live_send_tests.rs"]
+mod live_send;

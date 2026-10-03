@@ -180,9 +180,7 @@ impl OrderedRelayDeliveryBridge {
                     ingress_append.as_ref(),
                 )
                 .await;
-                if super::ingress_append::requires_ordering_authority(ingress_append.as_ref())
-                    && ingress_append_context.is_none()
-                {
+                if ingress_append.is_some() && ingress_append_context.is_none() {
                     return remote_resource_route_reply(FullJidDeliveryOutcome::Unavailable.into());
                 }
                 let outcome = if let Some(remote) = self
@@ -388,20 +386,10 @@ impl OrderedRelayDeliveryBridge {
                 .filter(|registration| registration.registration_id == msg.frame.registration_id)
                 .cloned()
         };
-        let Some(registration) = registration else {
-            return RelayRemoteResourceFrameReply {
-                status: RelayRemoteResourceFrameStatus::Unavailable,
-            };
-        };
-        if let Some(obligation) = msg
-            .frame
-            .ingress_append
-            .as_ref()
-            .filter(|obligation| !obligation.archive_positions.is_empty())
-        {
+        if let Some(obligation) = msg.frame.ingress_append.as_ref() {
             let Some(state) = services.web_socket_state.upgrade() else {
                 return RelayRemoteResourceFrameReply {
-                    status: RelayRemoteResourceFrameStatus::Unavailable,
+                    status: RelayRemoteResourceFrameStatus::Backpressure,
                 };
             };
             let authority = async {
@@ -425,23 +413,50 @@ impl OrderedRelayDeliveryBridge {
             .await;
             if authority.is_err() {
                 return RelayRemoteResourceFrameReply {
-                    status: RelayRemoteResourceFrameStatus::Unavailable,
+                    status: RelayRemoteResourceFrameStatus::Backpressure,
                 };
             }
-            if !obligation.archive_positions.is_empty() {
-                let Some(entry) = services
-                    .connection_registry
-                    .entry_if_owner(&msg.frame.jid, &registration.owner)
-                else {
+            let context = obligation.clone().into_context();
+            match state
+                .deps
+                .protocol
+                .ingress
+                .live_delivery_status(&context, &msg.frame.jid)
+                .await
+            {
+                Ok(Some(outcome)) => return remote_frame_outcome(outcome),
+                Ok(None) => {}
+                Err(_) => {
                     return RelayRemoteResourceFrameReply {
-                        status: RelayRemoteResourceFrameStatus::Unavailable,
-                    };
+                        status: RelayRemoteResourceFrameStatus::Backpressure,
+                    }
+                }
+            }
+            let Some(registration) = registration else {
+                return RelayRemoteResourceFrameReply {
+                    status: RelayRemoteResourceFrameStatus::Unavailable,
                 };
-                let stream = entry.sm_stream_id();
-                let context = obligation.clone().into_context();
-                // This receiver has no enclosing execution round to recheck a
-                // transient predecessor. Keep its bounded probes request-local
-                // while retaining the captured socket owner until enqueue.
+            };
+            let Some(entry) = services
+                .connection_registry
+                .entry_if_owner(&msg.frame.jid, &registration.owner)
+            else {
+                return RelayRemoteResourceFrameReply {
+                    status: RelayRemoteResourceFrameStatus::Unavailable,
+                };
+            };
+            let stream = entry.sm_stream_id();
+            if context
+                .dispatch_stream
+                .as_ref()
+                .is_some_and(|expected| stream.as_ref() != Some(expected))
+            {
+                return RelayRemoteResourceFrameReply {
+                    status: RelayRemoteResourceFrameStatus::Backpressure,
+                };
+            }
+            if !context.archive_positions.is_empty() {
+                // Retain the captured socket owner across bounded predecessor probes.
                 let probe_budget = crate::ingress::DispatchProbeBudget::default();
                 match state
                     .deps
@@ -458,30 +473,42 @@ impl OrderedRelayDeliveryBridge {
                     Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
                         return RelayRemoteResourceFrameReply {
                             status: RelayRemoteResourceFrameStatus::Delivered,
-                        }
+                        };
                     }
                     Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
                     Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
                         return RelayRemoteResourceFrameReply {
                             status: RelayRemoteResourceFrameStatus::Backpressure,
-                        }
+                        };
                     }
                 }
             }
+            let mut outbound = OutboundStanza::new(msg.frame.stanza.0.clone());
+            outbound.kind = msg.frame.kind;
+            outbound.ingress_append =
+                Some(obligation.clone().into_relayed_for(msg.frame.jid.clone()));
+            return remote_frame_outcome(
+                state
+                    .deps
+                    .protocol
+                    .ingress
+                    .accept_live_delivery(&context, &msg.frame.jid, &msg.frame.stanza.0, || {
+                        services.connection_registry.try_send_outbound_if_owner(
+                            &msg.frame.jid,
+                            &registration.owner,
+                            outbound,
+                        )
+                    })
+                    .await,
+            );
         }
-        let outbound = OutboundStanza {
-            stanza: msg.frame.stanza.0,
-            kind: msg.frame.kind,
-            pending_row_id: None,
-            pending_row_original_receipt_at: None,
-            write_acceptance: None,
-            // Canonical positions are authorized before they can advance this
-            // socket's acceptance frontier.
-            ingress_append: msg
-                .frame
-                .ingress_append
-                .map(|obligation| obligation.into_relayed_for(msg.frame.jid.clone())),
+        let Some(registration) = registration else {
+            return RelayRemoteResourceFrameReply {
+                status: RelayRemoteResourceFrameStatus::Unavailable,
+            };
         };
+        let mut outbound = OutboundStanza::new(msg.frame.stanza.0);
+        outbound.kind = msg.frame.kind;
         let outcome = services.connection_registry.try_send_outbound_if_owner(
             &msg.frame.jid,
             &registration.owner,
@@ -755,4 +782,17 @@ pub(in super::super) fn remote_resource_frame(
             stanza,
         ),
     }
+}
+
+fn remote_frame_outcome(outcome: FullJidDeliveryOutcome) -> RelayRemoteResourceFrameReply {
+    let status = match outcome {
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+            RelayRemoteResourceFrameStatus::Delivered
+        }
+        FullJidDeliveryOutcome::Dropped | FullJidDeliveryOutcome::MaybeCommitted => {
+            RelayRemoteResourceFrameStatus::Backpressure
+        }
+        FullJidDeliveryOutcome::Unavailable => RelayRemoteResourceFrameStatus::Unavailable,
+    };
+    RelayRemoteResourceFrameReply { status }
 }

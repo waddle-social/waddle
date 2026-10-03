@@ -1011,3 +1011,235 @@ async fn sqlite_sequence_lookup_retains_terminal_and_distinct_allocations() {
     let storage = DatabaseSmPersistence::open(None).await.expect("storage");
     sequence_lookup_retains_terminal_and_distinct_allocations(&storage).await;
 }
+
+/// The canonical lock arbitrates live queue attempts against *new* detached
+/// delivery, while accepted frames retain their independent custody path.
+async fn live_attempt_interlock(
+    fixture: crate::ingress::test_support::IngressFixture,
+    storage: Box<dyn SmPersistenceStorage>,
+) {
+    use crate::ingress::{commit::commit_submission, receipt_key};
+    use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+    use waddle_xmpp::ownership::NodeIdentity;
+
+    let snapshot_storage = DatabaseSmPersistence::from_database(fixture.db.clone())
+        .await
+        .expect("SM storage");
+    for state in [0, 1, 2] {
+        let mut session = fixture_session(&format!("live-interlock-{state}"));
+        session.jid = "juliet@example.com/phone".parse().expect("recipient");
+        storage
+            .store_session_atomic(
+                session.clone(),
+                vec![fixture_unacked(session.stream_id.as_str(), 11)],
+            )
+            .await
+            .expect("baseline");
+        let before = snapshot(&snapshot_storage, &session.stream_id).await;
+        let intent = IngressEffectIntent::RouteDirect {
+            recipient: session.jid.to_bare(),
+            fanout: vec![session.jid.clone()],
+            route_identity: EffectMessageIdentity::capture_ordinal(1),
+        };
+        let mut submission = fixture.submission(None, "interlocked delivery");
+        submission.plan.intents = vec![intent.clone()];
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("canonical message");
+        let receipt = receipt_key(&intent).expect("receipt");
+        let obligation = SendObligation {
+            message: decision.message_key.expect("message"),
+            receipt,
+            recipient: session.jid.clone(),
+        };
+        let mut tx = fixture.uow.begin().await.expect("claim transaction");
+        let SendClaim::Acquired(lease) = SendAttemptRepository::claim(
+            &mut tx,
+            &obligation,
+            &NodeIdentity::new("interlock", "owner"),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("claim") else {
+            panic!("fresh lease")
+        };
+        if state > 0 {
+            assert!(SendAttemptRepository::start(&mut tx, &lease)
+                .await
+                .expect("start"));
+        }
+        if state > 1 {
+            assert!(SendAttemptRepository::complete(&mut tx, &lease)
+                .await
+                .expect("complete"));
+        }
+        let mut append = append_for(&session);
+        append.key = SmIngressAppendKey {
+            message_key: obligation.message,
+            kind: SmIngressReceiptKind::from_storage(obligation.receipt.kind.to_storage()),
+            semantic_identity_hash: obligation.receipt.semantic_identity_hash,
+            resource: session.jid.clone(),
+        };
+        session.outbound_count = 13;
+        let attempted_append = storage.store_session_atomic_with_ingress_delivery(
+            session.clone(),
+            vec![fixture_unacked(session.stream_id.as_str(), 13)],
+            append.clone(),
+        );
+        tokio::pin!(attempted_append);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut attempted_append)
+                .await
+                .is_err(),
+            "detached allocation must wait for the live claim transaction"
+        );
+        tx.commit().await.expect("commit attempt");
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut attempted_append)
+            .await
+            .expect("detached write resolves after live commit");
+        assert!(
+            matches!(result, Err(SmPersistenceError::IngressDeliveryBlocked)),
+            "live state {state} must not accept detached delivery: {result:?}"
+        );
+        assert_eq!(
+            snapshot(&snapshot_storage, &session.stream_id).await,
+            before
+        );
+        assert!(storage
+            .get_ingress_append(&append.key)
+            .await
+            .expect("ledger")
+            .is_none());
+        fixture
+            .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+            .await;
+        if state == 0 {
+            assert_eq!(
+                storage
+                    .store_session_atomic_with_ingress_delivery(
+                        session.clone(),
+                        vec![fixture_unacked(session.stream_id.as_str(), 13)],
+                        append.clone()
+                    )
+                    .await
+                    .expect("expired unstarted permits custody"),
+                KeyedSnapshotOutcome::Committed
+            );
+            // The old lease cannot start after the detached path took custody.
+            let mut tx = fixture.uow.begin().await.expect("stale start");
+            assert!(!SendAttemptRepository::start(&mut tx, &lease)
+                .await
+                .expect("stale start rejected"));
+            tx.commit().await.expect("commit stale start");
+        } else {
+            assert!(
+                matches!(
+                    storage
+                        .store_session_atomic_with_ingress_delivery(
+                            session.clone(),
+                            vec![],
+                            append.clone()
+                        )
+                        .await,
+                    Err(SmPersistenceError::IngressDeliveryBlocked)
+                ),
+                "expiry never clears an attempted delivery"
+            );
+            assert_eq!(
+                snapshot(&snapshot_storage, &session.stream_id).await,
+                before
+            );
+            assert_eq!(
+                storage
+                    .store_session_atomic_with_ingress_append(
+                        session.clone(),
+                        vec![fixture_unacked(session.stream_id.as_str(), 13)],
+                        append.clone()
+                    )
+                    .await
+                    .expect("already accepted frame must retain custody"),
+                KeyedSnapshotOutcome::Committed
+            );
+        }
+        assert_eq!(
+            storage
+                .get_ingress_append(&append.key)
+                .await
+                .expect("custody"),
+            Some(append)
+        );
+    }
+    let session = fixture_session("missing-canonical");
+    let append = append_for(&session);
+    assert!(storage
+        .store_session_atomic_with_ingress_delivery(session.clone(), vec![], append.clone())
+        .await
+        .is_err());
+    assert!(storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("missing session")
+        .is_none());
+    assert!(storage
+        .get_ingress_append(&append.key)
+        .await
+        .expect("missing custody")
+        .is_none());
+    drop(snapshot_storage);
+    drop(storage);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_live_attempt_blocks_new_detached_delivery() {
+    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
+    let storage = DatabaseSmPersistence::from_database(fixture.db.clone())
+        .await
+        .expect("SM storage");
+    live_attempt_interlock(fixture, Box::new(storage)).await;
+}
+
+#[tokio::test]
+async fn postgres_live_attempt_blocks_new_detached_delivery() {
+    if let Some(fixture) =
+        crate::ingress::test_support::IngressFixture::postgres("sm_live_interlock").await
+    {
+        let storage = DatabaseSmPersistence::from_database(fixture.db.clone())
+            .await
+            .expect("SM storage");
+        live_attempt_interlock(fixture, Box::new(storage)).await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_fenced_live_attempt_blocks_new_detached_delivery() {
+    use crate::clustering::claims::PostgresClaimStore;
+    use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, SharedNodeIdentity};
+    if let Some(fixture) =
+        crate::ingress::test_support::IngressFixture::postgres("sm_fenced_live_interlock").await
+    {
+        let fenced_db = Database::from_config(
+            "sm-fenced-live-interlock",
+            &DatabaseConfig::new(
+                DatabaseDriver::Postgres,
+                fixture.db.database_url().to_owned(),
+            )
+            .with_control_plane_pool(crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("fenced database with control-plane pool");
+        let claims = Arc::new(PostgresClaimStore::new(fenced_db.clone()));
+        claims.ensure_schema().await.expect("claim schema");
+        let storage = PostgresFencedSmPersistence::open(
+            fenced_db,
+            claims,
+            SharedNodeIdentity::new(NodeIdentity::new("interlock", "fenced-owner")),
+        )
+        .await
+        .expect("fenced SM storage");
+        live_attempt_interlock(fixture, Box::new(storage)).await;
+    }
+}

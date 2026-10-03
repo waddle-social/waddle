@@ -84,6 +84,10 @@ pub struct IngressUnitOfWork {
 }
 
 impl IngressUnitOfWork {
+    pub(crate) fn database(&self) -> &Database {
+        &self.db
+    }
+
     pub(crate) fn enable_room_observations(&self) {
         self.observations
             .store(true, std::sync::atomic::Ordering::Release);

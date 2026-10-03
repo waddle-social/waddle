@@ -43,7 +43,7 @@ pub(super) async fn run(
                         (id, false)
                     }
                     Err(error) => {
-                        tracing::warn!(plugin = %observer.plugin, cancelled = error.is_cancelled(), "room observation task ended unexpectedly; lease will recover");
+                        tracing::warn!(plugin = %observer.plugin, cancelled = error.is_cancelled(), "room observation task ended unexpectedly; started callbacks will not replay");
                         (error.id(), false)
                     }
                 };
@@ -131,14 +131,23 @@ async fn process_room(
     let Some(work) = work else {
         return Ok(false);
     };
-    super::telemetry::started(&work.source.observed_at, work.attempt);
+    let mut tx = authority.observation_transaction().await?;
+    let may_invoke =
+        RoomObservationRepository::start(&mut tx, &work, crate::time::now_ms()).await?;
     let started = std::time::Instant::now();
-    let outcome = state
-        .deps
-        .protocol
-        .extension_manager
-        .observe_room_message(subscription, work.source.clone(), work.body.clone())
-        .await;
+    let outcome = invoke_after_commit(tx, may_invoke, async || {
+        super::telemetry::started(&work.source.observed_at, work.attempt);
+        state
+            .deps
+            .protocol
+            .extension_manager
+            .observe_room_message(subscription, work.source.clone(), work.body.clone())
+            .await
+    })
+    .await?;
+    let Some(outcome) = outcome else {
+        return Ok(false);
+    };
     let duration = started.elapsed();
     let mut tx = authority.observation_transaction().await?;
     let saved =
@@ -156,3 +165,22 @@ async fn process_room(
     }
     Ok(saved)
 }
+
+/// The callback must not even be constructed until the started marker commits.
+/// Cancellation on either side of this await leaves safe durable evidence:
+/// a reclaimable reservation before commit, an unresolved start afterwards.
+async fn invoke_after_commit(
+    tx: crate::ingress_uow::IngressUowTransaction<'_>,
+    may_invoke: bool,
+    invoke: impl AsyncFnOnce() -> waddle_extensions::RoomObservationOutcome,
+) -> Result<Option<waddle_extensions::RoomObservationOutcome>, ObservationRuntimeError> {
+    tx.commit().await?;
+    if !may_invoke {
+        return Ok(None);
+    }
+    Ok(Some(invoke().await))
+}
+
+#[cfg(test)]
+#[path = "tests/invocation.rs"]
+mod tests;

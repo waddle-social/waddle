@@ -4418,6 +4418,7 @@ struct GatedSnapshotPersistence {
     commit_then_gate: std::sync::atomic::AtomicBool,
     armed: std::sync::atomic::AtomicBool,
     fail_after_gate: std::sync::atomic::AtomicBool,
+    block_new_delivery: std::sync::atomic::AtomicBool,
     reached: tokio::sync::Notify,
     proceed: tokio::sync::Notify,
 }
@@ -4430,6 +4431,7 @@ impl GatedSnapshotPersistence {
             commit_then_gate: std::sync::atomic::AtomicBool::new(false),
             armed: std::sync::atomic::AtomicBool::new(false),
             fail_after_gate: std::sync::atomic::AtomicBool::new(false),
+            block_new_delivery: std::sync::atomic::AtomicBool::new(false),
             reached: tokio::sync::Notify::new(),
             proceed: tokio::sync::Notify::new(),
         }
@@ -4555,6 +4557,25 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
         super::super::persistence::SmPersistenceError,
     > {
         self.inner.get_session_principal(stream_id).await
+    }
+
+    async fn store_session_atomic_with_ingress_delivery(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        if self
+            .block_new_delivery
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(super::super::persistence::SmPersistenceError::IngressDeliveryBlocked);
+        }
+        self.store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
     }
 
     async fn store_session_atomic_with_ingress_append(

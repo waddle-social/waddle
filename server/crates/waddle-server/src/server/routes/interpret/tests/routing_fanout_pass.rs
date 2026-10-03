@@ -97,6 +97,8 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
     let dispatcher = pipelined_dispatcher();
     let deps = Deps {
         dispatch_probe_budget: None,
+        ingress_delivery_uow: None,
+        ingress_delivery_stop: None,
         delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         connection_registry: &registry,
         user_registry: Some(&user_registry),
