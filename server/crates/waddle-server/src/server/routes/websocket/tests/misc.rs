@@ -159,3 +159,64 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
         "non-default channels still require channel permissions"
     );
 }
+
+/// RFC 6120 §8.3: a subscribe whose contact lookup fails is answered with a
+/// retryable error instead of silence; the other subscription stanzas are
+/// still dropped.
+#[tokio::test]
+async fn subscribe_contact_lookup_failure_answers_with_a_wait_error() {
+    let state = create_test_websocket_state().await;
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice");
+    let (tx, _rx) = mpsc::channel::<waddle_xmpp::registry::OutboundStanza>(16);
+    let owner = register_test_connection(&state, &alice, tx).await;
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(alice.clone(), false);
+    conn.registry_owner = Some(owner);
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("database")
+        .execute("DROP TABLE native_users", crate::db_params![])
+        .await
+        .expect("break the account lookup");
+
+    let frames = handle_xmpp_frame(
+        r#"<presence xmlns="jabber:client" type="subscribe" id="sub-1" to="bob@example.com"/>"#,
+        "example.com",
+        &state,
+        &mut conn,
+    )
+    .await;
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    let reply = Element::from_str(&frames[0]).expect("presence reply");
+    assert_eq!(reply.name(), "presence");
+    assert_eq!(reply.attr("type"), Some("error"), "{reply:?}");
+    assert_eq!(reply.attr("id"), Some("sub-1"), "{reply:?}");
+    assert_eq!(reply.attr("from"), Some("bob@example.com"), "{reply:?}");
+    let error = reply
+        .get_child("error", "jabber:client")
+        .expect("stanza error");
+    assert_eq!(error.attr("type"), Some("wait"), "{reply:?}");
+    assert!(
+        error
+            .get_child(
+                "internal-server-error",
+                "urn:ietf:params:xml:ns:xmpp-stanzas"
+            )
+            .is_some(),
+        "{reply:?}"
+    );
+
+    let frames = handle_xmpp_frame(
+        r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+        "example.com",
+        &state,
+        &mut conn,
+    )
+    .await;
+    assert!(frames.is_empty(), "{frames:?}");
+}

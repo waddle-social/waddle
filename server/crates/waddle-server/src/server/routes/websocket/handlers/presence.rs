@@ -434,9 +434,24 @@ async fn handle_presence_impl(
                     warn!(
                         error = %error,
                         to = %request.to,
-                        "subscription contact lookup failed; dropping presence"
+                        "subscription contact lookup failed"
                     );
-                    return vec![];
+                    if request.subscription_type != SubscriptionType::Subscribe {
+                        return vec![];
+                    }
+                    // RFC 6120 §8.3: the request is answered, retryably.
+                    let mut reply =
+                        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Error);
+                    reply.id = presence.id.clone();
+                    reply.from = Some(Jid::from(request.to.clone()));
+                    reply.to = Some(Jid::from(sender_jid.clone()));
+                    reply.payloads.push(Element::from(StanzaError::new(
+                        ErrorType::Wait,
+                        DefinedCondition::InternalServerError,
+                        "en",
+                        "Contact lookup failed; retry later.",
+                    )));
+                    return vec![stanza_to_xml(&Stanza::Presence(reply))];
                 }
             }
             if try_handle_remote_subscription_presence(
