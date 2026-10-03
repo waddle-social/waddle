@@ -244,6 +244,8 @@ impl Drop for BotRoomCleanup {
         }
         self.held.generation = self.held.generation.wrapping_add(1);
         let generation = self.held.generation;
+        // ponytail: one sleeping task per send, superseded ones wake to no-op;
+        // keep one timer per bot/room if bots post in large bursts.
         let deadline = tokio::time::Instant::now() + BOT_LINGER;
         let state = Arc::clone(&self.state);
         let (plugin, room, sender) = (self.plugin.clone(), self.room.clone(), self.sender.clone());
