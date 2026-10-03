@@ -33,6 +33,8 @@ export interface PeopleRailPerson {
 
 export interface MemberCardModel extends PeopleRailPerson {
   affiliation: MemberSummary["affiliation"] | null;
+  /** A server-hosted bot: no presence, no DM. Listed apart from people. */
+  bot: boolean;
 }
 
 export interface PeopleRailGroups {
@@ -44,6 +46,8 @@ export interface PeopleRailGroups {
   around: PeopleRailPerson[];
   /** Roster contacts and DM peers who are away, offline, or unknown. */
   awayAndOffline: PeopleRailPerson[];
+  /** Known bots, in no presence bucket: their room presence only says when they last posted. */
+  bots: PeopleRailPerson[];
 }
 
 export interface PeopleRailSources {
@@ -246,11 +250,16 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
     return memberIndex.get(jid)?.username ?? fallback;
   }
 
-  function claim(jid: string): boolean {
-    // A bot takes no DM, and every rail entry is a "Message" button.
-    if (!jid || jid === selfKey || seen.has(jid) || isBotJid(jid)) return false;
+  const bots: PeopleRailPerson[] = [];
+
+  function claim(jid: string, fallbackName = jid): boolean {
+    if (!jid || jid === selfKey || seen.has(jid)) return false;
     seen.add(jid);
-    return true;
+    if (!isBotJid(jid)) return true;
+    // A bot takes no DM and joins a room only to post, so it gets no
+    // status and no presence bucket: the rail lists it apart.
+    bots.push({ jid, name: knownName(jid, fallbackName), presence: undefined, status: "offline", statusText: null, inCall: false });
+    return false;
   }
 
   // ── In a huddle ────────────────────────────────────────────────────
@@ -268,7 +277,7 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
       const realJid = mapped ?? owner?.realJid;
       if (!realJid) continue; // nick-only participants cannot be keyed honestly
       const jid = bare(realJid);
-      if (!claim(jid)) continue;
+      if (!claim(jid, nick)) continue;
       const speaking = sources.speakingJids.has(jid);
       const status: PeopleRailStatus = speaking ? "speaking" : "in-huddle";
       huddle.push({
@@ -302,11 +311,11 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
   const room: PeopleRailPerson[] = [];
   if (sources.activeRoomJid) {
     for (const [nick, occupantPresence] of Object.entries(sources.roomPresence)) {
-      if (occupantPresence === "offline") continue;
       const realJid = sources.authorJidByNick[nick];
       if (!realJid) continue;
       const jid = bare(realJid);
-      if (!claim(jid)) continue;
+      if (occupantPresence === "offline" && !isBotJid(jid)) continue;
+      if (!claim(jid, nick)) continue;
       const status = statusFromPresence(occupantPresence);
       room.push({
         jid,
@@ -341,8 +350,9 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
   }
   around.sort(comparePeople);
   awayAndOffline.sort(comparePeople);
+  bots.sort(comparePeople);
 
-  return { huddle, room, around, awayAndOffline };
+  return { huddle, room, around, awayAndOffline, bots };
 }
 
 /** Case-insensitive client-side filter over name and JID. */
@@ -392,6 +402,29 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
     return statusFromPresence(presence);
   }
 
+  function card(
+    jid: string,
+    name: string,
+    presence: OccupantPresence | undefined,
+    affiliation: MemberCardModel["affiliation"],
+  ): MemberCardModel {
+    // A bot's presence only says when it last posted: no status, no bucket.
+    if (isBotJid(jid)) {
+      return { jid, name, presence: undefined, status: "offline", statusText: null, inCall: false, affiliation, bot: true };
+    }
+    const status = statusFor(jid, presence);
+    return {
+      jid,
+      name,
+      presence,
+      status,
+      statusText: statusText(status),
+      inCall: sources.huddleJids.has(jid) || sources.peerInCall(jid),
+      affiliation,
+      bot: false,
+    };
+  }
+
   if (sources.roomActive) {
     for (const member of sources.members) {
       const jid = bare(member.jid);
@@ -401,16 +434,7 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
       const presence = (nick ? sources.roomPresence[nick] : undefined)
         ?? presenceFromShow(conversationByJid.get(jid)?.presenceShow)
         ?? presenceFromShow(contactByJid.get(jid)?.presenceShow);
-      const status = statusFor(jid, presence);
-      cards.push({
-        jid,
-        name: member.username || nick || jid,
-        presence,
-        status,
-        statusText: statusText(status),
-        inCall: sources.huddleJids.has(jid) || sources.peerInCall(jid),
-        affiliation: member.affiliation,
-      });
+      cards.push(card(jid, member.username || nick || jid, presence, member.affiliation));
     }
   } else {
     const jids = new Set<string>([...contactByJid.keys(), ...conversationByJid.keys()]);
@@ -420,16 +444,7 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
       const contact = contactByJid.get(jid);
       const conversation = conversationByJid.get(jid);
       const presence = presenceFromShow(conversation?.presenceShow) ?? presenceFromShow(contact?.presenceShow);
-      const status = statusFor(jid, presence);
-      cards.push({
-        jid,
-        name: contact?.name || conversation?.peerUsername || contact?.username || jid,
-        presence,
-        status,
-        statusText: statusText(status),
-        inCall: sources.huddleJids.has(jid) || sources.peerInCall(jid),
-        affiliation: null,
-      });
+      cards.push(card(jid, contact?.name || conversation?.peerUsername || contact?.username || jid, presence, null));
     }
   }
   cards.sort(comparePeople);

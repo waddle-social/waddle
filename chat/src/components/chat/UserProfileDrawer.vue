@@ -104,7 +104,7 @@ const hasVCardSection = computed(
         <UserAvatar :name="username" :jid="avatarJid ?? null" size="lg" :presence="presence" />
         <div>
           <div class="type-card-title">{{ username }}</div>
-          <div class="type-caption text-muted-foreground">{{ presenceText ?? "offline" }}</div>
+          <div v-if="!isBotJid(jid)" class="type-caption text-muted-foreground">{{ presenceText ?? "offline" }}</div>
         </div>
       </div>
 

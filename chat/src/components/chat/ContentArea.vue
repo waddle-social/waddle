@@ -189,12 +189,14 @@ const channelHeaderMembers = computed<ChannelHeaderMember[]>(() => {
   for (const [nick, p] of Object.entries(presence)) {
     if (me && nick === me) continue;
     const jid = props.authorJidByNick?.[nick];
+    const bot = isBotJid(jid);
     members.push({
       nick,
       // A bot takes no DM: without a jid the avatar opens the room details instead.
-      jid: isBotJid(jid) ? undefined : jid,
+      jid: bot ? undefined : jid,
       avatarJid: roomOccupantAvatarJid(props.roomJid, nick),
-      presence: p,
+      // A bot's presence only says when it last posted: it has no status.
+      presence: bot ? undefined : p,
     });
   }
   return members;

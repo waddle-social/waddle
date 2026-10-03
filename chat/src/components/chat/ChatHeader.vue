@@ -31,7 +31,8 @@ export interface ChannelHeaderMember {
   jid?: string;
   /** Real bare JID disclosed for the occupant, for the avatar; `null` = initials. */
   avatarJid: string | null;
-  presence: OccupantPresence;
+  /** Undefined for a bot, which has no status. */
+  presence?: OccupantPresence;
 }
 
 const props = withDefaults(defineProps<{
@@ -80,7 +81,7 @@ const MAX_HEADER_AVATARS = 4;
 
 const sortedMembers = computed<ChannelHeaderMember[]>(() => {
   const list = props.members ?? [];
-  const rank = (p: OccupantPresence) => {
+  const rank = (p?: OccupantPresence) => {
     switch (p) {
       case "online": return 0;
       case "dnd":    return 1;
@@ -409,8 +410,8 @@ const memberButtonCopy = computed(() => {
                   v-for="member in visibleMembers"
                   :key="`hdr-avatar:${member.nick}`"
                   class="chat-presence-stack__avatar-wrap"
-                  :class="`chat-presence-stack__avatar-wrap--${member.presence}`"
-                  :title="`${member.nick} · ${presenceLabel(member.presence)}`"
+                  :class="member.presence && `chat-presence-stack__avatar-wrap--${member.presence}`"
+                  :title="member.presence ? `${member.nick} · ${presenceLabel(member.presence)}` : member.nick"
                   tabindex="0"
                   @click.stop="onAvatarClick(member)"
                   @keydown.enter.stop="onAvatarClick(member)"

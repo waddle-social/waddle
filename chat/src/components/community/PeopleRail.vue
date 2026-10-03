@@ -66,6 +66,7 @@ const huddle = computed(() => filterPeople(groups.value.huddle, query.value));
 const room = computed(() => filterPeople(groups.value.room, query.value));
 const around = computed(() => filterPeople(groups.value.around, query.value));
 const awayAndOffline = computed(() => filterPeople(groups.value.awayAndOffline, query.value));
+const bots = computed(() => filterPeople(groups.value.bots, query.value));
 const roomTitle = computed(() => activeRoomChannel.value ? "In this room" : "");
 
 function openPerson(jid: string) {
@@ -118,6 +119,7 @@ function openPerson(jid: string) {
         collapsible
         @select="openPerson"
       />
+      <PeopleRailGroup v-if="bots.length > 0" title="Bots" :count="bots.length" :people="bots" bots />
     </div>
   </div>
 </template>

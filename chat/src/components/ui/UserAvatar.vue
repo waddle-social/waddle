@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { avatarStore } from "@/lib/avatars/avatar-store";
+import { isBotJid } from "@/lib/avatars/author-jid";
 import { useAvatarUrl } from "@/lib/avatars/use-avatar-url";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
@@ -26,6 +27,8 @@ const props = defineProps<{
   speaking?: boolean;
 }>();
 
+// A bot's room presence only says when it last posted: never show a status.
+const bot = computed(() => isBotJid(props.jid));
 const storeSrc = useAvatarUrl(() => props.jid);
 const src = computed(() => {
   if (storeSrc.value) return storeSrc.value;
@@ -39,8 +42,8 @@ const src = computed(() => {
     :name="name"
     :src="src"
     :size="size"
-    :presence="presence"
-    :last-seen="lastSeen"
+    :presence="bot ? undefined : presence"
+    :last-seen="bot ? undefined : lastSeen"
     :in-call="inCall"
     :huddle="huddle"
     :speaking="speaking"
