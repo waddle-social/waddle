@@ -37,7 +37,7 @@ impl BotRoomLocks {
         let lock = self
             .entries
             .entry((plugin.clone(), room.clone()))
-            .or_insert_with(Default::default)
+            .or_default()
             .clone();
         lock.lock_owned().await
     }
