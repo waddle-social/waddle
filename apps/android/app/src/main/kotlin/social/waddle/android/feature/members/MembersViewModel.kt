@@ -11,12 +11,12 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.client.RoomAdminResult
+import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.canManageMembersOf
 import social.waddle.android.client.hasBotHat
@@ -80,6 +80,9 @@ class MembersViewModel(
     private var searchJob: Job? = null
     private var searchTicket = 0
 
+    /** Real bot JIDs already asked about this load: one refetch per missing JID. */
+    private val requestedBots = HashSet<String>()
+
     private val _actionFailures = MutableSharedFlow<RoomAdminResult>(extraBufferCapacity = 4)
 
     /** Refused/failed member actions, for the screen's snackbar. */
@@ -104,21 +107,31 @@ class MembersViewModel(
 
     init {
         refresh()
-        // A bot posts through momentary occupancy: its bot-hat presence
-        // can arrive before the room's bot list names it, so re-ask.
         viewModelScope.launch {
-            sessionManager.presenceStore.botJids.drop(1).collect { hatLearned ->
-                val listed = sessionManager.roomMembersStore.rooms.value[roomJid]
-                    ?.bots.orEmpty().mapTo(HashSet()) { normalizedBareJid(it.jid) }
-                if (hatLearned.any { normalizedBareJid(it) !in listed }) {
-                    sessionManager.refreshRoomBots(roomJid)
-                }
+            sessionManager.events.collect { event ->
+                if (event is XmppEvent.Presence) refreshBotsIfUndeclared(event.presence)
             }
         }
     }
 
+    /**
+     * A bot joins a room for one send and leaves, and the server records
+     * it in the room's bot list at join. So a bot-hatted presence here —
+     * available or unavailable — whose real JID the list does not name
+     * means the list is stale: ask again, once per such JID per load.
+     */
+    private fun refreshBotsIfUndeclared(presence: WaddlePresence) {
+        if (presence.from?.let(::bareJidOf) != roomJid || !hasBotHat(presence.hats)) return
+        val bot = presence.mucJid?.let(::normalizedBareJid) ?: return
+        val listed = sessionManager.roomMembersStore.rooms.value[roomJid]
+            ?.bots.orEmpty().mapTo(HashSet()) { normalizedBareJid(it.jid) }
+        if (bot in listed || !requestedBots.add(bot)) return
+        viewModelScope.launch { sessionManager.refreshRoomBots(roomJid) }
+    }
+
     /** Re-run the four-tier §9.5 fan-out into the members store. */
     fun refresh() {
+        requestedBots.clear()
         viewModelScope.launch { sessionManager.refreshRoomMembers(roomJid) }
     }
 

@@ -154,9 +154,14 @@ class MembersViewModelTest {
     private fun bot(jid: String, name: String?) = WaddleRoomBot(jid = jid, name = name)
 
     /** A bot's transient occupancy: joins hatted with no affiliation. */
-    private fun botPresence(nick: String, jid: String, type: String = "available") = WaddleClientEvent.Presence(
+    private fun botPresence(
+        nick: String,
+        jid: String,
+        type: String = "available",
+        room: String = ROOM,
+    ) = WaddleClientEvent.Presence(
         testPresence(
-            from = "$ROOM/$nick",
+            from = "$room/$nick",
             presenceType = type,
             mucAffiliation = WaddleMucAffiliation.NONE,
             mucJid = "$jid/bot",
@@ -252,6 +257,71 @@ class MembersViewModelTest {
     }
 
     @Test
+    fun `a bot already learned in another room still refetches when it first posts here`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        // alpha is hat-learned session-wide from a different room.
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", room = OTHER_ROOM))
+        runCurrent()
+        val viewModel = harness.viewModel()
+        runCurrent()
+        val initialFetches = harness.client.listRoomBotsCalls.size
+
+        // Another room's bot presence says nothing about this room's list.
+        harness.factory.emit(botPresence("beta", "beta@extensions.waddle.test", room = OTHER_ROOM))
+        runCurrent()
+        assertEquals(initialFetches, harness.client.listRoomBotsCalls.size)
+
+        // The server records alpha in this room at join; the list names it only now.
+        harness.client.roomBots = mapOf(ROOM to listOf(bot("alpha@extensions.waddle.test", "Alpha")))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+        assertEquals(listOf("Alpha"), viewModel.uiState.value.bots.map { it.displayName })
+    }
+
+    @Test
+    fun `an unavailable bot presence for an unlisted jid refetches the room bots`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = harness.viewModel()
+        runCurrent()
+        val initialFetches = harness.client.listRoomBotsCalls.size
+
+        // The screen opened mid-send: only the bot's leave is seen.
+        harness.client.roomBots = mapOf(ROOM to listOf(bot("alpha@extensions.waddle.test", "Alpha")))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
+        runCurrent()
+
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+        assertEquals(listOf("Alpha"), viewModel.uiState.value.bots.map { it.displayName })
+    }
+
+    @Test
+    fun `a bot the list still omits refetches once per load, not per presence`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = harness.viewModel()
+        runCurrent()
+        val initialFetches = harness.client.listRoomBotsCalls.size
+
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+        assertEquals(initialFetches + 1, harness.client.listRoomBotsCalls.size)
+
+        // A fresh load asks again; the reload itself fetches the bots too.
+        viewModel.refresh()
+        runCurrent()
+        val afterReload = harness.client.listRoomBotsCalls.size
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        runCurrent()
+        assertEquals(afterReload + 1, harness.client.listRoomBotsCalls.size)
+    }
+
+    @Test
     fun `ban and remove map onto outcast and none affiliation sets`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
@@ -343,5 +413,6 @@ class MembersViewModelTest {
 
     private companion object {
         const val ROOM = "general@muc.waddle.test"
+        const val OTHER_ROOM = "random@muc.waddle.test"
     }
 }
