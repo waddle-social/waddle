@@ -1195,6 +1195,240 @@ async fn handle_iq_disco_items_for_extension_bots_are_empty() {
     }
 }
 
+/// `(jid, name, node)` of each disco#items item.
+fn named_disco_items_for_test(query: &Element) -> Vec<(String, Option<String>)> {
+    query
+        .children()
+        .filter(|child| child.name() == "item")
+        .map(|child| {
+            assert_eq!(child.attr("node"), None, "a bot item names no node");
+            (
+                child.attr("jid").expect("item jid").to_owned(),
+                child.attr("name").map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// XEP-0030 on a room JID, node `urn:waddle:room:bots:0`: the installed,
+/// unbanned bots that have posted in the room, by bare JID and display name,
+/// for anyone who may enter it. Others get an empty list. An unknown node on
+/// the room does not exist.
+#[tokio::test]
+async fn handle_iq_disco_items_lists_room_bots() {
+    use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
+    let state = create_test_websocket_state_with_fixture_bot().await;
+    upsert_test_channel(state.as_ref(), "bot-room", true).await;
+    let room: BareJid = "bot-room@muc.example.com".parse().expect("room");
+    let member: FullJid = "alice@example.com/web".parse().expect("alice");
+    let stranger: FullJid = "mallory@example.com/web".parse().expect("mallory");
+    let permissions = &state.deps.app_state.permission_actor;
+    permissions
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "bot-room"),
+                Relation::new("member"),
+                Subject::user(member.to_bare().to_string()),
+            ),
+        })
+        .await
+        .expect("member tuple");
+    let db = state.deps.app_state.db_pool.global();
+    let fixture = waddle_extensions::PluginId::new(FIXTURE_BOT_PLUGIN).expect("plugin");
+    for plugin in [
+        fixture.clone(),
+        waddle_extensions::PluginId::new("uninstalled").expect("plugin"),
+    ] {
+        crate::server::extension_bot_rooms::record(db, &room, &plugin)
+            .await
+            .expect("record bot room");
+    }
+    let bot = format!(
+        "{FIXTURE_BOT_PLUGIN}@{}",
+        state.deps.service_domains.extensions
+    );
+    let name =
+        crate::server::extension_bot::bot_name(&state.deps.protocol.extension_manager, &fixture);
+    let list = |requester: &FullJid| {
+        let (state, phase) = (Arc::clone(&state), ready_phase(requester));
+        async move {
+            let reply = disco_reply_for_test(
+                &state,
+                &phase,
+                &disco_items_iq_frame(
+                    "room-bots",
+                    "bot-room@muc.example.com",
+                    Some(NODE_WADDLE_ROOM_BOTS),
+                ),
+            )
+            .await;
+            assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+            let query = reply
+                .get_child("query", waddle_xmpp::disco::DISCO_ITEMS_NS)
+                .expect("disco#items result");
+            assert_eq!(query.attr("node"), Some(NODE_WADDLE_ROOM_BOTS));
+            named_disco_items_for_test(query)
+        }
+    };
+
+    assert_eq!(
+        list(&member).await,
+        [(bot.clone(), Some(name))],
+        "the installed bot, not the uninstalled plugin"
+    );
+    assert!(
+        list(&stranger).await.is_empty(),
+        "a non-member of a members-only room sees none"
+    );
+
+    permissions
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "bot-room"),
+                Relation::new("outcast"),
+                Subject::user(bot),
+            ),
+        })
+        .await
+        .expect("ban the bot");
+    assert!(list(&member).await.is_empty(), "a banned bot is not listed");
+
+    // XEP-0030 §4.1: an unknown node is not the server's service list.
+    for target in [
+        "bot-room@muc.example.com",
+        "alice@example.com",
+        "example.com",
+    ] {
+        let reply = disco_reply_for_test(
+            &state,
+            &ready_phase(&member),
+            &disco_items_iq_frame("unknown-node", target, Some("urn:example:unknown")),
+        )
+        .await;
+        assert_item_not_found_for_test(&reply, target);
+    }
+}
+
+fn pubsub_items_iq_frame(id: &str, to: &str, node: &str) -> String {
+    let items = Element::builder("items", waddle_xmpp::pubsub::NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .build();
+    stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination")),
+        id: id.to_string(),
+        payload: Element::builder("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+            .append(items)
+            .build(),
+    })))
+}
+
+/// The single PEP item the server returns for `node` on `to`.
+async fn pep_item_for_test(
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    to: &str,
+    node: &str,
+) -> Element {
+    let reply =
+        disco_reply_for_test(state, phase, &pubsub_items_iq_frame("pep-bot", to, node)).await;
+    assert_eq!(reply.attr("type"), Some("result"), "{node}: {reply:?}");
+    let items = reply
+        .get_child("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", waddle_xmpp::pubsub::NS_PUBSUB))
+        .expect("items");
+    assert_eq!(items.attr("node"), Some(node));
+    let all: Vec<_> = items.children().collect();
+    assert_eq!(all.len(), 1, "{node}: exactly one item: {reply:?}");
+    assert_eq!(all[0].attr("id"), Some("current"));
+    all[0].children().next().expect("item payload").clone()
+}
+
+/// XEP-0054, XEP-0292 and XEP-0084 for an extension bot, which has no account:
+/// the server answers from its manifest. vcard-temp carries FN (and DESC),
+/// the vCard4 PEP node one `current` item with fn (and note), the avatar
+/// metadata node one item with publishing disabled. Other PEP nodes and
+/// unknown bots do not exist.
+#[tokio::test]
+async fn handle_iq_answers_profiles_for_extension_bots() {
+    let state = create_test_websocket_state_with_fixture_bot().await;
+    let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
+    let extensions = state.deps.service_domains.extensions.clone();
+    let bot = format!("{FIXTURE_BOT_PLUGIN}@{extensions}");
+    let installed = crate::server::extension_bot::installed_bot(
+        &state.deps.service_domains,
+        &state.deps.protocol.extension_manager,
+        &bot.parse().expect("bot jid"),
+    )
+    .expect("fixture bot is installed");
+
+    let vcard_get = |to: &str| {
+        stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
+            from: None,
+            to: Some(to.parse().expect("valid iq destination")),
+            id: "vcard-bot".to_string(),
+            payload: Element::builder("vCard", waddle_xmpp::xep::xep0054::NS_VCARD).build(),
+        })))
+    };
+    let reply = disco_reply_for_test(&state, &phase, &vcard_get(&bot)).await;
+    assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+    let vcard = reply
+        .get_child("vCard", waddle_xmpp::xep::xep0054::NS_VCARD)
+        .expect("vCard");
+    let text = |name: &str| {
+        vcard
+            .get_child(name, waddle_xmpp::xep::xep0054::NS_VCARD)
+            .map(|child| child.text())
+    };
+    assert_eq!(text("FN"), Some(installed.name.clone()));
+    assert_eq!(text("DESC"), installed.description.clone());
+    let reply = disco_reply_for_test(
+        &state,
+        &phase,
+        &vcard_get(&format!("unknown-plugin@{extensions}")),
+    )
+    .await;
+    assert_item_not_found_for_test(&reply, "unknown bot vCard");
+
+    let vcard4 = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4,
+    )
+    .await;
+    let parsed = waddle_xmpp::xep::xep0292::parse_vcard4(&vcard4);
+    assert_eq!(parsed.full_name.as_deref(), Some(installed.name.as_str()));
+    assert_eq!(parsed.note, installed.description);
+
+    let metadata = pep_item_for_test(
+        &state,
+        &phase,
+        &bot,
+        waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA,
+    )
+    .await;
+    assert!(metadata.is("metadata", waddle_xmpp::xep::xep0084::NS_AVATAR_METADATA));
+    assert_eq!(
+        metadata.children().count(),
+        0,
+        "avatar publishing is disabled"
+    );
+
+    for node in [
+        "http://jabber.org/protocol/mood",
+        "http://jabber.org/protocol/tune",
+    ] {
+        let reply = disco_reply_for_test(
+            &state,
+            &phase,
+            &pubsub_items_iq_frame("pep-bot", &bot, node),
+        )
+        .await;
+        assert_item_not_found_for_test(&reply, node);
+    }
+}
+
 #[tokio::test]
 async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
     let state = create_test_websocket_state().await;

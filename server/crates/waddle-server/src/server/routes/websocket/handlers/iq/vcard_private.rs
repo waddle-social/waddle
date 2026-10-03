@@ -17,6 +17,27 @@ pub(super) async fn handle_vcard_iq(
         )];
     };
 
+    // XEP-0054: the server answers for an extension bot, which has no
+    // account and so no stored vCard, from its manifest profile.
+    if waddle_xmpp::xep::xep0054::is_vcard_get(iq) {
+        if let Some(bot) = iq.to().and_then(|to| {
+            crate::server::extension_bot::installed_bot(
+                &state.deps.service_domains,
+                &state.deps.protocol.extension_manager,
+                to,
+            )
+        }) {
+            let vcard = waddle_xmpp::xep::xep0054::VCard {
+                full_name: Some(bot.name),
+                desc: bot.description,
+                ..Default::default()
+            };
+            return vec![iq_to_xml(waddle_xmpp::xep::xep0054::build_vcard_response(
+                iq, &vcard,
+            ))];
+        }
+    }
+
     let db = match global_database(state).await {
         Ok(db) => Arc::new(db),
         Err(error) => {

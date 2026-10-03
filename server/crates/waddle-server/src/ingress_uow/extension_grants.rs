@@ -91,6 +91,14 @@ impl ExtensionGrantRepository {
             Self::insert_grant(tx, &plugin, &scope).await?;
             result.inserted += 1;
         }
+        // An uninstalled plugin's bot no longer speaks in any room.
+        tx.transaction_mut()
+            .execute(
+                "DELETE FROM extension_bot_rooms WHERE plugin_id NOT IN \
+                 (SELECT plugin_id FROM extension_grants WHERE revoked_at IS NULL)",
+                (),
+            )
+            .await?;
         Ok(result)
     }
 

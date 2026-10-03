@@ -39,6 +39,7 @@ use waddle_xmpp::pubsub::{Affiliation as PubSubAffiliation, PubSubItem};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 use waddle_xmpp::{ChannelInfo, ChannelType, XmppError};
 
+use crate::admin::channels::forget_extension_bot_room;
 use crate::admin::is_community_owner;
 use crate::channel_space_links::ChannelSpaceLink;
 use crate::permissions::{
@@ -1347,6 +1348,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             return Err(internal_err(message));
         }
         destroyed_rooms.insert(room_jid.clone());
+        forget_extension_bot_room(state, room_jid).await;
     }
 
     state

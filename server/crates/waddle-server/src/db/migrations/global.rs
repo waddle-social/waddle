@@ -793,6 +793,16 @@ WHERE NOT EXISTS (
     );
 "#;
 
+/// Rooms where an extension bot has posted, for XEP-0030 room bot listing.
+/// Standalone: rows are keyed by JID and plugin id only.
+pub const V0015_EXTENSION_BOT_ROOMS: &str = r#"
+CREATE TABLE extension_bot_rooms (
+    room_jid TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    PRIMARY KEY (room_jid, plugin_id)
+);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -882,6 +892,12 @@ pub fn all() -> Vec<Migration> {
             description: "Keep roster contacts to existing local accounts".to_string(),
             sql_sqlite: V0014_ROSTER_CONTACTS_ARE_ACCOUNTS,
             sql_postgres: V0014_ROSTER_CONTACTS_ARE_ACCOUNTS_POSTGRES,
+        },
+        Migration {
+            version: 15,
+            description: "Record rooms where extension bots have posted".to_string(),
+            sql_sqlite: V0015_EXTENSION_BOT_ROOMS,
+            sql_postgres: V0015_EXTENSION_BOT_ROOMS,
         },
     ]
 }

@@ -136,11 +136,12 @@ fn handle_extension_bot_disco_info<'a>(
     if !domains.is_extensions_address(&target) {
         return None;
     }
-    let manager = &state.deps.protocol.extension_manager;
-    let plugin = domains
-        .extension_bot(&target)
-        .filter(|plugin| manager.manifest_for_plugin(plugin.as_str()).is_some());
-    let Some(plugin) = plugin.filter(|_| req.node.is_none()) else {
+    let bot = crate::server::extension_bot::installed_bot(
+        domains,
+        &state.deps.protocol.extension_manager,
+        &target,
+    );
+    let Some(bot) = bot.filter(|_| req.node.is_none()) else {
         return Some(DiscoInfoResponse::error(
             req.id,
             req.response_from,
@@ -148,8 +149,7 @@ fn handle_extension_bot_disco_info<'a>(
             item_not_found_iq_error("Requested item not found."),
         ));
     };
-    let name = crate::server::extension_bot::bot_name(manager, &plugin);
-    let identities = vec![Identity::client_bot(Some(name.as_str()))];
+    let identities = vec![Identity::client_bot(Some(bot.name.as_str()))];
     let features = vec![Feature::disco_info()];
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))

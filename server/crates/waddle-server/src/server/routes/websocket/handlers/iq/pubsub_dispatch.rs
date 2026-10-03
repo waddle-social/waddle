@@ -309,6 +309,22 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
+                // XEP-0163: the server answers an extension bot's PEP reads
+                // from its manifest profile. Any other node does not exist.
+                if let Some(payload) =
+                    extension_bot_pep_item(state, &Jid::from(target_jid.clone()), &node)
+                {
+                    let item = waddle_xmpp::pubsub::PubSubItem::new(
+                        Some(EXTENSION_BOT_PEP_ITEM_ID.to_string()),
+                        Some(payload),
+                    );
+                    return vec![iq_to_xml(waddle_xmpp::pubsub::build_pubsub_items_result(
+                        iq,
+                        &node,
+                        &[item],
+                    ))];
+                }
+
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
                 // A legacy Presence avatar node (e.g. created by an old pod
                 // after the last startup sweep) is repaired on a peer's
@@ -510,6 +526,35 @@ pub(super) async fn handle_pubsub_iq(
 /// publish: the metadata node, payload is a `<metadata>` element with
 /// no children. Used to flip `avatar_source='oidc'` so a user who
 /// retracts their own picture re-opts into OIDC management.
+/// XEP-0292 §3 and XEP-0084 §4.5 keep the single item at this id.
+const EXTENSION_BOT_PEP_ITEM_ID: &str = "current";
+
+/// The PEP payload the server publishes for an installed extension bot: a
+/// XEP-0292 vCard4 with its name and description, and XEP-0084 metadata with
+/// avatar publishing disabled. `None` for anything else.
+fn extension_bot_pep_item(state: &WebSocketState, target: &Jid, node: &str) -> Option<Element> {
+    if node != waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4
+        && node != waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA
+    {
+        return None;
+    }
+    let bot = crate::server::extension_bot::installed_bot(
+        &state.deps.service_domains,
+        &state.deps.protocol.extension_manager,
+        target,
+    )?;
+    if node == waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA {
+        return Some(
+            Element::builder("metadata", waddle_xmpp::xep::xep0084::NS_AVATAR_METADATA).build(),
+        );
+    }
+    let mut vcard = waddle_xmpp::xep::xep0292::VCard4::new().with_full_name(bot.name);
+    if let Some(description) = bot.description {
+        vcard = vcard.with_note(description);
+    }
+    Some(waddle_xmpp::xep::xep0292::build_vcard4_element(&vcard))
+}
+
 fn is_user_avatar_retract(node: &str, item: &waddle_xmpp::pubsub::PubSubItem) -> bool {
     if node != waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA {
         return false;
