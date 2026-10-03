@@ -36,6 +36,7 @@ protocol FFIMessageFields {
     var forumPostKind: WaddleForumPostKind? { get }
     var forumTitle: String? { get }
     var isSticker: Bool { get }
+    var mucUser: Bool { get }
     var sharedFiles: [WaddleSharedFile] { get }
     var linkPreviews: [WaddleLinkPreview] { get }
 }
@@ -105,7 +106,8 @@ extension FFIInbound {
             forumTitle: fields.forumTitle,
             isSticker: fields.isSticker,
             sharedFiles: fields.sharedFiles.compactMap(sharedFile),
-            linkPreviews: fields.linkPreviews.compactMap(linkPreview)
+            linkPreviews: fields.linkPreviews.compactMap(linkPreview),
+            isMucUser: fields.mucUser
         )
     }
 

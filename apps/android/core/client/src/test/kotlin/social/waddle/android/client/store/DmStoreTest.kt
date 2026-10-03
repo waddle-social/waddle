@@ -55,6 +55,35 @@ class DmStoreTest {
     }
 
     @Test
+    fun `room private messages and invites never register the room as a peer`() {
+        // XEP-0045 PM received: type=chat from the occupant JID + muc#user marker.
+        store.onChatMessage(
+            ownBareJid = "me@waddle.test",
+            message = testMessage(from = "room@muc.waddle.test/alice", mucUser = true),
+        )
+        // Its sent-carbon twin: from the account, addressed to the occupant JID.
+        store.onChatMessage(
+            ownBareJid = "me@waddle.test",
+            message = testMessage(
+                from = "me@waddle.test/laptop",
+                to = "room@muc.waddle.test/alice",
+                mucUser = true,
+            ),
+        )
+        // Mediated invite: type=normal from the bare room.
+        store.onChatMessage(
+            ownBareJid = "me@waddle.test",
+            message = testMessage(
+                from = "room@muc.waddle.test",
+                messageType = "normal",
+                mucUser = true,
+            ),
+        )
+
+        assertEquals(emptyList<String>(), store.peers.value)
+    }
+
+    @Test
     fun `self-messages and clear leave no peers behind`() {
         store.onChatMessage(
             ownBareJid = "me@waddle.test",

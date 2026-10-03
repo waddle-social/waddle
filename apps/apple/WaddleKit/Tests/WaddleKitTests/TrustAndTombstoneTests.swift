@@ -33,7 +33,7 @@ struct TrustAndTombstoneTests {
     }
 
     @Test func groupchatWithoutSenderIsNotRouted() {
-        #expect(me.route(from: nil, to: JID(bare: me.jid, resource: "phone"), isGroupchat: true) == nil)
+        #expect(me.route(from: nil, to: JID(bare: me.jid, resource: "phone"), isGroupchat: true, isMucUser: false) == nil)
     }
 
     @Test func bodylessArchivedTombstoneIsShown() {

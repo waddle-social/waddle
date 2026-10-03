@@ -7259,6 +7259,12 @@ data class WaddleArchivedMessage (
     var `isSticker`: kotlin.Boolean
     ,
     /**
+     * Carries XEP-0045 `muc#user`: a room private message or a room
+     * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
+     */
+    var `mucUser`: kotlin.Boolean
+    ,
+    /**
      * XEP-0045 real author JID from the archived `muc#user` payload,
      * exposed by non-anonymous room archives.
      */
@@ -7340,6 +7346,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadAnchor.read(buf),
             FfiConverterOptionalTypeWaddleCallThreadEnded.read(buf),
@@ -7386,6 +7393,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
             FfiConverterOptionalString.allocationSize(value.`forumTitle`) +
             FfiConverterBoolean.allocationSize(value.`isSticker`) +
+            FfiConverterBoolean.allocationSize(value.`mucUser`) +
             FfiConverterOptionalString.allocationSize(value.`authorRealJid`) +
             FfiConverterOptionalTypeWaddleCallThreadAnchor.allocationSize(value.`callThread`) +
             FfiConverterOptionalTypeWaddleCallThreadEnded.allocationSize(value.`callThreadEnded`) +
@@ -7431,6 +7439,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
             FfiConverterOptionalString.write(value.`forumTitle`, buf)
             FfiConverterBoolean.write(value.`isSticker`, buf)
+            FfiConverterBoolean.write(value.`mucUser`, buf)
             FfiConverterOptionalString.write(value.`authorRealJid`, buf)
             FfiConverterOptionalTypeWaddleCallThreadAnchor.write(value.`callThread`, buf)
             FfiConverterOptionalTypeWaddleCallThreadEnded.write(value.`callThreadEnded`, buf)
@@ -9568,6 +9577,13 @@ data class WaddleMessage (
     ,
     var `isMuc`: kotlin.Boolean
     ,
+    /**
+     * Carries XEP-0045 `muc#user`: a room private message or a room
+     * invite/decline. Never a 1:1 DM, even when `message_type` is `chat`
+     * or `normal` and `from` is a room JID — route as room traffic.
+     */
+    var `mucUser`: kotlin.Boolean
+    ,
     var `thread`: kotlin.String?
     ,
     var `parentThreadId`: kotlin.String?
@@ -9721,6 +9737,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypeWaddleMarkupSpan.read(buf),
@@ -9770,6 +9787,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterBoolean.allocationSize(value.`displayedMarkerRequested`) +
             FfiConverterOptionalString.allocationSize(value.`displayedMarkerId`) +
             FfiConverterBoolean.allocationSize(value.`isMuc`) +
+            FfiConverterBoolean.allocationSize(value.`mucUser`) +
             FfiConverterOptionalString.allocationSize(value.`thread`) +
             FfiConverterOptionalString.allocationSize(value.`parentThreadId`) +
             FfiConverterSequenceTypeWaddleMarkupSpan.allocationSize(value.`markupSpans`) +
@@ -9818,6 +9836,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterBoolean.write(value.`displayedMarkerRequested`, buf)
             FfiConverterOptionalString.write(value.`displayedMarkerId`, buf)
             FfiConverterBoolean.write(value.`isMuc`, buf)
+            FfiConverterBoolean.write(value.`mucUser`, buf)
             FfiConverterOptionalString.write(value.`thread`, buf)
             FfiConverterOptionalString.write(value.`parentThreadId`, buf)
             FfiConverterSequenceTypeWaddleMarkupSpan.write(value.`markupSpans`, buf)

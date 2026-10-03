@@ -483,14 +483,7 @@ public final class SessionCoordinator {
             cursors.forEach(applyDisplayedCursor)
             return
         }
-        guard
-              let route = account.route(from: message.from, to: message.to, isGroupchat: message.isGroupchat)
-        else { return }
-        // MUC private messages (type chat from room/nick) are not 1:1
-        // conversations with the room; they are unsupported for now.
-        if route.conversation.kind == .direct, directory.isRoom(route.conversation.jid) {
-            return
-        }
+        guard let route = account.route(message) else { return }
         if let pin = message.pinEvent {
             if route.conversation.isRoom {
                 pins.apply(pin, in: route.conversation.jid)
@@ -573,7 +566,9 @@ public final class SessionCoordinator {
         case .onMention: shouldAlert = mentionsMe
         case .never: shouldAlert = false
         }
-        guard shouldAlert else { return }
+        // A room private message or invite is room traffic, but a reply from
+        // the notification would post it to the whole room: never alert.
+        guard shouldAlert, !message.isMucUser else { return }
         onAlert?(IncomingAlert(
             conversation: conversation,
             conversationTitle: directory.title(for: conversation),

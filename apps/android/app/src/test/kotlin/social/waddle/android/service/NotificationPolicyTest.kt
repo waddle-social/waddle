@@ -60,6 +60,25 @@ class NotificationPolicyTest {
     }
 
     @Test
+    fun `a room private message never notifies as a direct chat`() = runTest {
+        assertNull(
+            policy.decide(
+                testMessage(from = "general@muc.waddle.test/alice", body = "psst", mucUser = true),
+            ),
+        )
+        assertNull(
+            policy.decide(
+                testMessage(
+                    from = "general@muc.waddle.test",
+                    messageType = "normal",
+                    body = "join us",
+                    mucUser = true,
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `bodyless messages never notify`() = runTest {
         assertNull(policy.decide(testMessage(body = null)))
     }

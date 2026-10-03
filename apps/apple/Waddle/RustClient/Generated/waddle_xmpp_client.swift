@@ -5668,6 +5668,11 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
      */
     public var isSticker: Bool
     /**
+     * Carries XEP-0045 `muc#user`: a room private message or a room
+     * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
+     */
+    public var mucUser: Bool
+    /**
      * XEP-0045 real author JID from the archived `muc#user` payload,
      * exposed by non-anonymous room archives.
      */
@@ -5749,6 +5754,10 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
          * XEP-0449: the archived body is a sticker.
          */isSticker: Bool,
         /**
+         * Carries XEP-0045 `muc#user`: a room private message or a room
+         * invite/decline. Never a 1:1 DM (see `WaddleMessage::muc_user`).
+         */mucUser: Bool,
+        /**
          * XEP-0045 real author JID from the archived `muc#user` payload,
          * exposed by non-anonymous room archives.
          */authorRealJid: String?,
@@ -5801,6 +5810,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
         self.forumPostKind = forumPostKind
         self.forumTitle = forumTitle
         self.isSticker = isSticker
+        self.mucUser = mucUser
         self.authorRealJid = authorRealJid
         self.callThread = callThread
         self.callThreadEnded = callThreadEnded
@@ -5861,6 +5871,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
                 forumTitle: FfiConverterOptionString.read(from: &buf),
                 isSticker: FfiConverterBool.read(from: &buf),
+                mucUser: FfiConverterBool.read(from: &buf),
                 authorRealJid: FfiConverterOptionString.read(from: &buf),
                 callThread: FfiConverterOptionTypeWaddleCallThreadAnchor.read(from: &buf),
                 callThreadEnded: FfiConverterOptionTypeWaddleCallThreadEnded.read(from: &buf),
@@ -5907,6 +5918,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
         FfiConverterOptionString.write(value.forumTitle, into: &buf)
         FfiConverterBool.write(value.isSticker, into: &buf)
+        FfiConverterBool.write(value.mucUser, into: &buf)
         FfiConverterOptionString.write(value.authorRealJid, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadAnchor.write(value.callThread, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadEnded.write(value.callThreadEnded, into: &buf)
@@ -8682,6 +8694,12 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var displayedMarkerId: String?
     public var isMuc: Bool
+    /**
+     * Carries XEP-0045 `muc#user`: a room private message or a room
+     * invite/decline. Never a 1:1 DM, even when `message_type` is `chat`
+     * or `normal` and `from` is a room JID — route as room traffic.
+     */
+    public var mucUser: Bool
     public var thread: String?
     public var parentThreadId: String?
     /**
@@ -8818,7 +8836,12 @@ public struct WaddleMessage: Equatable, Hashable {
          */displayedMarkerRequested: Bool,
         /**
          * XEP-0333 `<displayed id='…'/>` marker target id.
-         */displayedMarkerId: String?, isMuc: Bool, thread: String?, parentThreadId: String?,
+         */displayedMarkerId: String?, isMuc: Bool,
+        /**
+         * Carries XEP-0045 `muc#user`: a room private message or a room
+         * invite/decline. Never a 1:1 DM, even when `message_type` is `chat`
+         * or `normal` and `from` is a room JID — route as room traffic.
+         */mucUser: Bool, thread: String?, parentThreadId: String?,
         /**
          * XEP-0394 message markup spans over the body.
          */markupSpans: [WaddleMarkupSpan],
@@ -8915,6 +8938,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.displayedMarkerRequested = displayedMarkerRequested
         self.displayedMarkerId = displayedMarkerId
         self.isMuc = isMuc
+        self.mucUser = mucUser
         self.thread = thread
         self.parentThreadId = parentThreadId
         self.markupSpans = markupSpans
@@ -8978,6 +9002,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 displayedMarkerRequested: FfiConverterBool.read(from: &buf),
                 displayedMarkerId: FfiConverterOptionString.read(from: &buf),
                 isMuc: FfiConverterBool.read(from: &buf),
+                mucUser: FfiConverterBool.read(from: &buf),
                 thread: FfiConverterOptionString.read(from: &buf),
                 parentThreadId: FfiConverterOptionString.read(from: &buf),
                 markupSpans: FfiConverterSequenceTypeWaddleMarkupSpan.read(from: &buf),
@@ -9027,6 +9052,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterBool.write(value.displayedMarkerRequested, into: &buf)
         FfiConverterOptionString.write(value.displayedMarkerId, into: &buf)
         FfiConverterBool.write(value.isMuc, into: &buf)
+        FfiConverterBool.write(value.mucUser, into: &buf)
         FfiConverterOptionString.write(value.thread, into: &buf)
         FfiConverterOptionString.write(value.parentThreadId, into: &buf)
         FfiConverterSequenceTypeWaddleMarkupSpan.write(value.markupSpans, into: &buf)

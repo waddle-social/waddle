@@ -266,14 +266,34 @@ struct AppActivityTests {
 @MainActor
 @Suite("Routing guards")
 struct RoutingGuardTests {
-    @Test func mucPrivateMessagesAndErrorsStayOutOfDMs() {
+    @Test func mucUserTrafficIsRoomTrafficNotADM() {
+        // The room is deliberately not in the directory: the protocol marker
+        // alone classifies, no domain or list guessing.
         let coordinator = SessionCoordinator(account: me, port: FakePort())
-        coordinator.directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
-        coordinator.route(directMessage("psst", from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/p"), id: "pm1"))
+        coordinator.directory.setNotifyMode(.always, for: roomConversation)
+        var alerts: [IncomingAlert] = []
+        coordinator.onAlert = { alerts.append($0) }
+
+        // XEP-0045 private message: type chat from the occupant JID.
+        var pm = directMessage("psst", from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/p"), id: "pm1")
+        pm.isMucUser = true
+        coordinator.route(pm)
+        // Mediated invite: type normal from the bare room, with a body.
+        var invite = directMessage("join us", from: jid("general@muc.waddle.test"), to: jid("alice@waddle.test"), id: "inv1")
+        invite.type = .normal
+        invite.isMucUser = true
+        coordinator.route(invite)
         var bounce = directMessage("bounced", from: jid("bob@waddle.test"), to: jid("alice@waddle.test/p"), id: "e1")
         bounce.type = .error
         coordinator.route(bounce)
+
         #expect(coordinator.directory.directConversations.isEmpty)
-        #expect(coordinator.unread.total == 0)
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.map(\.body) == ["psst", "join us"])
+        // Replying from an alert would post to the whole room.
+        #expect(alerts.isEmpty)
+
+        // Control: the same room still alerts for ordinary room traffic.
+        coordinator.route(roomMessage("public", from: "bob", stanzaID: "s1"))
+        #expect(alerts.map(\.body) == ["public"])
     }
 }

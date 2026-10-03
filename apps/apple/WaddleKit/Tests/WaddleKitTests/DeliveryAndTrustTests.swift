@@ -44,12 +44,12 @@ struct DeliveryAndTrustTests {
     }
 
     @Test func senderlessDirectStanzaIsNotRouted() {
-        #expect(me.route(from: nil, to: JID(bare: me.jid, resource: "phone"), isGroupchat: false) == nil)
+        #expect(me.route(from: nil, to: JID(bare: me.jid, resource: "phone"), isGroupchat: false, isMucUser: false) == nil)
     }
 
     @Test func ownCarbonStillRoutesToThePeer() {
         let bob = bare("bob@waddle.test")
-        let route = me.route(from: JID(bare: me.jid, resource: "laptop"), to: JID(bare: bob, resource: nil), isGroupchat: false)
+        let route = me.route(from: JID(bare: me.jid, resource: "laptop"), to: JID(bare: bob, resource: nil), isGroupchat: false, isMucUser: false)
         #expect(route == MessageRoute(conversation: .direct(bob), isMine: true))
     }
 

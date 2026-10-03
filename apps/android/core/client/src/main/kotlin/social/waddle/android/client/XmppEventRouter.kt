@@ -13,6 +13,7 @@ import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.store.InboxKind
 import social.waddle.android.client.store.SessionStores
+import social.waddle.android.client.store.isDirectChat
 import social.waddle.android.client.store.isTimelineMutation
 import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleMessage
@@ -249,7 +250,7 @@ internal class XmppEventRouter(
      * the `lastSeen`-seeded DM list is empty after every restart.
      */
     private fun persistDmRecency(message: WaddleMessage) {
-        if (message.isMuc || message.messageType != "chat") return
+        if (!message.isDirectChat()) return
         val from = message.from ?: return
         val peer = bareJid(from)
         if (peer == activeSession.ownBareJid) return

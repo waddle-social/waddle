@@ -46,6 +46,7 @@ internal fun ownDmEcho(
     displayedMarkerRequested = options.requestDisplayedMarker,
     displayedMarkerId = null,
     isMuc = false,
+    mucUser = false,
     thread = options.thread?.id,
     parentThreadId = options.thread?.parent,
     markupSpans = options.markupSpans,

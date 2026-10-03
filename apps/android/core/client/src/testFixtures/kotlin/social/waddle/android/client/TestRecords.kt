@@ -73,6 +73,8 @@ fun testMessage(
     stanzaId: String? = null,
     originId: String? = null,
     isMuc: Boolean = false,
+    /** XEP-0045 `muc#user` marker: a room private message or invite/decline. */
+    mucUser: Boolean = false,
     replacesId: String? = null,
     retractsId: String? = null,
     moderationTargetId: String? = null,
@@ -123,6 +125,7 @@ fun testMessage(
     displayedMarkerRequested = displayedMarkerRequested,
     displayedMarkerId = null,
     isMuc = isMuc,
+    mucUser = mucUser,
     thread = thread,
     parentThreadId = null,
     markupSpans = markupSpans,
@@ -168,6 +171,8 @@ fun testArchivedMessage(
     safetyScores: WaddleSafetyScoresFastening? = null,
     /** XEP-0045 real author JID from the archived `muc#user` payload. */
     authorRealJid: String? = null,
+    /** XEP-0045 `muc#user` marker: a room private message or invite/decline. */
+    mucUser: Boolean = false,
 ): WaddleArchivedMessage = WaddleArchivedMessage(
     mamId = mamId,
     queryId = null,
@@ -204,6 +209,7 @@ fun testArchivedMessage(
     forumPostKind = null,
     forumTitle = null,
     isSticker = false,
+    mucUser = mucUser,
     authorRealJid = authorRealJid,
     callThread = null,
     callThreadEnded = null,

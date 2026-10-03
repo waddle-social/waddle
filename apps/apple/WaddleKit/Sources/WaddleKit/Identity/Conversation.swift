@@ -67,7 +67,7 @@ public extension AccountIdentity {
     /// Routes a message: groupchat keys on the room bare JID and compares
     /// the occupant nick for authorship; 1:1 keys on the non-own side and
     /// compares bare JIDs (carbons of our own sends route to the peer).
-    func route(from: JID?, to: JID?, isGroupchat: Bool) -> MessageRoute? {
+    func route(from: JID?, to: JID?, isGroupchat: Bool, isMucUser: Bool) -> MessageRoute? {
         if isGroupchat {
             // A groupchat stanza comes from the room; without a sender it
             // cannot name one (the recipient is our own account).
@@ -79,7 +79,19 @@ public extension AccountIdentity {
         // §8.1.2.1), not from a peer: it names no 1:1 conversation.
         guard let sender = from?.bare else { return nil }
         let isMine = sender == jid
+        if isMucUser {
+            // XEP-0045 `muc#user`: a room private message or invite/decline
+            // is room traffic, never a DM with the room. The room is the
+            // sender, or the addressee of a carbon of our own send.
+            guard let room = isMine ? to?.bare : sender else { return nil }
+            return MessageRoute(conversation: .room(room), isMine: isMine)
+        }
         let peer = isMine ? (to?.bare ?? sender) : sender
         return MessageRoute(conversation: .direct(peer), isMine: isMine)
+    }
+
+    /// The single routing point for a parsed stanza.
+    func route(_ message: WireMessage) -> MessageRoute? {
+        route(from: message.from, to: message.to, isGroupchat: message.isGroupchat, isMucUser: message.isMucUser)
     }
 }
