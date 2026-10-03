@@ -3,7 +3,7 @@ import type { MemberSummary } from "@/lib/chat-types";
 import type { DmConversation, OccupantPresence, RoomPresence, RosterContact } from "@/lib/xmpp/types";
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import { barePeerJid } from "@/lib/xmpp/jid";
-import { isBotJid, isRoomJid } from "@/lib/avatars/author-jid";
+import { isBotJid } from "@/lib/avatars/author-jid";
 
 /**
  * People rail model: the one place that turns the controller's disjoint
@@ -136,10 +136,10 @@ export function splitKnownPeople(
   conversations: readonly DmConversation[],
 ): KnownPeopleGroups {
   const contactByJid = new Map<string, RosterContact>();
-  for (const contact of contacts) if (!isRoomJid(contact.jid)) contactByJid.set(bare(contact.jid), contact);
+  for (const contact of contacts) contactByJid.set(bare(contact.jid), contact);
   const conversationByJid = new Map<string, DmConversation>();
   for (const conversation of conversations) {
-    if (conversation.mucPm || isRoomJid(conversation.peerJid)) continue;
+    if (conversation.mucPm) continue;
     conversationByJid.set(bare(conversation.peerJid), conversation);
   }
   const around: KnownPerson[] = [];
@@ -225,12 +225,12 @@ export function buildPeopleRail(sources: PeopleRailSources): PeopleRailGroups {
   const seen = new Set<string>();
   const memberIndex = memberIndexByJid(sources.members);
   const contactByJid = new Map<string, RosterContact>();
-  for (const contact of sources.contacts) if (!isRoomJid(contact.jid)) contactByJid.set(bare(contact.jid), contact);
+  for (const contact of sources.contacts) contactByJid.set(bare(contact.jid), contact);
   const conversationByJid = new Map<string, DmConversation>();
   for (const conversation of sources.conversations) {
     // MUC private messages address an occupant, not an account; never
     // list a nick as if it were a person we know by JID (#1256).
-    if (conversation.mucPm || isRoomJid(conversation.peerJid)) continue;
+    if (conversation.mucPm) continue;
     conversationByJid.set(bare(conversation.peerJid), conversation);
   }
 
@@ -395,10 +395,10 @@ export function buildMemberCards(sources: MemberCardSources): MemberCardModel[] 
   const nickByJid = new Map<string, string>();
   for (const [nick, jid] of Object.entries(sources.authorJidByNick)) nickByJid.set(bare(jid), nick);
   const contactByJid = new Map<string, RosterContact>();
-  for (const contact of sources.contacts) if (!isRoomJid(contact.jid)) contactByJid.set(bare(contact.jid), contact);
+  for (const contact of sources.contacts) contactByJid.set(bare(contact.jid), contact);
   const conversationByJid = new Map<string, DmConversation>();
   for (const conversation of sources.conversations) {
-    if (conversation.mucPm || isRoomJid(conversation.peerJid)) continue;
+    if (conversation.mucPm) continue;
     conversationByJid.set(bare(conversation.peerJid), conversation);
   }
 

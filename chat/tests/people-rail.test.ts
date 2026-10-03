@@ -423,12 +423,4 @@ describe("people rail after a restart", () => {
     expect(groups.room).toEqual([]);
   });
 
-  test("a room in the roster or DMs is never listed as a person", () => {
-    occupantJidDirectory.setRoomPredicate((jid) => jid.endsWith("@conference.example.com"));
-    const groups = buildPeopleRail(sources({
-      contacts: [contact("chat@conference.example.com"), contact("bob@example.com")],
-      conversations: [conversation("chat@conference.example.com")],
-    }));
-    expect([...groups.around, ...groups.awayAndOffline].map((person) => person.jid)).toEqual(["bob@example.com"]);
-  });
 });

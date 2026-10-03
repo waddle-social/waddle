@@ -22,7 +22,6 @@ function fakeClient() {
     addOwnProfilePublishedHandler: (handler) => on(ownProfile, handler),
     addOwnOccupantNickHandler: () => () => undefined,
     bareJid: "alice@waddle.social",
-    isKnownMucRoom: () => false,
   };
   return {
     client,

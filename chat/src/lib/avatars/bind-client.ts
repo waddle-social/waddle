@@ -12,7 +12,6 @@ export interface AvatarClient {
   addOwnProfilePublishedHandler: (handler: (ownBareJid: string) => void) => () => void;
   addOwnOccupantNickHandler: (handler: (roomJid: string, nick: string | null) => void) => () => void;
   readonly bareJid: string;
-  isKnownMucRoom: (bareJid: string) => boolean;
 }
 
 /**
@@ -26,7 +25,6 @@ function bindAvatarClient(
   directory: OccupantJidDirectory = occupantJidDirectory,
 ): () => void {
   directory.setExtensionsDomain(extensionServiceJidForUserJid(client.bareJid));
-  directory.setRoomPredicate((jid) => client.isKnownMucRoom(jid));
   store.setFetcher((jid) => client.fetchUserAvatar(jid));
   store.setEvictionHandler((jid) => client.forgetUserAvatar(jid));
   const offChanged = client.addAvatarChangedHandler((event) => store.handleAvatarChanged(event.jid, event.avatarId));
