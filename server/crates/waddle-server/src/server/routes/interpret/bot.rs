@@ -747,6 +747,8 @@ async fn route_join_presences(
     }
     let cap = tokio::time::Instant::now() + JOIN_PRESENCE_CAP;
     let bound = commit_deadline.map_or(cap, |deadline| deadline.min(cap));
+    // An earlier cancelled wait may have consumed some; polling one again panics.
+    routes.retain(|route| !route.is_finished());
     if tokio::time::timeout_at(bound, futures::future::join_all(routes.iter_mut()))
         .await
         .is_err()

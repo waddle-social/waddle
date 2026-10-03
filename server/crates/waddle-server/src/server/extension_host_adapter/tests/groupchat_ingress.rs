@@ -859,3 +859,73 @@ async fn extension_groupchat_join_is_listed_before_it_is_seen_postgres() {
         join_is_listed_before_it_is_seen(f).await;
     }
 }
+
+/// A send cancelled while its join presences route, after one route has
+/// finished, still leaves: the leave never polls the finished route again.
+async fn cancelled_join_routing_still_leaves(f: IngressFixture) {
+    let fixture = GroupchatFixture::new(&f).await;
+    // Occupants without a local socket get the join over the node route.
+    for real_jid in ["juliet@example.com/phone", "mercutio@example.com/remote"] {
+        let real_jid: FullJid = real_jid.parse().expect("occupant");
+        fixture
+            .actor
+            .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                nick: real_jid.node().expect("node").to_string(),
+                real_jid,
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("occupant joins");
+    }
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (slow_tx, mut slow_rx) = mpsc::unbounded_channel();
+    // Juliet's route finishes at once; mercutio's waits for the release.
+    let route: crate::server::routes::interpret::TestJoinPresenceRoute = {
+        let release = Arc::clone(&release);
+        Arc::new(move |occupant: FullJid, _presence| {
+            let (release, slow) = (Arc::clone(&release), slow_tx.clone());
+            Box::pin(async move {
+                if occupant
+                    .node()
+                    .is_some_and(|node| node.as_str() == "mercutio")
+                {
+                    let _ = slow.send(());
+                    release.notified().await;
+                }
+            })
+        })
+    };
+    let sending = {
+        let adapter = fixture.adapter.clone();
+        let (invocation, request) = (fixture.invocation(), fixture.request("cancelled-join"));
+        tokio::spawn(
+            crate::server::routes::interpret::TEST_JOIN_PRESENCE_ROUTE.scope(route, async move {
+                adapter.send_message(&invocation, request).await
+            }),
+        )
+    };
+    slow_rx.recv().await.expect("the slow route starts");
+    // Well inside the join presence cap: planning has consumed juliet's
+    // finished route and still waits for mercutio's.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sending.abort();
+    assert!(sending.await.expect_err("cancelled").is_cancelled());
+    assert!(fixture.bot_present().await, "the cancelled send joined");
+    release.notify_one();
+    fixture.settle().await;
+    assert!(!fixture.bot_present().await, "the bot left");
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_cancelled_join_routing_still_leaves_sqlite() {
+    cancelled_join_routing_still_leaves(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_groupchat_cancelled_join_routing_still_leaves_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_cancelled_join").await {
+        cancelled_join_routing_still_leaves(f).await;
+    }
+}

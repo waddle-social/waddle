@@ -36,8 +36,10 @@ pub(super) struct HeldBot {
 
 impl HeldBot {
     /// Waits for the earlier sends' work, which its settlement budget bounds.
-    /// Cancelled, it keeps the work for the next wait.
+    /// Cancelled, it keeps the work for the next wait; a handle that wait
+    /// already consumed is dropped first, as polling it again panics.
     async fn delivered(&mut self) {
+        self.work.retain(|work| !work.is_finished());
         futures::future::join_all(self.work.iter_mut()).await;
         self.work.clear();
     }
@@ -293,6 +295,10 @@ async fn leave(
 ) {
     held.delivered().await;
     let occupancy = &mut held.occupancy;
+    // A cancelled send may have consumed some of these; polling one again panics.
+    occupancy
+        .join_stragglers
+        .retain(|route| !route.is_finished());
     futures::future::join_all(occupancy.join_stragglers.iter_mut()).await;
     occupancy.join_stragglers.clear();
     if let Some((nick, session)) = occupancy.held.take() {
