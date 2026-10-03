@@ -401,43 +401,6 @@ class XmppSessionManagerTest {
     }
 
     @Test
-    fun `room private message is not filed as a direct chat`() = runTest {
-        val harness = Harness(this)
-        harness.manager.login(testSessionInfo())
-        runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
-        runCurrent()
-
-        harness.factory.emit(
-            WaddleClientEvent.Message(
-                testMessage(
-                    stanzaId = "pm-1",
-                    from = "room@muc.waddle.test/alice",
-                    to = "icepuma@waddle.test",
-                    mucUser = true,
-                ),
-            ),
-        )
-        runCurrent()
-
-        assertEquals(emptyList<String>(), harness.manager.dmStore.peers.value)
-        assertEquals(emptyMap<String, String>(), harness.prefs.lastSeen.first())
-
-        // Control: a real 1:1 message takes the same path and IS filed.
-        harness.factory.emit(
-            WaddleClientEvent.Message(
-                testMessage(stanzaId = "dm-1", from = "alice@waddle.test/phone", to = "icepuma@waddle.test"),
-            ),
-        )
-        runCurrent()
-
-        assertEquals(listOf("alice@waddle.test"), harness.manager.dmStore.peers.value)
-        assertEquals(setOf("alice@waddle.test"), harness.prefs.lastSeen.first().keys)
-
-        harness.manager.logout()
-    }
-
-    @Test
     fun `passthroughs report not connected before session ready`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())

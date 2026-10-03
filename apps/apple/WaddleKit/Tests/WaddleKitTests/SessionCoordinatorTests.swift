@@ -266,7 +266,7 @@ struct AppActivityTests {
 @MainActor
 @Suite("Routing guards")
 struct RoutingGuardTests {
-    @Test func mucUserTrafficIsRoomTrafficNotADM() {
+    @Test func mucUserTrafficIsShownNowhere() {
         // The room is deliberately not in the directory: the protocol marker
         // alone classifies, no domain or list guessing.
         let coordinator = SessionCoordinator(account: me, port: FakePort())
@@ -283,17 +283,26 @@ struct RoutingGuardTests {
         invite.type = .normal
         invite.isMucUser = true
         coordinator.route(invite)
+        // Archived twin (history paths ingest through the timeline store).
+        var archived = directMessage("psst", from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/p"), id: "pm2", archiveID: "a1", source: .archive(mamID: "a1"))
+        archived.isMucUser = true
+        #expect(coordinator.timelines.ingest(archived) == .ignored)
         var bounce = directMessage("bounced", from: jid("bob@waddle.test"), to: jid("alice@waddle.test/p"), id: "e1")
         bounce.type = .error
         coordinator.route(bounce)
 
         #expect(coordinator.directory.directConversations.isEmpty)
-        #expect(coordinator.timelines.timeline(for: roomConversation).items.map(\.body) == ["psst", "join us"])
-        // Replying from an alert would post to the whole room.
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.isEmpty)
+        #expect(coordinator.unread.total == 0)
         #expect(alerts.isEmpty)
 
-        // Control: the same room still alerts for ordinary room traffic.
+        // Controls: the same archived stanza without the marker is a DM row,
+        // and ordinary room traffic in the same room is unaffected.
+        archived.isMucUser = false
+        if case .inserted = coordinator.timelines.ingest(archived) {} else { Issue.record("unmarked archived row must insert") }
         coordinator.route(roomMessage("public", from: "bob", stanzaID: "s1"))
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.map(\.body) == ["public"])
+        #expect(coordinator.unread.count(for: roomConversation) == 1)
         #expect(alerts.map(\.body) == ["public"])
     }
 }

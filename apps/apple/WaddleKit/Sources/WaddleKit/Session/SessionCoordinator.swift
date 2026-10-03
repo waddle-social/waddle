@@ -566,9 +566,7 @@ public final class SessionCoordinator {
         case .onMention: shouldAlert = mentionsMe
         case .never: shouldAlert = false
         }
-        // A room private message or invite is room traffic, but a reply from
-        // the notification would post it to the whole room: never alert.
-        guard shouldAlert, !message.isMucUser else { return }
+        guard shouldAlert else { return }
         onAlert?(IncomingAlert(
             conversation: conversation,
             conversationTitle: directory.title(for: conversation),

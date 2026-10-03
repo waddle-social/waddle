@@ -43,17 +43,13 @@ struct JIDTests {
         #expect(carbon == MessageRoute(conversation: bobConversation, isMine: true))
     }
 
-    @Test func routesMucUserTrafficToTheRoomNeverADirectChat() {
+    @Test func mucUserTrafficHasNoRoute() {
         // XEP-0045 private message received from an occupant JID.
-        let pm = me.route(from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/phone"), isGroupchat: false, isMucUser: true)
-        #expect(pm == MessageRoute(conversation: roomConversation, isMine: false))
+        #expect(me.route(from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/phone"), isGroupchat: false, isMucUser: true) == nil)
         // Mediated invite or decline from the bare room.
-        let invite = me.route(from: jid("general@muc.waddle.test"), to: jid("alice@waddle.test"), isGroupchat: false, isMucUser: true)
-        #expect(invite == MessageRoute(conversation: roomConversation, isMine: false))
-        // A carbon of our own private message names the room as the addressee.
-        let carbon = me.route(from: jid("alice@waddle.test/desktop"), to: jid("general@muc.waddle.test/bob"), isGroupchat: false, isMucUser: true)
-        #expect(carbon == MessageRoute(conversation: roomConversation, isMine: true))
-        #expect(me.route(from: jid("alice@waddle.test/desktop"), to: nil, isGroupchat: false, isMucUser: true) == nil)
+        #expect(me.route(from: jid("general@muc.waddle.test"), to: jid("alice@waddle.test"), isGroupchat: false, isMucUser: true) == nil)
+        // A carbon of our own private message.
+        #expect(me.route(from: jid("alice@waddle.test/desktop"), to: jid("general@muc.waddle.test/bob"), isGroupchat: false, isMucUser: true) == nil)
         // The marker alone decides: the same addressing without it is 1:1.
         let unmarked = me.route(from: jid("general@muc.waddle.test/bob"), to: jid("alice@waddle.test/phone"), isGroupchat: false, isMucUser: false)
         #expect(unmarked == MessageRoute(conversation: .direct(room), isMine: false))

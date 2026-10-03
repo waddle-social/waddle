@@ -67,7 +67,13 @@ public extension AccountIdentity {
     /// Routes a message: groupchat keys on the room bare JID and compares
     /// the occupant nick for authorship; 1:1 keys on the non-own side and
     /// compares bare JIDs (carbons of our own sends route to the peer).
+    /// `nil` means the stanza is not shown anywhere: it names no conversation.
     func route(from: JID?, to: JID?, isGroupchat: Bool, isMucUser: Bool) -> MessageRoute? {
+        // XEP-0045 `muc#user`: a room private message or invite/decline.
+        // Not a DM, and no surface here answers it privately: in the room it
+        // would read as public and a reply would go to the whole room. So it
+        // is not shown at all: no timeline, unread, recency or alert.
+        if isMucUser { return nil }
         if isGroupchat {
             // A groupchat stanza comes from the room; without a sender it
             // cannot name one (the recipient is our own account).
@@ -79,13 +85,6 @@ public extension AccountIdentity {
         // §8.1.2.1), not from a peer: it names no 1:1 conversation.
         guard let sender = from?.bare else { return nil }
         let isMine = sender == jid
-        if isMucUser {
-            // XEP-0045 `muc#user`: a room private message or invite/decline
-            // is room traffic, never a DM with the room. The room is the
-            // sender, or the addressee of a carbon of our own send.
-            guard let room = isMine ? to?.bare : sender else { return nil }
-            return MessageRoute(conversation: .room(room), isMine: isMine)
-        }
         let peer = isMine ? (to?.bare ?? sender) : sender
         return MessageRoute(conversation: .direct(peer), isMine: isMine)
     }

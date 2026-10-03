@@ -82,6 +82,11 @@ internal class XmppEventRouter(
     }
 
     private fun routeMessage(message: WaddleMessage) {
+        // XEP-0045 `muc#user` traffic (room private message, invite or
+        // decline) has no conversation surface: filed under the room it
+        // would read as public and a reply would go to the whole room.
+        // Neither a DM nor room traffic — no store sees it.
+        if (message.mucUser) return
         // A live MDS PEP event is pure read-state metadata from a
         // sibling device — apply the cursors and skip every chat
         // consumer.
@@ -202,8 +207,10 @@ internal class XmppEventRouter(
     }
 
     private fun routeMamResult(event: XmppEvent.MamResult) {
-        stores.timelineStore.onArchivedMessage(event.message)
         val message = event.message
+        // Same "not shown" rule as live `muc#user` traffic (see routeMessage).
+        if (message.mucUser) return
+        stores.timelineStore.onArchivedMessage(message)
         if (message.body == null) return
         conversationKeyOf(
             ownBareJid = activeSession.ownBareJid,

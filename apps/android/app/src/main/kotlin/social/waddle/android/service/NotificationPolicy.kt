@@ -52,9 +52,9 @@ class NotificationPolicy(
         if (!userPrefs.notificationsEnabled.first()) return null
         val session = currentSession.value ?: return null
         val isGroupchat = message.isMuc || message.messageType == MESSAGE_TYPE_GROUPCHAT
-        // Room private messages/invites carry `type=chat|normal` from the
-        // room JID but are not 1:1 DMs, and neither the DM nor the room
-        // reply path can answer them — they never notify as a DM.
+        // Room private messages/invites (`muc#user`) carry `type=chat|normal`
+        // from the room JID but are not 1:1 DMs, and neither the DM nor the
+        // room reply path can answer them — they never notify.
         if (!isGroupchat && !message.isDirectChat()) return null
         val (conversationJid, sender) =
             foreignSenderOf(message.from, isGroupchat, session) ?: return null

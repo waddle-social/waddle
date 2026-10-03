@@ -46,6 +46,38 @@ class TimelineStoreTest {
     }
 
     @Test
+    fun `muc user traffic never becomes a timeline row`() {
+        val room = "room@muc.waddle.test"
+        // Live private message from an occupant, live invite from the bare
+        // room, and an archived private message (history pages hit the store).
+        val insertedPm = store.onLiveMessage(
+            testMessage(id = "pm-1", from = "$room/alice", to = "me@waddle.test", mucUser = true),
+        )
+        val insertedInvite = store.onLiveMessage(
+            testMessage(id = "inv-1", from = room, to = "me@waddle.test", messageType = "normal", mucUser = true),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "mam-1",
+                id = "pm-2",
+                from = "$room/alice",
+                to = "me@waddle.test",
+                mucUser = true,
+            ),
+        )
+
+        assertFalse(insertedPm)
+        assertFalse(insertedInvite)
+        assertEquals(emptyList<TimelineItem>(), store.timeline(room).value)
+
+        // Control: the same addressing without the marker is an ordinary row.
+        assertTrue(
+            store.onLiveMessage(testMessage(id = "pm-3", from = "$room/alice", to = "me@waddle.test")),
+        )
+        assertEquals(1, store.timeline(room).value.size)
+    }
+
+    @Test
     fun `bodyless call anchor still inserts as a feed row`() {
         val inserted = store.onLiveMessage(
             testMessage(
