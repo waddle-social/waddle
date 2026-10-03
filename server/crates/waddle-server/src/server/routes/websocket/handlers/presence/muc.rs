@@ -1970,13 +1970,22 @@ pub async fn handle_muc_leave(
     // bump `(sender_bare, room)` activity and clear the persisted
     // `<show/>`. We record before the room-actor teardown so a
     // missing room actor doesn't suppress the activity write; the
-    // typed signal happened on the wire regardless.
-    crate::server::routes::interpret::record_presence_unavailable_activity_on_state(
-        state,
-        &sender_jid.to_bare(),
-        room_jid,
-    )
-    .await;
+    // typed signal happened on the wire regardless. Activity belongs to
+    // accounts; a host-owned extension bot leaves after every send, and an
+    // account lookup per leave costs more than its fixed bot address check.
+    if state
+        .deps
+        .service_domains
+        .extension_bot(&jid::Jid::from(sender_jid.clone()))
+        .is_none()
+    {
+        crate::server::routes::interpret::record_presence_unavailable_activity_on_state(
+            state,
+            &sender_jid.to_bare(),
+            room_jid,
+        )
+        .await;
+    }
 
     let Some(room_actor) = get_room_actor(state, room_jid).await else {
         let known_remote_membership = state
