@@ -16,24 +16,21 @@ struct OccupantMemberRow: View {
             status: occupant.status,
             hats: occupant.hats,
             affiliation: occupant.affiliation,
-            isAbsent: false,
-            showsPresence: !occupant.isBot
+            isAbsent: false
         )
         .memberActions(
-            MemberSubject(nick: occupant.nick, jid: occupant.realJID, affiliation: occupant.affiliation, isPresent: true, isBot: occupant.isBot),
+            MemberSubject(nick: occupant.nick, jid: occupant.realJID, affiliation: occupant.affiliation, isPresent: true),
             room: room,
             model: model
         )
     }
 }
 
-/// An affiliated member who is not in the room, shown offline; an extension
-/// bot has no presence to show.
+/// An affiliated member who is not in the room, shown offline.
 struct AbsentMemberRow: View {
     let room: BareJID
     let member: RoomMember
     let model: RoomMembersModel
-    var isBot = false
 
     var body: some View {
         MemberRowLabel(
@@ -44,13 +41,31 @@ struct AbsentMemberRow: View {
             status: nil,
             hats: [],
             affiliation: member.affiliation,
-            isAbsent: !isBot,
-            showsPresence: !isBot
+            isAbsent: true
         )
         .memberActions(
-            MemberSubject(nick: member.nick, jid: member.jid, affiliation: member.affiliation, isPresent: false, isBot: isBot),
+            MemberSubject(nick: member.nick, jid: member.jid, affiliation: member.affiliation, isPresent: false),
             room: room,
             model: model
+        )
+    }
+}
+
+/// A bot the room's server declares: its name, no presence and no actions.
+struct BotMemberRow: View {
+    let bot: RoomBot
+
+    var body: some View {
+        MemberRowLabel(
+            name: bot.displayName,
+            avatarJID: bot.jid,
+            colorKey: bot.jid.description,
+            availability: .offline,
+            status: nil,
+            hats: [],
+            affiliation: .none,
+            isAbsent: false,
+            showsPresence: false
         )
     }
 }
@@ -65,7 +80,7 @@ struct MemberRowLabel: View {
     let hats: [Hat]
     let affiliation: RoomAffiliation
     let isAbsent: Bool
-    /// False for extension bots, whose room presence is not availability.
+    /// False for a bot, which has no availability to show.
     var showsPresence = true
 
     var body: some View {

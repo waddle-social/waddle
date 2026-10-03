@@ -1,49 +1,33 @@
 import Foundation
-import WaddleKit
 
 /// Occupants that share a XEP-0045 role.
-struct MemberRoleGroup: Identifiable, Hashable {
-    let role: RoomRole
-    let occupants: [Occupant]
+public struct MemberRoleGroup: Identifiable, Hashable, Sendable {
+    public let role: RoomRole
+    public let occupants: [Occupant]
 
-    var id: RoomRole { role }
+    public var id: RoomRole { role }
 }
 
-/// Builds the member list of the details screen.
-enum MemberRoster {
-    static let roleOrder: [RoomRole] = [.moderator, .participant, .visitor]
+/// Builds the people lists of the room details screen. The room's bots are
+/// not here: `RoomBotStore` holds the ones the server declares.
+public enum MemberRoster {
+    public static let roleOrder: [RoomRole] = [.moderator, .participant, .visitor]
 
     /// Present people grouped Moderators, Participants, Visitors; empty
-    /// groups dropped; each sorted by nick. Extension bots are listed by
-    /// `bots` instead.
-    static func grouped(_ occupants: [Occupant]) -> [MemberRoleGroup] {
+    /// groups dropped; each sorted by nick. A bot-hatted occupant is in the
+    /// room only for one send, so it is never listed as a person.
+    public static func grouped(_ occupants: [Occupant]) -> [MemberRoleGroup] {
         roleOrder.compactMap { role in
             let members = occupants.filter { $0.role == role && !$0.isBot }.sorted(by: nickOrder)
             return members.isEmpty ? nil : MemberRoleGroup(role: role, occupants: members)
         }
     }
 
-    /// Extension bots in the room, sorted by nick. They join a room lazily
-    /// on first post, so their presence says nothing about availability.
-    static func bots(_ occupants: [Occupant]) -> [Occupant] {
-        occupants.filter(\.isBot).sorted(by: nickOrder)
-    }
-
-    /// Affiliated people not currently in the room (see `absentAll`).
-    static func absent(_ members: [RoomMember], present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
-        absentAll(members, present: occupants).filter { !account.isExtensionBot($0.jid) }
-    }
-
-    /// Affiliated extension bots not currently in the room.
-    static func absentBots(_ members: [RoomMember], present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
-        absentAll(members, present: occupants).filter { account.isExtensionBot($0.jid) }
-    }
-
     /// XEP-0045 affiliated users not currently in the room. A member counts
     /// as present when an occupant exposes the same real JID or, in a
     /// semi-anonymous room, uses the member's reserved nick. Outcasts are
     /// not members.
-    private static func absentAll(_ members: [RoomMember], present occupants: [Occupant]) -> [RoomMember] {
+    public static func absent(_ members: [RoomMember], present occupants: [Occupant]) -> [RoomMember] {
         let presentJIDs = Set(occupants.compactMap(\.realJID))
         let presentNicks = Set(occupants.map { $0.nick.lowercased() })
         return members
@@ -53,7 +37,7 @@ enum MemberRoster {
             .sorted(by: memberOrder)
     }
 
-    static func displayName(of member: RoomMember) -> String {
+    public static func displayName(of member: RoomMember) -> String {
         if let nick = member.nick?.trimmingCharacters(in: .whitespacesAndNewlines), !nick.isEmpty {
             return nick
         }
@@ -61,7 +45,7 @@ enum MemberRoster {
     }
 
     /// Applies a successful affiliation change to a loaded member list.
-    static func updating(_ members: [RoomMember], jid: BareJID, to affiliation: RoomAffiliation) -> [RoomMember] {
+    public static func updating(_ members: [RoomMember], jid: BareJID, to affiliation: RoomAffiliation) -> [RoomMember] {
         guard affiliation != .none else { return members.filter { $0.jid != jid } }
         guard let index = members.firstIndex(where: { $0.jid == jid }) else {
             return members + [RoomMember(jid: jid, nick: nil, affiliation: affiliation)]

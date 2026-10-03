@@ -56,9 +56,6 @@ struct MemberSubject: Hashable {
     let jid: BareJID?
     let affiliation: RoomAffiliation
     let isPresent: Bool
-    /// An extension bot: a present occupant's hat, or an absent member's
-    /// `extensions.<domain>` JID.
-    var isBot = false
 }
 
 /// XEP-0045 permission rules for the member context menu. The server stays

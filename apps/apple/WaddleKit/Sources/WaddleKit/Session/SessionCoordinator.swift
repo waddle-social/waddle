@@ -24,6 +24,9 @@ public final class SessionCoordinator {
     public let timelines: TimelineStore
     public let directory: DirectoryStore
     public let presence: PresenceStore
+    /// The bots each room declares; they hold no affiliation and are in a
+    /// room only for one send, so presence and member lists never name them.
+    public let roomBots: RoomBotStore
     public let typing: TypingStore
     public let unread: UnreadStore
     public let deliveries: DeliveryStore
@@ -131,6 +134,7 @@ public final class SessionCoordinator {
         self.directory = directory
         self.timelines = TimelineStore(maxItemsPerConversation: timelineCapacity)
         self.presence = PresenceStore(isRoom: { directory.isRoom($0) })
+        self.roomBots = RoomBotStore()
         self.typing = TypingStore()
         self.unread = UnreadStore()
         self.deliveries = DeliveryStore()
@@ -326,6 +330,7 @@ public final class SessionCoordinator {
         timelines.clear()
         directory.clear()
         presence.clear()
+        roomBots.clear()
         typing.clear()
         unread.clearAll()
         deliveries.clear()
@@ -409,6 +414,7 @@ public final class SessionCoordinator {
             route(message)
         case let .presence(wirePresence):
             presence.apply(wirePresence)
+            refreshRoomBotsIfUndeclared(by: wirePresence)
         case let .deliveryAcked(stanzaID):
             deliveries.acknowledged(stanzaID)
             // A late ack can arrive after a reset has put this message back

@@ -20,6 +20,7 @@ extension SessionCoordinator {
         await markDisplayedIfVisible(conversation)
         if conversation.isRoom {
             await refreshPins(in: conversation.jid)
+            await refreshRoomBots(in: conversation.jid)
         }
     }
 

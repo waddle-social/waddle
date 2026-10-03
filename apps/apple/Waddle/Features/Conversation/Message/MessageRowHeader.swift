@@ -28,7 +28,7 @@ struct MessageRowHeader: View {
     }
 }
 
-/// Small capsule for a hat, owner, admin or moderator.
+/// Small capsule for a bot, hat, owner, admin or moderator.
 struct MessageRoleBadgeView: View {
     let badge: MessageRoleBadge
 
@@ -47,7 +47,7 @@ struct MessageRoleBadgeView: View {
         case .owner: return .orange
         case .admin: return .purple
         case .moderator: return .blue
-        case .hat: return .teal
+        case .bot, .hat: return .teal
         }
     }
 }

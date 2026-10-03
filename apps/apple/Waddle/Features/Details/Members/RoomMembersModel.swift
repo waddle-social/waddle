@@ -3,6 +3,7 @@ import Observation
 import WaddleKit
 
 /// Affiliation list loading and moderation for one room's details screen.
+/// The room's bots come from `SessionCoordinator.roomBots`, not from here.
 @MainActor
 @Observable
 final class RoomMembersModel {
@@ -29,17 +30,13 @@ final class RoomMembersModel {
         } catch {
             loadError = ActionErrorCopy.message(for: error, fallback: "Couldn't load members. Try again.")
         }
+        await session.refreshRoomBots(in: room)
         isLoading = false
     }
 
     /// Affiliated people not in the room, once loaded.
-    func absentMembers(present occupants: [Occupant], account: AccountIdentity) -> [RoomMember]? {
-        members.map { MemberRoster.absent($0, present: occupants, account: account) }
-    }
-
-    /// Affiliated extension bots not in the room, once loaded.
-    func absentBots(present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
-        members.map { MemberRoster.absentBots($0, present: occupants, account: account) } ?? []
+    func absentMembers(present occupants: [Occupant]) -> [RoomMember]? {
+        members.map { MemberRoster.absent($0, present: occupants) }
     }
 
     /// Bans wait for confirmation; everything else runs now.

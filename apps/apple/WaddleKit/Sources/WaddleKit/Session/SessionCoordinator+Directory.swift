@@ -85,6 +85,26 @@ extension SessionCoordinator {
         try await port.listMembers(of: room)
     }
 
+    /// Lists the room's declared bots into `roomBots`; a failed query
+    /// keeps the last list.
+    public func refreshRoomBots(in room: BareJID) async {
+        let ticket = roomBots.beginRefresh(in: room)
+        guard let listed = try? await port.listRoomBots(in: room) else { return }
+        roomBots.replace(listed, in: room, ticket: ticket)
+    }
+
+    /// A bot joins a room for one send and leaves, so a bot-hatted presence
+    /// for a JID the room has not declared means the list is stale. The
+    /// server records the room before the bot leaves, so its leave presence
+    /// is the one a refresh sees the bot in.
+    func refreshRoomBotsIfUndeclared(by wirePresence: WirePresence) {
+        let room = wirePresence.from.bare
+        guard wirePresence.isBot,
+              let bot = wirePresence.occupant?.realJID?.bare,
+              !roomBots.isDeclared(bot, in: room) else { return }
+        Task { await refreshRoomBots(in: room) }
+    }
+
     public func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String? = nil) async throws {
         try await port.setAffiliation(affiliation, of: user, in: room, reason: reason)
     }

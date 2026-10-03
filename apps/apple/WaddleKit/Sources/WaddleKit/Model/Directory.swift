@@ -93,6 +93,28 @@ public struct RoomMember: Hashable, Sendable, Identifiable {
     }
 }
 
+/// A bot a room's server declares (XEP-0030 `urn:waddle:room:bots:0`).
+/// Bots hold no affiliation and join a room only for one send, so neither
+/// the member lists nor the occupants name them.
+public struct RoomBot: Hashable, Sendable, Identifiable {
+    public var id: BareJID { jid }
+    public let jid: BareJID
+    /// The display name the service reports, if any.
+    public let name: String?
+
+    public init(jid: BareJID, name: String?) {
+        self.jid = jid
+        self.name = name
+    }
+
+    public var displayName: String {
+        if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        return jid.localpart ?? jid.domain
+    }
+}
+
 /// A XEP-0055 user search result.
 public struct UserSearchResult: Hashable, Sendable, Identifiable {
     public var id: BareJID { jid }
