@@ -348,3 +348,67 @@ fn receiver_nacks_stanza_kind_mismatch_as_parse_failure() {
         })
     ));
 }
+#[tokio::test(start_paused = true)]
+async fn receiver_diversion_expires_after_cooldown_without_advancing_expected() {
+    let mut receiver = OrderedRelayReceiverState::default();
+    let channel = channel();
+    let envelope = |sequence: u64, body: &str| RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: channel.clone(),
+        sequence: OrderedRelaySequence(sequence),
+        origin_inbound_sequence: inbound(sequence as u32),
+        origin_claim: origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: target_claim(),
+        payload: message_payload(body),
+        origin_proof: None,
+    };
+    let OrderedRelayReservation::Reserved(reserved) = receiver.reserve(envelope(1, "one")) else {
+        panic!("first envelope reserves");
+    };
+    receiver.abort_reserved(*reserved, OrderedRelayNackReason::MaybeCommitted);
+
+    tokio::time::advance(ORDERED_RELAY_DIVERSION_COOLDOWN - std::time::Duration::from_millis(1))
+        .await;
+    assert!(matches!(
+        receiver.reserve(envelope(1, "retry")),
+        OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::Diverted(_),
+            ..
+        }))
+    ));
+    // After the cooldown the aborted sequence is still the expectation, so
+    // the sender's next envelope (sequence 2) learns it through a Gap.
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert!(matches!(
+        receiver.reserve(envelope(2, "two")),
+        OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::Gap {
+                expected: OrderedRelaySequence(1)
+            },
+            ..
+        }))
+    ));
+    assert!(matches!(
+        receiver.reserve(envelope(1, "two")),
+        OrderedRelayReservation::Reserved(_)
+    ));
+}
+#[tokio::test(start_paused = true)]
+async fn receiver_expired_diversions_are_pruned_before_the_capacity_latch() {
+    let mut receiver = OrderedRelayReceiverState::default();
+    for index in 0..MAX_TRACKED_ORDERED_RELAY_CHANNELS {
+        receiver.divert(OrderedRelayDiversion {
+            channel: channel_for_bare(&format!("user-{index}@example.test")),
+            reason: OrderedRelayDiversionReason::Unreachable,
+        });
+    }
+    tokio::time::advance(ORDERED_RELAY_DIVERSION_COOLDOWN).await;
+    receiver.divert(OrderedRelayDiversion {
+        channel: channel_for_bare("late@example.test"),
+        reason: OrderedRelayDiversionReason::Unreachable,
+    });
+
+    assert!(!receiver.new_channels_diverted);
+    assert_eq!(receiver.diversions.len(), 1);
+}

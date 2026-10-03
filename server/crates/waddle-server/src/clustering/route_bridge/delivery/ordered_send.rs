@@ -135,6 +135,7 @@ impl OrderedRelayDeliveryBridge {
         let result = self
             .send_prepared_to_owner(&prepared.previous_owner, prepared.envelope.clone())
             .await;
+        let (prepared, result) = self.resend_after_gap(prepared, result).await;
         if allow_target_refresh_retry
             && matches!(
                 &result,
@@ -164,7 +165,7 @@ impl OrderedRelayDeliveryBridge {
             }
         }
 
-        self.finish_prepared_delivery_result(prepared, result).await
+        self.finish_resolved_delivery_result(prepared, result).await
     }
 
     pub(in super::super) async fn send_prepared_to_owner(
@@ -172,6 +173,13 @@ impl OrderedRelayDeliveryBridge {
         owner: &NodeIdentity,
         envelope: RemoteStanzaEnvelope,
     ) -> Result<OrderedRelayReply, RelayAskError> {
+        #[cfg(test)]
+        if let Ok(relay) =
+            crate::clustering::route_bridge::tests::diversion_recovery::TEST_ORDERED_RELAY
+                .try_with(Arc::clone)
+        {
+            return relay.deliver(owner, envelope).await;
+        }
         #[cfg(test)]
         if let Ok(receiver) = super::muc::cleanup::TEST_CLEANUP_RELAY.try_with(Arc::clone) {
             return Ok(receiver.deliver(envelope).await);
@@ -199,7 +207,78 @@ impl OrderedRelayDeliveryBridge {
         handle.deliver_ordered(envelope).await
     }
 
+    /// After `Gap { expected }`, relabel the payload to `expected` and send it
+    /// once more (#1623). Every other reply, a refused compare-and-set, and a
+    /// signing failure pass the original result through unchanged.
+    async fn resend_after_gap(
+        &self,
+        prepared: PreparedRemoteDelivery,
+        result: Result<OrderedRelayReply, RelayAskError>,
+    ) -> (
+        PreparedRemoteDelivery,
+        Result<OrderedRelayReply, RelayAskError>,
+    ) {
+        let Ok(OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::Gap { expected },
+            ..
+        })) = &result
+        else {
+            return (prepared, result);
+        };
+        let resent = {
+            let mut sender = self.sender_state.lock().await;
+            if !sender.resync_after_gap(&prepared.envelope, *expected) {
+                return (prepared, result);
+            }
+            let envelope = &prepared.envelope;
+            sender.next_envelope(
+                envelope.asserted_origin_node.clone(),
+                envelope.channel.clone(),
+                envelope.origin_inbound_sequence,
+                envelope.claims(),
+                envelope.payload.clone(),
+            )
+        };
+        let Ok(mut envelope) = resent else {
+            return (prepared, result);
+        };
+        if self.sign_envelope(&mut envelope).is_err() {
+            self.sender_state
+                .lock()
+                .await
+                .rollback_unseen_envelope(&envelope);
+            return (prepared, result);
+        }
+        tracing::debug!(
+            target = %prepared.target,
+            nacked_sequence = prepared.envelope.sequence.0,
+            resynced_sequence = envelope.sequence.0,
+            "ordered relay: resending on the receiver's expected sequence after a gap"
+        );
+        let result = self
+            .send_prepared_to_owner(&prepared.previous_owner, envelope.clone())
+            .await;
+        (
+            PreparedRemoteDelivery {
+                envelope,
+                ..prepared
+            },
+            result,
+        )
+    }
+
     pub(in super::super) async fn finish_prepared_delivery_result(
+        self: Arc<Self>,
+        prepared: PreparedRemoteDelivery,
+        result: Result<OrderedRelayReply, RelayAskError>,
+    ) -> Option<RemoteDeliveryOutcome> {
+        let (prepared, result) = self.resend_after_gap(prepared, result).await;
+        self.finish_resolved_delivery_result(prepared, result).await
+    }
+
+    // The gap retry has already been considered for this owner. Keep final
+    // classification separate so owner refresh cannot trigger a second resend.
+    async fn finish_resolved_delivery_result(
         self: Arc<Self>,
         prepared: PreparedRemoteDelivery,
         result: Result<OrderedRelayReply, RelayAskError>,
@@ -254,7 +333,7 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
             Err(error) => {
-                if matches!(error, RelayAskError::NotFound { .. }) {
+                if ask_error_is_unseen(&error) {
                     self.sender_state
                         .lock()
                         .await

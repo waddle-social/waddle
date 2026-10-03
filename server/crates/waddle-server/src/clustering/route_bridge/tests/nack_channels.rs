@@ -683,16 +683,16 @@ fn iq_ask_error_classifier_falls_back_only_for_definite_no_effect_failures() {
         Some(FullJidDeliveryOutcome::Unavailable)
     );
     assert_eq!(channel_diversion_for_ask_error(&not_found), None);
-    assert_eq!(
-        channel_diversion_for_ask_error(&mailbox_full),
-        Some(OrderedRelayDiversionReason::Backpressure)
-    );
+    // #1623: an unseen ask is rolled back, never diverted.
+    assert_eq!(channel_diversion_for_ask_error(&mailbox_full), None);
+    assert!(ask_error_is_unseen(&mailbox_full));
     let stale_ref = RelayAskError::Send {
         failure: RelaySendFailure::StaleRef,
         effect: RelaySendEffect::NoEffect,
         message: "actor not running before enqueue".to_string(),
     };
     assert!(ask_error_allows_target_refresh(&stale_ref));
+    assert_eq!(channel_diversion_for_ask_error(&stale_ref), None);
     assert_eq!(
         outcome_for_ask_error(&stale_ref, true),
         Some(FullJidDeliveryOutcome::Unavailable)
@@ -703,6 +703,11 @@ fn iq_ask_error_classifier_falls_back_only_for_definite_no_effect_failures() {
         message: "reply timeout".to_string(),
     };
     assert!(!ask_error_allows_target_refresh(&reply_timeout));
+    assert!(!ask_error_is_unseen(&reply_timeout));
+    assert_eq!(
+        channel_diversion_for_ask_error(&reply_timeout),
+        Some(OrderedRelayDiversionReason::Unreachable)
+    );
     assert_eq!(
         outcome_for_ask_error(&reply_timeout, true),
         Some(FullJidDeliveryOutcome::MaybeCommitted)

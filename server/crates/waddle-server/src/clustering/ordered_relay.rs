@@ -10,12 +10,26 @@ use super::NodeId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use tokio::time::Instant;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 const RECENT_ACK_CACHE_PER_CHANNEL: usize = 64;
 const MAX_TRACKED_ORDERED_RELAY_CHANNELS: usize = 8_192;
+
+/// How long a diversion suppresses its channel (#1623). A diversion used to be
+/// permanent, and a channel's key does not change when a full-JID resource
+/// rebinds, so one failed send silenced a live recipient until a claim epoch
+/// moved. After the cooldown the channel resumes and any sequence
+/// disagreement resolves through a `Gap` resync. It outlasts the reply timeout
+/// so a receiver reservation from the failed attempt has ended by then.
+pub(crate) const ORDERED_RELAY_DIVERSION_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_secs(10);
+const _: () = assert!(
+    ORDERED_RELAY_DIVERSION_COOLDOWN.as_nanos()
+        > crate::config::ORDERED_RELAY_REPLY_TIMEOUT.as_nanos()
+);
 
 /// Monotonic sequence number on one ordered relay channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -485,6 +499,15 @@ pub struct RemoteStanzaEnvelope {
 }
 
 impl RemoteStanzaEnvelope {
+    /// The claim triple this envelope was minted under.
+    pub fn claims(&self) -> OrderedRelayEnvelopeClaims {
+        OrderedRelayEnvelopeClaims::new(
+            self.origin_claim.clone(),
+            self.sender_claim.clone(),
+            self.target_claim.clone(),
+        )
+    }
+
     pub fn signing_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(&RemoteStanzaEnvelopeSigningView {
             asserted_origin_node: &self.asserted_origin_node,
@@ -706,11 +729,73 @@ pub struct OrderedRelayDiversion {
     pub reason: OrderedRelayDiversionReason,
 }
 
-/// Sender-side sequence allocator and sticky-diversion tracker.
+/// Diversions recorded by one side of the relay, each bounded by
+/// [`ORDERED_RELAY_DIVERSION_COOLDOWN`]. The recording instant stays local:
+/// [`OrderedRelayDiversion`] is part of the `Diverted` NACK wire shape.
+/// `tokio::time::Instant` lets tests drive expiry with a paused clock.
+#[derive(Debug, Default)]
+struct OrderedRelayDiversions {
+    entries: HashMap<OrderedRelayChannel, (OrderedRelayDiversion, Instant)>,
+}
+
+fn diversion_is_live(since: Instant) -> bool {
+    since.elapsed() < ORDERED_RELAY_DIVERSION_COOLDOWN
+}
+
+impl OrderedRelayDiversions {
+    /// The channel's unexpired diversion; an expired one is removed.
+    fn active(&mut self, channel: &OrderedRelayChannel) -> Option<OrderedRelayDiversion> {
+        let (diversion, since) = self.entries.get(channel)?;
+        if diversion_is_live(*since) {
+            return Some(diversion.clone());
+        }
+        self.entries.remove(channel);
+        None
+    }
+
+    fn is_active(&self, channel: &OrderedRelayChannel) -> bool {
+        self.entries
+            .get(channel)
+            .is_some_and(|(_, since)| diversion_is_live(*since))
+    }
+
+    /// Record `diversion`, pruning expired entries first when at capacity.
+    /// Returns `false` when the table is still full of live diversions.
+    fn insert(&mut self, diversion: OrderedRelayDiversion) -> bool {
+        if !self.entries.contains_key(&diversion.channel)
+            && self.entries.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
+        {
+            self.entries
+                .retain(|_, (_, since)| diversion_is_live(*since));
+            if self.entries.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS {
+                return false;
+            }
+        }
+        self.entries
+            .insert(diversion.channel.clone(), (diversion, Instant::now()));
+        true
+    }
+
+    fn remove(&mut self, channel: &OrderedRelayChannel) {
+        self.entries.remove(channel);
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Sender-side sequence allocator and bounded-diversion tracker.
 #[derive(Debug, Default)]
 pub struct OrderedRelaySenderState {
     next_by_channel: HashMap<OrderedRelayChannel, OrderedRelaySequence>,
-    diversions: HashMap<OrderedRelayChannel, OrderedRelayDiversion>,
+    diversions: OrderedRelayDiversions,
     new_channels_diverted: bool,
 }
 
@@ -723,8 +808,8 @@ impl OrderedRelaySenderState {
         claims: OrderedRelayEnvelopeClaims,
         payload: OrderedRelayPayload,
     ) -> Result<RemoteStanzaEnvelope, OrderedRelayDiversion> {
-        if let Some(diversion) = self.diversions.get(&channel) {
-            return Err(diversion.clone());
+        if let Some(diversion) = self.diversions.active(&channel) {
+            return Err(diversion);
         }
         if self.new_channels_diverted && !self.next_by_channel.contains_key(&channel) {
             return Err(OrderedRelayDiversion {
@@ -772,14 +857,11 @@ impl OrderedRelaySenderState {
     }
 
     pub fn divert(&mut self, diversion: OrderedRelayDiversion) {
-        if !self.diversions.contains_key(&diversion.channel)
-            && self.diversions.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
-        {
-            self.next_by_channel.remove(&diversion.channel);
+        let channel = diversion.channel.clone();
+        if !self.diversions.insert(diversion) {
+            self.next_by_channel.remove(&channel);
             self.new_channels_diverted = true;
-            return;
         }
-        self.diversions.insert(diversion.channel.clone(), diversion);
     }
 
     pub fn forget_channel(&mut self, channel: &OrderedRelayChannel) {
@@ -787,8 +869,34 @@ impl OrderedRelaySenderState {
         self.diversions.remove(channel);
     }
 
+    /// Adopt the receiver's `expected` sequence after `envelope` was NACKed
+    /// `Gap { expected }`, so the caller can resend its payload there (#1623).
+    ///
+    /// Order-safe because the receiver has committed exactly the sequences
+    /// below `expected`, and the per-channel lock leaves at most one earlier
+    /// envelope in flight: if that one still holds `expected`, the resend's
+    /// different fingerprint is refused without effect. Compare-and-set: it
+    /// refuses when a later envelope already advanced the channel (a
+    /// concurrent `forget_channel` or repair) or the channel is diverted.
+    pub fn resync_after_gap(
+        &mut self,
+        envelope: &RemoteStanzaEnvelope,
+        expected: OrderedRelaySequence,
+    ) -> bool {
+        if expected == envelope.sequence
+            || self.diversions.is_active(&envelope.channel)
+            || envelope.sequence.checked_next().as_ref()
+                != self.next_by_channel.get(&envelope.channel)
+        {
+            return false;
+        }
+        self.next_by_channel
+            .insert(envelope.channel.clone(), expected);
+        true
+    }
+
     pub fn rollback_unseen_envelope(&mut self, envelope: &RemoteStanzaEnvelope) {
-        if self.diversions.contains_key(&envelope.channel) {
+        if self.diversions.is_active(&envelope.channel) {
             return;
         }
         let Some(expected_after_envelope) = envelope.sequence.checked_next() else {
@@ -812,17 +920,17 @@ pub struct OrderedRelayReceiverState {
     next_expected_by_channel: HashMap<OrderedRelayChannel, OrderedRelaySequence>,
     pending_by_channel: HashMap<OrderedRelayChannel, OrderedRelayPendingReservation>,
     recent_acked_by_channel: HashMap<OrderedRelayChannel, VecDeque<OrderedRelayRecentAck>>,
-    diversions: HashMap<OrderedRelayChannel, OrderedRelayDiversion>,
+    diversions: OrderedRelayDiversions,
     new_channels_diverted: bool,
 }
 
 impl OrderedRelayReceiverState {
     pub fn reserve(&mut self, envelope: RemoteStanzaEnvelope) -> OrderedRelayReservation {
-        if let Some(diversion) = self.diversions.get(&envelope.channel) {
+        if let Some(diversion) = self.diversions.active(&envelope.channel) {
             return OrderedRelayReservation::Completed(OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
                 sequence: envelope.sequence,
-                reason: OrderedRelayNackReason::Diverted(diversion.clone()),
+                reason: OrderedRelayNackReason::Diverted(diversion),
             }));
         }
         if self.new_channels_diverted
@@ -974,11 +1082,11 @@ impl OrderedRelayReceiverState {
     ) -> OrderedRelayReply {
         let envelope = reserved.envelope;
         self.pending_by_channel.remove(&envelope.channel);
-        if let Some(diversion) = self.diversions.get(&envelope.channel) {
+        if let Some(diversion) = self.diversions.active(&envelope.channel) {
             return OrderedRelayReply::Nack(OrderedRelayNack {
                 channel: envelope.channel,
                 sequence: envelope.sequence,
-                reason: OrderedRelayNackReason::Diverted(diversion.clone()),
+                reason: OrderedRelayNackReason::Diverted(diversion),
             });
         }
 
@@ -1033,6 +1141,12 @@ impl OrderedRelayReceiverState {
         reserved: OrderedRelayReservedEnvelope,
         reason: OrderedRelayNackReason,
     ) -> OrderedRelayReply {
+        // An unbound target is a delivery answer, not a channel failure:
+        // `next_expected` stays at this sequence, so the sender rolls back and
+        // its next stanza reaches the resource once it rebinds (#1623).
+        if reason == OrderedRelayNackReason::TargetUnavailable {
+            return self.abort_reserved_without_diversion(reserved, reason);
+        }
         let envelope = reserved.envelope;
         self.pending_by_channel.remove(&envelope.channel);
         self.divert(OrderedRelayDiversion {
@@ -1061,16 +1175,13 @@ impl OrderedRelayReceiverState {
     }
 
     pub fn divert(&mut self, diversion: OrderedRelayDiversion) {
-        if !self.diversions.contains_key(&diversion.channel)
-            && self.diversions.len() >= MAX_TRACKED_ORDERED_RELAY_CHANNELS
-        {
-            self.next_expected_by_channel.remove(&diversion.channel);
-            self.pending_by_channel.remove(&diversion.channel);
-            self.recent_acked_by_channel.remove(&diversion.channel);
+        let channel = diversion.channel.clone();
+        if !self.diversions.insert(diversion) {
+            self.next_expected_by_channel.remove(&channel);
+            self.pending_by_channel.remove(&channel);
+            self.recent_acked_by_channel.remove(&channel);
             self.new_channels_diverted = true;
-            return;
         }
-        self.diversions.insert(diversion.channel.clone(), diversion);
     }
 
     pub fn forget_channel(&mut self, channel: &OrderedRelayChannel) {
