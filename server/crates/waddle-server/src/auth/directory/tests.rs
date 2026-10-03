@@ -126,7 +126,7 @@ async fn matches_names_on_their_canonical_localpart() {
         .register(RegisterRequest {
             username: "Äda".to_string(),
             domain: "localhost".to_string(),
-            password: "ada-pass-1234".to_string(),
+            password: format!("{:x}", rand::random::<u64>()),
             email: None,
         })
         .await
