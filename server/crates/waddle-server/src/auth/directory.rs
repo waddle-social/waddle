@@ -52,7 +52,13 @@ pub(crate) fn canonical_account_jid(name: &str, domain: &str) -> Option<jid::Bar
 /// names nobody registered) by the same rule the roster set and subscription
 /// guards apply. Idempotent.
 pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
-    backfill_account_keys(actor).await?;
+    // Nodes starting together can race to key case-variant twins; the
+    // loser's UPDATE trips the unique key index. A second pass sees the
+    // winner's key and leaves the twin unkeyed, as a lone node would.
+    if let Err(error) = backfill_account_keys(actor).await {
+        warn!(%error, "account key backfill failed; retrying once");
+        backfill_account_keys(actor).await?;
+    }
     prune_roster_contacts(actor).await
 }
 
