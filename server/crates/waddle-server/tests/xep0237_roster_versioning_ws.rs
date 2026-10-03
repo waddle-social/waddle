@@ -284,3 +284,56 @@ async fn xep0237_version_persists_across_server_restart() {
 
     let _ = alice2.close().await;
 }
+
+/// A stored roster item whose contact is no account (written before roster
+/// contacts had to be accounts) is dropped when the server starts, with the
+/// owner's version: the restarted server answers the old ver with the full,
+/// pruned roster instead of "unchanged".
+#[tokio::test]
+async fn xep0237_startup_prune_of_non_account_contacts_invalidates_the_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("waddle-test-roster-prune.sqlite");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+
+    let v1 = {
+        let server = TestServer::start_persistent_with_extra_accounts(
+            &database_url,
+            &accounts(&alice_password),
+        );
+        let mut alice = connect_named(&server, "alice", &alice_password, "r1").await;
+        let _ = roster_set_add(&mut alice, "prune-add-ed", "ed@localhost", "Ed").await;
+        let frame = roster_get(&mut alice, "prune-snapshot", None).await;
+        let _ = alice.close().await;
+        roster_version(&frame)
+    };
+
+    let pool = sqlx::SqlitePool::connect(&database_url)
+        .await
+        .expect("open stopped server database");
+    sqlx::query(
+        "INSERT INTO roster_items (user_jid, contact_jid) \
+         VALUES ('alice@localhost', 'chat@localhost')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed a non-account roster item");
+    pool.close().await;
+
+    let server = TestServer::start_persistent_with_extra_accounts(
+        &database_url,
+        &[("alice", &alice_password)],
+    );
+    let mut alice = connect_named(&server, "alice", &alice_password, "r2").await;
+    let frame = roster_get(&mut alice, "prune-after-restart", Some(&v1)).await;
+    assert!(
+        frame.contains("jid='ed@localhost'"),
+        "the old ver no longer matches, so the full roster returns: {frame}"
+    );
+    assert!(
+        !frame.contains("chat@localhost"),
+        "the non-account item is gone: {frame}"
+    );
+
+    let _ = alice.close().await;
+}

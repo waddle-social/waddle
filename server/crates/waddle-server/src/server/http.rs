@@ -973,12 +973,11 @@ async fn create_websocket_state(
     crate::admin::spaces::register(&websocket_command_registry, Arc::clone(&state)).await;
     if lineage_attested {
         // Account lookups match canonical keys only, so every account row
-        // needs its key before the node serves.
+        // needs its key before the node serves; the roster prune that
+        // follows uses them.
         crate::auth::directory::reconcile_local_accounts(state.db_pool.global_actor())
             .await
-            .map_err(|error| {
-                anyhow::anyhow!("failed to reconcile local account lookup keys: {error}")
-            })?;
+            .map_err(|error| anyhow::anyhow!("failed to reconcile local accounts: {error}"))?;
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
             &state.permission_actor,

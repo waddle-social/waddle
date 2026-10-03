@@ -47,9 +47,64 @@ pub(crate) fn canonical_account_jid(name: &str, domain: &str) -> Option<jid::Bar
 }
 
 /// Startup pass before the node serves: give every account row written
-/// without one its canonical lookup key. Idempotent.
+/// without one its canonical lookup key, then drop roster items whose
+/// contact is not an account on the owner's domain (rooms, extension bots,
+/// names nobody registered) by the same rule the roster set and subscription
+/// guards apply. Idempotent.
 pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
-    backfill_account_keys(actor).await
+    backfill_account_keys(actor).await?;
+    prune_roster_contacts(actor).await
+}
+
+/// Each pruned owner also loses its XEP-0237 version, so a cached roster no
+/// longer matches and is refetched.
+// ponytail: reads every roster row each startup; page by owner if rosters grow large.
+async fn prune_roster_contacts(actor: &ActorRef<DbActor>) -> Result<(), AuthError> {
+    let items = query(
+        actor,
+        "SELECT user_jid, contact_jid FROM roster_items",
+        vec![],
+    )
+    .await?;
+    let mut accounts = std::collections::HashMap::new();
+    for row in items {
+        let owner = text(&row, 0)?;
+        let contact = text(&row, 1)?;
+        let keep = match (
+            owner.parse::<jid::BareJid>(),
+            contact.parse::<jid::BareJid>(),
+        ) {
+            (Ok(owner), Ok(contact)) if owner.domain() == contact.domain() => {
+                match accounts.get(&contact) {
+                    Some(exists) => *exists,
+                    None => {
+                        let exists =
+                            local_account_jid_exists(actor, &contact, contact.domain().as_str())
+                                .await?;
+                        accounts.insert(contact, exists);
+                        exists
+                    }
+                }
+            }
+            _ => false,
+        };
+        if keep {
+            continue;
+        }
+        execute(
+            actor,
+            "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+            vec![owner.as_str().into(), contact.into()],
+        )
+        .await?;
+        execute(
+            actor,
+            "DELETE FROM roster_versions WHERE user_jid = ?",
+            vec![owner.into()],
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 // ponytail: one UPDATE per unkeyed row; batch it if a large legacy table makes startup slow.

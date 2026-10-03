@@ -2771,30 +2771,35 @@ async fn postgres_v0012_makes_auth_context_total() {
 }
 
 #[tokio::test]
-async fn sqlite_v0014_keys_existing_accounts() {
+async fn sqlite_v0014_keys_accounts_and_prunes_roster_contacts() {
     let db = Database::in_memory("test-global-v0014-account-keys")
         .await
         .expect("in-memory database");
-    assert_v0014_account_keys(&db).await;
+    assert_v0014_account_reconciliation(&db).await;
 }
 
 #[tokio::test]
-async fn postgres_v0014_keys_existing_accounts() {
+async fn postgres_v0014_keys_accounts_and_prunes_roster_contacts() {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V0014 account keys)");
         return;
     };
     let schema = unique_postgres_schema_name("account_keys");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
-    assert_v0014_account_keys(&db).await;
+    assert_v0014_account_reconciliation(&db).await;
     drop_postgres_schema(&admin, &schema).await;
 }
 
 /// Accounts written before V0014 get the JID library's canonical keys at
-/// startup: `Äda` and `Erin@Example.com` key as `äda` / `erin@example.com`,
-/// a later `ada`-cased duplicate of an older account's JID and a name that
-/// is no localpart stay unkeyed, and the pass is idempotent.
-async fn assert_v0014_account_keys(db: &Database) {
+/// startup: `Äda`, `Erin@Example.com` and the OIDC `straße` key as
+/// `äda@example.com`, `erin@example.com` and `strasse`; a later
+/// differently-cased duplicate of an older account's JID and a name that is
+/// no localpart stay unkeyed. Then Alice's roster keeps its accounts on
+/// those keys and loses a phantom local name, a room, an extension bot and
+/// a foreign JID reusing an OIDC localpart, which invalidates Alice's roster
+/// version but not Dave's, whose roster was already clean. Both passes are
+/// idempotent.
+async fn assert_v0014_account_reconciliation(db: &Database) {
     let through_v0013 = MigrationRunner::new(
         global::all()
             .into_iter()
@@ -2807,13 +2812,29 @@ async fn assert_v0014_account_keys(db: &Database) {
     let conn = db.guard().await.expect("database guard");
     for sql in [
         "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES \
+         ('alice@example.com', 'alice', 'alice', 'now', 'now'), \
          ('bob@example.com', 'bob', 'bob', 'now', 'now'), \
+         ('dave@example.com', 'dave', 'dave', 'now', 'now'), \
          ('straße@example.com', 'straße', 'straße', 'now', 'now')",
         "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) \
-         VALUES ('Äda', 'example.com', 'hash', 'salt', '', ''), \
+         VALUES ('carol', 'example.com', 'hash', 'salt', '', ''), \
+         ('Äda', 'example.com', 'hash', 'salt', '', ''), \
          ('Erin', 'Example.com', 'hash', 'salt', '', ''), \
          ('äda', 'example.com', 'hash', 'salt', '', ''), \
          ('no:pe', 'example.com', 'hash', 'salt', '', '')",
+        "INSERT INTO roster_items (user_jid, contact_jid) VALUES \
+         ('alice@example.com', 'bob@example.com'), \
+         ('alice@example.com', 'carol@example.com'), \
+         ('alice@example.com', 'äda@example.com'), \
+         ('alice@example.com', 'erin@example.com'), \
+         ('alice@example.com', 'strasse@example.com'), \
+         ('alice@example.com', 'chat@example.com'), \
+         ('alice@example.com', 'room@muc.example.com'), \
+         ('alice@example.com', 'helper@extensions.example.com'), \
+         ('alice@example.com', 'bob@other.test'), \
+         ('dave@example.com', 'bob@example.com')",
+        "INSERT INTO roster_versions (user_jid, version) VALUES \
+         ('alice@example.com', 'alice-ver'), ('dave@example.com', 'dave-ver')",
     ] {
         conn.execute(sql, ()).await.expect("seed V0014 fixture");
     }
@@ -2833,22 +2854,10 @@ async fn assert_v0014_account_keys(db: &Database) {
             .expect("reconcile accounts");
     }
 
-    let conn = db.guard().await.expect("database guard");
-    let mut rows = conn
-        .query("SELECT username, jid_key FROM native_users ORDER BY id", ())
-        .await
-        .expect("read native keys");
-    let mut native = Vec::new();
-    while let Some(row) = rows.next().await.expect("native row") {
-        native.push((
-            row.get::<String>(0).expect("username"),
-            row.get::<Option<String>>(1).expect("jid key"),
-        ));
-    }
-    drop(rows);
     assert_eq!(
-        native,
+        query_text_pairs(db, "SELECT username, jid_key FROM native_users ORDER BY id").await,
         [
+            ("carol", Some("carol@example.com")),
             ("Äda", Some("äda@example.com")),
             ("Erin", Some("erin@example.com")),
             ("äda", None),
@@ -2856,26 +2865,52 @@ async fn assert_v0014_account_keys(db: &Database) {
         ]
         .map(|(name, key)| (name.to_string(), key.map(str::to_string)))
     );
-
-    let mut rows = conn
-        .query(
-            "SELECT xmpp_localpart, localpart_key FROM users ORDER BY jid",
-            (),
+    assert_eq!(
+        query_text_pairs(
+            db,
+            "SELECT xmpp_localpart, localpart_key FROM users ORDER BY jid"
         )
-        .await
-        .expect("read user keys");
-    let mut users = Vec::new();
-    while let Some(row) = rows.next().await.expect("user row") {
-        users.push((
-            row.get::<String>(0).expect("localpart"),
-            row.get::<Option<String>>(1).expect("localpart key"),
+        .await,
+        [
+            ("alice", Some("alice")),
+            ("bob", Some("bob")),
+            ("dave", Some("dave")),
+            ("straße", Some("strasse")),
+        ]
+        .map(|(name, key)| (name.to_string(), key.map(str::to_string)))
+    );
+    let mut roster = query_text_pairs(db, "SELECT user_jid, contact_jid FROM roster_items").await;
+    roster.sort();
+    assert_eq!(
+        roster,
+        [
+            ("alice@example.com", "bob@example.com"),
+            ("alice@example.com", "carol@example.com"),
+            ("alice@example.com", "erin@example.com"),
+            ("alice@example.com", "strasse@example.com"),
+            ("alice@example.com", "äda@example.com"),
+            ("dave@example.com", "bob@example.com"),
+        ]
+        .map(|(owner, contact)| (owner.to_string(), Some(contact.to_string())))
+    );
+    assert_eq!(
+        query_text_pairs(db, "SELECT user_jid, version FROM roster_versions").await,
+        [("dave@example.com".to_string(), Some("dave-ver".to_string()))],
+        "alice's roster version must be invalidated"
+    );
+}
+
+async fn query_text_pairs(db: &Database, sql: &str) -> Vec<(String, Option<String>)> {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn.query(sql, ()).await.expect("query pairs");
+    let mut pairs = Vec::new();
+    while let Some(row) = rows.next().await.expect("pair row") {
+        pairs.push((
+            row.get::<String>(0).expect("first"),
+            row.get::<Option<String>>(1).expect("second"),
         ));
     }
-    assert_eq!(
-        users,
-        [("bob", Some("bob")), ("straße", Some("strasse"))]
-            .map(|(name, key)| (name.to_string(), key.map(str::to_string)))
-    );
+    pairs
 }
 
 #[tokio::test]
