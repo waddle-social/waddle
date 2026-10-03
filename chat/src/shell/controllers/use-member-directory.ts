@@ -23,6 +23,7 @@ export function useMemberDirectory(deps: MemberDirectoryDeps) {
   const mergedMentionMembers = computed(() =>
     mergeMentionMembers({
       members: waddles.members.value,
+      roomHats: messaging.roomHats.value,
       roomPresence: messaging.roomPresence.value,
       memberJidsByNick: memberJidByNick.value,
     }),

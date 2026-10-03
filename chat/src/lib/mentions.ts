@@ -1,4 +1,5 @@
 import type { MemberSummary } from "@/lib/chat-types";
+import { BOT_HAT_URI, type RoomHats } from "@/lib/xmpp/types";
 import type { TimelineMessage } from "@/lib/chat-ui";
 
 const BROADCAST_MENTION_SET = new Set(["everyone", "here"]);
@@ -97,6 +98,9 @@ export function resolveMentionUri(
 interface MergeMentionMembersParams {
   /** Authoritative member list from the MUC affiliation query. */
   members: MemberSummary[];
+  /** Server-assigned XEP-0317 hats by nick. An occupant wearing the Bot hat
+   * is an extension bot posting, not a member of the room. */
+  roomHats?: Readonly<RoomHats>;
   /** Live presence map: nick → presence status string. */
   roomPresence: Readonly<Record<string, string>>;
   /**
@@ -127,6 +131,7 @@ interface MergeMentionMembersResult {
  */
 export function mergeMentionMembers({
   members,
+  roomHats = {},
   roomPresence,
   memberJidsByNick,
 }: MergeMentionMembersParams): MergeMentionMembersResult {
@@ -161,7 +166,8 @@ export function mergeMentionMembers({
 
     if (jidFromPresence) {
       authorJidByNick[nick] = jidFromPresence;
-      if (!existingNicks.has(canonicalNick)) {
+      const isBot = (roomHats[nick] ?? []).some((hat) => hat.uri === BOT_HAT_URI);
+      if (!isBot && !existingNicks.has(canonicalNick)) {
         mergedMembers.push({
           jid: jidFromPresence,
           username: nick,
