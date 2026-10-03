@@ -1,8 +1,9 @@
 import SwiftUI
 import WaddleKit
 
-/// Present people by XEP-0045 role, then bots (no presence), then affiliated
-/// members who are away once the affiliation lists are loaded.
+/// Present people by XEP-0045 role, then bots (no presence; affiliated ones
+/// that are away join them once the affiliation lists are loaded), then
+/// affiliated people who are away.
 struct RoomMembersSections: View {
     @Environment(SessionCoordinator.self) private var session
     let room: BareJID
@@ -20,13 +21,17 @@ struct RoomMembersSections: View {
             }
         }
         let bots = MemberRoster.bots(occupants)
-        if !bots.isEmpty {
+        let absentBots = model.absentBots(present: occupants, account: session.account)
+        if !bots.isEmpty || !absentBots.isEmpty {
             Section {
                 ForEach(bots) { bot in
                     OccupantMemberRow(room: room, occupant: bot, model: model)
                 }
+                ForEach(absentBots) { bot in
+                    AbsentMemberRow(room: room, member: bot, model: model, isBot: true)
+                }
             } header: {
-                Text("Bots · \(bots.count)")
+                Text("Bots · \(bots.count + absentBots.count)")
             }
         }
         AbsentMembersSection(room: room, model: model, occupants: occupants)
@@ -42,7 +47,7 @@ struct AbsentMembersSection: View {
 
     var body: some View {
         Section {
-            if let absent = model.absentMembers(present: occupants) {
+            if let absent = model.absentMembers(present: occupants, account: session.account) {
                 ForEach(absent) { member in
                     AbsentMemberRow(room: room, member: member, model: model)
                 }

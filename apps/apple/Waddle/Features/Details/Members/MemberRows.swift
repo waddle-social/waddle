@@ -27,11 +27,13 @@ struct OccupantMemberRow: View {
     }
 }
 
-/// An affiliated member who is not in the room, shown offline.
+/// An affiliated member who is not in the room, shown offline; an extension
+/// bot has no presence to show.
 struct AbsentMemberRow: View {
     let room: BareJID
     let member: RoomMember
     let model: RoomMembersModel
+    var isBot = false
 
     var body: some View {
         MemberRowLabel(
@@ -42,10 +44,11 @@ struct AbsentMemberRow: View {
             status: nil,
             hats: [],
             affiliation: member.affiliation,
-            isAbsent: true
+            isAbsent: !isBot,
+            showsPresence: !isBot
         )
         .memberActions(
-            MemberSubject(nick: member.nick, jid: member.jid, affiliation: member.affiliation, isPresent: false),
+            MemberSubject(nick: member.nick, jid: member.jid, affiliation: member.affiliation, isPresent: false, isBot: isBot),
             room: room,
             model: model
         )

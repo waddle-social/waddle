@@ -32,9 +32,14 @@ final class RoomMembersModel {
         isLoading = false
     }
 
-    /// Affiliated members not in the room, once loaded.
-    func absentMembers(present occupants: [Occupant]) -> [RoomMember]? {
-        members.map { MemberRoster.absent($0, present: occupants) }
+    /// Affiliated people not in the room, once loaded.
+    func absentMembers(present occupants: [Occupant], account: AccountIdentity) -> [RoomMember]? {
+        members.map { MemberRoster.absent($0, present: occupants, account: account) }
+    }
+
+    /// Affiliated extension bots not in the room, once loaded.
+    func absentBots(present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
+        members.map { MemberRoster.absentBots($0, present: occupants, account: account) } ?? []
     }
 
     /// Bans wait for confirmation; everything else runs now.

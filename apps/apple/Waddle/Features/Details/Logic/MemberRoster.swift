@@ -29,11 +29,21 @@ enum MemberRoster {
         occupants.filter(\.isBot).sorted(by: nickOrder)
     }
 
+    /// Affiliated people not currently in the room (see `absentAll`).
+    static func absent(_ members: [RoomMember], present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
+        absentAll(members, present: occupants).filter { !account.isExtensionBot($0.jid) }
+    }
+
+    /// Affiliated extension bots not currently in the room.
+    static func absentBots(_ members: [RoomMember], present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
+        absentAll(members, present: occupants).filter { account.isExtensionBot($0.jid) }
+    }
+
     /// XEP-0045 affiliated users not currently in the room. A member counts
     /// as present when an occupant exposes the same real JID or, in a
     /// semi-anonymous room, uses the member's reserved nick. Outcasts are
     /// not members.
-    static func absent(_ members: [RoomMember], present occupants: [Occupant]) -> [RoomMember] {
+    private static func absentAll(_ members: [RoomMember], present occupants: [Occupant]) -> [RoomMember] {
         let presentJIDs = Set(occupants.compactMap(\.realJID))
         let presentNicks = Set(occupants.map { $0.nick.lowercased() })
         return members
