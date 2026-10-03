@@ -124,7 +124,7 @@ use crate::ownership::{
 };
 use crate::stream_management::persistence::PersistedSession;
 
-use super::core::InMemorySmSessionRegistry;
+use super::core::{InMemorySmSessionRegistry, ReclaimedClaimAdmissionError};
 use super::{DetachedSession, SmRegistryError};
 
 /// Initial backoff between held-response handshake retries (branch 3).
@@ -604,10 +604,19 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
-        let Some(reservation) = self.reserve_reclaimed_claim_capacity(entity) else {
-            return Err(SmRegistryError::Internal(
-                "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
-            ));
+        let reservation = match self.reserve_reclaimed_claim_fence_capacity(&entity.id) {
+            Ok(reservation) => reservation,
+            Err(ReclaimedClaimAdmissionError::BusySameStream) => {
+                return Ok(CrossNodeResumeOutcome::NotFound);
+            }
+            Err(
+                ReclaimedClaimAdmissionError::Exhausted
+                | ReclaimedClaimAdmissionError::LockPoisoned,
+            ) => {
+                return Err(SmRegistryError::Internal(
+                    "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
+                ));
+            }
         };
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
@@ -665,10 +674,19 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
     ) -> Result<CrossNodeResumeOutcome, SmRegistryError> {
         let me = self.node_identity.current();
-        let Some(reservation) = self.reserve_reclaimed_claim_capacity(entity) else {
-            return Err(SmRegistryError::Internal(
-                "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
-            ));
+        let reservation = match self.reserve_reclaimed_claim_fence_capacity(&entity.id) {
+            Ok(reservation) => reservation,
+            Err(ReclaimedClaimAdmissionError::BusySameStream) => {
+                return Ok(CrossNodeResumeOutcome::NotFound);
+            }
+            Err(
+                ReclaimedClaimAdmissionError::Exhausted
+                | ReclaimedClaimAdmissionError::LockPoisoned,
+            ) => {
+                return Err(SmRegistryError::Internal(
+                    "attempt_cross_node_resume: exact ownership capacity exhausted".to_string(),
+                ));
+            }
         };
         match tokio::time::timeout(
             FINISH_STEAL_TIMEOUT,
@@ -1053,6 +1071,126 @@ mod tests {
 
     fn alice() -> BareJid {
         "alice@example.com".parse().expect("valid jid")
+    }
+
+    async fn prepare_admission_test(
+        foreign_claim: bool,
+    ) -> (InMemorySmSessionRegistry, Entity, StealTicket) {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let entity = Entity::new(EntityType::SmSession, "admission-race".to_string());
+        if foreign_claim {
+            claim_store
+                .acquire(&entity, &NodeIdentity::new("foreign-node", "foreign-epoch"))
+                .await
+                .expect("seed foreign claim");
+        }
+        let persistence = Arc::new(InMemorySmPersistence::new());
+        let jid = "alice@example.com/phone".parse().expect("valid jid");
+        persistence
+            .upsert_session(make_persisted_session(&entity.id, &jid))
+            .await
+            .expect("seed persisted session");
+        let registry = InMemorySmSessionRegistry::with_capacity(1)
+            .with_persistence(persistence)
+            .with_claim_store(
+                claim_store,
+                SharedNodeIdentity::new(NodeIdentity::new("resuming-node", "resuming-epoch")),
+            );
+        let stage = registry
+            .prepare_cross_node_resume(&entity.id, &alice(), Duration::from_secs(1))
+            .await
+            .expect("prepare resume");
+        let CrossNodeResumeStage::ReadyToSteal(ticket) = stage else {
+            panic!("expected ready ticket, got {stage:?}");
+        };
+        assert_eq!(
+            matches!(ticket.mode, StealTicketMode::Steal { .. }),
+            foreign_claim,
+        );
+        (registry, entity, ticket)
+    }
+
+    #[tokio::test]
+    async fn same_stream_reclaimed_admission_race_returns_not_found() {
+        // Cover both steal and direct acquire while another local resume is
+        // paused between reserving capacity and committing its ownership CAS.
+        for foreign_claim in [true, false] {
+            let (registry, entity, ticket) = prepare_admission_test(foreign_claim).await;
+            let original_claim = registry.claim_store.current_claim(&entity).await.unwrap();
+            let reservation = registry
+                .reserve_reclaimed_claim_capacity(&entity)
+                .expect("first resume reserves capacity");
+
+            let outcome = registry.finish_cross_node_steal(ticket).await;
+            assert!(
+                matches!(outcome, Ok(CrossNodeResumeOutcome::NotFound)),
+                "same-stream contention must be a clean race loss: {outcome:?}",
+            );
+            assert_eq!(
+                registry.claim_store.current_claim(&entity).await.unwrap(),
+                original_claim,
+                "the losing resume must not issue an ownership mutation",
+            );
+            assert_eq!(
+                registry
+                    .reclaimed_claim_reservations
+                    .read()
+                    .unwrap()
+                    .get(&entity.id),
+                Some(&reservation),
+                "the losing resume must preserve the first resume's token",
+            );
+            registry.cancel_reclaimed_claim_capacity(&entity, reservation);
+            assert_eq!(registry.claim_fence_capacity_used(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn same_stream_generic_admission_race_returns_not_found() {
+        for foreign_claim in [true, false] {
+            let (registry, entity, ticket) = prepare_admission_test(foreign_claim).await;
+            let original_claim = registry.claim_store.current_claim(&entity).await.unwrap();
+            assert!(registry.reserve_claim_fence_capacity(&entity.id));
+
+            let outcome = registry.finish_cross_node_steal(ticket).await;
+            assert!(
+                matches!(outcome, Ok(CrossNodeResumeOutcome::NotFound)),
+                "same-stream contention must be a clean race loss: {outcome:?}",
+            );
+            assert_eq!(
+                registry.claim_store.current_claim(&entity).await.unwrap(),
+                original_claim,
+            );
+            assert!(registry.has_claim_fence_reservation(&entity.id));
+            registry.cancel_claim_fence_reservation(&entity.id);
+            assert_eq!(registry.claim_fence_capacity_used(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn different_stream_admission_exhaustion_remains_internal_error() {
+        for foreign_claim in [true, false] {
+            let (registry, entity, ticket) = prepare_admission_test(foreign_claim).await;
+            let original_claim = registry.claim_store.current_claim(&entity).await.unwrap();
+            let other = Entity::new(EntityType::SmSession, "other-stream".to_string());
+            let reservation = registry
+                .reserve_reclaimed_claim_capacity(&other)
+                .expect("other stream reserves all capacity");
+
+            let outcome = registry.finish_cross_node_steal(ticket).await;
+            assert!(
+                matches!(outcome, Err(SmRegistryError::Internal(ref message))
+                if message == "attempt_cross_node_resume: exact ownership capacity exhausted")
+            );
+            assert_eq!(
+                registry.claim_store.current_claim(&entity).await.unwrap(),
+                original_claim,
+                "exhausted admission must not issue an ownership mutation",
+            );
+            assert_eq!(registry.claim_fence_capacity_used(), 1);
+            registry.cancel_reclaimed_claim_capacity(&other, reservation);
+            assert_eq!(registry.claim_fence_capacity_used(), 0);
+        }
     }
 
     /// FIX 1: a deliberately-slow asker (its own delay is an order of
