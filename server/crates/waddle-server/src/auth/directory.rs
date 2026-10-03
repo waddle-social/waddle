@@ -199,6 +199,12 @@ fn text(row: &[crate::db::Value], index: usize) -> Result<String, AuthError> {
         .map_err(|error| AuthError::DatabaseError(error.to_string()))
 }
 
+/// Exact matches on the indexed keys: (canonical localpart, canonical JID).
+const ACCOUNT_EXISTS_SQL: &str = "SELECT 1 FROM users WHERE localpart_key = ? \
+     UNION ALL \
+     SELECT 1 FROM native_users WHERE jid_key = ? \
+     LIMIT 1";
+
 /// Returns `true` when `localpart@domain` resolves to a registered local
 /// account through either the OIDC `users` table or the native `native_users`
 /// table.
@@ -223,11 +229,7 @@ pub async fn local_account_exists(
     };
     let row = actor
         .ask(DbQueryOne {
-            sql: "SELECT 1 FROM users WHERE localpart_key = ? \
-                  UNION ALL \
-                  SELECT 1 FROM native_users WHERE jid_key = ? \
-                  LIMIT 1"
-                .to_string(),
+            sql: ACCOUNT_EXISTS_SQL.to_string(),
             params: vec![localpart.as_str().into(), jid.as_str().into()],
         })
         .await

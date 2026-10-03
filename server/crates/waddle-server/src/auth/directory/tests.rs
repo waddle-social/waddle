@@ -168,3 +168,32 @@ async fn matches_names_on_their_canonical_localpart() {
         .await
         .expect("directory lookup"));
 }
+
+/// The existence lookup searches both key indexes instead of scanning a
+/// table per check, which `lower(username)` forced.
+#[tokio::test]
+async fn existence_lookup_searches_the_key_indexes() {
+    let db = Database::in_memory("test-local-directory-plan")
+        .await
+        .expect("create test database");
+    MigrationRunner::global()
+        .run(&db)
+        .await
+        .expect("run migrations");
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn
+        .query(
+            &format!("EXPLAIN QUERY PLAN {}", super::ACCOUNT_EXISTS_SQL),
+            crate::db_params!["äda", "äda@localhost"],
+        )
+        .await
+        .expect("query plan");
+    let mut plan = Vec::new();
+    while let Some(row) = rows.next().await.expect("plan row") {
+        plan.push(row.get::<String>(3).expect("plan detail"));
+    }
+    let plan = plan.join("\n");
+    assert!(plan.contains("idx_users_localpart_key"), "{plan}");
+    assert!(plan.contains("idx_native_users_jid_key"), "{plan}");
+    assert!(!plan.contains("SCAN"), "{plan}");
+}
