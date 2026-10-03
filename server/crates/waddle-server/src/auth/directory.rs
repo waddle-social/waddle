@@ -44,9 +44,11 @@ pub async fn local_account_exists(
 ) -> Result<bool, AuthError> {
     let row = actor
         .ask(DbQueryOne {
-            sql: "SELECT 1 FROM users WHERE xmpp_localpart = ? \
+            // JID localparts and domains compare case-insensitively; native
+            // usernames keep the case they were registered with.
+            sql: "SELECT 1 FROM users WHERE lower(xmpp_localpart) = lower(?) \
                   UNION ALL \
-                  SELECT 1 FROM native_users WHERE username = ? AND domain = ? \
+                  SELECT 1 FROM native_users WHERE lower(username) = lower(?) AND lower(domain) = lower(?) \
                   LIMIT 1"
                 .to_string(),
             params: vec![localpart.into(), localpart.into(), domain.into()],

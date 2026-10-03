@@ -2811,10 +2811,12 @@ async fn assert_v0014_roster_cleanup(db: &Database) {
          ('bob@example.com', 'bob', 'bob', 'now', 'now'), \
          ('dave@example.com', 'dave', 'dave', 'now', 'now')",
         "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) \
-         VALUES ('carol', 'example.com', 'hash', 'salt', '', '')",
+         VALUES ('carol', 'example.com', 'hash', 'salt', '', ''), \
+         ('Erin', 'Example.com', 'hash', 'salt', '', '')",
         "INSERT INTO roster_items (user_jid, contact_jid) VALUES \
          ('alice@example.com', 'bob@example.com'), \
          ('alice@example.com', 'carol@example.com'), \
+         ('alice@example.com', 'erin@example.com'), \
          ('alice@example.com', 'chat@example.com'), \
          ('alice@example.com', 'room@muc.example.com'), \
          ('alice@example.com', 'helper@extensions.example.com'), \
@@ -2856,6 +2858,7 @@ async fn assert_v0014_roster_cleanup(db: &Database) {
         [
             ("alice@example.com", "bob@example.com"),
             ("alice@example.com", "carol@example.com"),
+            ("alice@example.com", "erin@example.com"),
             ("dave@example.com", "bob@example.com"),
         ]
         .map(|(owner, contact)| (owner.to_string(), contact.to_string()))
