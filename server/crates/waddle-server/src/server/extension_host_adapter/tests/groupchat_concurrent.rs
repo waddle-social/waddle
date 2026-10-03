@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 use waddle_extensions::PluginId;
-use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::{muc::room_actor::GetSnapshot, Stanza};
 
 async fn two_bots(f: IngressFixture) {
     let fixture = GroupchatFixture::new(&f).await;
@@ -53,8 +53,9 @@ async fn two_bots(f: IngressFixture) {
     fixture.close(f).await;
 }
 
-/// One bot's sends into one room run one at a time, join to leave: the next
-/// send cannot find this send's occupancy or race its admission.
+/// One bot's sends into one room run one at a time: the next send cannot
+/// race this send's admission. A send queued behind another takes its
+/// occupancy over, so occupants see one join, both messages, one leave.
 async fn concurrent(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let gate = Arc::new(interpret::BotSnapshotGate::default());
@@ -92,7 +93,7 @@ async fn concurrent(f: IngressFixture) {
         tokio::time::timeout(Duration::from_millis(150), gate.reached.notified())
             .await
             .is_err(),
-        "second send waits until the first message settled and its bot left"
+        "second send waits until the first send is done"
     );
     settlement_gate.release.notify_one();
     tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
@@ -108,15 +109,27 @@ async fn concurrent(f: IngressFixture) {
         .room
         .find_occupant_by_real_jid(&fixture.invocation().actor_jid)
         .is_none());
-    let types: Vec<_> = super::groupchat_ingress::bot_presences(&fixture.drain())
+    use xmpp_parsers::{message::MessageType, presence::Type};
+    let wire: Vec<_> = fixture
+        .drain()
         .into_iter()
-        .map(|(type_, ..)| type_)
+        .filter_map(|stanza| match stanza {
+            Stanza::Presence(presence) => Some(format!("{:?}", presence.type_)),
+            Stanza::Message(message) if message.type_ == MessageType::Groupchat => {
+                message.id.map(|id| id.0).or(Some("groupchat".to_owned()))
+            }
+            _ => None,
+        })
         .collect();
-    use xmpp_parsers::presence::Type;
     assert_eq!(
-        types,
-        [Type::None, Type::Unavailable, Type::None, Type::Unavailable],
-        "each send joins and leaves in turn"
+        wire,
+        [
+            format!("{:?}", Type::None),
+            "concurrent-a".to_owned(),
+            "concurrent-b".to_owned(),
+            format!("{:?}", Type::Unavailable),
+        ],
+        "the queued send took the occupancy over"
     );
     assert_eq!(
         f.count("ingress_messages WHERE terminal_at IS NOT NULL")

@@ -278,7 +278,8 @@ pub(crate) struct PlannedExtensionBotGroupchat {
 }
 
 /// The room occupancy one bot dispatch used, joined for it or found present,
-/// which the caller leaves after the send whether or not it committed.
+/// which the caller leaves after the send whether or not it committed, or
+/// hands to the next send of the same bot into the same room.
 #[derive(Default)]
 pub(crate) struct BotOccupancy {
     pub held: Option<(
@@ -466,7 +467,8 @@ pub(crate) async fn plan_extension_bot_groupchat(
         .iter()
         .find(|occupant| occupant.full_jid == bot_full)
     {
-        // An occupancy left behind by an interrupted send is this send's to leave.
+        // An occupancy the previous send handed on, or an interrupted one
+        // left behind, is this send's to leave.
         occupancy.held = waddle_xmpp::muc::MucOccupantNick::new(present.nick.clone())
             .map(|nick| (nick, session));
     } else {
@@ -476,6 +478,8 @@ pub(crate) async fn plan_extension_bot_groupchat(
         );
         let joined_nick = waddle_xmpp::muc::MucOccupantNick::new(bot_nick.clone())
             .ok_or(ExtensionBotDispatchError::BotJoinFailed)?;
+        // Held before the ask: a send cancelled while it runs still leaves.
+        occupancy.held = Some((joined_nick, session));
         // A host-owned occupancy lasts this send: no affiliation, so the bot
         // is never a durable recipient and the room can still go dormant.
         match room_actor
@@ -490,7 +494,6 @@ pub(crate) async fn plan_extension_bot_groupchat(
             .await
         {
             Ok(join) => {
-                occupancy.held = Some((joined_nick, session));
                 // Before anyone sees the join: a client that refetches the
                 // room's bot listing on the hatted join must find this bot.
                 if let Err(error) = crate::server::extension_bot_rooms::record(
@@ -532,17 +535,20 @@ pub(crate) async fn plan_extension_bot_groupchat(
                         );
                         join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }
-                    occupancy.join_stragglers = route_join_presences(
-                        state,
-                        host_state,
-                        &room_jid,
-                        join_presences,
-                        commit_deadline,
-                    )
-                    .await;
+                    occupancy.join_stragglers.extend(
+                        route_join_presences(
+                            state,
+                            host_state,
+                            &room_jid,
+                            join_presences,
+                            commit_deadline,
+                        )
+                        .await,
+                    );
                 }
             }
             Err(error) => {
+                occupancy.held = None;
                 warn!(
                     room = %room_jid,
                     error = ?error,

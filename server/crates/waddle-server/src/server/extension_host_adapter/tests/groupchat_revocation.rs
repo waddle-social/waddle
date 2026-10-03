@@ -177,3 +177,49 @@ async fn extension_groupchat_revocation_leaves_leftover_occupancy_postgres() {
         revoked_after_bot_planning(f, true).await;
     }
 }
+
+/// A send dropped after its bot joined (the frame backstop cancels a slow
+/// handler) still leaves the room, and posts nothing.
+async fn cancelled_send_leaves(f: IngressFixture) {
+    let mut fixture = GroupchatFixture::new(&f).await;
+    let bot = fixture.invocation().actor_jid;
+    let origin = OriginId::new(uuid::Uuid::new_v4().to_string());
+    let gate = Registration::before_admission(origin.clone());
+    let adapter = ExtensionHostAdapter::new(Arc::clone(&fixture.adapter.state));
+    let invocation = fixture.invocation();
+    let request = fixture.request(origin.as_str());
+    let sending = tokio::spawn(async move { adapter.send_message(&invocation, request).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.entered())
+        .await
+        .expect("the bot joined and the send reached admission");
+    sending.abort();
+    assert!(sending.await.expect_err("cancelled").is_cancelled());
+    fixture.settle().await;
+    let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert!(
+        room.session_generation(&bot).is_none(),
+        "the cancelled send left the bot occupancy"
+    );
+    let wire = fixture.drain();
+    let types: Vec<_> = super::groupchat_ingress::bot_presences(&wire)
+        .into_iter()
+        .map(|(type_, ..)| type_)
+        .collect();
+    assert_eq!(types, [Type::None, Type::Unavailable], "join then leave");
+    assert!(!wire.iter().any(|stanza| matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat)));
+    assert_eq!(f.count("ingress_messages").await, 0);
+    drop(gate);
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_cancelled_send_leaves_sqlite() {
+    cancelled_send_leaves(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_cancelled_send_leaves_postgres() {
+    if let Some(f) = IngressFixture::postgres("bot_cancelled_send").await {
+        cancelled_send_leaves(f).await;
+    }
+}

@@ -2,7 +2,8 @@
 use std::sync::Arc;
 
 use jid::{BareJid, FullJid};
-use waddle_extensions::{host_tools::InvocationKind, StanzaId};
+use tokio::sync::OwnedMutexGuard;
+use waddle_extensions::{host_tools::InvocationKind, PluginId, StanzaId};
 use waddle_xmpp::ingress::{NormalizedTarget, TransportGeneration};
 
 use crate::ingress::{
@@ -13,34 +14,49 @@ use crate::server::routes::websocket::WebSocketState;
 
 use super::{interpret, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation};
 
+/// What a bot's sends into one room hand on to one another: the occupancy
+/// still to leave and the work that leave waits for.
+#[derive(Default)]
+pub(super) struct HeldBot {
+    occupancy: interpret::BotOccupancy,
+    /// Committed sends still settling: their messages reach occupants before
+    /// the bot's unavailable.
+    settlements: Vec<tokio::task::JoinHandle<SettlementOutcome>>,
+}
+
 /// Serializes the synthetic actor lifecycle across independently created adapters.
 #[derive(Default)]
 pub struct BotRoomLocks {
-    entries: dashmap::DashMap<(waddle_extensions::PluginId, BareJid), Arc<tokio::sync::Mutex<()>>>,
+    entries: dashmap::DashMap<(PluginId, BareJid), Arc<tokio::sync::Mutex<HeldBot>>>,
     #[cfg(feature = "clustering")]
     pub(super) relayed: super::remote_room::RelayedRoomSends,
 }
 
 impl BotRoomLocks {
-    pub(super) async fn lock(
-        &self,
-        plugin: &waddle_extensions::PluginId,
-        room: &BareJid,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    async fn lock(&self, plugin: &PluginId, room: &BareJid) -> OwnedMutexGuard<HeldBot> {
         let lock = self
             .entries
             .entry((plugin.clone(), room.clone()))
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .or_insert_with(Default::default)
             .clone();
         lock.lock_owned().await
     }
 
-    /// Waits until the last send of `plugin` into `room` has left.
+    /// Waits until the last send of `plugin` into `room` has left. It polls:
+    /// queueing on the lock would be a successor the bot is handed to.
     #[cfg(test)]
-    pub(super) async fn settled(&self, plugin: &waddle_extensions::PluginId, room: &BareJid) {
-        tokio::time::timeout(std::time::Duration::from_secs(10), self.lock(plugin, room))
-            .await
-            .expect("the bot's leave finishes");
+    pub(super) async fn settled(&self, plugin: &PluginId, room: &BareJid) {
+        let key = (plugin.clone(), room.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !self.entries.get(&key).is_none_or(|lock| {
+                lock.try_lock()
+                    .is_ok_and(|held| held.occupancy.held.is_none())
+            }) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the bot's leave finishes");
     }
 }
 
@@ -73,18 +89,29 @@ impl ExtensionHostAdapter {
             .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
         let sender = self.plugin_actor_jid(&invocation.plugin_id)?;
         let requester = (!provider).then(|| invocation.actor_jid.to_bare());
+        // Created first, so the bot leaves however this send ends, cancelled
+        // included.
+        let mut cleanup = BotRoomCleanup {
+            state: Arc::clone(&self.state),
+            plugin: invocation.plugin_id.clone(),
+            room: room.clone(),
+            sender: sender.clone(),
+            held: None,
+            outcome: None,
+        };
         // Keep the bot's join, send and leave ordered for this bot/room: the
         // actor's admission generation must not change under a second join,
-        // and the next send must not find this send's occupancy.
-        let room_guard = self
-            .state
-            .deps
-            .protocol
-            .extension_bot_rooms
-            .lock(&invocation.plugin_id, &room)
-            .await;
-        let mut occupancy = interpret::BotOccupancy::default();
-        let mut settlement = None;
+        // and the next send must not find this send's occupancy unless it
+        // was handed it.
+        let held = cleanup.held.insert(
+            self.state
+                .deps
+                .protocol
+                .extension_bot_rooms
+                .lock(&invocation.plugin_id, &room)
+                .await,
+        );
+        let settlement = &mut cleanup.outcome;
         let result = async {
             // A forwarded send whose origin has stopped waiting must not commit:
             // the origin would report a failure for a message that was posted.
@@ -103,7 +130,7 @@ impl ExtensionHostAdapter {
                 response,
                 &self.state,
                 commit_deadline,
-                &mut occupancy,
+                &mut held.occupancy,
             )
             .await
             .map_err(|error| match error {
@@ -162,19 +189,7 @@ impl ExtensionHostAdapter {
                 .and_then(|(_, id)| StanzaId::new(id.id).ok()))
         }
         .await;
-        BotRoomCleanup {
-            state: Arc::clone(&self.state),
-            room,
-            sender,
-            occupancy,
-            settlement: match settlement {
-                Some(NestedOutcome::Committed { settlement, .. }) if !settlement.is_finished() => {
-                    Some(settlement)
-                }
-                _ => None,
-            },
-        }
-        .spawn(room_guard);
+        drop(cleanup);
         // A committed denial may have only an error frame and no room archive.
         // If its settlement misses the response deadline, acceptance still uses
         // the offered ID. Successful room sends retain their canonical reply ID.
@@ -182,45 +197,51 @@ impl ExtensionHostAdapter {
     }
 }
 
-/// What one dispatch leaves to finish after its reply: the bot occupancy it
-/// used is left.
+/// Leaves the bot occupancy a dispatch used once the dispatch ends, replied
+/// or cancelled: dropping it spawns the leave, so the leave never delays the
+/// reply.
 struct BotRoomCleanup {
     state: Arc<WebSocketState>,
+    plugin: PluginId,
     room: BareJid,
     sender: FullJid,
-    occupancy: interpret::BotOccupancy,
-    /// A committed send's settlement still running: its message reaches
-    /// occupants before the bot's unavailable.
-    settlement: Option<tokio::task::JoinHandle<SettlementOutcome>>,
+    /// The bot/room lock, once acquired. It is held until the bot has left,
+    /// so the next send joins afresh, or is handed to a queued send.
+    held: Option<OwnedMutexGuard<HeldBot>>,
+    /// This dispatch's commit, whose settlement the leave waits for.
+    outcome: Option<NestedOutcome>,
 }
 
-impl BotRoomCleanup {
-    /// Runs detached so the leave never delays the reply. The room guard is
-    /// held until the bot has left, so the next send joins afresh.
-    fn spawn(self, room_guard: tokio::sync::OwnedMutexGuard<()>) {
+impl Drop for BotRoomCleanup {
+    fn drop(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let mut held = self.held.take();
+        if let (Some(held), Some(NestedOutcome::Committed { settlement, .. })) =
+            (held.as_mut(), self.outcome.take())
+        {
+            if !settlement.is_finished() {
+                held.settlements.push(settlement);
+            }
+        }
+        let state = Arc::clone(&self.state);
+        let (plugin, room, sender) = (self.plugin.clone(), self.room.clone(), self.sender.clone());
         let cleanup = async move {
-            if let Some(settlement) = self.settlement {
-                let _ = settlement.await;
-            }
-            // Occupants on other nodes must see the join before its
-            // unavailable, or they keep a ghost bot.
-            for route in self.occupancy.join_stragglers {
-                let _ = route.await;
-            }
-            if let Some((nick, session)) = self.occupancy.held {
-                // The normal departure path emits unavailable presence and
-                // retains interrupted actor cleanup for the departure janitor.
-                let _ = crate::server::routes::websocket::handlers::presence::handle_muc_leave(
-                    &self.state,
-                    &self.room,
-                    &self.sender,
-                    nick.as_str(),
-                    session,
-                    None,
-                )
-                .await;
-            }
-            drop(room_guard);
+            // Cancelled while queued: queue on, so whatever the lock is handed
+            // is still left.
+            let held = match held {
+                Some(held) => held,
+                None => {
+                    state
+                        .deps
+                        .protocol
+                        .extension_bot_rooms
+                        .lock(&plugin, &room)
+                        .await
+                }
+            };
+            leave(held, &state, &room, &sender).await;
         };
         // A test observing remote delivery keeps observing the detached leave.
         #[cfg(all(test, feature = "clustering"))]
@@ -239,6 +260,62 @@ impl BotRoomCleanup {
                 }
             }
         };
-        tokio::spawn(cleanup);
+        runtime.spawn(cleanup);
+    }
+}
+
+/// A queued send of this bot into this room: besides the map's and `held`'s
+/// own, each waiter holds a reference to the lock.
+fn successor_waiting(held: &OwnedMutexGuard<HeldBot>) -> bool {
+    Arc::strong_count(OwnedMutexGuard::mutex(held)) > 2
+}
+
+/// Leaves the held occupancy, unless a send of the same bot into the same
+/// room is queued: that send takes the occupancy over and leaves it after
+/// its own message, instead of waiting for this leave and joining again.
+async fn leave(
+    mut held: OwnedMutexGuard<HeldBot>,
+    state: &WebSocketState,
+    room: &BareJid,
+    sender: &FullJid,
+) {
+    if successor_waiting(&held) {
+        return;
+    }
+    // Occupants see the message, and occupants on other nodes the join,
+    // before the unavailable, or they keep a ghost bot. Bounded, since a
+    // send queued meanwhile waits on it; one still running is left to the
+    // next leave.
+    let HeldBot {
+        occupancy,
+        settlements,
+    } = &mut *held;
+    let _ = tokio::time::timeout(
+        super::settlement::SETTLEMENT_RESPONSE_DEADLINE,
+        futures::future::join(
+            futures::future::join_all(settlements.iter_mut()),
+            futures::future::join_all(occupancy.join_stragglers.iter_mut()),
+        ),
+    )
+    .await;
+    settlements.retain(|settlement| !settlement.is_finished());
+    occupancy
+        .join_stragglers
+        .retain(|route| !route.is_finished());
+    if successor_waiting(&held) {
+        return;
+    }
+    if let Some((nick, session)) = held.occupancy.held.take() {
+        // The normal departure path emits unavailable presence and retains
+        // interrupted actor cleanup for the departure janitor.
+        let _ = crate::server::routes::websocket::handlers::presence::handle_muc_leave(
+            state,
+            room,
+            sender,
+            nick.as_str(),
+            session,
+            None,
+        )
+        .await;
     }
 }
