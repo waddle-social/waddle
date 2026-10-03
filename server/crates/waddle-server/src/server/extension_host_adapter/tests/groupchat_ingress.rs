@@ -302,6 +302,11 @@ async fn each_send_joins_and_leaves(f: IngressFixture) {
     }
     assert_eq!(f.count("ingress_messages").await, 2);
     assert_eq!(
+        f.count("notification_activity").await,
+        0,
+        "a bot's sends and leaves are no account activity"
+    );
+    assert_eq!(
         f.count("extension_bot_rooms WHERE room_jid = 'extension-room@muc.example.com' AND plugin_id = 'direct-test'")
             .await,
         1,
