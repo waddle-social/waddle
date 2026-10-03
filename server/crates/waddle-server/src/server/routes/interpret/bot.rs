@@ -370,108 +370,123 @@ pub(crate) async fn plan_extension_bot_groupchat(
         );
         return Err(ExtensionBotDispatchError::MissingRoomRegistry);
     };
-    let room_actor = match room_registry
-        .ask(GetRoom {
-            room_jid: room_jid.clone(),
-        })
+    // #1108: the dormancy sweep can seal and stop the room actor between the
+    // registry lookup and the join. One retry looks the room up again, which
+    // loads a fresh one; the send is never dropped for it.
+    let mut retried_dead_room = false;
+    let (room_actor, join) = loop {
+        let room_actor = match room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+        {
+            Ok(Some(actor)) => actor,
+            Ok(None) => load_managed_room(state, &room_jid).await?,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "Extension bot groupchat room lookup failed; dropping"
+                );
+                return Err(ExtensionBotDispatchError::RoomLookupFailed);
+            }
+        };
+        match room_actor
+            .ask(GetAffiliation {
+                jid: bot_full.to_bare(),
+            })
+            .await
+        {
+            Ok(waddle_xmpp::Affiliation::Outcast) => {
+                warn!(
+                    room = %room_jid,
+                    bot = %bot_full,
+                    "Extension bot is outcast from room; dropping room message"
+                );
+                return Err(ExtensionBotDispatchError::BotOutcast);
+            }
+            Ok(_) => {}
+            // The handler cannot fail: the actor is gone.
+            Err(_) if !retried_dead_room => {
+                retried_dead_room = true;
+                continue;
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "Extension bot affiliation lookup failed; dropping"
+                );
+                return Err(ExtensionBotDispatchError::RoomLookupFailed);
+            }
+        }
+        let initial_snapshot = match room_actor
+            .ask(GetRoomSnapshot {
+                sender_jid: bot_full.clone(),
+            })
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) if !retried_dead_room && room_gone(state, &room_jid, &error).await => {
+                retried_dead_room = true;
+                continue;
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "Extension bot groupchat snapshot failed; dropping"
+                );
+                return Err(ExtensionBotDispatchError::SnapshotFailed);
+            }
+        };
+        // A group DM is a conversation between people; a bot never joins one,
+        // even when someone runs an extension command inside it. The type is
+        // fixed at creation, so this snapshot check cannot race a change.
+        if initial_snapshot.config.group_dm {
+            return Err(ExtensionBotDispatchError::GroupDm);
+        }
+        #[cfg(test)]
+        if let Ok(gate) = TEST_BOT_SNAPSHOT_GATE.try_with(std::sync::Arc::clone) {
+            gate.arrivals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            gate.reached.notify_one();
+            gate.release.notified().await;
+        }
+        // Room joins commit only for the full JID's current generation (#1869).
+        // A bot has no bind, so it keeps one stable published generation.
+        let session = crate::occupancy_authority::ensure(
+            state.deps.app_state.db_pool.global(),
+            &bot_full,
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        )
         .await
-    {
-        Ok(Some(actor)) => actor,
-        Ok(None) => load_managed_room(state, &room_jid).await?,
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                error = ?error,
-                "Extension bot groupchat room lookup failed; dropping"
-            );
-            return Err(ExtensionBotDispatchError::RoomLookupFailed);
+        .map_err(|error| {
+            warn!(room = %room_jid, %error, "Extension bot occupancy authority failed");
+            ExtensionBotDispatchError::BotJoinFailed
+        })?;
+        if let Some(present) = initial_snapshot
+            .occupants
+            .iter()
+            .find(|occupant| occupant.full_jid == bot_full)
+        {
+            // An occupancy an earlier send left lingering, or an interrupted
+            // one left behind, is this send's to reuse and leave.
+            occupancy.held = waddle_xmpp::muc::MucOccupantNick::new(present.nick.clone())
+                .map(|nick| (nick, session));
+            break (room_actor, None);
         }
-    };
-    match room_actor
-        .ask(GetAffiliation {
-            jid: bot_full.to_bare(),
-        })
-        .await
-    {
-        Ok(waddle_xmpp::Affiliation::Outcast) => {
-            warn!(
-                room = %room_jid,
-                bot = %bot_full,
-                "Extension bot is outcast from room; dropping room message"
-            );
-            return Err(ExtensionBotDispatchError::BotOutcast);
-        }
-        Ok(_) => {}
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                error = ?error,
-                "Extension bot affiliation lookup failed; dropping"
-            );
-            return Err(ExtensionBotDispatchError::RoomLookupFailed);
-        }
-    }
-    let initial_snapshot = match room_actor
-        .ask(GetRoomSnapshot {
-            sender_jid: bot_full.clone(),
-        })
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                error = ?error,
-                "Extension bot groupchat snapshot failed; dropping"
-            );
-            return Err(ExtensionBotDispatchError::SnapshotFailed);
-        }
-    };
-    // A group DM is a conversation between people; a bot never joins one,
-    // even when someone runs an extension command inside it. The type is
-    // fixed at creation, so this snapshot check cannot race a change.
-    if initial_snapshot.config.group_dm {
-        return Err(ExtensionBotDispatchError::GroupDm);
-    }
-    #[cfg(test)]
-    if let Ok(gate) = TEST_BOT_SNAPSHOT_GATE.try_with(std::sync::Arc::clone) {
-        gate.arrivals
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        gate.reached.notify_one();
-        gate.release.notified().await;
-    }
-    let initial_occupants: Vec<OccupantSnapshot> = initial_snapshot
-        .occupants
-        .iter()
-        .map(|o| OccupantSnapshot {
-            full_jid: o.full_jid.clone(),
-            nick: o.nick.clone(),
-            affiliation: o.affiliation,
-            role: o.role,
-        })
-        .collect();
-    // Room joins commit only for the full JID's current generation (#1869).
-    // A bot has no bind, so it keeps one stable published generation.
-    let session = crate::occupancy_authority::ensure(
-        state.deps.app_state.db_pool.global(),
-        &bot_full,
-        waddle_xmpp_core::OccupancySessionGeneration::mint(),
-    )
-    .await
-    .map_err(|error| {
-        warn!(room = %room_jid, %error, "Extension bot occupancy authority failed");
-        ExtensionBotDispatchError::BotJoinFailed
-    })?;
-    if let Some(present) = initial_snapshot
-        .occupants
-        .iter()
-        .find(|occupant| occupant.full_jid == bot_full)
-    {
-        // An occupancy an earlier send left lingering, or an interrupted one
-        // left behind, is this send's to reuse and leave.
-        occupancy.held = waddle_xmpp::muc::MucOccupantNick::new(present.nick.clone())
-            .map(|nick| (nick, session));
-    } else {
+        let initial_occupants: Vec<OccupantSnapshot> = initial_snapshot
+            .occupants
+            .iter()
+            .map(|o| OccupantSnapshot {
+                full_jid: o.full_jid.clone(),
+                nick: o.nick.clone(),
+                affiliation: o.affiliation,
+                role: o.role,
+            })
+            .collect();
         let bot_nick = available_bot_nick_with_base(
             &initial_occupants,
             preferred_nick.as_deref().unwrap_or("waddle"),
@@ -494,61 +509,13 @@ pub(crate) async fn plan_extension_bot_groupchat(
             })
             .await
         {
-            Ok(join) => {
-                // Before anyone sees the join: a client that refetches the
-                // room's bot listing on the hatted join must find this bot.
-                if let Err(error) = crate::server::extension_bot_rooms::record(
-                    state.deps.app_state.db_pool.global(),
-                    &room_jid,
-                    &plugin,
-                )
-                .await
-                {
-                    warn!(room = %room_jid, %error, "Failed to record extension bot room");
-                }
-                if !join.is_same_bare_multi_session_join {
-                    let mut join_presences = Vec::new();
-                    for existing in join.existing_occupants {
-                        let from = match room_jid.clone().with_resource_str(&bot_nick) {
-                            Ok(from) => from,
-                            Err(error) => {
-                                warn!(
-                                    room = %room_jid,
-                                    %error,
-                                    "Extension bot presence could not build room occupant JID"
-                                );
-                                continue;
-                            }
-                        };
-                        let bot_bare = bot_full.to_bare();
-                        let presence = waddle_xmpp::muc::build_occupant_presence(
-                            &from,
-                            &existing.jid,
-                            join.new_occupant_affiliation,
-                            join.new_occupant_role,
-                            waddle_xmpp::muc::MucPresenceStatus::new(false, false),
-                            &waddle_xmpp::xep::xep0421::OccupantIdentity {
-                                bare_jid: &bot_bare,
-                                real_jid: Some(&bot_full),
-                                secret: &state.deps.occupant_id_secret,
-                                hats: &state.deps.app_state.server_hats,
-                            },
-                        );
-                        join_presences.push((existing.jid, Stanza::Presence(presence)));
-                    }
-                    route_join_presences(
-                        state,
-                        host_state,
-                        &room_jid,
-                        join_presences,
-                        commit_deadline,
-                        &mut occupancy.join_stragglers,
-                    )
-                    .await;
-                }
-            }
+            Ok(join) => break (room_actor, Some((join, bot_nick))),
             Err(error) => {
                 occupancy.held = None;
+                if !retried_dead_room && room_gone(state, &room_jid, &error).await {
+                    retried_dead_room = true;
+                    continue;
+                }
                 warn!(
                     room = %room_jid,
                     error = ?error,
@@ -556,6 +523,59 @@ pub(crate) async fn plan_extension_bot_groupchat(
                 );
                 return Err(ExtensionBotDispatchError::BotJoinFailed);
             }
+        }
+    };
+    if let Some((join, bot_nick)) = join {
+        // Before anyone sees the join: a client that refetches the room's bot
+        // listing on the hatted join must find this bot.
+        if let Err(error) = crate::server::extension_bot_rooms::record(
+            state.deps.app_state.db_pool.global(),
+            &room_jid,
+            &plugin,
+        )
+        .await
+        {
+            warn!(room = %room_jid, %error, "Failed to record extension bot room");
+        }
+        if !join.is_same_bare_multi_session_join {
+            let mut join_presences = Vec::new();
+            for existing in join.existing_occupants {
+                let from = match room_jid.clone().with_resource_str(&bot_nick) {
+                    Ok(from) => from,
+                    Err(error) => {
+                        warn!(
+                            room = %room_jid,
+                            %error,
+                            "Extension bot presence could not build room occupant JID"
+                        );
+                        continue;
+                    }
+                };
+                let bot_bare = bot_full.to_bare();
+                let presence = waddle_xmpp::muc::build_occupant_presence(
+                    &from,
+                    &existing.jid,
+                    join.new_occupant_affiliation,
+                    join.new_occupant_role,
+                    waddle_xmpp::muc::MucPresenceStatus::new(false, false),
+                    &waddle_xmpp::xep::xep0421::OccupantIdentity {
+                        bare_jid: &bot_bare,
+                        real_jid: Some(&bot_full),
+                        secret: &state.deps.occupant_id_secret,
+                        hats: &state.deps.app_state.server_hats,
+                    },
+                );
+                join_presences.push((existing.jid, Stanza::Presence(presence)));
+            }
+            route_join_presences(
+                state,
+                host_state,
+                &room_jid,
+                join_presences,
+                commit_deadline,
+                &mut occupancy.join_stragglers,
+            )
+            .await;
         }
     }
     let snapshot = match room_actor
@@ -612,6 +632,28 @@ pub(crate) async fn plan_extension_bot_groupchat(
 /// A managed room with no live actor went dormant and was evicted: load it
 /// the way a member join does, from its channel and durable state. A room
 /// another node claimed meanwhile is that node's to post in.
+/// Whether `error` says the room actor is sealed or stopped (#1108). A
+/// sealed actor is purged too: the registry may still hand it out when the
+/// sweep's destroy timed out, and a retry would meet it again.
+async fn room_gone<M>(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+    error: &kameo::error::SendError<M, waddle_xmpp::muc::room_actor::RoomActorError>,
+) -> bool {
+    match error {
+        kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
+        ) => {
+            let _ = waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .reap_sealed_room(room.clone())
+                .await;
+            true
+        }
+        kameo::error::SendError::HandlerError(_) => false,
+        _ => true,
+    }
+}
+
 async fn load_managed_room(
     state: &crate::server::routes::websocket::WebSocketState,
     room_jid: &BareJid,
