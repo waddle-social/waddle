@@ -12,6 +12,8 @@ const props = defineProps<{
   live?: boolean;
   /** Render as a collapsed "link" that expands on demand. */
   collapsible?: boolean;
+  /** Bots take no DM: rows are plain, with no Message action. */
+  bots?: boolean;
   emptyText?: string;
 }>();
 
@@ -59,11 +61,12 @@ function ringClass(person: PeopleRailPerson): string {
     </div>
     <ul v-if="expanded" class="people-rail__list" role="list">
       <li v-for="person in people" :key="person.jid">
-        <button
-          type="button"
+        <component
+          :is="bots ? 'div' : 'button'"
+          :type="bots ? undefined : 'button'"
           class="people-rail__person"
-          :aria-label="personLabel(person)"
-          @click="emit('select', person.jid)"
+          :aria-label="bots ? undefined : personLabel(person)"
+          @click="!bots && emit('select', person.jid)"
         >
           <span :class="ringClass(person)">
             <UserAvatar
@@ -87,7 +90,7 @@ function ringClass(person: PeopleRailPerson): string {
           <span v-if="person.status === 'speaking'" class="speaking-bars" aria-hidden="true">
             <span /><span /><span />
           </span>
-        </button>
+        </component>
       </li>
       <li v-if="people.length === 0 && emptyText" class="people-rail__empty">
         {{ emptyText }}

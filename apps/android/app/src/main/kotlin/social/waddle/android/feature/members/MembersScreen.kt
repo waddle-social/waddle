@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -66,7 +67,8 @@ private sealed interface PendingAction {
  * Member management screen (web `MemberManagement.vue` parity):
  * affiliation-sorted member list merged with live occupancy, XEP-0317
  * hats, and — for owners/admins — promote/demote/remove/ban/kick plus
- * the XEP-0055 add-member search. Owner rows are immutable.
+ * the XEP-0055 add-member search. Owner rows are immutable. Bots
+ * (XEP-0317 bot hat) list last in their own section without presence.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -230,10 +232,27 @@ private fun MemberList(state: MembersUiState, onRowClick: (MemberRow) -> Unit) {
         )
         return
     }
+    // Bots sort last (see memberRowsOf): own section, no presence.
+    val (bots, people) = remember(state.rows) { state.rows.partition { it.isBot } }
     LazyColumn {
-        items(items = state.rows, key = { "${it.jid ?: it.displayName}:${it.inferred}" }) { row ->
-            MemberListRow(row = row, onClick = { onRowClick(row) })
+        memberItems(people, onRowClick)
+        if (bots.isNotEmpty()) {
+            item(key = "bots-header") {
+                Text(
+                    text = stringResource(R.string.members_bots_section),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+            memberItems(bots, onRowClick)
         }
+    }
+}
+
+private fun LazyListScope.memberItems(rows: List<MemberRow>, onRowClick: (MemberRow) -> Unit) {
+    items(items = rows, key = { "${it.jid ?: it.displayName}:${it.inferred}" }) { row ->
+        MemberListRow(row = row, onClick = { onRowClick(row) })
     }
 }
 

@@ -13,6 +13,7 @@ import {
 import type { DmConversation, RosterContact } from "../src/lib/xmpp/types";
 import type { MemberSummary } from "../src/lib/chat-types";
 import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
+import { renderVueComponent } from "./helpers/render-vue-sfc";
 
 const ROOM = "general@conference.example.com";
 
@@ -304,26 +305,107 @@ describe("usePeopleRail", () => {
   });
 });
 
-describe("bots take no DMs, so they are not offered as people", () => {
+describe("bots take no DMs and have no presence, so they are listed apart from people", () => {
   afterEach(() => occupantJidDirectory.clear());
   const BOT = "helper@extensions.example.com";
 
-  test("the rail and the dashboard's around-now list leave out a known bot", () => {
+  test("the rail lists a known bot once, in its own group with no status, outside every presence bucket", () => {
     occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
     const groups = buildPeopleRail(sources({
       activeRoomJid: ROOM,
       roomPresence: { helper: "online", bob: "online" },
       authorJidByNick: { helper: BOT, bob: "bob@example.com" },
-      contacts: [contact(BOT, "available"), contact("carol@example.com", "available")],
+      contacts: [contact(BOT, "available", "Helper"), contact("carol@example.com", "available")],
       conversations: [conversation(BOT, "available")],
     }));
     expect(groups.room.map((p) => p.jid)).toEqual(["bob@example.com"]);
     expect(groups.around.map((p) => p.jid)).toEqual(["carol@example.com"]);
+    expect(groups.awayAndOffline).toEqual([]);
+    expect(groups.bots).toEqual([
+      { jid: BOT, name: "Helper", presence: undefined, status: "offline", statusText: null, inCall: false },
+    ]);
+  });
 
+  test("a bot stays listed whether or not its occupant presence says it is in the room", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    for (const presence of ["online", "away", "offline"] as const) {
+      const groups = buildPeopleRail(sources({
+        activeRoomJid: ROOM,
+        roomPresence: { helper: presence, gone: "offline" },
+        authorJidByNick: { helper: BOT, gone: "gone@example.com" },
+      }));
+      expect(groups.bots.map((p) => [p.jid, p.name])).toEqual([[BOT, "helper"]]);
+      expect(groups.room).toEqual([]);
+    }
+  });
+
+  test("the dashboard's around-now list leaves out a known bot", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
     const known = splitKnownPeople(
       [contact(BOT, "available"), contact("carol@example.com", "available")],
       [conversation(BOT, "available")],
     );
     expect(known.around.map((p) => p.jid)).toEqual(["carol@example.com"]);
+    expect(known.awayAndOffline).toEqual([]);
+  });
+
+  test("member cards mark a bot, keep its affiliation, and give it no status", () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    const cards = buildMemberCards({
+      roomActive: true,
+      members: [member("bob@example.com"), member(BOT)],
+      roomPresence: { helper: "online", bob: "online" },
+      authorJidByNick: { helper: BOT, bob: "bob@example.com" },
+      contacts: [],
+      conversations: [],
+      huddleJids: new Set([BOT]),
+      speakingJids: new Set(),
+      peerInCall: () => false,
+    });
+
+    expect(cards.map((c) => [c.jid, c.bot, c.status, c.presence, c.statusText, c.inCall, c.affiliation])).toEqual([
+      ["bob@example.com", false, "available", "online", "available", false, "member"],
+      [BOT, true, "offline", undefined, null, false, "member"],
+    ]);
+  });
+
+  test("the rail renders the Bots group with no Message action and no status dot", async () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    const groups = buildPeopleRail(sources({
+      activeRoomJid: ROOM,
+      roomPresence: { helper: "online", bob: "online" },
+      authorJidByNick: { helper: BOT, bob: "bob@example.com" },
+    }));
+    const html = (people: typeof groups.bots, bots: boolean) =>
+      renderVueComponent(
+        "../src/components/community/PeopleRailGroup.vue",
+        { title: bots ? "Bots" : "In this room", count: people.length, people, bots },
+        import.meta.url,
+      );
+
+    const botHtml = await html(groups.bots, true);
+    expect(botHtml).toContain("Bots · 1");
+    expect(botHtml).toContain("helper");
+    expect(botHtml).not.toContain("<button");
+    expect(botHtml).not.toContain("Message");
+    expect(botHtml).not.toContain("data-show");
+
+    // The same markup for a person is a Message button with a dot.
+    const personHtml = await html(groups.room, false);
+    expect(personHtml).toContain('aria-label="Message bob, available"');
+    expect(personHtml).toContain('data-show="available"');
+  });
+
+  test("an avatar never shows a status for a known bot, even when handed one", async () => {
+    occupantJidDirectory.record(ROOM, "helper", `${BOT}/bot`, true);
+    const avatar = (jid: string) =>
+      renderVueComponent(
+        "../src/components/ui/UserAvatar.vue",
+        { name: "x", jid, presence: "online", lastSeen: Date.now() },
+        import.meta.url,
+      );
+
+    expect(await avatar(`${BOT}/bot`)).not.toContain("data-show");
+    expect(await avatar("bob@example.com")).toContain('data-show="available"');
   });
 });

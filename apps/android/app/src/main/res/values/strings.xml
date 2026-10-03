@@ -242,6 +242,7 @@
     <string name="members_search_hint">Add a member — search users</string>
     <string name="members_add_as_member">Add</string>
     <string name="members_present_now">Present now</string>
+    <string name="members_bots_section">Bots</string>
     <string name="members_last_synced">Showing last synced members.</string>
     <string name="members_unavailable">Members are unavailable right now.</string>
     <string name="members_empty">No members</string>

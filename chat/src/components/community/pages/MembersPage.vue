@@ -85,13 +85,22 @@ function isHere(card: MemberCardModel): boolean {
     || isAroundPresence(card.presence);
 }
 
-const hereCards = computed(() => cards.value.filter(isHere));
-const visibleCards = computed(() => (filter.value === "here" ? hereCards.value : cards.value));
+// Bots have no presence, so they are never "here" and sit in their own
+// section whichever filter is on.
+const people = computed(() => cards.value.filter((card) => !card.bot));
+const botCards = computed(() => cards.value.filter((card) => card.bot));
+const hereCards = computed(() => people.value.filter(isHere));
+const visibleCards = computed(() => (filter.value === "here" ? hereCards.value : people.value));
+const sections = computed(() =>
+  [{ title: "", cards: visibleCards.value }, { title: "Bots", cards: botCards.value }]
+    .filter((section) => section.cards.length > 0),
+);
 
 /** The headline counts what the grid shows: room members with a room
- * focused, otherwise everyone known by JID (roster and DM peers). */
+ * focused, otherwise everyone known by JID (roster and DM peers). Bots
+ * are listed under it, not counted. */
 const headline = computed(() => {
-  const count = cards.value.length;
+  const count = people.value.length;
   if (roomActive.value) return `${count} member${count === 1 ? "" : "s"}`;
   return `${count} ${count === 1 ? "person" : "people"}`;
 });
@@ -159,6 +168,7 @@ function ringClass(card: MemberCardModel): string {
 
 function cardLabel(card: MemberCardModel): string {
   const parts = [card.name];
+  if (card.bot) parts.push("bot");
   if (card.affiliation) parts.push(card.affiliation);
   if (card.statusText) parts.push(card.statusText);
   else if (card.inCall) parts.push("in a call");
@@ -208,7 +218,7 @@ function cardLabel(card: MemberCardModel): string {
 
     <div class="community-page__body">
       <div v-if="visibleCards.length === 0" class="community-empty">
-        <template v-if="filter === 'here' && cards.length > 0">
+        <template v-if="filter === 'here' && people.length > 0">
           Nobody is here right now. Switch to Everyone to see the whole list.
         </template>
         <template v-else-if="roomActive">
@@ -218,40 +228,43 @@ function cardLabel(card: MemberCardModel): string {
           No contacts yet. Say hello in a room and people will show up here.
         </template>
       </div>
-      <ul v-else class="community-grid">
-        <li v-for="card in visibleCards" :key="card.jid" class="contents">
-        <button
-          type="button"
-          class="member-card"
-          :aria-pressed="selectedJid === card.jid"
-          :aria-label="cardLabel(card)"
-          @click="selectCard(card)"
-        >
-          <span :class="ringClass(card)">
-            <UserAvatar
-              :name="card.name"
-              :jid="card.jid"
-              :presence="card.presence"
-              :in-call="card.inCall"
-              size="lg"
-            />
-          </span>
-          <span class="member-card__text">
-            <span class="member-card__name">{{ card.name }}</span>
-            <span class="member-card__meta">
-              <span v-if="card.affiliation" class="community-kicker">{{ card.affiliation }}</span>
-              <span
-                v-if="card.statusText"
-                :class="card.status === 'speaking' || card.status === 'in-huddle' ? 'text-live-text' : ''"
-              >{{ card.statusText }}</span>
-            </span>
-          </span>
-          <span v-if="card.status === 'speaking'" class="speaking-bars" aria-hidden="true">
-            <span /><span /><span />
-          </span>
-        </button>
-        </li>
-      </ul>
+      <div v-for="section in sections" :key="section.title" class="flex flex-col gap-3">
+        <span v-if="section.title" class="community-kicker">{{ section.title }} · {{ section.cards.length }}</span>
+        <ul class="community-grid">
+          <li v-for="card in section.cards" :key="card.jid" class="contents">
+            <button
+              type="button"
+              class="member-card"
+              :aria-pressed="selectedJid === card.jid"
+              :aria-label="cardLabel(card)"
+              @click="selectCard(card)"
+            >
+              <span :class="ringClass(card)">
+                <UserAvatar
+                  :name="card.name"
+                  :jid="card.jid"
+                  :presence="card.presence"
+                  :in-call="card.inCall"
+                  size="lg"
+                />
+              </span>
+              <span class="member-card__text">
+                <span class="member-card__name">{{ card.name }}</span>
+                <span class="member-card__meta">
+                  <span v-if="card.affiliation" class="community-kicker">{{ card.affiliation }}</span>
+                  <span
+                    v-if="card.statusText"
+                    :class="card.status === 'speaking' || card.status === 'in-huddle' ? 'text-live-text' : ''"
+                  >{{ card.statusText }}</span>
+                </span>
+              </span>
+              <span v-if="card.status === 'speaking'" class="speaking-bars" aria-hidden="true">
+                <span /><span /><span />
+              </span>
+            </button>
+          </li>
+        </ul>
+      </div>
     </div>
 
     <AppDialog v-model:open="profileDialogOpen">

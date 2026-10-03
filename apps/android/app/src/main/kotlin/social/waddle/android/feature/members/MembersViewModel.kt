@@ -17,7 +17,10 @@ import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.canManageMembersOf
+import social.waddle.android.client.hasBotHat
+import social.waddle.android.client.isExtensionBotJid
 import social.waddle.android.client.store.MemberListStatus
 import social.waddle.android.client.store.RoomMembersState
 import social.waddle.android.jid.bareJidOf
@@ -36,11 +39,14 @@ data class MemberRow(
     val affiliation: WaddleMucAffiliation,
     /** Occupant nick while present (the §8.2 kick address). */
     val nick: String?,
+    /** Never true for bots: their lazy room presence is meaningless. */
     val presentNow: Boolean,
     /** XEP-0317 hat titles from the occupant presence. */
     val hats: List<String>,
     /** Presence-only row: shown, never editable (web parity). */
     val inferred: Boolean,
+    /** Extension bot (bot hat, or an `extensions.<own domain>` address): own section. */
+    val isBot: Boolean = false,
 )
 
 data class MembersUiState(
@@ -62,6 +68,7 @@ data class MembersUiState(
 class MembersViewModel(
     private val sessionManager: XmppSessionManager,
     private val roomJid: String,
+    currentSession: StateFlow<WaddleSessionInfo?>,
 ) : ViewModel() {
     private val search = MutableStateFlow(SearchState())
     private var searchJob: Job? = null
@@ -75,13 +82,15 @@ class MembersViewModel(
     val uiState: StateFlow<MembersUiState> = combine(
         sessionManager.roomMembersStore.rooms,
         sessionManager.presenceStore.occupants,
+        sessionManager.presenceStore.botJids,
+        currentSession,
         search,
-    ) { rooms, occupants, searchState ->
+    ) { rooms, occupants, botJids, session, searchState ->
         val members = rooms[roomJid] ?: RoomMembersState()
         val roomOccupants = occupants[roomJid].orEmpty()
         MembersUiState(
             status = members.status,
-            rows = memberRowsOf(members, roomOccupants),
+            rows = memberRowsOf(members, roomOccupants, botJids, session?.jid),
             canManage = canManageMembersOf(roomOccupants),
             searchQuery = searchState.query,
             searchResults = searchState.results,
@@ -170,7 +179,11 @@ class MembersViewModel(
 
         fun factory(graph: AppGraph, roomJid: String): ViewModelProvider.Factory =
             viewModelFactoryOf {
-                MembersViewModel(sessionManager = graph.sessionManager, roomJid = roomJid)
+                MembersViewModel(
+                    sessionManager = graph.sessionManager,
+                    roomJid = roomJid,
+                    currentSession = graph.currentSession,
+                )
             }
     }
 }
@@ -188,12 +201,19 @@ private fun tierOrderOf(affiliation: WaddleMucAffiliation): Int = when (affiliat
  * Merge the authoritative member list with live occupants: list rows
  * gain "present now" + nick + hats when an occupant's real JID
  * matches; occupants missing from the list append as read-only
- * inferred rows (web `mergeMentionMembers` behavior).
+ * inferred rows (web `mergeMentionMembers` behavior). Bots (a bot hat
+ * on the occupant, a learned [botJids] entry, or an
+ * `extensions.<own domain>` address per [accountJid]) sort after
+ * everyone else and never read as present.
  */
 internal fun memberRowsOf(
     members: RoomMembersState,
     occupants: Map<String, WaddlePresence>,
+    botJids: Set<String> = emptySet(),
+    accountJid: String? = null,
 ): List<MemberRow> {
+    fun isBotJid(jid: String?) =
+        jid != null && (jid in botJids || isExtensionBotJid(jid, accountJid))
     val occupantsByBareJid = occupants.entries
         .mapNotNull { (nick, presence) ->
             presence.mucJid?.let { real -> bareJidOf(real) to (nick to presence) }
@@ -202,14 +222,16 @@ internal fun memberRowsOf(
     val listedJids = members.members.map { it.jid }.toSet()
     val listed = members.members.map { entry ->
         val occupant = occupantsByBareJid[entry.jid]
+        val isBot = isBotJid(entry.jid) || occupant?.second?.hats?.let(::hasBotHat) == true
         MemberRow(
             jid = entry.jid,
             displayName = entry.nick ?: localpartOf(entry.jid),
             affiliation = entry.affiliation,
             nick = occupant?.first,
-            presentNow = occupant != null,
+            presentNow = occupant != null && !isBot,
             hats = occupant?.second?.hats?.map { it.title }.orEmpty(),
             inferred = false,
+            isBot = isBot,
         )
     }
     val inferred = occupants.entries
@@ -218,17 +240,20 @@ internal fun memberRowsOf(
             bare == null || bare !in listedJids
         }
         .map { (nick, presence) ->
+            val jid = presence.mucJid?.let(::bareJidOf)
+            val isBot = isBotJid(jid) || hasBotHat(presence.hats)
             MemberRow(
-                jid = presence.mucJid?.let(::bareJidOf),
+                jid = jid,
                 displayName = nick,
                 affiliation = presence.mucAffiliation ?: WaddleMucAffiliation.NONE,
                 nick = nick,
-                presentNow = true,
+                presentNow = !isBot,
                 hats = presence.hats.map { it.title },
                 inferred = true,
+                isBot = isBot,
             )
         }
     return (listed + inferred).sortedWith(
-        compareBy({ tierOrderOf(it.affiliation) }, { it.displayName.lowercase() }),
+        compareBy({ it.isBot }, { tierOrderOf(it.affiliation) }, { it.displayName.lowercase() }),
     )
 }

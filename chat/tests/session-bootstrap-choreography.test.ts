@@ -75,6 +75,7 @@ function makeHarness(options: {
     addOccupantRealJidHandler: () => () => {},
     addOwnProfilePublishedHandler: () => () => {},
     addOwnOccupantNickHandler: () => () => {},
+    bareJid: "alice@waddle.social",
     fetchUserAvatar: async () => null,
     forgetUserAvatar: () => {},
     setMemberJidHandler: () => {},

@@ -34,7 +34,7 @@ struct ConversationHeaderText: Hashable {
     static func subtitle(for conversation: ConversationID, session: SessionCoordinator) -> String? {
         if conversation.isRoom {
             return roomSubtitle(
-                occupantCount: session.presence.occupants[conversation.jid]?.count,
+                occupantCount: session.presence.occupants[conversation.jid]?.values.filter { !$0.isBot }.count,
                 summary: session.directory.channel(for: conversation.jid)?.summary
             )
         }

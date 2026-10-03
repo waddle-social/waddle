@@ -13,20 +13,37 @@ struct MemberRoleGroup: Identifiable, Hashable {
 enum MemberRoster {
     static let roleOrder: [RoomRole] = [.moderator, .participant, .visitor]
 
-    /// Present occupants grouped Moderators, Participants, Visitors; empty
-    /// groups dropped; each sorted by nick.
+    /// Present people grouped Moderators, Participants, Visitors; empty
+    /// groups dropped; each sorted by nick. Extension bots are listed by
+    /// `bots` instead.
     static func grouped(_ occupants: [Occupant]) -> [MemberRoleGroup] {
         roleOrder.compactMap { role in
-            let members = occupants.filter { $0.role == role }.sorted(by: nickOrder)
+            let members = occupants.filter { $0.role == role && !$0.isBot }.sorted(by: nickOrder)
             return members.isEmpty ? nil : MemberRoleGroup(role: role, occupants: members)
         }
+    }
+
+    /// Extension bots in the room, sorted by nick. They join a room lazily
+    /// on first post, so their presence says nothing about availability.
+    static func bots(_ occupants: [Occupant]) -> [Occupant] {
+        occupants.filter(\.isBot).sorted(by: nickOrder)
+    }
+
+    /// Affiliated people not currently in the room (see `absentAll`).
+    static func absent(_ members: [RoomMember], present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
+        absentAll(members, present: occupants).filter { !account.isExtensionBot($0.jid) }
+    }
+
+    /// Affiliated extension bots not currently in the room.
+    static func absentBots(_ members: [RoomMember], present occupants: [Occupant], account: AccountIdentity) -> [RoomMember] {
+        absentAll(members, present: occupants).filter { account.isExtensionBot($0.jid) }
     }
 
     /// XEP-0045 affiliated users not currently in the room. A member counts
     /// as present when an occupant exposes the same real JID or, in a
     /// semi-anonymous room, uses the member's reserved nick. Outcasts are
     /// not members.
-    static func absent(_ members: [RoomMember], present occupants: [Occupant]) -> [RoomMember] {
+    private static func absentAll(_ members: [RoomMember], present occupants: [Occupant]) -> [RoomMember] {
         let presentJIDs = Set(occupants.compactMap(\.realJID))
         let presentNicks = Set(occupants.map { $0.nick.lowercased() })
         return members

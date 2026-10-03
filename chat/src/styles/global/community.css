@@ -474,6 +474,11 @@
   background: var(--secondary);
 }
 
+/* A bot row is not a button: no hover affordance. */
+div.people-rail__person:hover {
+  background: none;
+}
+
 .people-rail__text {
   display: flex;
   min-width: 0;

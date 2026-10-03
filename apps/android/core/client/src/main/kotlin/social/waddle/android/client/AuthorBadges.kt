@@ -46,6 +46,24 @@ fun authorityBadge(affiliation: WaddleMucAffiliation?, role: WaddleMucRole?): Au
     else -> null
 }
 
+/** The server-assigned `urn:waddle:hats:bot` hat is among [hats]. */
+fun hasBotHat(hats: List<WaddlePresenceHat>): Boolean = hats.any { it.uri == HAT_URI_BOT }
+
+/**
+ * `<plugin>@extensions.<own domain>` is a server-hosted extension bot
+ * (the server answers it as XEP-0030 `client/bot` and refuses messages
+ * to it), so it is a bot even before any presence carries the hat.
+ * Compared case-insensitively against the account's own domain; the
+ * bare service JID itself (no localpart) is not a bot.
+ */
+fun isExtensionBotJid(jid: String, accountJid: String?): Boolean {
+    val ownDomain = accountJid?.let(::normalizedBareJid)?.substringAfter('@', "").orEmpty()
+    if (ownDomain.isEmpty()) return false
+    val bare = normalizedBareJid(jid)
+    return bare.substringBefore('@', "").isNotEmpty() &&
+        bare.substringAfter('@', "") == "extensions.$ownDomain"
+}
+
 /**
  * Web `descriptiveBadge`: highest-ranked hat, first-wins on ties
  * (strict `>` comparison). Unknown hats show their server title.

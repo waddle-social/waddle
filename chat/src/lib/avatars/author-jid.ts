@@ -14,7 +14,7 @@
  * occupant ids are not surfaced by the client yet, so it is keyed by
  * room + nick.
  */
-import { shallowReactive } from "vue";
+import { ref, shallowReactive } from "vue";
 import { barePeerJid, resourceOf } from "@/lib/xmpp/jid";
 import type { TimelineMessage } from "@/lib/chat-ui";
 
@@ -48,6 +48,17 @@ export class OccupantJidDirectory {
    * it leaves a room.
    */
   private readonly bots = shallowReactive(new Set<string>());
+  /**
+   * The account's extension service (`extensions.<domain>`). Every address
+   * with a localpart there is a server-hosted bot: the server answers it as
+   * XEP-0030 `client/bot` and refuses messages to it. This recognises a bot
+   * whose presence this session never saw, e.g. a room member who is away.
+   */
+  private readonly extensionsDomain = ref<string | null>(null);
+
+  setExtensionsDomain(domain: string | null): void {
+    this.extensionsDomain.value = domain?.toLowerCase() || null;
+  }
 
   /**
    * Record who holds `nick` now. `realJid` null means an occupant whose
@@ -75,7 +86,10 @@ export class OccupantJidDirectory {
   /** Reactive: `jid` is a known server-hosted bot. */
   isBot(jid: string | null | undefined): boolean {
     const real = bare(jid);
-    return !!real && this.bots.has(real);
+    if (!real) return false;
+    if (this.bots.has(real)) return true;
+    const at = real.indexOf("@");
+    return at > 0 && real.slice(at + 1).toLowerCase() === this.extensionsDomain.value;
   }
 
   recordOwnNick(roomJid: string, nick: string | null): void {
@@ -103,6 +117,7 @@ export class OccupantJidDirectory {
     this.holders.clear();
     this.ownNicks.clear();
     this.bots.clear();
+    this.extensionsDomain.value = null;
   }
 }
 

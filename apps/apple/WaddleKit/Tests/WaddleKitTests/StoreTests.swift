@@ -107,6 +107,16 @@ struct StoreTests {
         #expect(presence.occupant(named: "carol", in: room)?.isBot == false)
     }
 
+    @Test func extensionBotIsAJIDOnTheAccountsExtensionService() {
+        #expect(me.isExtensionBot(bare("helper@extensions.waddle.test")))
+        #expect(me.isExtensionBot(bare("Helper@EXTENSIONS.Waddle.Test")))
+        // Not a bot: the service itself, a person, another domain's service.
+        #expect(!me.isExtensionBot(bare("extensions.waddle.test")))
+        #expect(!me.isExtensionBot(bob))
+        #expect(!me.isExtensionBot(bare("helper@extensions.other.test")))
+        #expect(!me.isExtensionBot(bare("helper@sub.extensions.waddle.test")))
+    }
+
     @Test func directListOrdersByRecency() {
         let directory = DirectoryStore()
         directory.touchDirect(bob, at: date(1), preview: "one")

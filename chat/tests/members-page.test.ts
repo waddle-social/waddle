@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { computed, ref } from "vue";
 import { renderVueComponent } from "./helpers/render-vue-sfc";
+import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
 import type { DmConversation, RosterContact } from "../src/lib/xmpp/types";
 
 function contact(jid: string, presenceShow?: RosterContact["presenceShow"], name?: string): RosterContact {
@@ -62,5 +63,35 @@ describe("MembersPage", () => {
     const html = await renderMembersPage([], []);
     expect(html).toContain("0 people</h1>");
     expect(html).toContain("No contacts yet.");
+  });
+});
+
+describe("MembersPage bots", () => {
+  afterEach(() => occupantJidDirectory.clear());
+  const BOT = "helper@extensions.example.com";
+
+  test("a bot is listed under Bots, not counted as a person, and shows no status", async () => {
+    occupantJidDirectory.record("general@conference.example.com", "helper", `${BOT}/bot`, true);
+    const html = await renderMembersPage(
+      [contact(BOT, "available", "Helper"), contact("bob@example.com", "available", "Bob B")],
+      [conversation(BOT, "available")],
+    );
+
+    expect(html).toContain("1 person</h1>");
+    expect(html).toContain("1 here now.");
+    expect(html).toContain("Bots · 1");
+    expect(html).toContain('aria-label="Helper, bot"');
+    expect(html).not.toContain('aria-label="Helper, available"');
+    // Only Bob's avatar carries a presence dot.
+    expect(html.match(/data-show=/g)).toHaveLength(1);
+  });
+
+  test("a bot is never here now, but is still listed when nobody else is", async () => {
+    occupantJidDirectory.record("general@conference.example.com", "helper", `${BOT}/bot`, true);
+    const html = await renderMembersPage([contact(BOT, "available", "Helper")], []);
+
+    expect(html).toContain("0 people</h1>");
+    expect(html).toContain("0 here now.");
+    expect(html).toContain("Bots · 1");
   });
 });

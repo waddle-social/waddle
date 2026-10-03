@@ -91,6 +91,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
     addOccupantRealJidHandler: () => noop,
     addOwnProfilePublishedHandler: () => noop,
     addOwnOccupantNickHandler: () => noop,
+    bareJid: "alice@waddle.social",
     fetchUserAvatar: async () => null,
     forgetUserAvatar: noop,
     setMemberJidHandler: noop,

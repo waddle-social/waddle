@@ -57,6 +57,13 @@ public struct MessageRoute: Hashable, Sendable {
 }
 
 public extension AccountIdentity {
+    /// A server-hosted extension bot: `<bot>@extensions.<our domain>`, the
+    /// service the server answers as XEP-0030 client/bot and refuses DMs to.
+    /// (`BareJID` already case-folds the domain.)
+    func isExtensionBot(_ other: BareJID) -> Bool {
+        other.localpart != nil && other.domain == "extensions.\(jid.domain)"
+    }
+
     /// Routes a message: groupchat keys on the room bare JID and compares
     /// the occupant nick for authorship; 1:1 keys on the non-own side and
     /// compares bare JIDs (carbons of our own sends route to the peer).

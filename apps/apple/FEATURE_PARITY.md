@@ -91,7 +91,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | Voice/video calls | 0166, 0353, 0272 | ❌ | ❌ | Not in this PR. Baseline: call events logged and dropped |
 | Moderation | 0425 | ❌ | ✅ | Moderator-gated with confirmation |
 | Affiliations / roles | 0045 | ❌ | ✅ | XEP-0045 member lists, affiliation changes, kick, ban. Baseline: called `/v1/space/members`, which the server does not serve |
-| Hats | 0317 | 🟡 | ✅ | Shown as author and member badges; a member wearing the server-assigned `urn:waddle:hats:bot` hat (an extension bot) has no Message action, since the server refuses DMs to bots |
+| Hats | 0317 | 🟡 | ✅ | Shown as author and member badges; a member wearing the server-assigned `urn:waddle:hats:bot` hat (an extension bot) has no Message action, since the server refuses DMs to bots, and is listed under "Bots" with no presence dot and left out of the member count, since bots join a room lazily on first post; an affiliated bot that is not in the room (a `@extensions.<domain>` JID) joins that section once members are loaded instead of showing as an offline person |
 
 ## Platform
 
