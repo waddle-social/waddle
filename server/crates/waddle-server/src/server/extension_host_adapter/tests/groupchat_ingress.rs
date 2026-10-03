@@ -439,6 +439,44 @@ async fn group_dm_refuses_the_bot(f: IngressFixture) {
     fixture.close(f).await;
 }
 
+/// A group DM whose room is not loaded is refused from its channel record:
+/// the bot's send loads, claims and joins nothing.
+async fn unloaded_group_dm_is_refused_before_loading(f: IngressFixture) {
+    let adapter = direct_ingress::adapter(&f).await;
+    let (room, invocation) =
+        managed_room(&f, &adapter, waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM).await;
+    let result = managed_send(&adapter, &invocation, &room, "unloaded-group-dm").await;
+    assert!(
+        matches!(result, Err(ExtensionHostAdapterError::NotAuthorized)),
+        "{result:?}"
+    );
+    assert!(
+        adapter
+            .state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom { room_jid: room })
+            .await
+            .expect("room lookup")
+            .is_none(),
+        "the refusal loads no room"
+    );
+    assert_eq!(f.count("ingress_messages").await, 0);
+    close_node(adapter, f).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_unloaded_group_dm_refused_sqlite() {
+    unloaded_group_dm_is_refused_before_loading(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_groupchat_unloaded_group_dm_refused_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_unloaded_group_dm").await {
+        unloaded_group_dm_is_refused_before_loading(f).await;
+    }
+}
+
 #[tokio::test]
 async fn extension_groupchat_group_dm_refused_sqlite() {
     group_dm_refuses_the_bot(IngressFixture::sqlite().await).await;

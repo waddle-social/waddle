@@ -671,6 +671,10 @@ async fn load_managed_room(
             return Err(ExtensionBotDispatchError::RoomLookupFailed);
         }
     };
+    // Refused before the room is loaded and claimed for nothing.
+    if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
+        return Err(ExtensionBotDispatchError::GroupDm);
+    }
     match crate::server::routes::websocket::get_or_create_room_actor(
         state,
         room_jid,
