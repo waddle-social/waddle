@@ -87,6 +87,16 @@ describe("the occupant directory remembers bots by real JID for the session", ()
     expect(directory.isBot("helper@extensions.waddle.social")).toBe(false);
   });
 
+  test("an address on the account's extension service is a bot without any presence", () => {
+    const directory = new OccupantJidDirectory();
+    directory.setExtensionsDomain("Extensions.waddle.social");
+    expect(directory.isBot("helper@extensions.waddle.social")).toBe(true);
+    expect(directory.isBot("extensions.waddle.social")).toBe(false);
+    expect(directory.isBot("alice@waddle.social")).toBe(false);
+    directory.clear();
+    expect(directory.isBot("helper@extensions.waddle.social")).toBe(false);
+  });
+
   test("a bot flag without a disclosed JID records nothing", () => {
     const directory = new OccupantJidDirectory();
     directory.record(ROOM, "helper", null, true);

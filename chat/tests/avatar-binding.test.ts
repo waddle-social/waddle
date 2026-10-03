@@ -21,6 +21,7 @@ function fakeClient() {
     addOccupantRealJidHandler: (handler) => on(occupants, handler),
     addOwnProfilePublishedHandler: (handler) => on(ownProfile, handler),
     addOwnOccupantNickHandler: () => () => undefined,
+    bareJid: "alice@waddle.social",
   };
   return {
     client,
