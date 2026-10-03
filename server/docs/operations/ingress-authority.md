@@ -982,8 +982,10 @@ Observer work uses its existing durable identity and a separate `started` state.
 Only proven rejection before guest invocation re-arms it. Plugin-returned temporary
 failure, timeout, cancellation or uncertain runtime failure does not authorize
 another invocation. A known result and its publication/receipt settle atomically.
-These are at-most-once invocation and enqueue-attempt guarantees after `started`
-commits, not exactly-once client delivery or external plugin effects. A crash
+These gates prevent repeated guest invocation and repeated successful queue
+acceptance for a recorded obligation. Definitive pre-effect rejection can retry;
+ambiguous attempts cannot. They do not promise exactly-once client delivery or
+external plugin effects. A crash
 between that commit and the side effect can lose delivery; a crash after the side
 effect but before its completion record leaves an unresolved row. Recovery never
 invents successful delivery for either case.
