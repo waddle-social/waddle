@@ -755,18 +755,16 @@ DELETE FROM roster_versions WHERE user_jid IN (
     )
 );
 
-DELETE FROM roster_items WHERE id IN (
-    SELECT r.id FROM roster_items r
-    WHERE NOT EXISTS (
+DELETE FROM roster_items
+WHERE NOT EXISTS (
         SELECT 1 FROM users u
-        WHERE lower(u.xmpp_localpart || '@' || substr(r.user_jid, instr(r.user_jid, '@') + 1)) = lower(r.contact_jid)
+        WHERE lower(u.xmpp_localpart || '@' || substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1)) = lower(roster_items.contact_jid)
     )
     AND NOT EXISTS (
         SELECT 1 FROM native_users n
-        WHERE lower(n.domain) = lower(substr(r.user_jid, instr(r.user_jid, '@') + 1))
-          AND lower(n.username || '@' || n.domain) = lower(r.contact_jid)
-    )
-);
+        WHERE lower(n.domain) = lower(substr(roster_items.user_jid, instr(roster_items.user_jid, '@') + 1))
+          AND lower(n.username || '@' || n.domain) = lower(roster_items.contact_jid)
+    );
 "#;
 
 pub const V0014_ROSTER_CONTACTS_ARE_ACCOUNTS_POSTGRES: &str = r#"
@@ -783,18 +781,16 @@ DELETE FROM roster_versions WHERE user_jid IN (
     )
 );
 
-DELETE FROM roster_items WHERE id IN (
-    SELECT r.id FROM roster_items r
-    WHERE NOT EXISTS (
+DELETE FROM roster_items
+WHERE NOT EXISTS (
         SELECT 1 FROM users u
-        WHERE lower(u.xmpp_localpart || '@' || substr(r.user_jid, strpos(r.user_jid, '@') + 1)) = lower(r.contact_jid)
+        WHERE lower(u.xmpp_localpart || '@' || substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1)) = lower(roster_items.contact_jid)
     )
     AND NOT EXISTS (
         SELECT 1 FROM native_users n
-        WHERE lower(n.domain) = lower(substr(r.user_jid, strpos(r.user_jid, '@') + 1))
-          AND lower(n.username || '@' || n.domain) = lower(r.contact_jid)
-    )
-);
+        WHERE lower(n.domain) = lower(substr(roster_items.user_jid, strpos(roster_items.user_jid, '@') + 1))
+          AND lower(n.username || '@' || n.domain) = lower(roster_items.contact_jid)
+    );
 "#;
 
 /// Get all global migrations in order
