@@ -11,10 +11,11 @@ import java.time.OffsetDateTime
  * the first eligible HTTPS URL of a draft is looked up via
  * `urn:waddle:link-preview:0`, and the minted token is attached to the
  * send ONLY while its `expires-at` instant is still in the future.
- * The lookup must never block a send beyond the web's 2 s budget.
+ * Android performs this lookup while sending, so its wait is capped at 2 s.
+ * The web's longer background lookup budget is independent of this send-time cap.
  */
 
-/** Web `LOOKUP_TIMEOUT_MS`: budget for the lookup IQ round-trip. */
+/** Maximum send-time wait for the Android lookup IQ round-trip. */
 const val LINK_PREVIEW_LOOKUP_TIMEOUT_MS = 2_000L
 
 /** Web `HTTPS_URL_RE` (the lookup scanner, distinct from autolinking). */

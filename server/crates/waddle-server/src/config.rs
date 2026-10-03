@@ -1222,13 +1222,17 @@ impl Default for LinkPreviewConfig {
             max_html_head_bytes: 1024 * 1024,
             max_cached_image_bytes: 2 * 1024 * 1024,
             max_redirects: 3,
-            fetch_timeout: Duration::from_millis(1_500),
+            fetch_timeout: Duration::from_millis(Self::DEFAULT_FETCH_TIMEOUT_MS),
             video_enabled: true,
         }
     }
 }
 
 impl LinkPreviewConfig {
+    /// Per-phase (page, image) budget. Clients bound the whole lookup at
+    /// `LOOKUP_TIMEOUT_MS` (web) / `LINK_PREVIEW_LOOKUP_TIMEOUT_MS` (Android),
+    /// which must cover two phases plus delivery.
+    const DEFAULT_FETCH_TIMEOUT_MS: u64 = 3_000;
     const MAX_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
     pub fn from_env() -> Result<Self, String> {
@@ -1248,7 +1252,7 @@ impl LinkPreviewConfig {
         let fetch_timeout = Duration::from_millis(parse_u64_var(
             &vars,
             "WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS",
-            1_500,
+            Self::DEFAULT_FETCH_TIMEOUT_MS,
         )?);
         if fetch_timeout > Self::MAX_FETCH_TIMEOUT {
             return Err(format!(

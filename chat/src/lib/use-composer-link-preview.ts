@@ -8,8 +8,9 @@ import {
   type ComposerLinkPreviewState,
 } from "@/lib/link-preview-composer";
 
-// The production lookup has its own 2s timeout; keep send fail-open if a
-// replacement lookup implementation ever forgets to bound its promise.
+// Bounded wait at send time for a lookup that is still in flight. The lookup
+// itself may run longer in the background (8 s); send must stay responsive
+// and fail open without a preview rather than block on a slow origin.
 export const SEND_LOOKUP_GRACE_MS = 2_250;
 
 export function useComposerLinkPreview(

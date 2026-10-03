@@ -26,7 +26,14 @@ use crate::storage::{BlobMeta, StorageError};
 const DEFAULT_MAX_HTML_HEAD_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// Per-phase budget (page, then image). Popular origins (x.com, GitHub,
+/// YouTube) routinely take 1.5-3 s to first byte from a datacenter, so a
+/// tighter budget turns most real-world previews into `failed`.
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3_000);
+/// Origins such as Wikipedia, Reddit and many CDN bot filters reject requests
+/// without a User-Agent; identify as a crawler like other link unfurlers do.
+const LINK_PREVIEW_USER_AGENT: &str =
+    "Mozilla/5.0 (compatible; WaddleBot/1.0; +https://waddle.social)";
 /// Extra bytes scanned past `</head>` for OpenGraph `<meta>` tags that
 /// streaming-SSR frameworks (Next.js, React 18, Remix) emit into the `<body>`
 /// stream rather than the head. Bounded so the resolver still stops well
@@ -277,9 +284,13 @@ pub(super) async fn resolve_link_preview(
             }
         };
         match fetch {
-            FetchOnceResult::Html { final_url, html } => {
+            FetchOnceResult::Html {
+                final_url,
+                html,
+                syntax,
+            } => {
                 let Some((mut metadata, remote_image)) =
-                    extract_metadata_parts_from_html(url, &html, &final_url, policy)
+                    extract_metadata_parts_from_document(url, &html, syntax, &final_url, policy)
                 else {
                     return LinkPreviewResolverOutcome::Unsupported;
                 };
@@ -537,18 +548,7 @@ async fn fetch_image_once(
     policy: &LinkPreviewResolverPolicy,
     timeout: Duration,
 ) -> Result<FetchImageOnceResult, LinkPreviewResolverStatus> {
-    let target = prepare_target(url, policy).await?;
-    let mut builder = Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .redirect(redirect::Policy::none())
-        .https_only(!policy.allow_http_loopback_for_tests);
-    if let Host::Domain(host) = target.host {
-        builder = builder.resolve_to_addrs(host, &target.addrs);
-    }
-    let client = builder
-        .build()
-        .map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    let client = pinned_client(url, policy, timeout).await?;
     let mut response = client
         .get(url.clone())
         .send()
@@ -612,10 +612,24 @@ async fn fetch_image_once(
     })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocumentSyntax {
+    Html,
+    Xhtml,
+}
+
+impl DocumentSyntax {
+    fn is_empty_element(self, tag: &str) -> bool {
+        // HTML ignores the self-closing flag on script/style/template elements.
+        self == Self::Xhtml && tag.trim_end().ends_with('/')
+    }
+}
+
 enum FetchOnceResult {
     Html {
         final_url: Url,
         html: String,
+        syntax: DocumentSyntax,
     },
     DirectVideo {
         final_url: Url,
@@ -630,22 +644,7 @@ async fn fetch_html_once(
     policy: &LinkPreviewResolverPolicy,
     timeout: Duration,
 ) -> Result<FetchOnceResult, LinkPreviewResolverStatus> {
-    let target = prepare_target(url, policy).await?;
-    // The client is per-hop because each redirect target needs a fresh DNS pin;
-    // max_redirects keeps the extra TLS/client setup cost bounded.
-    let mut builder = Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .redirect(redirect::Policy::none())
-        .https_only(!policy.allow_http_loopback_for_tests);
-    if let Host::Domain(host) = target.host {
-        // SSRF defense relies on reqwest dialing only the DNS results validated in
-        // prepare_target; dropping this pin would let reqwest re-resolve the host.
-        builder = builder.resolve_to_addrs(host, &target.addrs);
-    }
-    let client = builder
-        .build()
-        .map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    let client = pinned_client(url, policy, timeout).await?;
     let mut request = client.get(url.clone());
     if policy.max_html_head_bytes > 0 {
         request = request.header(RANGE, format!("bytes=0-{}", policy.max_html_head_bytes - 1));
@@ -714,13 +713,12 @@ async fn fetch_html_once(
         }
         return Err(LinkPreviewResolverStatus::Unsupported);
     }
-    if !matches!(
-        content_type.as_deref(),
-        Some("text/html") | Some("application/xhtml+xml")
-    ) {
-        return Err(LinkPreviewResolverStatus::Unsupported);
-    }
-    let allow_head_cutoff = matches!(content_type.as_deref(), Some("text/html"));
+    let syntax = match content_type.as_deref() {
+        Some("text/html") => DocumentSyntax::Html,
+        Some("application/xhtml+xml") => DocumentSyntax::Xhtml,
+        _ => return Err(LinkPreviewResolverStatus::Unsupported),
+    };
+    let allow_head_cutoff = syntax == DocumentSyntax::Html;
     // For `text/html` we stream and stop at `</head>` (+ the bounded meta
     // window), so a large advertised `Content-Length` is fine as long as the
     // head fits the budget — common for origins that ignore `Range` and return
@@ -829,6 +827,7 @@ async fn fetch_html_once(
     Ok(FetchOnceResult::Html {
         final_url: url.clone(),
         html,
+        syntax,
     })
 }
 
@@ -912,6 +911,41 @@ fn parse_content_range(value: &str) -> ContentRangeState {
     } else {
         ContentRangeState::Complete { expected_len }
     }
+}
+
+/// Build a single-hop client pinned to the SSRF-validated DNS results for
+/// `url`. The DNS resolution shares `timeout` with the request, so a slow
+/// resolver cannot stretch a phase past its budget.
+///
+/// The client is per-hop because each redirect target needs a fresh DNS pin;
+/// max_redirects keeps the extra TLS/client setup cost bounded.
+async fn pinned_client(
+    url: &Url,
+    policy: &LinkPreviewResolverPolicy,
+    timeout: Duration,
+) -> Result<Client, LinkPreviewResolverStatus> {
+    let started = Instant::now();
+    let target = tokio::time::timeout(timeout, prepare_target(url, policy))
+        .await
+        .map_err(|_| LinkPreviewResolverStatus::Failed)??;
+    let timeout = timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(LinkPreviewResolverStatus::Failed)?;
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .user_agent(LINK_PREVIEW_USER_AGENT)
+        .redirect(redirect::Policy::none())
+        .https_only(!policy.allow_http_loopback_for_tests);
+    if let Host::Domain(host) = target.host {
+        // SSRF defense relies on reqwest dialing only the DNS results validated in
+        // prepare_target; dropping this pin would let reqwest re-resolve the host.
+        builder = builder.resolve_to_addrs(host, &target.addrs);
+    }
+    builder
+        .build()
+        .map_err(|_| LinkPreviewResolverStatus::Failed)
 }
 
 struct PreparedTarget<'a> {
@@ -1121,15 +1155,40 @@ struct RemotePreviewImage {
     alt: Option<String>,
 }
 
+#[cfg(test)]
 fn extract_metadata_parts_from_html(
     requested_url: &Url,
     html: &str,
     normalized_fallback_url: &Url,
     policy: &LinkPreviewResolverPolicy,
 ) -> Option<(ResolvedLinkMetadata, Option<RemotePreviewImage>)> {
-    let title = meta_content(html, "og:title", LINK_PREVIEW_TITLE_MAX_BYTES);
-    let description = meta_content(html, "og:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES);
-    let canonical_url = meta_content(html, "og:url", usize::MAX)
+    extract_metadata_parts_from_document(
+        requested_url,
+        html,
+        DocumentSyntax::Html,
+        normalized_fallback_url,
+        policy,
+    )
+}
+
+fn extract_metadata_parts_from_document(
+    requested_url: &Url,
+    html: &str,
+    syntax: DocumentSyntax,
+    normalized_fallback_url: &Url,
+    policy: &LinkPreviewResolverPolicy,
+) -> Option<(ResolvedLinkMetadata, Option<RemotePreviewImage>)> {
+    let meta_content =
+        |property, max_bytes| meta_content_with_syntax(html, syntax, property, max_bytes);
+    // OpenGraph first, then Twitter cards, then plain HTML metadata: many
+    // sites ship only `<title>` and `<meta name="description">`.
+    let title = meta_content("og:title", LINK_PREVIEW_TITLE_MAX_BYTES)
+        .or_else(|| meta_content("twitter:title", LINK_PREVIEW_TITLE_MAX_BYTES))
+        .or_else(|| head_title_with_syntax(html, syntax, LINK_PREVIEW_TITLE_MAX_BYTES));
+    let description = meta_content("og:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES)
+        .or_else(|| meta_content("twitter:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES))
+        .or_else(|| meta_content("description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES));
+    let canonical_url = meta_content("og:url", usize::MAX)
         .and_then(|url| Url::parse(&url).ok())
         .filter(|url| {
             classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready
@@ -1146,20 +1205,40 @@ fn extract_metadata_parts_from_html(
         return None;
     }
 
-    let image = meta_content(html, "og:image", usize::MAX)
-        .and_then(|url| Url::parse(&url).ok())
-        .filter(|url| classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready)
-        .map(|url| RemotePreviewImage {
+    let image = [
+        ("og:image", "og:image:alt"),
+        ("twitter:image", "twitter:image:alt"),
+    ]
+    .into_iter()
+    .find_map(|(property, alt_property)| {
+        // Validate each candidate before falling back, and keep descriptive
+        // fields paired with the source whose image was selected.
+        let raw = meta_content(property, usize::MAX)?;
+        // Relative image paths resolve against the page actually fetched.
+        let url = normalized_fallback_url.join(&raw).ok()?;
+        if classify_url_with_policy(&url, policy) != LinkPreviewResolverStatus::Ready {
+            return None;
+        }
+        let (width, height) = if property == "og:image" {
+            (
+                meta_content("og:image:width", 16).and_then(|raw| raw.parse().ok()),
+                meta_content("og:image:height", 16).and_then(|raw| raw.parse().ok()),
+            )
+        } else {
+            (None, None)
+        };
+        Some(RemotePreviewImage {
             url,
-            width: meta_content(html, "og:image:width", 16).and_then(|raw| raw.parse().ok()),
-            height: meta_content(html, "og:image:height", 16).and_then(|raw| raw.parse().ok()),
-            alt: meta_content(html, "og:image:alt", LINK_PREVIEW_DESCRIPTION_MAX_BYTES),
-        });
+            width,
+            height,
+            alt: meta_content(alt_property, LINK_PREVIEW_DESCRIPTION_MAX_BYTES),
+        })
+    });
 
-    let og_video_is_html = meta_content(html, "og:video:type", 64)
-        .is_some_and(|ty| ty.eq_ignore_ascii_case("text/html"));
-    let player_embed = meta_content(html, "og:video:secure_url", usize::MAX)
-        .or_else(|| meta_content(html, "og:video:url", usize::MAX))
+    let og_video_is_html =
+        meta_content("og:video:type", 64).is_some_and(|ty| ty.eq_ignore_ascii_case("text/html"));
+    let player_embed = meta_content("og:video:secure_url", usize::MAX)
+        .or_else(|| meta_content("og:video:url", usize::MAX))
         .filter(|_| og_video_is_html)
         .and_then(|raw| Url::parse(&raw).ok())
         .and_then(|url| normalize_allowed_player_embed(&url))
@@ -1170,8 +1249,8 @@ fn extract_metadata_parts_from_html(
         .filter(|url| classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready)
         .map(|url| ResolvedPlayerEmbed {
             url,
-            width: meta_content(html, "og:video:width", 16).and_then(|raw| raw.parse().ok()),
-            height: meta_content(html, "og:video:height", 16).and_then(|raw| raw.parse().ok()),
+            width: meta_content("og:video:width", 16).and_then(|raw| raw.parse().ok()),
+            height: meta_content("og:video:height", 16).and_then(|raw| raw.parse().ok()),
         });
 
     // Native-playable media advertised by the page's `og:video` (e.g. a CDN
@@ -1185,16 +1264,16 @@ fn extract_metadata_parts_from_html(
             // `og:video:type` may carry media-type parameters
             // (`video/mp4; codecs="…"`); match on the essence only, like the
             // image path does for `og:image:type`.
-            let media_type = meta_content(html, "og:video:type", 64)?
+            let media_type = meta_content("og:video:type", 64)?
                 .split(';')
                 .next()
                 .unwrap_or_default()
                 .trim()
                 .parse::<DirectVideoMediaType>()
                 .ok()?;
-            let url = meta_content(html, "og:video:secure_url", usize::MAX)
-                .or_else(|| meta_content(html, "og:video:url", usize::MAX))
-                .or_else(|| meta_content(html, "og:video", usize::MAX))
+            let url = meta_content("og:video:secure_url", usize::MAX)
+                .or_else(|| meta_content("og:video:url", usize::MAX))
+                .or_else(|| meta_content("og:video", usize::MAX))
                 .and_then(|raw| Url::parse(&raw).ok())
                 .filter(|url| url.scheme() == "https")
                 .filter(|url| {
@@ -1246,23 +1325,77 @@ fn sniff_safe_preview_image_media_type(bytes: &[u8]) -> Option<PreviewImageMedia
     None
 }
 
+#[cfg(test)]
 fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> {
+    meta_content_with_syntax(html, DocumentSyntax::Html, property, max_bytes)
+}
+
+fn meta_content_with_syntax(
+    html: &str,
+    syntax: DocumentSyntax,
+    property: &str,
+    max_bytes: usize,
+) -> Option<String> {
     let mut remaining = html;
-    while let Some(start) = find_meta_tag_start(remaining) {
-        remaining = &remaining[start + "<meta".len()..];
-        let Some(end) = find_meta_tag_end(remaining) else {
-            break;
-        };
-        if let Some(next_start) = find_meta_tag_start(remaining) {
-            if next_start < end {
-                remaining = &remaining[next_start..];
-                continue;
+    let mut template_depth = 0usize;
+    while let Some(start) = remaining.find('<') {
+        remaining = &remaining[start..];
+        if let Some(end) = comment_or_cdata_end(remaining, syntax) {
+            remaining = &remaining[end..];
+            continue;
+        }
+        let tail = &remaining[1..];
+        let end = find_meta_tag_end(tail)?;
+        // Retain recovery from a missing '>' without interpreting markup
+        // inside quoted attributes as another tag.
+        if let Some(next_start) = find_meta_tag_start(&tail[..end]) {
+            remaining = &tail[next_start..];
+            continue;
+        }
+        let mut tag = HtmlTagScanner::default();
+        for byte in tail[..end].bytes() {
+            tag.consume_unquoted(byte);
+            if tag.name_done {
+                break;
             }
         }
-        let tag = &remaining[..end];
-        remaining = &remaining[end + 1..];
-
-        let attrs = parse_tag_attrs(tag);
+        remaining = &tail[end + 1..];
+        match tag.name.as_slice() {
+            b"template" => {
+                if !syntax.is_empty_element(&tail[..end]) {
+                    template_depth += 1;
+                }
+                continue;
+            }
+            b"/template" if template_depth > 0 => {
+                template_depth -= 1;
+                continue;
+            }
+            // Unlike raw-text elements, plaintext has no closing tag.
+            b"plaintext" if syntax == DocumentSyntax::Html => return None,
+            _ => {}
+        }
+        let closing_name = match tag.name.as_slice() {
+            b"noscript" => Some(b"noscript".as_slice()),
+            b"iframe" => Some(b"iframe".as_slice()),
+            b"xmp" => Some(b"xmp".as_slice()),
+            b"noembed" => Some(b"noembed".as_slice()),
+            b"noframes" => Some(b"noframes".as_slice()),
+            _ => tag.raw_text_closing_name(),
+        };
+        if let Some(closing_name) = closing_name {
+            if !syntax.is_empty_element(&tail[..end]) {
+                let (_, end) = raw_text_end(remaining, closing_name, syntax)?;
+                remaining = &remaining[end..];
+            }
+            continue;
+        }
+        // Active body metadata is intentional: streaming SSR frameworks can
+        // emit it after </head>, sometimes inside ordinary body wrappers.
+        if template_depth > 0 || tag.name != b"meta" {
+            continue;
+        }
+        let attrs = parse_tag_attrs(&tail["meta".len()..end]);
         let name_matches = attrs.iter().any(|(name, value)| {
             (name.eq_ignore_ascii_case("property") || name.eq_ignore_ascii_case("name"))
                 && value.eq_ignore_ascii_case(property)
@@ -1285,6 +1418,149 @@ fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> 
     None
 }
 
+/// The document `<title>`, before explicit or implicit body content. Reuse
+/// the head scanner's tag and raw-text rules so comments, quoted attributes,
+/// and script/style contents cannot supply a title or terminate the head.
+#[cfg(test)]
+fn head_title(html: &str, max_bytes: usize) -> Option<String> {
+    head_title_with_syntax(html, DocumentSyntax::Html, max_bytes)
+}
+
+fn head_title_with_syntax(html: &str, syntax: DocumentSyntax, max_bytes: usize) -> Option<String> {
+    let mut remaining = html.strip_prefix('\u{feff}').unwrap_or(html);
+    let mut template_depth = 0usize;
+    loop {
+        remaining = remaining.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if template_depth > 0 {
+            remaining = &remaining[remaining.find('<')?..];
+        }
+        if let Some(end) = comment_or_cdata_end(remaining, syntax) {
+            remaining = &remaining[end..];
+            continue;
+        }
+        let tail = remaining.strip_prefix('<')?;
+        let end = find_meta_tag_end(tail)?;
+        let mut tag = HtmlTagScanner::default();
+        // Only the tag name is needed here; attribute boundaries were already
+        // handled by the quote-aware tag-end scan above.
+        for byte in tail[..end].bytes() {
+            tag.consume_unquoted(byte);
+            if tag.name_done {
+                break;
+            }
+        }
+        remaining = &tail[end + 1..];
+        match tag.name.as_slice() {
+            b"template" => {
+                if !syntax.is_empty_element(&tail[..end]) {
+                    template_depth += 1;
+                }
+                continue;
+            }
+            b"/template" if template_depth > 0 => {
+                template_depth -= 1;
+                continue;
+            }
+            _ => {}
+        }
+        // With scripting enabled, noscript is raw text in the head.
+        let closing_name = if tag.name == b"noscript" {
+            Some(b"noscript".as_slice())
+        } else {
+            tag.raw_text_closing_name()
+        };
+        if let Some(closing_name) = closing_name {
+            if syntax.is_empty_element(&tail[..end]) {
+                continue;
+            }
+            let (text_end, tag_end) = raw_text_end(remaining, closing_name, syntax)?;
+            if closing_name == b"title" && template_depth == 0 {
+                let title = decode_title_text(&remaining[..text_end], syntax)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return (!title.is_empty()).then(|| truncate_utf8_to_bytes(&title, max_bytes));
+            }
+            // Textarea starts body content even if </head> was omitted.
+            if closing_name == b"textarea" && template_depth == 0 {
+                return None;
+            }
+            remaining = &remaining[tag_end..];
+        } else if template_depth == 0
+            && !matches!(
+                tag.name.as_slice(),
+                b"!doctype" | b"?xml" | b"html" | b"head" | b"base" | b"link" | b"meta"
+            )
+        {
+            return None;
+        }
+    }
+}
+
+fn decode_title_text(text: &str, syntax: DocumentSyntax) -> String {
+    if syntax == DocumentSyntax::Html {
+        return html_escape::decode_html_entities(text).into_owned();
+    }
+    let mut decoded = String::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find('<') {
+        decoded.push_str(&html_escape::decode_html_entities(&remaining[..start]));
+        remaining = &remaining[start..];
+        if let Some(end) = comment_or_cdata_end(remaining, syntax) {
+            if let Some(cdata) = remaining[..end]
+                .strip_prefix("<![CDATA[")
+                .and_then(|section| section.strip_suffix("]]>"))
+            {
+                // CDATA is literal text: entity references remain untouched.
+                decoded.push_str(cdata);
+            }
+            remaining = &remaining[end..];
+        } else {
+            decoded.push('<');
+            remaining = &remaining[1..];
+        }
+    }
+    decoded.push_str(&html_escape::decode_html_entities(remaining));
+    decoded
+}
+
+// Unterminated opaque sections consume the remaining document, so partial
+// comments/CDATA cannot expose their embedded markup as metadata.
+fn comment_or_cdata_end(html: &str, syntax: DocumentSyntax) -> Option<usize> {
+    let (opening, closing) = if html.starts_with("<!--") {
+        ("<!--", "-->")
+    } else if syntax == DocumentSyntax::Xhtml && html.starts_with("<![CDATA[") {
+        ("<![CDATA[", "]]>")
+    } else {
+        return None;
+    };
+    Some(
+        html[opening.len()..]
+            .find(closing)
+            .map_or(html.len(), |end| opening.len() + end + closing.len()),
+    )
+}
+
+fn raw_text_end(html: &str, closing_name: &[u8], syntax: DocumentSyntax) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    loop {
+        let start = offset + html[offset..].find('<')?;
+        // XML comments and CDATA can contain literal closing tags. HTML raw
+        // text keeps its own closing-tag rules, even after an XML declaration.
+        if syntax == DocumentSyntax::Xhtml {
+            if let Some(end) = comment_or_cdata_end(&html[start..], syntax) {
+                offset = start + end;
+                continue;
+            }
+        }
+        match end_tag_end_index_at(html.as_bytes(), start, closing_name) {
+            EndTagMatch::Complete(end) => return Some((start, end)),
+            EndTagMatch::Incomplete => return None,
+            EndTagMatch::NotMatch => offset = start + 1,
+        }
+    }
+}
+
 fn same_domain_host(left: &Url, right: &Url) -> bool {
     match (left.host(), right.host()) {
         (Some(Host::Domain(left)), Some(Host::Domain(right))) => left
@@ -1295,14 +1571,25 @@ fn same_domain_host(left: &Url, right: &Url) -> bool {
 }
 
 fn find_meta_tag_start(html: &str) -> Option<usize> {
-    let mut offset = 0;
-    while let Some(start) = find_ascii_case_insensitive(&html[offset..], "<meta") {
-        let absolute_start = offset + start;
-        let after_name = absolute_start + "<meta".len();
-        match html.as_bytes().get(after_name) {
-            None | Some(b'>') | Some(b'/') => return Some(absolute_start),
-            Some(byte) if byte.is_ascii_whitespace() => return Some(absolute_start),
-            _ => offset = after_name,
+    let mut quote = None;
+    for (index, byte) in html.bytes().enumerate() {
+        match (quote, byte) {
+            (Some(open), current) if current == open => quote = None,
+            (None, b'"' | b'\'') => quote = Some(byte),
+            (None, b'<')
+                if html
+                    .as_bytes()
+                    .get(index..index + "<meta".len())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(b"<meta")) =>
+            {
+                let after_name = index + "<meta".len();
+                match html.as_bytes().get(after_name) {
+                    None | Some(b'>') | Some(b'/') => return Some(index),
+                    Some(byte) if byte.is_ascii_whitespace() => return Some(index),
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -1386,13 +1673,6 @@ fn parse_tag_attrs(tag: &str) -> Vec<(String, String)> {
         attrs.push((name.to_string(), value.to_string()));
     }
     attrs
-}
-
-fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[derive(Default)]
@@ -1718,6 +1998,290 @@ mod tests {
         let requested_url = Url::parse("https://example.com/articles").expect("url");
 
         assert!(extract_metadata_from_html(&requested_url, "<html><head></head></html>").is_none());
+    }
+
+    #[test]
+    fn falls_back_to_title_and_standard_meta_when_open_graph_is_absent() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<html><head>
+            <TITLE>
+              Plain &amp; simple
+              page
+            </TITLE>
+            <meta name="description" content="Standard description">
+            <meta name="twitter:image" content="/cards/plain.png">
+          </head><body><svg><title>not the page title</title></svg></body></html>"#;
+
+        let (metadata, image) = extract_metadata_parts_from_html(
+            &requested_url,
+            html,
+            &requested_url,
+            &LinkPreviewResolverPolicy::default(),
+        )
+        .expect("title/description fallback is usable metadata");
+
+        assert_eq!(metadata.title.as_deref(), Some("Plain & simple page"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Standard description")
+        );
+        assert_eq!(
+            image.map(|image| image.url.to_string()).as_deref(),
+            Some("https://example.com/cards/plain.png")
+        );
+    }
+
+    #[test]
+    fn prefers_twitter_card_text_over_document_title() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<html><head><title>Doc title</title>
+            <meta name="twitter:title" content="Card title">
+            <meta name="twitter:description" content="Card description">
+            <meta name="description" content="Standard description">
+          </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(metadata.title.as_deref(), Some("Card title"));
+        assert_eq!(metadata.description.as_deref(), Some("Card description"));
+    }
+
+    #[test]
+    fn body_only_title_is_not_page_metadata() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = "<html><head></head><body><svg><title>icon</title></svg></body></html>";
+
+        assert!(extract_metadata_from_html(&requested_url, html).is_none());
+    }
+
+    #[test]
+    fn head_title_ignores_comments_and_raw_text() {
+        for prefix in [
+            "<!-- <title>Old title</title> -->",
+            r#"<script>const s = "</head><title>Script title</title>";</script>"#,
+            r#"<style>body::before { content: "</head><title>Style title</title>"; }</style>"#,
+        ] {
+            let html = format!("<head>{prefix}<title>Actual title</title></head>");
+            assert_eq!(head_title(&html, 256).as_deref(), Some("Actual title"));
+        }
+    }
+
+    #[test]
+    fn head_title_skips_noscript_and_nested_templates() {
+        for prefix in [
+            "<noscript><style>body { display: none; }</style></noscript>",
+            "<template><div>inert text</div><title>inert title</title></template>",
+            r#"<template><!-- </template> --><template><script>const s = "</template>";</script><title>nested title</title></template></template>"#,
+        ] {
+            let html = format!("<head>{prefix}<title>Actual title</title></head>");
+            assert_eq!(head_title(&html, 256).as_deref(), Some("Actual title"));
+        }
+    }
+
+    #[test]
+    fn head_title_accepts_a_leading_bom_and_omitted_head_start() {
+        assert_eq!(
+            head_title(
+                "\u{feff}<!doctype html><html><title>Actual title</title>",
+                256
+            )
+            .as_deref(),
+            Some("Actual title")
+        );
+    }
+
+    #[test]
+    fn head_title_accepts_an_xhtml_declaration() {
+        let html = r#"<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Actual title</title></head></html>"#;
+        assert_eq!(head_title(html, 256).as_deref(), Some("Actual title"));
+    }
+
+    #[test]
+    fn xhtml_title_decodes_normal_text_but_preserves_cdata_and_omits_comments() {
+        for (text, expected) in [
+            (
+                "Actual<!-- hidden --><![CDATA[ &amp; literal ]]>",
+                "Actual &amp; literal",
+            ),
+            ("A<!-- hidden -->B", "AB"),
+            ("<![CDATA[A&amp;B]]>&amp;C", "A&amp;B&C"),
+            (
+                "<![CDATA[</title> &amp; literal]]>",
+                "</title> &amp; literal",
+            ),
+        ] {
+            let html = format!("<head><title>{text}</title></head>");
+            assert_eq!(
+                head_title_with_syntax(&html, DocumentSyntax::Xhtml, 256).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            head_title_with_syntax(
+                "<head><title>A<!-- hidden --><![CDATA[&amp;]]></title></head>",
+                DocumentSyntax::Html,
+                256
+            )
+            .as_deref(),
+            Some("A<!-- hidden --><![CDATA[&]]>")
+        );
+    }
+
+    #[test]
+    fn head_title_stops_at_body_content_when_head_end_is_omitted() {
+        for html in [
+            "<html><head><body><svg><title>icon</title></svg></body></html>",
+            "<html><head><svg><title>icon</title></svg></html>",
+            "<html><head>body text<title>body title</title></html>",
+        ] {
+            assert_eq!(head_title(html, 256), None);
+        }
+    }
+
+    #[test]
+    fn head_title_respects_tag_boundaries_and_quoted_attributes() {
+        let html = r#"<!doctype html><html><title data-label=">">Actual </title-card> title</TITLE ></html>"#;
+        assert_eq!(
+            head_title(html, 256).as_deref(),
+            Some("Actual </title-card> title")
+        );
+    }
+
+    #[test]
+    fn resolves_relative_open_graph_image_against_fetched_page() {
+        let requested_url = Url::parse("https://example.com/blog/post").expect("url");
+        let html = r#"<html><head>
+            <meta property="og:title" content="Post">
+            <meta property="og:image" content="../img/cover.jpg">
+          </head></html>"#;
+
+        let (_, image) = extract_metadata_parts_from_html(
+            &requested_url,
+            html,
+            &requested_url,
+            &LinkPreviewResolverPolicy::default(),
+        )
+        .expect("metadata");
+
+        assert_eq!(
+            image.map(|image| image.url.to_string()).as_deref(),
+            Some("https://example.com/img/cover.jpg")
+        );
+    }
+
+    #[test]
+    fn metadata_ignores_inert_tags_and_keeps_active_body_metadata() {
+        for (open, close) in [
+            ("<!--", "-->"),
+            ("<script>", "</script>"),
+            ("<style>", "</style>"),
+            ("<textarea>", "</textarea>"),
+            ("<title>", "</title>"),
+            ("<noscript>", "</noscript>"),
+            ("<iframe>", "</iframe>"),
+            ("<xmp>", "</xmp>"),
+            ("<noembed>", "</noembed>"),
+            ("<noframes>", "</noframes>"),
+            ("<template><template></template>", "</template>"),
+            ("<div data-example='", "'></div>"),
+        ] {
+            let html = format!(
+                r#"<head>{open}<meta name="twitter:title" content="Inert title"><meta name="description" content="Inert description"><meta name="twitter:image" content="/inert.png">{close}</head><body><meta name="twitter:title" content="Active title"><meta name="description" content="Active description"><meta name="twitter:image" content="/active.png"></body>"#
+            );
+            assert_eq!(
+                meta_content(&html, "twitter:title", 256).as_deref(),
+                Some("Active title"),
+                "{open}"
+            );
+            assert_eq!(
+                meta_content(&html, "description", 256).as_deref(),
+                Some("Active description"),
+                "{open}"
+            );
+            assert_eq!(
+                meta_content(&html, "twitter:image", 256).as_deref(),
+                Some("/active.png"),
+                "{open}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_preserves_literal_meta_markup_inside_quoted_content() {
+        let html = r#"<meta name="twitter:title" content="Example <meta name='description' content='Inert'> markup"><meta name="description" content="Active description">"#;
+        assert_eq!(
+            meta_content(html, "twitter:title", 256).as_deref(),
+            Some("Example <meta name='description' content='Inert'> markup")
+        );
+        assert_eq!(
+            meta_content(html, "description", 256).as_deref(),
+            Some("Active description")
+        );
+    }
+
+    #[test]
+    fn metadata_ignores_everything_after_plaintext_start() {
+        let html = r#"<body><plaintext><meta name="twitter:title" content="Inert"></plaintext><meta name="twitter:title" content="Still inert">"#;
+        assert_eq!(meta_content(html, "twitter:title", 256), None);
+    }
+
+    #[test]
+    fn image_falls_back_after_rejected_open_graph_url_and_keeps_twitter_metadata() {
+        let url = Url::parse("https://example.com/articles").expect("url");
+        let policy = LinkPreviewResolverPolicy {
+            blocked_hosts: vec!["blocked.example".parse().expect("pattern")],
+            ..LinkPreviewResolverPolicy::default()
+        };
+        for rejected in [
+            "https://[invalid",
+            "https://blocked.example/card.png",
+            "http://unsafe.example/card.png",
+        ] {
+            let html = format!(
+                r#"<title>Article</title><meta property="og:image" content="{rejected}"><meta property="og:image:alt" content="Rejected image"><meta property="og:image:width" content="999"><meta property="og:image:height" content="888"><meta name="twitter:image" content="/twitter.png"><meta name="twitter:image:alt" content="Twitter &amp; image">"#
+            );
+            let (_, image) =
+                extract_metadata_parts_from_html(&url, &html, &url, &policy).expect("metadata");
+            let image = image.expect("valid Twitter fallback");
+            assert_eq!(image.url.as_str(), "https://example.com/twitter.png");
+            assert_eq!(image.alt.as_deref(), Some("Twitter & image"));
+            assert_eq!(image.width, None);
+            assert_eq!(image.height, None);
+        }
+    }
+
+    #[test]
+    fn image_alt_belongs_to_the_selected_source() {
+        let url = Url::parse("https://example.com/articles").expect("url");
+        for (tags, expected_url, expected_alt) in [
+            (
+                r#"<meta name="twitter:image" content="/twitter.png"><meta name="twitter:image:alt" content="Twitter image">"#,
+                "https://example.com/twitter.png",
+                Some("Twitter image"),
+            ),
+            (
+                r#"<meta property="og:image" content="/og.png"><meta name="twitter:image" content="/twitter.png"><meta name="twitter:image:alt" content="Twitter image">"#,
+                "https://example.com/og.png",
+                None,
+            ),
+            (
+                r#"<meta property="og:image" content="/og.png"><meta property="og:image:alt" content="OG image"><meta name="twitter:image" content="/twitter.png"><meta name="twitter:image:alt" content="Twitter image">"#,
+                "https://example.com/og.png",
+                Some("OG image"),
+            ),
+        ] {
+            let html = format!("<title>Article</title>{tags}");
+            let (_, image) = extract_metadata_parts_from_html(
+                &url,
+                &html,
+                &url,
+                &LinkPreviewResolverPolicy::default(),
+            )
+            .expect("metadata");
+            let image = image.expect("image");
+            assert_eq!(image.url.as_str(), expected_url);
+            assert_eq!(image.alt.as_deref(), expected_alt);
+        }
     }
 
     #[test]
@@ -2373,6 +2937,37 @@ mod tests {
         assert_eq!(metadata.description.as_deref(), Some("Fetched description"));
     }
 
+    #[tokio::test]
+    async fn identifies_as_a_link_preview_crawler_for_origins_that_reject_anonymous_clients() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .and(wiremock::matchers::header_regex("user-agent", "WaddleBot/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head><meta property="og:title" content="Crawler ok"></head></html>"#,
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Crawler ok"));
+    }
+
     fn scan_head_end_one_byte_at_a_time(html: &str) -> Option<usize> {
         let mut scanner = HtmlHeadEndScanner::default();
         let mut buffer = Vec::with_capacity(html.len());
@@ -3011,6 +3606,84 @@ mod tests {
 
         assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
         assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn self_closing_inert_elements_follow_the_response_media_type() {
+        for content_type in ["application/xhtml+xml", "text/html"] {
+            for tag in ["script", "style", "template"] {
+                let server = MockServer::start().await;
+                let body = format!(
+                    r#"<?xml version="1.0"?><html><head><{tag} /><meta name="twitter:title" content="Actual title" /></head></html>"#
+                );
+                Mock::given(method("GET"))
+                    .and(path("/article"))
+                    .respond_with(ResponseTemplate::new(200).set_body_raw(body, content_type))
+                    .mount(&server)
+                    .await;
+                let policy = LinkPreviewResolverPolicy {
+                    allow_http_loopback_for_tests: true,
+                    ..Default::default()
+                };
+                let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+                let outcome = resolve_link_preview(&url, &policy).await;
+                if content_type == "application/xhtml+xml" {
+                    let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+                        panic!("expected XHTML metadata after empty {tag}, got {outcome:?}");
+                    };
+                    assert_eq!(metadata.title.as_deref(), Some("Actual title"));
+                } else {
+                    assert_eq!(
+                        outcome.status(),
+                        LinkPreviewResolverStatus::Unsupported,
+                        "HTML {tag}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn xhtml_empty_elements_do_not_hide_the_document_title() {
+        let server = MockServer::start().await;
+        let body = r#"<html><head><script src="app.js" /><style /><template /><title /><title>Actual title</title></head></html>"#;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/xhtml+xml"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+        let outcome = resolve_link_preview(&url, &policy).await;
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected XHTML document title, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Actual title"));
+    }
+
+    #[tokio::test]
+    async fn xhtml_cdata_cannot_supply_metadata_or_close_inert_elements() {
+        let server = MockServer::start().await;
+        let body = r#"<html><head><![CDATA[<meta name="twitter:title" content="CDATA title" />]]><script><![CDATA[</script><meta name="twitter:title" content="Script title" />]]></script><title>Actual title</title><meta name="description" content="Actual description" /></head></html>"#;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/xhtml+xml"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+        let outcome = resolve_link_preview(&url, &policy).await;
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected active XHTML metadata, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Actual title"));
+        assert_eq!(metadata.description.as_deref(), Some("Actual description"));
     }
 
     #[tokio::test]
