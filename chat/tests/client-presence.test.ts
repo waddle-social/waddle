@@ -23,6 +23,7 @@ function createManager(overrides: {
   const manager = new PresenceManager({
     events,
     currentRoom: overrides.currentRoom ?? (() => ROOM),
+    isKnownMucRoom: (bareJid) => bareJid.endsWith("@muc.example.com"),
     ownFullJidCandidates: () => new Set(["alice@example.com/web-1"]),
     requireConnectedXmpp: async () => ({
       send_presence: overrides.sendPresence ?? (async () => undefined),
@@ -142,6 +143,24 @@ describe("PresenceManager MUC occupant tracking", () => {
       [ROOM, "sam", "sam@example.com", false],
       [ROOM, "helper", "helper@extensions.example.com", false],
     ]);
+  });
+
+  test("a person's directed presence cannot mark anyone a bot", () => {
+    // Any user can send a directed presence carrying muc#user and the bot
+    // hat; only the room service's word counts.
+    const { manager, events } = createManager();
+    const occupantJids: unknown[] = [];
+    events.on("occupantRealJid", (room, nick, bare, isBot) => occupantJids.push([room, nick, bare, isBot]));
+
+    manager.handle(directPresence({
+      from: "mallory@example.com/laptop",
+      muc_affiliation: "member",
+      muc_role: "participant",
+      muc_jid: "bob@example.com/web",
+      hats: [{ uri: "urn:waddle:hats:bot", title: "Bot" }],
+    }));
+
+    expect(occupantJids).toEqual([["mallory@example.com", "laptop", "bob@example.com", false]]);
   });
 
   test("self-presence reports our actual (possibly room-assigned) nick, and clears it on leave", () => {

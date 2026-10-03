@@ -46,6 +46,10 @@ type PresenceManagerDeps = {
   events: TypedEventBus<ClientEvents>;
   /** Focused room — only its presence fan-out reaches the room handlers. */
   currentRoom: () => string | null;
+  /** `bareJid` is on the MUC service or a known room. Only the room service
+   * can author such a presence, so only there is a bot hat the server's word;
+   * a directed presence from a person can carry any muc#user and hats. */
+  isKnownMucRoom: (bareJid: string) => boolean;
   /** Identity keys of our own full JID (session and resource variants). */
   ownFullJidCandidates: () => Set<string>;
   requireConnectedXmpp: () => Promise<PresenceWasmClient>;
@@ -227,7 +231,8 @@ export class PresenceManager {
       if (presence.muc_jid) {
         const bare = barePeerJid(presence.muc_jid);
         roomMemberJids[nick] = bare;
-        this.deps.events.emitSafe("occupantRealJid", room, nick, bare, roomHats[nick].some((hat) => hat.uri === BOT_HAT_URI));
+        const isBot = this.deps.isKnownMucRoom(room) && roomHats[nick].some((hat) => hat.uri === BOT_HAT_URI);
+        this.deps.events.emitSafe("occupantRealJid", room, nick, bare, isBot);
         if (isFocusedRoom) this.deps.events.emit("memberJid", nick, bare);
       } else {
         // An occupant whose real JID is not disclosed to us holds this nick

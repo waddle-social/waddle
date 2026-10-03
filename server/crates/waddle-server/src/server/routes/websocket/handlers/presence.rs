@@ -223,6 +223,13 @@ async fn handle_presence_impl(
     context: PresenceHandlerContext<'_>,
 ) -> Vec<String> {
     strip_client_authored_delay(&mut presence);
+    if presence
+        .to
+        .as_ref()
+        .is_none_or(|jid| jid.domain().as_str() != context.muc_domain)
+    {
+        strip_client_authored_room_payloads(&mut presence);
+    }
     let is_unavailable = presence.type_ == xmpp_parsers::presence::Type::Unavailable;
 
     // Check if this is a MUC presence (to room@muc.domain/nick)
@@ -500,6 +507,16 @@ fn strip_client_authored_delay(presence: &mut xmpp_parsers::presence::Presence) 
     presence
         .payloads
         .retain(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY));
+}
+
+/// Room occupant identity (muc#user) and XEP-0317 hats are authored only by
+/// the room service. A person's broadcast or directed presence carrying them
+/// would let the recipient mistake it for room presence, e.g. a forged Bot hat.
+fn strip_client_authored_room_payloads(presence: &mut xmpp_parsers::presence::Presence) {
+    waddle_xmpp::xep::xep0317::strip_hats(presence);
+    presence
+        .payloads
+        .retain(|payload| !payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER));
 }
 
 fn is_directed_presence_update(presence: &xmpp_parsers::presence::Presence) -> bool {

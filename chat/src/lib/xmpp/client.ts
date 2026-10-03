@@ -684,6 +684,7 @@ export class BrowserXmppClient {
     this.presence = new PresenceManager({
       events: this.events,
       currentRoom: () => this.currentRoom,
+      isKnownMucRoom: (bareJid) => this.isKnownMucRoom(bareJid),
       ownFullJidCandidates: () => this.ownFullJidCandidates(),
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
       handleMucPresenceError: (presence) => this.handleMucPresenceError(presence),
