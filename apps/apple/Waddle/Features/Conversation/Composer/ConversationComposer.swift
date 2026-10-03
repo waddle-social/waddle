@@ -147,9 +147,15 @@ struct ConversationComposer: View {
         ComposerAttachmentIntake(model: model, uploader: uploader)
     }
 
-    /// Rooms pass their JID to extension commands; 1:1 conversations none.
+    /// Extensions act in channels. A group DM is a conversation between
+    /// people like a 1:1 one, and the server refuses bots there.
+    private var isChannel: Bool {
+        conversation.isRoom && session.directory.channel(for: conversation.jid)?.isGroupDM != true
+    }
+
+    /// Channels pass their JID to extension commands; DMs none.
     private var commandRoom: BareJID? {
-        conversation.isRoom ? conversation.jid : nil
+        isChannel ? conversation.jid : nil
     }
 
     private func cardActions(
@@ -177,7 +183,7 @@ struct ConversationComposer: View {
     /// Slash commands while the command word is typed, not while editing.
     private var slashSuggestions: [SlashCandidate]? {
         guard !model.isEditing, let prefix = SlashPopover.prefix(in: model.text) else { return nil }
-        let candidates = SlashCandidates.filter(prefix: prefix, extensions: session.extensionCommands, inRoom: conversation.isRoom)
+        let candidates = SlashCandidates.filter(prefix: prefix, extensions: session.extensionCommands, inRoom: isChannel)
         return Array(candidates.prefix(8))
     }
 
@@ -216,7 +222,7 @@ struct ConversationComposer: View {
         let resolution = SlashCandidates.resolve(
             prefix: trigger.prefix,
             extensions: session.extensionCommands,
-            inRoom: conversation.isRoom
+            inRoom: isChannel
         )
         return resolution != nil
     }
@@ -237,7 +243,7 @@ struct ConversationComposer: View {
         let decision = SlashSubmitDecision.decide(
             text: model.text,
             extensions: session.extensionCommands,
-            inRoom: conversation.isRoom
+            inRoom: isChannel
         )
         switch decision {
         case .sendAsTyped:
