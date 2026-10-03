@@ -56,6 +56,33 @@ pub(crate) async fn reconcile_local_accounts(actor: &ActorRef<DbActor>) -> Resul
     prune_roster_contacts(actor).await
 }
 
+/// How often a serving node keys account rows written without one. During
+/// a rolling upgrade, nodes predating the keys still write such rows, which
+/// key lookups miss until then.
+pub(crate) const ACCOUNT_KEY_BACKFILL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(300);
+
+/// Keys account rows written without one every `every`, after the startup
+/// pass. Two indexed `IS NULL` reads when every row has its key. Stops once
+/// the database actor does.
+pub(crate) fn spawn_account_key_backfill(actor: &ActorRef<DbActor>, every: std::time::Duration) {
+    let actor = actor.downgrade();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(every);
+        // The startup pass has just run.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(actor) = actor.upgrade() else {
+                break;
+            };
+            if let Err(error) = backfill_account_keys(&actor).await {
+                warn!(%error, "account key backfill failed; will retry next tick");
+            }
+        }
+    });
+}
+
 /// Each pruned owner also loses its XEP-0237 version, so a cached roster no
 /// longer matches and is refetched.
 // ponytail: reads every roster row each startup; page by owner if rosters grow large.

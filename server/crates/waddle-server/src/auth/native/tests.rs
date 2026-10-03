@@ -252,3 +252,34 @@ async fn test_names_resolve_to_their_canonical_jid() {
         Err(AuthError::InvalidUsername(_))
     ));
 }
+
+/// A node predating the lookup keys writes `Bob` without one. Until the
+/// backfill keys it, registering `bob` here is refused instead of taking
+/// the JID the backfill would then leave `Bob` without.
+#[tokio::test]
+async fn test_unkeyed_account_blocks_a_case_variant() {
+    let db = create_test_db().await;
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    actor
+        .ask(DbExecute {
+            sql: "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) \
+                  VALUES ('Bob', 'example.com', 'hash', 'salt', '', '')"
+                .to_string(),
+            params: vec![],
+        })
+        .await
+        .expect("unkeyed account");
+    let store = NativeUserStore::new(actor);
+
+    assert!(store.user_exists("bob", "example.com").await.unwrap());
+    let variant = store
+        .register(RegisterRequest {
+            username: "bob".to_string(),
+            domain: "example.com".to_string(),
+            password: test_password(),
+            email: None,
+        })
+        .await;
+    assert!(matches!(variant, Err(AuthError::UserAlreadyExists(_))));
+    assert!(!store.user_exists("carol", "example.com").await.unwrap());
+}

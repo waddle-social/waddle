@@ -197,3 +197,42 @@ async fn existence_lookup_searches_the_key_indexes() {
     assert!(plan.contains("idx_native_users_jid_key"), "{plan}");
     assert!(!plan.contains("SCAN"), "{plan}");
 }
+
+/// Rows a node predating the lookup keys writes while this one serves get
+/// their keys from the periodic pass, without a restart.
+#[tokio::test]
+async fn periodic_backfill_keys_rows_written_without_keys() {
+    let actor = test_actor().await;
+    for sql in [
+        "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) \
+         VALUES ('Bob', 'localhost', 'hash', 'salt', '', '')",
+        "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) \
+         VALUES ('straße@localhost', 'straße', 'straße', 'now', 'now')",
+    ] {
+        actor
+            .ask(DbExecute {
+                sql: sql.to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("unkeyed account");
+    }
+    let found = |name: &'static str| {
+        let actor = actor.clone();
+        async move {
+            local_account_exists(&actor, name, "localhost")
+                .await
+                .expect("directory lookup")
+        }
+    };
+    assert!(!found("bob").await && !found("strasse").await);
+
+    super::spawn_account_key_backfill(&actor, std::time::Duration::from_millis(10));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !(found("bob").await && found("strasse").await) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the periodic pass keys both accounts");
+}

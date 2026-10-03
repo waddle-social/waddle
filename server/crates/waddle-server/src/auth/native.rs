@@ -145,7 +145,9 @@ impl NativeUserStore {
     }
 
     /// Check if an account holds the JID `username@domain`, in whatever case
-    /// or Unicode form it was registered.
+    /// or Unicode form it was registered. A row a node predating the lookup
+    /// keys wrote counts before the backfill keys it, so registering a
+    /// case variant of its name cannot take its JID meanwhile.
     pub async fn user_exists(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
         let Some(jid) = canonical_account_jid(username, domain) else {
             return Ok(false);
@@ -159,7 +161,7 @@ impl NativeUserStore {
             .await
             .map_err(db_err)?;
 
-        Ok(row.is_some())
+        Ok(row.is_some() || !self.unkeyed_ids(&jid).await?.is_empty())
     }
 
     /// Get SCRAM credentials for a user.
