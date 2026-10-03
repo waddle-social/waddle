@@ -3,7 +3,7 @@
 //! A bot has no account; the server speaks for it. It is identified the
 //! way XMPP intends: XEP-0030 identity `client/bot` for the entity and
 //! the server-assigned XEP-0317 Bot hat in rooms. It holds a room
-//! occupancy only for one send, without an affiliation; the rooms it
+//! occupancy only while it posts, without an affiliation; the rooms it
 //! posted in are listed on the room's `urn:waddle:room:bots:0` node.
 
 use std::sync::Arc;

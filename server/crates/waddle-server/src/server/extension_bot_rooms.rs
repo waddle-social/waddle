@@ -1,6 +1,6 @@
 //! Rooms where an extension bot has joined to post.
 //!
-//! A bot holds a room occupancy only for one send, so the room's roster
+//! A bot holds a room occupancy only while it posts, so the room's roster
 //! cannot say which bots speak there. One row per (room, plugin) records it
 //! for the room's XEP-0030 bot listing, written when the bot joins and
 //! before anyone sees that join. Uninstall and room destruction delete the

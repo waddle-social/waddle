@@ -277,16 +277,16 @@ pub(crate) struct PlannedExtensionBotGroupchat {
     pub digest_input: DigestInput,
 }
 
-/// The room occupancy one bot dispatch used, joined for it or found present,
-/// which the caller leaves after the send whether or not it committed, or
-/// hands to the next send of the same bot into the same room.
+/// The room occupancy a bot's dispatches use, joined for one or found
+/// present, which the caller leaves once no send of the same bot into the
+/// same room has used it for a while, whether or not they committed.
 #[derive(Default)]
 pub(crate) struct BotOccupancy {
     pub held: Option<(
         waddle_xmpp::muc::MucOccupantNick,
         waddle_xmpp_core::OccupancySessionGeneration,
     )>,
-    /// Join presence routes to other nodes still running after the cap. The
+    /// Join presence routes to other nodes, registered as they start. The
     /// leave awaits them so its unavailable cannot overtake the join.
     pub join_stragglers: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -467,8 +467,8 @@ pub(crate) async fn plan_extension_bot_groupchat(
         .iter()
         .find(|occupant| occupant.full_jid == bot_full)
     {
-        // An occupancy the previous send handed on, or an interrupted one
-        // left behind, is this send's to leave.
+        // An occupancy an earlier send left lingering, or an interrupted one
+        // left behind, is this send's to reuse and leave.
         occupancy.held = waddle_xmpp::muc::MucOccupantNick::new(present.nick.clone())
             .map(|nick| (nick, session));
     } else {
@@ -480,8 +480,9 @@ pub(crate) async fn plan_extension_bot_groupchat(
             .ok_or(ExtensionBotDispatchError::BotJoinFailed)?;
         // Held before the ask: a send cancelled while it runs still leaves.
         occupancy.held = Some((joined_nick, session));
-        // A host-owned occupancy lasts this send: no affiliation, so the bot
-        // is never a durable recipient and the room can still go dormant.
+        // A host-owned occupancy lasts while the bot posts: no affiliation,
+        // so the bot is never a durable recipient and the room can still go
+        // dormant once it leaves.
         match room_actor
             .ask(JoinWithAffiliation {
                 sender_jid: bot_full.clone(),
@@ -535,16 +536,15 @@ pub(crate) async fn plan_extension_bot_groupchat(
                         );
                         join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }
-                    occupancy.join_stragglers.extend(
-                        route_join_presences(
-                            state,
-                            host_state,
-                            &room_jid,
-                            join_presences,
-                            commit_deadline,
-                        )
-                        .await,
-                    );
+                    route_join_presences(
+                        state,
+                        host_state,
+                        &room_jid,
+                        join_presences,
+                        commit_deadline,
+                        &mut occupancy.join_stragglers,
+                    )
+                    .await;
                 }
             }
             Err(error) => {
@@ -665,19 +665,19 @@ tokio::task_local! {
 /// XEP-0045 §7.2.3. Local sockets get the join first and in order, ahead of
 /// the message. Occupants on other nodes are routed concurrently and waited
 /// for up to [`JOIN_PRESENCE_CAP`]; a route still running then is detached
-/// and finishes on its own, so a slow peer may see the message first. The
-/// routes still running are returned.
+/// and finishes on its own, so a slow peer may see the message first. Each
+/// route joins `routes` as it is spawned, and those still running stay.
 async fn route_join_presences(
     state: &crate::server::routes::websocket::WebSocketState,
     host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
     room: &BareJid,
     presences: Vec<(FullJid, Stanza)>,
     commit_deadline: Option<tokio::time::Instant>,
-) -> Vec<tokio::task::JoinHandle<()>> {
+    routes: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
     use crate::server::routes::websocket::handlers::presence::{
         deliver_room_presence_locally, route_room_presence_to_occupant,
     };
-    let mut routes = Vec::new();
     for (occupant, presence) in presences {
         let local = state
             .deps
@@ -711,7 +711,6 @@ async fn route_join_presences(
         );
     }
     routes.retain(|route| !route.is_finished());
-    routes
 }
 
 /// The remote node owning `room`'s actor claim, or `None` when this node runs it.

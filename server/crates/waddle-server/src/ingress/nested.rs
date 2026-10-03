@@ -126,6 +126,19 @@ impl NestedIngressOperation {
         submission: IngressSubmission,
         continuation: NestedContinuation,
     ) -> NestedOutcome {
+        self.commit_tracked(submission, continuation, &mut Vec::new())
+            .await
+    }
+
+    /// [`Self::commit_and_continue`], pushing the authority-owned work
+    /// (commit, delivery and settlement) onto `work` as it starts, so a
+    /// caller cancelled before the decision can still wait for it.
+    pub async fn commit_tracked(
+        self,
+        submission: IngressSubmission,
+        continuation: NestedContinuation,
+        work: &mut Vec<JoinHandle<()>>,
+    ) -> NestedOutcome {
         if !matches!(
             submission.identity,
             super::IngressStreamIdentity::Extension { .. }
@@ -139,7 +152,7 @@ impl NestedIngressOperation {
         }
         let (decision_tx, decision_rx) = oneshot::channel();
         let (settlement_tx, settlement_rx) = oneshot::channel();
-        tokio::spawn(async move {
+        work.push(tokio::spawn(async move {
             let Self { authority, permit } = self;
             let decision = authority.commit_admitted(&submission).await;
             let _ = decision_tx.send((decision.class, decision.archive_ids.clone()));
@@ -180,7 +193,7 @@ impl NestedIngressOperation {
                 });
             }
             drop(permit);
-        });
+        }));
         match decision_rx.await {
             Ok((decision_class, archive_ids)) if decision_class.advances() => {
                 NestedOutcome::Committed {

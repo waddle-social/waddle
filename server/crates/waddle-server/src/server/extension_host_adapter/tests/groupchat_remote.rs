@@ -976,6 +976,7 @@ async fn slow_remote_occupant_is_detached(f: IngressFixture) {
     assert_eq!(started.load(Ordering::SeqCst), 1);
     assert_eq!(finished.load(Ordering::SeqCst), 0, "still routing");
     assert_eq!(f.count("ingress_messages").await, 1);
+    super::super::groupchat::linger_passes().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let bot = fixture.invocation().actor_jid;
     assert!(
@@ -1058,12 +1059,6 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
         .expect("revoke plugin grants");
     tx.commit().await.expect("durable revocation");
     gate.release();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        routed.lock().expect("routed").is_empty(),
-        "the unavailable waits for the join"
-    );
-    release.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(5), sending)
         .await
         .expect("refused send completes")
@@ -1072,6 +1067,13 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
         matches!(result, Err(ExtensionHostAdapterError::NotAuthorized)),
         "{result:?}"
     );
+    super::super::groupchat::linger_passes().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        routed.lock().expect("routed").is_empty(),
+        "the unavailable waits for the join"
+    );
+    release.notify_one();
     fixture.settle().await;
     let types: Vec<_> = routed
         .lock()

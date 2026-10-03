@@ -1,6 +1,6 @@
 //! Real host dispatch with a persistent local room and durable recipients.
 use super::super::*;
-use super::direct_ingress;
+use super::{super::groupchat::BOT_LINGER, direct_ingress};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use std::time::Duration;
@@ -158,18 +158,21 @@ impl GroupchatFixture {
         }
     }
 
-    /// One send, including the bot's detached leave.
-    pub async fn send(&self, origin: &str) -> Result<StanzaId, ExtensionHostAdapterError> {
-        let result = self
-            .adapter
+    /// One send; the bot lingers in the room afterwards.
+    pub async fn post(&self, origin: &str) -> Result<StanzaId, ExtensionHostAdapterError> {
+        self.adapter
             .send_message(&self.invocation(), self.request(origin))
-            .await;
+            .await
+    }
+
+    /// One send, including the bot's leave once its linger passes.
+    pub async fn send(&self, origin: &str) -> Result<StanzaId, ExtensionHostAdapterError> {
+        let result = self.post(origin).await;
         self.settle().await;
         result
     }
 
-    /// Wait until the last send's bot has left: the leave holds the
-    /// bot/room lock until it is done.
+    /// Let the bot's linger pass and wait until it has left.
     pub async fn settle(&self) {
         self.adapter
             .state
@@ -178,6 +181,16 @@ impl GroupchatFixture {
             .extension_bot_rooms
             .settled(&direct_ingress::plugin(), &self.room)
             .await;
+    }
+
+    pub async fn bot_present(&self) -> bool {
+        self.actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .find_occupant_by_real_jid(&self.invocation().actor_jid)
+            .is_some()
     }
 
     pub fn drain(&mut self) -> Vec<Stanza> {
@@ -201,6 +214,34 @@ impl GroupchatFixture {
         drop(self);
         f.close().await;
     }
+}
+
+/// What one occupant saw of the bot, in order.
+#[derive(Debug, PartialEq)]
+pub(super) enum Seen {
+    Join,
+    /// A groupchat message, by id.
+    Message(String),
+    Leave,
+}
+
+pub(super) fn seen(wire: &[Stanza]) -> Vec<Seen> {
+    wire.iter()
+        .filter_map(|stanza| match stanza {
+            Stanza::Presence(presence) if presence.type_ == xmpp_parsers::presence::Type::None => {
+                Some(Seen::Join)
+            }
+            Stanza::Presence(_) => Some(Seen::Leave),
+            Stanza::Message(message)
+                if message.type_ == xmpp_parsers::message::MessageType::Groupchat =>
+            {
+                Some(Seen::Message(
+                    message.id.clone().map(|id| id.0).unwrap_or_default(),
+                ))
+            }
+            Stanza::Message(_) | Stanza::Iq(_) => None,
+        })
+        .collect()
 }
 
 /// The presences the bot sent one occupant, in order: `(type, affiliation,
@@ -242,65 +283,81 @@ pub(super) fn bot_presences(
         .collect()
 }
 
-/// XEP-0045 + XEP-0317: every send in a members-only room is the bot's
-/// join (Bot hat, no affiliation), its message, then its unavailable. The
-/// bot keeps no occupancy, affiliation or durable recipient, and the room
-/// records it once for its bot listing.
-async fn each_send_joins_and_leaves(f: IngressFixture) {
+/// XEP-0045 + XEP-0317: the bot joins a members-only room for a send (Bot
+/// hat, no affiliation) and lingers. A send within [`BOT_LINGER`] of the
+/// last reuses the occupancy; once the window passes with no send, the bot
+/// leaves, and a later send joins again. The bot keeps no affiliation or
+/// durable recipient, records no account activity, and the room records it
+/// once for its bot listing.
+async fn sends_share_a_lingering_occupancy(f: IngressFixture) {
     use xmpp_parsers::presence::Type;
     let mut fixture = GroupchatFixture::new(&f).await;
     let bot = fixture.invocation().actor_jid;
-    let mut generation = None;
-    for origin in ["groupchat-first", "groupchat-second"] {
-        fixture.send(origin).await.expect("send");
-        let wire = fixture.drain();
-        groupchat_message(&wire);
-        let message_at = wire
-            .iter()
-            .position(|s| matches!(s, Stanza::Message(m) if m.type_ == xmpp_parsers::message::MessageType::Groupchat))
-            .expect("message");
-        let presence_at: Vec<_> = wire
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| matches!(s, Stanza::Presence(_)))
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(presence_at.len(), 2, "{origin}: {wire:?}");
-        assert!(presence_at[0] < message_at && message_at < presence_at[1]);
-        let none = Some("none".to_owned());
-        assert_eq!(
-            bot_presences(&wire),
-            [
-                (
-                    Type::None,
-                    none.clone(),
-                    Some("participant".to_owned()),
-                    true
-                ),
-                (Type::Unavailable, none, Some("none".to_owned()), true),
-            ],
-            "{origin}"
-        );
-        let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
-        assert!(room.find_occupant_by_real_jid(&bot).is_none(), "{origin}");
-        assert_eq!(room.get_affiliation(&bot.to_bare()), Affiliation::None);
-        let chain = fixture
-            .actor
-            .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
-                sender_jid: bot.clone(),
-            })
+    let message = |id: &str| Seen::Message(id.to_owned());
+    fixture.post("linger-first").await.expect("first send");
+    assert_eq!(
+        seen(&fixture.drain()),
+        [Seen::Join, message("linger-first")]
+    );
+    let generation = || async {
+        f.optional_text("SELECT generation FROM xmpp_occupancy_authority WHERE full_jid = 'direct-test@extensions.example.com/bot'")
             .await
-            .expect("chain snapshot");
-        assert!(!chain.durable_recipient_bare_jids.contains(&bot.to_bare()));
-        // Durable room joins commit only for the published generation (#1869);
-        // a bot keeps one.
-        let current = f
-            .optional_text("SELECT generation FROM xmpp_occupancy_authority WHERE full_jid = 'direct-test@extensions.example.com/bot'")
-            .await
-            .expect("published bot generation");
-        assert_eq!(*generation.get_or_insert(current.clone()), current);
-    }
-    assert_eq!(f.count("ingress_messages").await, 2);
+            .expect("published bot generation")
+    };
+    let joined = generation().await;
+    // Just inside the window: the bot stays for the second send.
+    tokio::time::pause();
+    tokio::time::advance(BOT_LINGER - Duration::from_secs(1)).await;
+    tokio::time::resume();
+    fixture.post("linger-second").await.expect("second send");
+    // The first send's leave comes due and finds the second send.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(fixture.bot_present().await, "the bot lingers");
+    assert_eq!(seen(&fixture.drain()), [message("linger-second")]);
+    fixture.settle().await;
+    assert_eq!(seen(&fixture.drain()), [Seen::Leave]);
+    assert!(!fixture.bot_present().await);
+
+    fixture
+        .send("linger-after")
+        .await
+        .expect("send after the window");
+    let wire = fixture.drain();
+    assert_eq!(
+        seen(&wire),
+        [Seen::Join, message("linger-after"), Seen::Leave],
+        "after the window the bot joins again"
+    );
+    let none = Some("none".to_owned());
+    assert_eq!(
+        bot_presences(&wire),
+        [
+            (
+                Type::None,
+                none.clone(),
+                Some("participant".to_owned()),
+                true
+            ),
+            (Type::Unavailable, none, Some("none".to_owned()), true),
+        ]
+    );
+    let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert_eq!(room.get_affiliation(&bot.to_bare()), Affiliation::None);
+    let chain = fixture
+        .actor
+        .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
+            sender_jid: bot.clone(),
+        })
+        .await
+        .expect("chain snapshot");
+    assert!(!chain.durable_recipient_bare_jids.contains(&bot.to_bare()));
+    // Durable room joins commit only for the published generation (#1869);
+    // a bot keeps one.
+    assert_eq!(generation().await, joined);
+    assert_eq!(f.count("ingress_messages").await, 3);
     assert_eq!(
         f.count("notification_activity").await,
         0,
@@ -310,7 +367,7 @@ async fn each_send_joins_and_leaves(f: IngressFixture) {
         f.count("extension_bot_rooms WHERE room_jid = 'extension-room@muc.example.com' AND plugin_id = 'direct-test'")
             .await,
         1,
-        "two sends record the room once"
+        "the room records the bot once"
     );
     // Uninstall: the configured set no longer has the plugin.
     let mut tx = f.uow.begin().await.expect("sync transaction");
@@ -394,13 +451,13 @@ async fn extension_groupchat_group_dm_refused_postgres() {
 }
 
 #[tokio::test]
-async fn extension_groupchat_each_send_joins_and_leaves_sqlite() {
-    each_send_joins_and_leaves(IngressFixture::sqlite().await).await;
+async fn extension_groupchat_sends_share_a_lingering_occupancy_sqlite() {
+    sends_share_a_lingering_occupancy(IngressFixture::sqlite().await).await;
 }
 #[tokio::test]
-async fn extension_groupchat_each_send_joins_and_leaves_postgres() {
-    if let Some(f) = IngressFixture::postgres("groupchat_two").await {
-        each_send_joins_and_leaves(f).await;
+async fn extension_groupchat_sends_share_a_lingering_occupancy_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_linger").await {
+        sends_share_a_lingering_occupancy(f).await;
     }
 }
 #[tokio::test]

@@ -54,8 +54,8 @@ async fn two_bots(f: IngressFixture) {
 }
 
 /// One bot's sends into one room run one at a time: the next send cannot
-/// race this send's admission. A send queued behind another takes its
-/// occupancy over, so occupants see one join, both messages, one leave.
+/// race this send's admission. A send queued behind another reuses its
+/// lingering occupancy, so occupants see one join, both messages, one leave.
 async fn concurrent(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let gate = Arc::new(interpret::BotSnapshotGate::default());
@@ -95,12 +95,24 @@ async fn concurrent(f: IngressFixture) {
             .is_err(),
         "second send waits until the first send is done"
     );
+    // The first send replies at its response deadline while its settlement
+    // still runs; the bot's next message still waits for that work.
+    tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .expect("first send replies at its response deadline")
+        .expect("task")
+        .expect("first committed");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), gate.reached.notified())
+            .await
+            .is_err(),
+        "second send waits for the first send's settlement"
+    );
     settlement_gate.release.notify_one();
     tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
         .await
-        .expect("second send plans after the first leave");
+        .expect("second send plans once the first is delivered");
     gate.release.notify_one();
-    first.await.expect("task").expect("first committed");
     second.await.expect("task").expect("second committed");
     fixture.settle().await;
     assert_eq!(gate.arrivals.load(Ordering::SeqCst), 2);
@@ -129,7 +141,7 @@ async fn concurrent(f: IngressFixture) {
             "concurrent-b".to_owned(),
             format!("{:?}", Type::Unavailable),
         ],
-        "the queued send took the occupancy over"
+        "the queued send reused the occupancy"
     );
     assert_eq!(
         f.count("ingress_messages WHERE terminal_at IS NOT NULL")

@@ -37,10 +37,10 @@ pub enum JoinAffiliationGrant {
     /// grant — it is not reconstructible from any resolver.
     CreatorOwner,
     /// A host-owned entity (an extension bot) holding a transient
-    /// occupancy for one server-authored send. Nothing is written to
-    /// the affiliation list and the admission revision does not move,
-    /// so the occupant is never a durable recipient and never blocks
-    /// dormancy. It enters a members-only room unless outcast (never a
+    /// occupancy while it posts server-authored messages. Nothing is
+    /// written to the affiliation list and the admission revision does
+    /// not move, so the occupant is never a durable recipient and leaves
+    /// nothing that blocks dormancy. It enters a members-only room unless outcast (never a
     /// group DM) and speaks as at least a Participant.
     HostOwned,
 }

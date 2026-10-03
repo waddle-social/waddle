@@ -1,5 +1,8 @@
 //! A refused send still leaves the bot occupancy it used.
-use super::{direct_ingress, groupchat_ingress::GroupchatFixture};
+use super::{
+    direct_ingress,
+    groupchat_ingress::{seen, GroupchatFixture, Seen},
+};
 use crate::{
     ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
     ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
@@ -179,10 +182,10 @@ async fn extension_groupchat_revocation_leaves_leftover_occupancy_postgres() {
 }
 
 /// A send dropped after its bot joined (the frame backstop cancels a slow
-/// handler) still leaves the room, and posts nothing.
+/// handler) may still commit: the authority owns that work. The bot leaves
+/// once its linger passes, and never before the message it was joined for.
 async fn cancelled_send_leaves(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
-    let bot = fixture.invocation().actor_jid;
     let origin = OriginId::new(uuid::Uuid::new_v4().to_string());
     let gate = Registration::before_admission(origin.clone());
     let adapter = ExtensionHostAdapter::new(Arc::clone(&fixture.adapter.state));
@@ -194,21 +197,28 @@ async fn cancelled_send_leaves(f: IngressFixture) {
         .expect("the bot joined and the send reached admission");
     sending.abort();
     assert!(sending.await.expect_err("cancelled").is_cancelled());
-    fixture.settle().await;
-    let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
+    super::super::groupchat::linger_passes().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        room.session_generation(&bot).is_none(),
+        fixture.bot_present().await,
+        "the leave waits for the cancelled send's commit"
+    );
+    gate.release();
+    fixture.settle().await;
+    assert!(
+        !fixture.bot_present().await,
         "the cancelled send left the bot occupancy"
     );
-    let wire = fixture.drain();
-    let types: Vec<_> = super::groupchat_ingress::bot_presences(&wire)
-        .into_iter()
-        .map(|(type_, ..)| type_)
-        .collect();
-    assert_eq!(types, [Type::None, Type::Unavailable], "join then leave");
-    assert!(!wire.iter().any(|stanza| matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat)));
-    assert_eq!(f.count("ingress_messages").await, 0);
-    drop(gate);
+    assert_eq!(
+        seen(&fixture.drain()),
+        [
+            Seen::Join,
+            Seen::Message(origin.as_str().to_owned()),
+            Seen::Leave
+        ],
+        "the committed message reaches the occupant before the leave"
+    );
+    assert_eq!(f.count("ingress_messages").await, 1);
     fixture.close(f).await;
 }
 
