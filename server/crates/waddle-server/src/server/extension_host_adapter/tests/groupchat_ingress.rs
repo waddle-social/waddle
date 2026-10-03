@@ -543,3 +543,62 @@ async fn extension_groupchat_send_loads_an_evicted_room_postgres() {
         send_loads_an_evicted_room(f).await;
     }
 }
+
+/// The room's bot listing names the bot before anyone sees it join: a
+/// client that refetches the listing on the hatted join presence finds it.
+async fn join_is_listed_before_it_is_seen(f: IngressFixture) {
+    let fixture = GroupchatFixture::new(&f).await;
+    // An occupant without a local socket gets the join over the node route.
+    fixture
+        .actor
+        .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            nick: "juliet".into(),
+            real_jid: "juliet@example.com/phone".parse().expect("juliet"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("juliet joins");
+    let db = fixture
+        .adapter
+        .state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .clone();
+    let room = fixture.room.clone();
+    let (listed_tx, mut listed_rx) = mpsc::unbounded_channel();
+    let route: crate::server::routes::interpret::TestJoinPresenceRoute =
+        Arc::new(move |_occupant, _presence| {
+            let (db, room, listed) = (db.clone(), room.clone(), listed_tx.clone());
+            Box::pin(async move {
+                let bots = crate::server::extension_bot_rooms::list(&db, &room)
+                    .await
+                    .expect("bot listing");
+                let _ = listed.send(bots);
+            })
+        });
+    crate::server::routes::interpret::TEST_JOIN_PRESENCE_ROUTE
+        .scope(route, fixture.send("listed-on-join"))
+        .await
+        .expect("send");
+    assert_eq!(
+        listed_rx.recv().await,
+        Some(vec![direct_ingress::plugin()]),
+        "the join presence went out after the bot was listed"
+    );
+    fixture.close(f).await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_join_is_listed_before_it_is_seen_sqlite() {
+    join_is_listed_before_it_is_seen(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_groupchat_join_is_listed_before_it_is_seen_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_listed_join").await {
+        join_is_listed_before_it_is_seen(f).await;
+    }
+}

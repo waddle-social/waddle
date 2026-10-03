@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use jid::{BareJid, FullJid};
-use waddle_extensions::{host_tools::InvocationKind, PluginId, StanzaId};
+use waddle_extensions::{host_tools::InvocationKind, StanzaId};
 use waddle_xmpp::ingress::{NormalizedTarget, TransportGeneration};
 
 use crate::ingress::{
@@ -162,10 +162,8 @@ impl ExtensionHostAdapter {
                 .and_then(|(_, id)| StanzaId::new(id.id).ok()))
         }
         .await;
-        let posted = matches!(result, Ok(Some(_)));
         BotRoomCleanup {
             state: Arc::clone(&self.state),
-            plugin: invocation.plugin_id.clone(),
             room,
             sender,
             occupancy,
@@ -175,7 +173,6 @@ impl ExtensionHostAdapter {
                 }
                 _ => None,
             },
-            posted,
         }
         .spawn(room_guard);
         // A committed denial may have only an error frame and no room archive.
@@ -186,17 +183,15 @@ impl ExtensionHostAdapter {
 }
 
 /// What one dispatch leaves to finish after its reply: the bot occupancy it
-/// used is left, and a room it posted to is recorded.
+/// used is left.
 struct BotRoomCleanup {
     state: Arc<WebSocketState>,
-    plugin: PluginId,
     room: BareJid,
     sender: FullJid,
     occupancy: interpret::BotOccupancy,
     /// A committed send's settlement still running: its message reaches
     /// occupants before the bot's unavailable.
     settlement: Option<tokio::task::JoinHandle<SettlementOutcome>>,
-    posted: bool,
 }
 
 impl BotRoomCleanup {
@@ -211,17 +206,6 @@ impl BotRoomCleanup {
             // unavailable, or they keep a ghost bot.
             for route in self.occupancy.join_stragglers {
                 let _ = route.await;
-            }
-            if self.posted {
-                if let Err(error) = crate::server::extension_bot_rooms::record(
-                    self.state.deps.app_state.db_pool.global(),
-                    &self.room,
-                    &self.plugin,
-                )
-                .await
-                {
-                    tracing::warn!(room = %self.room, %error, "Failed to record extension bot room");
-                }
             }
             if let Some((nick, session)) = self.occupancy.held {
                 // The normal departure path emits unavailable presence and

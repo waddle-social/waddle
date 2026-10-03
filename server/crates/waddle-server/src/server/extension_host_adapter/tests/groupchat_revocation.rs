@@ -83,7 +83,11 @@ async fn revoked_after_bot_planning(f: IngressFixture, leftover: bool) {
     );
     fixture.settle().await;
     assert_eq!(f.count("ingress_messages").await, 0);
-    assert_eq!(f.count("extension_bot_rooms").await, 0, "nothing posted");
+    assert_eq!(
+        f.count("extension_bot_rooms").await,
+        0,
+        "revoking the plugin's grants unlists it"
+    );
     assert_eq!(
         f.count("notification_activity").await,
         0,

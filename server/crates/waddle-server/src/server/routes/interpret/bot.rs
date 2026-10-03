@@ -352,6 +352,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
     #[cfg(feature = "clustering")]
     require_local_room(deps, &room_jid).await?;
     let preferred_nick = response.preferred_nick.clone();
+    let plugin = response.plugin.clone();
     let (working, digest_input) =
         prepare_extension_room_message(deps, &room_jid, &bot_full, response)?;
     let Some(state) = deps.web_socket_state else {
@@ -490,6 +491,17 @@ pub(crate) async fn plan_extension_bot_groupchat(
         {
             Ok(join) => {
                 occupancy.held = Some((joined_nick, session));
+                // Before anyone sees the join: a client that refetches the
+                // room's bot listing on the hatted join must find this bot.
+                if let Err(error) = crate::server::extension_bot_rooms::record(
+                    state.deps.app_state.db_pool.global(),
+                    &room_jid,
+                    &plugin,
+                )
+                .await
+                {
+                    warn!(room = %room_jid, %error, "Failed to record extension bot room");
+                }
                 if !join.is_same_bare_multi_session_join {
                     let mut join_presences = Vec::new();
                     for existing in join.existing_occupants {

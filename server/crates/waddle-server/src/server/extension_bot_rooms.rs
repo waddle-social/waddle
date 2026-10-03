@@ -1,9 +1,10 @@
-//! Rooms where an extension bot has posted.
+//! Rooms where an extension bot has joined to post.
 //!
 //! A bot holds a room occupancy only for one send, so the room's roster
 //! cannot say which bots speak there. One row per (room, plugin) records it
-//! for the room's XEP-0030 bot listing. Uninstall and room destruction
-//! delete the rows; a ban filters them on read.
+//! for the room's XEP-0030 bot listing, written when the bot joins and
+//! before anyone sees that join. Uninstall and room destruction delete the
+//! rows; a ban filters them on read.
 
 use jid::BareJid;
 use waddle_extensions::PluginId;
