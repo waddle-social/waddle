@@ -257,8 +257,6 @@ pub(super) async fn plan_bot_groupchat_message(
             Some(bot_ctx.sender_full.clone()),
         ),
         digest_input,
-        joined_occupancy: None,
-        join_stragglers: Vec::new(),
     })
 }
 
@@ -277,12 +275,18 @@ pub(crate) struct ExtensionRoomMessage {
 pub(crate) struct PlannedExtensionBotGroupchat {
     pub plan: IngressPlan,
     pub digest_input: DigestInput,
-    pub joined_occupancy: Option<(
+}
+
+/// The room occupancy one bot dispatch used, joined for it or found present,
+/// which the caller leaves after the send whether or not it committed.
+#[derive(Default)]
+pub(crate) struct BotOccupancy {
+    pub held: Option<(
         waddle_xmpp::muc::MucOccupantNick,
         waddle_xmpp_core::OccupancySessionGeneration,
     )>,
-    /// Join presence routes to other nodes still running after the cap. A
-    /// revoked join awaits them so its unavailable cannot overtake the join.
+    /// Join presence routes to other nodes still running after the cap. The
+    /// leave awaits them so its unavailable cannot overtake the join.
     pub join_stragglers: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -334,6 +338,8 @@ pub(crate) enum ExtensionBotDispatchError {
 
 /// `host_state` owns cross-node join presence routes that outlive planning.
 /// A forwarded send's `commit_deadline` also bounds the wait for them.
+/// `occupancy` receives the bot occupancy this dispatch used on every exit,
+/// success or error, so the caller can always leave it.
 pub(crate) async fn plan_extension_bot_groupchat(
     deps: &Deps<'_>,
     room_jid: BareJid,
@@ -341,6 +347,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
     response: ExtensionRoomMessage,
     host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
     commit_deadline: Option<tokio::time::Instant>,
+    occupancy: &mut BotOccupancy,
 ) -> Result<PlannedExtensionBotGroupchat, ExtensionBotDispatchError> {
     #[cfg(feature = "clustering")]
     require_local_room(deps, &room_jid).await?;
@@ -444,36 +451,40 @@ pub(crate) async fn plan_extension_bot_groupchat(
             role: o.role,
         })
         .collect();
-    let mut joined_occupancy = None;
-    let mut join_stragglers = Vec::new();
-    if !initial_snapshot
+    // Room joins commit only for the full JID's current generation (#1869).
+    // A bot has no bind, so it keeps one stable published generation.
+    let session = crate::occupancy_authority::ensure(
+        state.deps.app_state.db_pool.global(),
+        &bot_full,
+        waddle_xmpp_core::OccupancySessionGeneration::mint(),
+    )
+    .await
+    .map_err(|error| {
+        warn!(room = %room_jid, %error, "Extension bot occupancy authority failed");
+        ExtensionBotDispatchError::BotJoinFailed
+    })?;
+    if let Some(present) = initial_snapshot
         .occupants
         .iter()
-        .any(|occupant| occupant.full_jid == bot_full)
+        .find(|occupant| occupant.full_jid == bot_full)
     {
+        // An occupancy left behind by an interrupted send is this send's to leave.
+        occupancy.held = waddle_xmpp::muc::MucOccupantNick::new(present.nick.clone())
+            .map(|nick| (nick, session));
+    } else {
         let bot_nick = available_bot_nick_with_base(
             &initial_occupants,
             preferred_nick.as_deref().unwrap_or("waddle"),
         );
         let joined_nick = waddle_xmpp::muc::MucOccupantNick::new(bot_nick.clone())
             .ok_or(ExtensionBotDispatchError::BotJoinFailed)?;
-        // Room joins commit only for the full JID's current generation (#1869).
-        // A bot has no bind, so it keeps one stable published generation.
-        let session = crate::occupancy_authority::ensure(
-            state.deps.app_state.db_pool.global(),
-            &bot_full,
-            waddle_xmpp_core::OccupancySessionGeneration::mint(),
-        )
-        .await
-        .map_err(|error| {
-            warn!(room = %room_jid, %error, "Extension bot occupancy authority failed");
-            ExtensionBotDispatchError::BotJoinFailed
-        })?;
+        // A host-owned occupancy lasts this send: no affiliation, so the bot
+        // is never a durable recipient and the room can still go dormant.
         match room_actor
             .ask(JoinWithAffiliation {
                 sender_jid: bot_full.clone(),
                 nick: bot_nick.clone(),
-                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
+                affiliation_grant: JoinAffiliationGrant::HostOwned,
                 local_domain: state.deps.auth_state.xmpp_domain.clone(),
                 admission_revision: initial_snapshot.admission_revision,
                 session,
@@ -481,7 +492,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
             .await
         {
             Ok(join) => {
-                joined_occupancy = Some((joined_nick, session));
+                occupancy.held = Some((joined_nick, session));
                 if !join.is_same_bare_multi_session_join {
                     let mut join_presences = Vec::new();
                     for existing in join.existing_occupants {
@@ -512,7 +523,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
                         );
                         join_presences.push((existing.jid, Stanza::Presence(presence)));
                     }
-                    join_stragglers = route_join_presences(
+                    occupancy.join_stragglers = route_join_presences(
                         state,
                         host_state,
                         &room_jid,
@@ -559,7 +570,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
         })
         .collect();
     let durable_recipient_bare_jids = snapshot.durable_recipient_bare_jids.clone();
-    let mut planned = plan_bot_groupchat_message(
+    plan_bot_groupchat_message(
         deps,
         BotGroupchatDispatch {
             room_jid: &room_jid,
@@ -580,10 +591,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
         working,
         digest_input,
     )
-    .await?;
-    planned.joined_occupancy = joined_occupancy;
-    planned.join_stragglers = join_stragglers;
-    Ok(planned)
+    .await
 }
 
 /// The longest planning waits for cross-node join presences. A healthy peer

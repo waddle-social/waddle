@@ -1,15 +1,15 @@
 //! Trusted bot sends commit under the plugin's configured grant.
 use std::sync::Arc;
 
-use jid::BareJid;
-use waddle_extensions::{host_tools::InvocationKind, StanzaId};
+use jid::{BareJid, FullJid};
+use waddle_extensions::{host_tools::InvocationKind, PluginId, StanzaId};
 use waddle_xmpp::ingress::{NormalizedTarget, TransportGeneration};
 
 use crate::ingress::{
-    nested::{NestedContinuation, NestedOutcome, NestedRefusal},
-    ExtensionPrincipal, IngressDecisionClass, IngressPrincipal, IngressStreamIdentity,
-    IngressSubmission,
+    nested::{NestedContinuation, NestedOutcome, SettlementOutcome},
+    ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
 };
+use crate::server::routes::websocket::WebSocketState;
 
 use super::{interpret, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation};
 
@@ -22,7 +22,7 @@ pub struct BotRoomLocks {
 }
 
 impl BotRoomLocks {
-    async fn lock(
+    pub(super) async fn lock(
         &self,
         plugin: &waddle_extensions::PluginId,
         room: &BareJid,
@@ -65,8 +65,9 @@ impl ExtensionHostAdapter {
             .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
         let sender = self.plugin_actor_jid(&invocation.plugin_id)?;
         let requester = (!provider).then(|| invocation.actor_jid.to_bare());
-        // Keep snapshot, first join, and admission ordered for this bot/room.
-        // The actor's admission generation must not change under a second join.
+        // Keep the bot's join, send and leave ordered for this bot/room: the
+        // actor's admission generation must not change under a second join,
+        // and the next send must not find this send's occupancy.
         let room_guard = self
             .state
             .deps
@@ -74,110 +75,178 @@ impl ExtensionHostAdapter {
             .extension_bot_rooms
             .lock(&invocation.plugin_id, &room)
             .await;
-        // A forwarded send whose origin has stopped waiting must not commit:
-        // the origin would report a failure for a message that was posted.
-        // Time spent on authorization and this lock counts, so a send that
-        // already expired never joins the bot.
-        let expired =
-            || commit_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
-        if expired() {
-            return Err(ExtensionHostAdapterError::DeadlineExceeded);
-        }
-        let deps = self.interpret_deps(invocation.session.as_ref());
-        let planned = interpret::plan_extension_bot_groupchat(
-            &deps,
-            room.clone(),
-            sender.clone(),
-            response,
-            &self.state,
-            commit_deadline,
-        )
-        .await
-        .map_err(|error| match error {
-            interpret::ExtensionBotDispatchError::InvalidEnvelope
-            | interpret::ExtensionBotDispatchError::BotOutcast
-            | interpret::ExtensionBotDispatchError::GroupDm => {
-                ExtensionHostAdapterError::NotAuthorized
+        let mut occupancy = interpret::BotOccupancy::default();
+        let mut settlement = None;
+        let result = async {
+            // A forwarded send whose origin has stopped waiting must not commit:
+            // the origin would report a failure for a message that was posted.
+            // Time spent on authorization and this lock counts, so a send that
+            // already expired never joins the bot.
+            let expired =
+                || commit_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+            if expired() {
+                return Err(ExtensionHostAdapterError::DeadlineExceeded);
             }
-            interpret::ExtensionBotDispatchError::Plan(failure) => {
-                ExtensionHostAdapterError::Plan(failure)
-            }
-            interpret::ExtensionBotDispatchError::Digest(error) => {
-                ExtensionHostAdapterError::Unsupported(error.to_string())
-            }
-            interpret::ExtensionBotDispatchError::RoomNotRegistered => {
-                ExtensionHostAdapterError::RoomNotFound(room.clone())
-            }
-            other => ExtensionHostAdapterError::Protocol(other.to_string()),
-        })?;
-        if let Some(failure) = planned.plan.failure {
-            return Err(ExtensionHostAdapterError::Plan(failure));
-        }
-        // A join made here stays: it is the occupancy every successful send
-        // leaves behind, and the grant still holds. Revoking it would only
-        // churn presence and make the origin's next attempt join again.
-        if expired() {
-            return Err(ExtensionHostAdapterError::DeadlineExceeded);
-        }
-        let submission = IngressSubmission {
-            identity: IngressStreamIdentity::Extension {
-                plugin: invocation.plugin_id.clone(),
-                requester: requester.clone(),
-            },
-            principal: IngressPrincipal::Extension(ExtensionPrincipal {
-                grant,
-                requester,
-                sender: sender.to_bare(),
-            }),
-            sender: sender.clone(),
-            target: NormalizedTarget::Bare(room.clone()),
-            digest_input: planned.digest_input,
-            plan: planned.plan,
-            connection_generation: TransportGeneration::Host,
-        };
-        let continuation = NestedContinuation::new(
-            Arc::clone(&self.state),
-            invocation.session.clone(),
-            submission.sender.clone(),
-        );
-        let outcome = operation
-            .commit_and_continue(submission, continuation)
-            .await;
-        if matches!(
-            outcome,
-            NestedOutcome::Refused(NestedRefusal::Decision(
-                IngressDecisionClass::PrincipalMissing
-            ))
-        ) {
-            if let Some((nick, session)) = planned.joined_occupancy {
-                // Occupants on other nodes must see the join before its
-                // unavailable, or they keep a ghost bot.
-                for route in planned.join_stragglers {
-                    let _ = route.await;
+            let deps = self.interpret_deps(invocation.session.as_ref());
+            let planned = interpret::plan_extension_bot_groupchat(
+                &deps,
+                room.clone(),
+                sender.clone(),
+                response,
+                &self.state,
+                commit_deadline,
+                &mut occupancy,
+            )
+            .await
+            .map_err(|error| match error {
+                interpret::ExtensionBotDispatchError::InvalidEnvelope
+                | interpret::ExtensionBotDispatchError::BotOutcast
+                | interpret::ExtensionBotDispatchError::GroupDm => {
+                    ExtensionHostAdapterError::NotAuthorized
                 }
-                // Revoke only this dispatch's join, before another send can reuse it.
-                // The normal departure path emits unavailable presence and retains
-                // interrupted actor cleanup for the departure janitor.
+                interpret::ExtensionBotDispatchError::Plan(failure) => {
+                    ExtensionHostAdapterError::Plan(failure)
+                }
+                interpret::ExtensionBotDispatchError::Digest(error) => {
+                    ExtensionHostAdapterError::Unsupported(error.to_string())
+                }
+                interpret::ExtensionBotDispatchError::RoomNotRegistered => {
+                    ExtensionHostAdapterError::RoomNotFound(room.clone())
+                }
+                other => ExtensionHostAdapterError::Protocol(other.to_string()),
+            })?;
+            if let Some(failure) = planned.plan.failure {
+                return Err(ExtensionHostAdapterError::Plan(failure));
+            }
+            if expired() {
+                return Err(ExtensionHostAdapterError::DeadlineExceeded);
+            }
+            let submission = IngressSubmission {
+                identity: IngressStreamIdentity::Extension {
+                    plugin: invocation.plugin_id.clone(),
+                    requester: requester.clone(),
+                },
+                principal: IngressPrincipal::Extension(ExtensionPrincipal {
+                    grant,
+                    requester,
+                    sender: sender.to_bare(),
+                }),
+                sender: sender.clone(),
+                target: NormalizedTarget::Bare(room.clone()),
+                digest_input: planned.digest_input,
+                plan: planned.plan,
+                connection_generation: TransportGeneration::Host,
+            };
+            let continuation = NestedContinuation::new(
+                Arc::clone(&self.state),
+                invocation.session.clone(),
+                submission.sender.clone(),
+            );
+            let outcome = settlement.insert(
+                operation
+                    .commit_and_continue(submission, continuation)
+                    .await,
+            );
+            let archive_ids = super::settlement::finish_nested(outcome).await?;
+            Ok(archive_ids
+                .into_iter()
+                .find(|(archive, _)| archive == &room)
+                .and_then(|(_, id)| StanzaId::new(id.id).ok()))
+        }
+        .await;
+        let posted = matches!(result, Ok(Some(_)));
+        BotRoomCleanup {
+            state: Arc::clone(&self.state),
+            plugin: invocation.plugin_id.clone(),
+            room,
+            sender,
+            occupancy,
+            settlement: match settlement {
+                Some(NestedOutcome::Committed { settlement, .. }) if !settlement.is_finished() => {
+                    Some(settlement)
+                }
+                _ => None,
+            },
+            posted,
+        }
+        .spawn(room_guard);
+        // A committed denial may have only an error frame and no room archive.
+        // If its settlement misses the response deadline, acceptance still uses
+        // the offered ID. Successful room sends retain their canonical reply ID.
+        result.map(|id| id.unwrap_or(offered_id))
+    }
+}
+
+/// What one dispatch leaves to finish after its reply: the bot occupancy it
+/// used is left, and a room it posted to is recorded.
+struct BotRoomCleanup {
+    state: Arc<WebSocketState>,
+    plugin: PluginId,
+    room: BareJid,
+    sender: FullJid,
+    occupancy: interpret::BotOccupancy,
+    /// A committed send's settlement still running: its message reaches
+    /// occupants before the bot's unavailable.
+    settlement: Option<tokio::task::JoinHandle<SettlementOutcome>>,
+    posted: bool,
+}
+
+impl BotRoomCleanup {
+    /// Runs detached so the leave never delays the reply. The room guard is
+    /// held until the bot has left, so the next send joins afresh.
+    fn spawn(self, room_guard: tokio::sync::OwnedMutexGuard<()>) {
+        let cleanup = async move {
+            if let Some(settlement) = self.settlement {
+                let _ = settlement.await;
+            }
+            // Occupants on other nodes must see the join before its
+            // unavailable, or they keep a ghost bot.
+            for route in self.occupancy.join_stragglers {
+                let _ = route.await;
+            }
+            if self.posted {
+                if let Err(error) = crate::server::extension_bot_rooms::record(
+                    self.state.deps.app_state.db_pool.global(),
+                    &self.room,
+                    &self.plugin,
+                )
+                .await
+                {
+                    tracing::warn!(room = %self.room, %error, "Failed to record extension bot room");
+                }
+            }
+            if let Some((nick, session)) = self.occupancy.held {
+                // The normal departure path emits unavailable presence and
+                // retains interrupted actor cleanup for the departure janitor.
                 let _ = crate::server::routes::websocket::handlers::presence::handle_muc_leave(
                     &self.state,
-                    &room,
-                    &sender,
+                    &self.room,
+                    &self.sender,
                     nick.as_str(),
                     session,
                     None,
                 )
                 .await;
             }
-        }
-        drop(room_guard);
-        let archive_ids = super::settlement::finish_nested(outcome).await?;
-        // A committed denial may have only an error frame and no room archive.
-        // If its settlement misses the response deadline, acceptance still uses
-        // the offered ID. Successful room sends retain their canonical reply ID.
-        Ok(archive_ids
-            .into_iter()
-            .find(|(archive, _)| archive == &room)
-            .and_then(|(_, id)| StanzaId::new(id.id).ok())
-            .unwrap_or(offered_id))
+            drop(room_guard);
+        };
+        // A test observing remote delivery keeps observing the detached leave.
+        #[cfg(all(test, feature = "clustering"))]
+        let cleanup = {
+            let controlled = interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY
+                .try_with(Clone::clone)
+                .ok();
+            async move {
+                match controlled {
+                    Some(controlled) => {
+                        interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY
+                            .scope(controlled, cleanup)
+                            .await
+                    }
+                    None => cleanup.await,
+                }
+            }
+        };
+        tokio::spawn(cleanup);
     }
 }

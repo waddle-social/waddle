@@ -29,7 +29,10 @@ async fn conflict_deadline(f: IngressFixture) {
         1
     );
     assert!(
-        fixture.drain().is_empty(),
+        fixture
+            .drain()
+            .iter()
+            .all(|stanza| matches!(stanza, waddle_xmpp::Stanza::Presence(_))),
         "conflict never reaches room occupants"
     );
     host_boundary::restore_receipts(&f).await;

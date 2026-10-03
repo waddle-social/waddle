@@ -158,10 +158,30 @@ impl GroupchatFixture {
         }
     }
 
+    /// One send, including the bot's detached leave.
     pub async fn send(&self, origin: &str) -> Result<StanzaId, ExtensionHostAdapterError> {
-        self.adapter
+        let result = self
+            .adapter
             .send_message(&self.invocation(), self.request(origin))
-            .await
+            .await;
+        self.settle().await;
+        result
+    }
+
+    /// Wait until the last send's bot has left: the leave holds the
+    /// bot/room lock until it is done.
+    pub async fn settle(&self) {
+        let _done = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.adapter
+                .state
+                .deps
+                .protocol
+                .extension_bot_rooms
+                .lock(&direct_ingress::plugin(), &self.room),
+        )
+        .await
+        .expect("the bot's leave finishes");
     }
 
     pub fn drain(&mut self) -> Vec<Stanza> {
@@ -187,59 +207,117 @@ impl GroupchatFixture {
     }
 }
 
-async fn two_sends_reuse_occupancy(f: IngressFixture) {
+/// The presences the bot sent one occupant, in order: `(type, affiliation,
+/// role, wears the Bot hat)`.
+pub(super) fn bot_presences(
+    wire: &[Stanza],
+) -> Vec<(
+    xmpp_parsers::presence::Type,
+    Option<String>,
+    Option<String>,
+    bool,
+)> {
+    wire.iter()
+        .filter_map(|stanza| match stanza {
+            Stanza::Presence(presence) => Some(presence),
+            _ => None,
+        })
+        .map(|presence| {
+            let item = presence
+                .payloads
+                .iter()
+                .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))
+                .and_then(|x| x.get_child("item", waddle_xmpp::muc::presence::NS_MUC_USER));
+            let hats = presence
+                .payloads
+                .iter()
+                .find(|payload| payload.is("hats", waddle_xmpp::xep::xep0317::NS_HATS))
+                .map(waddle_xmpp::xep::xep0317::parse_hats_element)
+                .unwrap_or_default();
+            (
+                presence.type_.clone(),
+                item.and_then(|item| item.attr("affiliation"))
+                    .map(str::to_owned),
+                item.and_then(|item| item.attr("role")).map(str::to_owned),
+                hats == waddle_xmpp::xep::xep0317::HatSet::new()
+                    .with_hat(waddle_xmpp::xep::xep0317::Hat::bot()),
+            )
+        })
+        .collect()
+}
+
+/// XEP-0045 + XEP-0317: every send in a members-only room is the bot's
+/// join (Bot hat, no affiliation), its message, then its unavailable. The
+/// bot keeps no occupancy, affiliation or durable recipient, and the room
+/// records it once for its bot listing.
+async fn each_send_joins_and_leaves(f: IngressFixture) {
+    use xmpp_parsers::presence::Type;
     let mut fixture = GroupchatFixture::new(&f).await;
-    fixture.send("groupchat-first").await.expect("first send");
-    let first = fixture
-        .actor
-        .ask(GetSnapshot)
-        .await
-        .expect("first snapshot");
     let bot = fixture.invocation().actor_jid;
-    let session = first
-        .room
-        .session_generation(&bot)
-        .expect("bot occupancy session");
-    // Durable room joins commit only for the published generation (#1869).
-    assert!(
-        crate::occupancy_authority::is_current(
-            fixture.adapter.state.deps.app_state.db_pool.global(),
-            &bot,
-            session,
-        )
-        .await
-        .expect("occupancy authority"),
-        "bot joins under its published occupancy generation"
-    );
-    let first_wire = fixture.drain();
-    groupchat_message(&first_wire);
-    assert_eq!(
-        first_wire
+    let mut generation = None;
+    for origin in ["groupchat-first", "groupchat-second"] {
+        fixture.send(origin).await.expect("send");
+        let wire = fixture.drain();
+        groupchat_message(&wire);
+        let message_at = wire
             .iter()
-            .filter(|s| matches!(s, Stanza::Presence(_)))
-            .count(),
-        1,
-        "one initial bot join presence"
-    );
-    fixture
-        .send("groupchat-second")
-        .await
-        .expect("second send must reuse bot occupancy");
-    let second = fixture
-        .actor
-        .ask(GetSnapshot)
-        .await
-        .expect("second snapshot");
-    assert_eq!(second.room.session_generation(&bot), Some(session));
-    assert_eq!(second.occupancy_revision, first.occupancy_revision);
-    let second_wire = fixture.drain();
-    groupchat_message(&second_wire);
-    assert!(!second_wire.iter().any(|s| matches!(s, Stanza::Presence(_))));
+            .position(|s| matches!(s, Stanza::Message(m) if m.type_ == xmpp_parsers::message::MessageType::Groupchat))
+            .expect("message");
+        let presence_at: Vec<_> = wire
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| matches!(s, Stanza::Presence(_)))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(presence_at.len(), 2, "{origin}: {wire:?}");
+        assert!(presence_at[0] < message_at && message_at < presence_at[1]);
+        let none = Some("none".to_owned());
+        assert_eq!(
+            bot_presences(&wire),
+            [
+                (
+                    Type::None,
+                    none.clone(),
+                    Some("participant".to_owned()),
+                    true
+                ),
+                (Type::Unavailable, none, Some("none".to_owned()), true),
+            ],
+            "{origin}"
+        );
+        let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
+        assert!(room.find_occupant_by_real_jid(&bot).is_none(), "{origin}");
+        assert_eq!(room.get_affiliation(&bot.to_bare()), Affiliation::None);
+        let chain = fixture
+            .actor
+            .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
+                sender_jid: bot.clone(),
+            })
+            .await
+            .expect("chain snapshot");
+        assert!(!chain.durable_recipient_bare_jids.contains(&bot.to_bare()));
+        // Durable room joins commit only for the published generation (#1869);
+        // a bot keeps one.
+        let current = f
+            .optional_text("SELECT generation FROM xmpp_occupancy_authority WHERE full_jid = 'direct-test@extensions.example.com/bot'")
+            .await
+            .expect("published bot generation");
+        assert_eq!(*generation.get_or_insert(current.clone()), current);
+    }
+    assert_eq!(f.count("ingress_messages").await, 2);
     assert_eq!(
-        f.count("ingress_messages").await,
-        2,
-        "both real adapter sends are canonical ingress"
+        f.count("extension_bot_rooms WHERE room_jid = 'extension-room@muc.example.com' AND plugin_id = 'direct-test'")
+            .await,
+        1,
+        "two sends record the room once"
     );
+    // Uninstall: the configured set no longer has the plugin.
+    let mut tx = f.uow.begin().await.expect("sync transaction");
+    ExtensionGrantRepository::sync_configured(&mut tx, &[])
+        .await
+        .expect("uninstall");
+    tx.commit().await.expect("uninstall commit");
+    assert_eq!(f.count("extension_bot_rooms").await, 0);
     fixture.close(f).await;
 }
 
@@ -315,13 +393,13 @@ async fn extension_groupchat_group_dm_refused_postgres() {
 }
 
 #[tokio::test]
-async fn extension_groupchat_two_sends_sqlite() {
-    two_sends_reuse_occupancy(IngressFixture::sqlite().await).await;
+async fn extension_groupchat_each_send_joins_and_leaves_sqlite() {
+    each_send_joins_and_leaves(IngressFixture::sqlite().await).await;
 }
 #[tokio::test]
-async fn extension_groupchat_two_sends_postgres() {
+async fn extension_groupchat_each_send_joins_and_leaves_postgres() {
     if let Some(f) = IngressFixture::postgres("groupchat_two").await {
-        two_sends_reuse_occupancy(f).await;
+        each_send_joins_and_leaves(f).await;
     }
 }
 #[tokio::test]

@@ -108,7 +108,7 @@ impl ExtensionHostAdapter {
             submission.sender.clone(),
         );
         super::settlement::finish_nested(
-            operation
+            &mut operation
                 .commit_and_continue(submission, continuation)
                 .await,
         )

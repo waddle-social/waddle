@@ -181,8 +181,8 @@ use archive_lookup::{
 #[cfg(feature = "clustering")]
 pub(crate) use bot::extension_room_owner;
 pub(crate) use bot::{
-    build_extension_message_markup, plan_extension_bot_groupchat, ExtensionBotDispatchError,
-    ExtensionRoomMessage,
+    build_extension_message_markup, plan_extension_bot_groupchat, BotOccupancy,
+    ExtensionBotDispatchError, ExtensionRoomMessage,
 };
 #[cfg(test)]
 pub(crate) use bot::{BotSnapshotGate, TEST_BOT_SNAPSHOT_GATE, TEST_SIGNING_TIME};
