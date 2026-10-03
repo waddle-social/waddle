@@ -4,20 +4,32 @@ use crate::server::routes::interpret::effects::{invite::MucUserRoute, EffectSink
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, IngressEffectIntent, PendingDeliveryMutation},
-    pending_delivery::{PendingPayload, PendingRow, PendingRowId},
+    pending_delivery::{
+        storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
+    },
     protocol::CarbonKind,
     registry::ConnectionRegistry,
 };
 
-async fn invite_delivered(fixture: IngressFixture, live: bool) {
-    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let registry = ConnectionRegistry::new();
-    let recipient: jid::BareJid = "juliet@example.com".parse().expect("recipient");
-    let resource = recipient.with_resource_str("phone").expect("resource");
-    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    if live {
-        registry.register(resource.clone(), tx);
-    }
+async fn invite_pending_storage(
+    fixture: &IngressFixture,
+    quota: QuotaPolicy,
+) -> std::sync::Arc<dyn PendingDeliveryStorage> {
+    std::sync::Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+            fixture.db.clone(),
+            quota,
+        )
+        .await
+        .expect("canonical pending storage"),
+    )
+}
+
+fn invite_submission(
+    fixture: &IngressFixture,
+    resource: &jid::FullJid,
+) -> crate::ingress::IngressSubmission {
+    let recipient = resource.to_bare();
     let mut submission = fixture.submission(Some("online-invite"), "invitation");
     let message = Box::new(submission.plan.sanitized_message.clone());
     let row_id = PendingRowId::fresh();
@@ -39,7 +51,7 @@ async fn invite_delivered(fixture: IngressFixture, live: bool) {
         ExternalEffect::RouteToPeer(MucUserRoute {
             route_identity: Some(identity),
             recipient: recipient.clone(),
-            resources: vec![resource],
+            resources: vec![resource.clone()],
             message: message.clone(),
             fallback: PendingRow {
                 id: row_id,
@@ -52,6 +64,20 @@ async fn invite_delivered(fixture: IngressFixture, live: bool) {
             failure: None,
         }),
     ))];
+    submission
+}
+
+async fn invite_delivered(fixture: IngressFixture, live: bool) {
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let recipient: jid::BareJid = "juliet@example.com".parse().expect("recipient");
+    let resource = recipient.with_resource_str("phone").expect("resource");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    if live {
+        registry.register(resource.clone(), tx);
+    }
+    let submission = invite_submission(&fixture, &resource);
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit");
@@ -62,6 +88,7 @@ async fn invite_delivered(fixture: IngressFixture, live: bool) {
     );
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -74,14 +101,8 @@ async fn invite_delivered(fixture: IngressFixture, live: bool) {
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(rx.try_recv().is_ok(), live, "live invitation delivery");
     assert_eq!(
-        state
-            .deps
-            .protocol
-            .pending_delivery_storage
-            .count(&recipient)
-            .await
-            .expect("queued invitations"),
-        u32::from(!live),
+        fixture.count("pending_delivery").await,
+        i64::from(!live),
         "an unavailable live resource uses the frozen pending fallback"
     );
     assert!(report.receipt_failures.is_empty());
@@ -123,6 +144,668 @@ async fn postgres_invite_offline_fallback_terminalizes_generically() {
     if let Some(fixture) = IngressFixture::postgres("offline_invite_receipts").await {
         invite_delivered(fixture, false).await;
     }
+}
+
+#[tokio::test]
+async fn sqlite_invite_lost_receipts_retry_without_second_live_copy() {
+    let fixture = IngressFixture::sqlite().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    registry.register(target.clone(), tx);
+    let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
+        .await
+        .expect("commit invitation");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    fixture.execute("CREATE TRIGGER fail_invite_receipt BEFORE INSERT ON ingress_effect_receipts BEGIN SELECT RAISE(ABORT, 'lost receipt'); END", ()).await;
+    let first = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        rx.try_recv().is_ok(),
+        "first invitation reached the live queue"
+    );
+    assert_eq!(
+        first.outcomes[0].1,
+        ExternalOutcome::Uncertain,
+        "receipt failure injected"
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    fixture
+        .execute("DROP TRIGGER fail_invite_receipt", ())
+        .await;
+    let repaired = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(repaired.outcomes[0].1, ExternalOutcome::Done);
+    assert!(
+        rx.try_recv().is_err(),
+        "a lost receipt must not repeat the invitation"
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_invite_concurrent_executions_accept_one_live_copy() {
+    let fixture = IngressFixture::sqlite().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    registry.register(target.clone(), tx);
+    let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
+        .await
+        .expect("commit invitation");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    let (first, second) = tokio::join!(
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5)
+        ),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5)
+        ),
+    );
+    assert!(
+        first.outcomes[0].1 == ExternalOutcome::Done
+            || second.outcomes[0].1 == ExternalOutcome::Done
+    );
+    assert!(rx.try_recv().is_ok(), "one invitation accepted");
+    assert!(
+        rx.try_recv().is_err(),
+        "concurrent execution must not enqueue another copy"
+    );
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_invite_partial_live_fanout_retries_only_missing_resource() {
+    let fixture = IngressFixture::sqlite().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first target");
+    let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second target");
+    let (tx, mut first_rx) = tokio::sync::mpsc::channel(4);
+    registry.register(first.clone(), tx);
+    let mut submission = invite_submission(&fixture, &first);
+    for intent in &mut submission.plan.intents {
+        if let IngressEffectIntent::RouteDirect { fanout, .. } = intent {
+            fanout.push(second.clone());
+        }
+    }
+    let Effect::External(ExternalEffect::RouteToPeer(route)) = &mut submission.plan.plan[0].effect
+    else {
+        panic!("invitation route");
+    };
+    route.resources.push(second.clone());
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit invitation");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    let partial = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_ne!(partial.outcomes[0].1, ExternalOutcome::Done);
+    assert!(
+        first_rx.try_recv().is_ok(),
+        "connected resource accepted its copy"
+    );
+    assert_eq!(
+        fixture.count("pending_delivery").await,
+        0,
+        "partial live acceptance must not create a duplicate offline copy"
+    );
+    let (tx, mut second_rx) = tokio::sync::mpsc::channel(4);
+    registry.register(second, tx);
+    let repaired = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(repaired.outcomes[0].1, ExternalOutcome::Done);
+    assert!(
+        second_rx.try_recv().is_ok(),
+        "missing resource receives its copy"
+    );
+    assert!(
+        first_rx.try_recv().is_err(),
+        "accepted sibling must not receive the invitation again"
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_invite_uncertain_live_send_never_falls_back_after_disconnect() {
+    let fixture = IngressFixture::sqlite().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    registry.register(target.clone(), tx);
+    let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
+        .await
+        .expect("commit invitation");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    fixture.execute("CREATE TRIGGER fail_invite_completion BEFORE UPDATE ON ingress_send_attempts WHEN NEW.state = 2 BEGIN SELECT RAISE(ABORT, 'lost completion'); END", ()).await;
+    let first = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        rx.try_recv().is_ok(),
+        "live copy was accepted before completion failed"
+    );
+    assert_eq!(first.outcomes[0].1, ExternalOutcome::Uncertain);
+    registry.unregister(&target);
+    fixture
+        .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+        .await;
+    let retry = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(retry.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(
+        fixture.count("pending_delivery").await,
+        0,
+        "unknown live acceptance cannot fall back to an offline copy"
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    fixture.close().await;
+}
+
+async fn invite_quota_refusal_requires_receipts_before_compensation(fixture: IngressFixture) {
+    use crate::server::routes::{
+        interpret::effects::invite::InviteDeliveryFailure,
+        websocket::muc_invites::{self, OutstandingInvite},
+    };
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::CountCap { max_rows: 0 }).await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+    let invite = OutstandingInvite {
+        room: "room@conference.example.com".parse().expect("room"),
+        invitee: target.to_bare(),
+        inviter: fixture.principal.bare_jid().clone(),
+    };
+    let ledger = state.deps.app_state.db_pool.global_actor().clone();
+    muc_invites::record_invite_at(ledger.clone(), &invite, chrono::Utc::now())
+        .await
+        .expect("record outstanding invitation");
+    let mut submission = invite_submission(&fixture, &target);
+    let Effect::External(ExternalEffect::RouteToPeer(route)) = &mut submission.plan.plan[0].effect
+    else {
+        panic!("invitation route");
+    };
+    route.failure = Some(Box::new(InviteDeliveryFailure::RemoveLedger(
+        invite.clone(),
+    )));
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit invitation");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    let postgres = fixture.db.driver() == crate::db::DatabaseDriver::Postgres;
+    if postgres {
+        fixture.execute("CREATE FUNCTION fail_invite_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'lost receipt'; END $$", ()).await;
+        fixture.execute("CREATE TRIGGER fail_invite_receipt BEFORE INSERT ON ingress_effect_receipts FOR EACH ROW EXECUTE FUNCTION fail_invite_receipt()", ()).await;
+    } else {
+        fixture.execute("CREATE TRIGGER fail_invite_receipt BEFORE INSERT ON ingress_effect_receipts BEGIN SELECT RAISE(ABORT, 'lost receipt'); END", ()).await;
+    }
+    let failed = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(failed.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(
+        muc_invites::list_invites(ledger.clone(), &invite.room, &invite.invitee)
+            .await
+            .expect("preserved ledger")
+            .len(),
+        1,
+        "a failed refusal commit must not compensate the invitation"
+    );
+    fixture
+        .execute(
+            if postgres {
+                "DROP TRIGGER fail_invite_receipt ON ingress_effect_receipts"
+            } else {
+                "DROP TRIGGER fail_invite_receipt"
+            },
+            (),
+        )
+        .await;
+    let refused = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(refused.outcomes[0].1, ExternalOutcome::Failed);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    assert!(
+        muc_invites::list_invites(ledger, &invite.room, &invite.invitee)
+            .await
+            .expect("compensated ledger")
+            .is_empty()
+    );
+    let unlimited = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    deps.pending_delivery_storage = Some(&unlimited);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    registry.register(target, tx);
+    let stale = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(stale.outcomes[0].1, ExternalOutcome::Done);
+    assert!(
+        rx.try_recv().is_err(),
+        "terminal quota refusal cannot later send the rolled-back invitation"
+    );
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_invite_quota_refusal_requires_receipts_before_compensation() {
+    invite_quota_refusal_requires_receipts_before_compensation(IngressFixture::sqlite().await)
+        .await;
+}
+
+#[tokio::test]
+async fn postgres_invite_quota_refusal_requires_receipts_before_compensation() {
+    if let Some(fixture) = IngressFixture::postgres("invite_quota_compensation").await {
+        invite_quota_refusal_requires_receipts_before_compensation(fixture).await;
+    }
+}
+
+async fn invite_live_acceptance_after_offline_probe_prevents_pending_fallback(
+    fixture: IngressFixture,
+) {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+    let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
+        .await
+        .expect("commit invitation");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let offline_attempt = crate::ingress::execute_uow::PAUSE_BEFORE_INVITATION_SETTLEMENT.scope(
+        (entered.clone(), resume.clone()),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        ),
+    );
+    let live_attempt = async {
+        entered.notified().await;
+        registry.register(target, tx);
+        let report = execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        )
+        .await;
+        resume.notify_one();
+        report
+    };
+    let (offline, live) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(offline_attempt, live_attempt)
+    })
+    .await
+    .expect("both competing invitation attempts finish");
+    assert_eq!(live.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(offline.outcomes[0].1, ExternalOutcome::Done);
+    assert!(
+        rx.try_recv().is_ok(),
+        "the live attempt accepted one invitation"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "offline settlement must not repeat the live copy"
+    );
+    assert_eq!(
+        fixture.count("pending_delivery").await,
+        0,
+        "a stale offline probe must recheck live acceptance before allocating pending delivery"
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_invite_live_acceptance_after_offline_probe_prevents_pending_fallback() {
+    invite_live_acceptance_after_offline_probe_prevents_pending_fallback(
+        IngressFixture::sqlite().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_invite_live_acceptance_after_offline_probe_prevents_pending_fallback() {
+    if let Some(fixture) = IngressFixture::postgres("invite_live_pending_race").await {
+        invite_live_acceptance_after_offline_probe_prevents_pending_fallback(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_invite_quota_compensation_uses_resolved_membership_outcome() {
+    use crate::server::routes::{
+        interpret::effects::{
+            early::RoomMembershipMutation, invite::InviteDeliveryFailure, PlanEffectDependency,
+        },
+        websocket::{
+            handlers::message::muc_invite::{InviteLedgerMutation, MucMembershipMutation},
+            muc_invites::OutstandingInvite,
+        },
+    };
+    use kameo::actor::Spawn;
+    use waddle_xmpp::{
+        ingress::{MucInviteLedgerAction, MucInviteLedgerMutation, MucInviteMembershipGrant},
+        muc::{
+            room_actor::{GetSnapshot, RoomActor},
+            MucRoom, RoomConfig,
+        },
+        xep::xep0421::OccupantIdSecret,
+        Affiliation,
+    };
+    for affiliation in [Affiliation::Member, Affiliation::None] {
+        let fixture = IngressFixture::sqlite().await;
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let storage = invite_pending_storage(&fixture, QuotaPolicy::CountCap { max_rows: 0 }).await;
+        let registry = ConnectionRegistry::new();
+        let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+        let invite = OutstandingInvite {
+            room: "room@conference.example.com".parse().expect("room"),
+            invitee: target.to_bare(),
+            inviter: fixture.principal.bare_jid().clone(),
+        };
+        let mut room = MucRoom::new(
+            invite.room.clone(),
+            "test".into(),
+            "room".into(),
+            RoomConfig {
+                members_only: true,
+                ..RoomConfig::default()
+            },
+        );
+        room.set_affiliation(invite.invitee.clone(), affiliation);
+        let actor = RoomActor::spawn(RoomActor::new(
+            room,
+            OccupantIdSecret::new(vec![b'x'; 32]).expect("secret"),
+        ));
+        let grant = MucMembershipMutation {
+            room: invite.room.clone(),
+            invitee: invite.invitee.clone(),
+            actor: actor.clone(),
+            // Planning observed a different affiliation from the execution-time room.
+            previous_affiliation: Affiliation::Outcast,
+        };
+        let membership = PlanEffectDependency::AfterRoomMembership {
+            room: invite.room.clone(),
+            member: invite.invitee.clone(),
+        };
+        let recorded_at = chrono::Utc::now();
+        let mut submission = invite_submission(&fixture, &target);
+        let inbound_invite =
+            minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    invite.invitee.to_string(),
+                )
+                .build();
+        submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(invite.room.clone());
+        let incoming = &mut submission.plan.sanitized_message;
+        incoming.to = Some(invite.room.clone().into());
+        incoming.type_ = xmpp_parsers::message::MessageType::Normal;
+        incoming.bodies.clear();
+        incoming.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(inbound_invite.clone())
+                .build(),
+        );
+        submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
+            incoming,
+            &waddle_xmpp::ingress::DigestContext {
+                target: submission.target.clone(),
+                server_authorities: vec![invite.inviter.clone()],
+                stanza_lang: None,
+            },
+        )
+        .expect("mediated invitation digest");
+        let outgoing = crate::server::routes::websocket::handlers::message::muc_invite::mediated_invite_message(
+            incoming,
+            &invite.room,
+            &invite.inviter,
+            &invite.invitee,
+            &inbound_invite,
+        );
+        let Effect::External(ExternalEffect::RouteToPeer(route)) =
+            &mut submission.plan.plan[0].effect
+        else {
+            panic!("invitation route");
+        };
+        *route.message = outgoing.clone();
+        route.fallback.payload = PendingPayload::Transient(Box::new(outgoing));
+        route.failure = Some(Box::new(InviteDeliveryFailure::RollbackMucMembership(
+            Box::new(grant.clone()),
+        )));
+        submission.plan.plan[0].dependencies = vec![
+            membership.clone(),
+            PlanEffectDependency::AfterInviteLedger {
+                invite: invite.clone(),
+            },
+        ];
+        submission
+            .plan
+            .plan
+            .push(PlannedEffect::new(Effect::External(
+                ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::Muc(Box::new(
+                    grant,
+                ))),
+            )));
+        submission.plan.plan.push(
+            PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
+                InviteLedgerMutation::Record {
+                    invite: invite.clone(),
+                    recorded_at,
+                    failure: None,
+                },
+            )))
+            .with_dependency(membership),
+        );
+        submission.plan.intents.extend([
+            IngressEffectIntent::MucInviteMembershipGrant {
+                grant: MucInviteMembershipGrant {
+                    room: invite.room.clone(),
+                    invitee: invite.invitee.clone(),
+                    inviter: invite.inviter.clone(),
+                },
+            },
+            IngressEffectIntent::MucInviteLedger {
+                mutation: MucInviteLedgerMutation {
+                    room: invite.room.clone(),
+                    invitee: invite.invitee.clone(),
+                    inviter: invite.inviter.clone(),
+                    action: MucInviteLedgerAction::Recorded,
+                    recorded_at: Some(recorded_at),
+                },
+            },
+        ]);
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("commit invitation grant");
+        let mut deps = Deps::new(&registry, "example.com");
+        deps.web_socket_state = Some(&state);
+        deps.pending_delivery_storage = Some(&storage);
+        let report = execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            report.outcomes.iter().any(|(effect, outcome)| matches!(
+                effect,
+                ExternalEffect::RouteToPeer(_)
+            ) && *outcome
+                == ExternalOutcome::Failed),
+            "invitation was refused by quota"
+        );
+        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert_eq!(snapshot.room.get_affiliation(&invite.invitee), affiliation,
+            "quota compensation must preserve existing membership or restore the actual pre-grant affiliation");
+        assert_eq!(fixture.count("pending_delivery").await, 0);
+        actor.kill();
+        fixture.close().await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn sqlite_invite_remote_hosted_resource_uses_gateway_without_pending_fallback() {
+    use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
+    use std::sync::{Arc, Mutex};
+    let fixture = IngressFixture::sqlite().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/remote".parse().expect("remote target");
+    let (tx, mut mirror) = tokio::sync::mpsc::channel(4);
+    registry.register_entry(
+        target.clone(),
+        waddle_xmpp::registry::ConnectionEntry::remote_hosted(tx),
+    );
+    let submission = invite_submission(&fixture, &target);
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("record invitation");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::MaybeCommitted, calls.clone()),
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert_eq!(
+        calls.lock().expect("remote calls").len(),
+        1,
+        "the remote-hosted invitation must reach its registered socket gateway"
+    );
+    assert_eq!(calls.lock().expect("remote calls")[0].0, target);
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert!(
+        mirror.try_recv().is_err(),
+        "the owner mirror is not a local socket"
+    );
+    assert_eq!(
+        fixture.count("pending_delivery").await,
+        0,
+        "an uncertain remote send cannot fall back to pending delivery"
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    fixture.close().await;
 }
 
 async fn remote_carbons_failure(fixture: IngressFixture) {

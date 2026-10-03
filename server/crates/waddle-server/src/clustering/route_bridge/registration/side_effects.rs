@@ -38,10 +38,12 @@ impl OrderedRelayDeliveryBridge {
         message: &xmpp_parsers::message::Message,
         kind: CarbonKind,
         exclude: Vec<jid::FullJid>,
+        ingress_append: Option<&crate::ingress::identity::IngressAppendObligationRef>,
     ) -> Option<RemoteCarbonFanout> {
         self.try_remote_user_carbons(
             source_jid,
             RemoteUserSideEffect::Carbons {
+                ingress_append: ingress_append.cloned().map(Box::new),
                 owner: owner.clone(),
                 message: RemoteStanza(Stanza::Message(message.clone())),
                 kind: kind.into(),
@@ -278,17 +280,47 @@ impl OrderedRelayDeliveryBridge {
 
         let (status, carbon_recipients) = match msg.effect {
             RemoteUserSideEffect::Carbons {
+                ingress_append,
                 owner,
                 message,
                 kind,
                 exclude,
-            } => match message.0 {
-                Stanza::Message(message) => {
-                    let web_socket_state = services.web_socket_state.upgrade();
-                    let outcome =
+            } => {
+                match message.0 {
+                    Stanza::Message(message) => {
+                        let web_socket_state = services.web_socket_state.upgrade();
+                        let mut delivery = web_socket_state.as_deref().map(|state| {
+                        let mut delivery = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+                        delivery.connection_registry = &services.connection_registry;
+                        delivery.user_registry = Some(&services.user_registry);
+                        delivery.sm_session_registry = Some(&services.sm_session_registry);
+                        delivery
+                    });
+                        if let Some(obligation) = ingress_append {
+                            // Registration authenticates the carbon owner. Received
+                            // carbons retain the original correspondent as sender.
+                            if owner != msg.source_jid.to_bare()
+                                || message.from.as_ref().map(jid::Jid::to_bare).as_ref()
+                                    != Some(&obligation.sender_bare)
+                                || delivery.is_none()
+                            {
+                                return RelayRemoteUserSideEffectReply {
+                                status: RelayRemoteUserSideEffectStatus::Incomplete {
+                                    reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure::Delivery,
+                                },
+                                carbon_recipients: Vec::new(),
+                            };
+                            }
+                            if let Some(delivery) = delivery.as_mut() {
+                                delivery.ingress_append_context =
+                                    Some((*obligation).into_context());
+                            }
+                        }
+                        let outcome =
                         crate::server::routes::interpret::carbons::send_carbons_to_registry_with_capture(
                             &services.connection_registry,
                             crate::server::routes::interpret::carbons::CarbonRegistryDeps {
+                                ingress_delivery: delivery.as_ref(),
                                 ingress_effect_capture: None,
                                 sm_session_registry: Some(&services.sm_session_registry),
                                 web_socket_state: web_socket_state.as_deref(),
@@ -299,24 +331,25 @@ impl OrderedRelayDeliveryBridge {
                             exclude,
                         )
                         .await;
-                    match outcome {
-                        Ok(outcome) => (
-                            RelayRemoteUserSideEffectStatus::Applied,
-                            outcome.carbon_recipients,
-                        ),
-                        Err(incomplete) => (
-                            RelayRemoteUserSideEffectStatus::Incomplete {
-                                reason: incomplete.reason,
-                            },
-                            incomplete.completed.carbon_recipients,
-                        ),
+                        match outcome {
+                            Ok(outcome) => (
+                                RelayRemoteUserSideEffectStatus::Applied,
+                                outcome.carbon_recipients,
+                            ),
+                            Err(incomplete) => (
+                                RelayRemoteUserSideEffectStatus::Incomplete {
+                                    reason: incomplete.reason,
+                                },
+                                incomplete.completed.carbon_recipients,
+                            ),
+                        }
                     }
+                    _ => (
+                        RelayRemoteUserSideEffectStatus::StaleRegistration,
+                        Vec::new(),
+                    ),
                 }
-                _ => (
-                    RelayRemoteUserSideEffectStatus::StaleRegistration,
-                    Vec::new(),
-                ),
-            },
+            }
             RemoteUserSideEffect::RosterPush {
                 user_jid,
                 source_jid,

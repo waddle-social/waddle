@@ -189,6 +189,7 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
     let outcome = send_carbons_to_registry_with_capture(
         &registry,
         CarbonRegistryDeps {
+            ingress_delivery: None,
             ingress_effect_capture: None,
             sm_session_registry: None,
             web_socket_state: None,
@@ -262,6 +263,7 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
     let outcome = send_carbons_to_registry_with_capture(
         &registry,
         CarbonRegistryDeps {
+            ingress_delivery: None,
             ingress_effect_capture: None,
             sm_session_registry: None,
             web_socket_state: None,
@@ -335,4 +337,345 @@ async fn postgres_remote_carbons_partial_progress_retries_only_unfinished_target
     if let Some(fixture) = IngressFixture::postgres("carbon_partial_retry").await {
         remote_carbons_partial_retry(fixture).await;
     }
+}
+
+async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
+    fixture: IngressFixture,
+    kind: CarbonKind,
+    detached: bool,
+    disappear: bool,
+    ambiguous: bool,
+) {
+    use crate::server::routes::interpret::carbons::{
+        send_carbons_to_registry_with_capture, CarbonRegistryDeps,
+    };
+    let mut submission = fixture.submission(Some("carbon-lost-reply"), "carbon body");
+    let (owner, source) = match kind {
+        CarbonKind::Sent => (submission.sender.to_bare(), submission.sender.clone()),
+        CarbonKind::Received => {
+            let owner = submission
+                .plan
+                .sanitized_message
+                .to
+                .as_ref()
+                .expect("recipient")
+                .to_bare();
+            let source = owner
+                .with_resource_str("primary")
+                .expect("original recipient");
+            (owner, source)
+        }
+    };
+    let target = owner.with_resource_str("sibling").expect("target");
+    let intent = IngressEffectIntent::RelayCarbons {
+        owner: owner.clone(),
+        exclude: vec![source.clone()],
+        kind,
+    };
+    let effect = ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons {
+        owner: owner.clone(),
+        exclude: vec![source.clone()],
+        kind,
+        origin: None,
+        message: Box::new(submission.plan.sanitized_message.clone()),
+    });
+    submission.plan.intents = vec![intent];
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(effect.clone()))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit");
+    let registry = ConnectionRegistry::new();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let sm = Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(
+            DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+                .await
+                .expect("SM store"),
+        )),
+    );
+    if detached {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        sm.store_session(DetachedSession {
+            stream_id: target.to_string(),
+            user_id: owner.to_string(),
+            jid: target.clone(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: true,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("detached carbon");
+    } else {
+        registry.register(target.clone(), sender);
+        assert!(registry.set_carbons_enabled(&target, true));
+    }
+    let mut delivery = Deps::new(&registry, "example.com");
+    delivery.ingress_delivery_uow = Some(fixture.uow.clone());
+    delivery.sm_session_registry = Some(&sm);
+    delivery.ingress_append_context = carbon_progress::append_context(
+        &fixture.uow,
+        decision.message_key.expect("key"),
+        &effect,
+        &decision.external_receipts[0],
+    )
+    .await
+    .expect("original relay context");
+    for attempt in 0..2 {
+        let outcome = send_carbons_to_registry_with_capture(
+            &registry,
+            CarbonRegistryDeps {
+                ingress_delivery: Some(&delivery),
+                ingress_effect_capture: None,
+                sm_session_registry: Some(&sm),
+                web_socket_state: None,
+            },
+            owner.clone(),
+            Box::new(submission.plan.sanitized_message.clone()),
+            kind,
+            vec![source.clone()],
+        )
+        .await;
+        if ambiguous && attempt == 1 {
+            let incomplete = outcome.expect_err("vanished started resource remains unresolved");
+            assert!(incomplete.completed.carbon_recipients.is_empty());
+            // An inventory sampled before a competing start can claim empty
+            // success. Final settlement rechecks under the canonical lock.
+            let empty_success = EffectOutcome::CarbonFanout {
+                outcome: crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                recipients: Vec::new(),
+            };
+            assert!(matches!(
+                carbon_progress::persist(
+                    &fixture.uow,
+                    decision.message_key.expect("key"),
+                    &effect,
+                    &empty_success
+                )
+                .await,
+                Err(crate::ingress_uow::IngressUowError::UnresolvedCarbonSend)
+            ));
+        } else {
+            assert_eq!(
+                outcome.expect("fanout").carbon_recipients,
+                vec![target.clone()]
+            );
+        }
+        if attempt == 0 && disappear {
+            registry.unregister(&target);
+            if ambiguous {
+                fixture
+                    .execute("UPDATE ingress_send_attempts SET state = 1", ())
+                    .await;
+            }
+        }
+        // The owner reply and its per-target progress never reach the origin.
+        assert_eq!(fixture.count("ingress_carbon_receipts").await, 0);
+        assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    }
+    if detached {
+        use waddle_xmpp::stream_management::SmSessionRegistry;
+        let session = sm
+            .peek_session(&target.to_string())
+            .await
+            .expect("peek")
+            .expect("session");
+        assert_eq!(session.unacked_stanzas.len(), 1, "one detached allocation");
+        assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+        assert!(receiver.try_recv().is_err());
+    } else {
+        assert!(receiver.try_recv().is_ok(), "one accepted carbon");
+        assert!(
+            receiver.try_recv().is_err(),
+            "lost reply cannot replay carbon"
+        );
+        assert_eq!(
+            fixture.count("ingress_send_attempts WHERE state = 2").await,
+            i64::from(!ambiguous)
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_lost_reply_does_not_repeat_resource_send() {
+    remote_carbon_lost_reply_does_not_repeat_resource_send(
+        IngressFixture::sqlite().await,
+        CarbonKind::Sent,
+        false,
+        false,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_lost_reply_does_not_repeat_detached_append() {
+    remote_carbon_lost_reply_does_not_repeat_resource_send(
+        IngressFixture::sqlite().await,
+        CarbonKind::Sent,
+        true,
+        false,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_lost_reply_repairs_disconnected_resource() {
+    remote_carbon_lost_reply_does_not_repeat_resource_send(
+        IngressFixture::sqlite().await,
+        CarbonKind::Sent,
+        false,
+        true,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_disconnected_started_resource_blocks_aggregate_receipt() {
+    remote_carbon_lost_reply_does_not_repeat_resource_send(
+        IngressFixture::sqlite().await,
+        CarbonKind::Sent,
+        false,
+        true,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_remote_carbon_lost_reply_does_not_repeat_resource_send() {
+    if let Some(fixture) = IngressFixture::postgres("remote_carbon_lost_reply").await {
+        remote_carbon_lost_reply_does_not_repeat_resource_send(
+            fixture,
+            CarbonKind::Sent,
+            false,
+            false,
+            false,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_remote_carbon_disconnected_started_resource_blocks_aggregate_receipt() {
+    if let Some(fixture) = IngressFixture::postgres("remote_carbon_started").await {
+        remote_carbon_lost_reply_does_not_repeat_resource_send(
+            fixture,
+            CarbonKind::Sent,
+            false,
+            true,
+            true,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_received_remote_carbon_lost_reply_preserves_correspondent_sender() {
+    remote_carbon_lost_reply_does_not_repeat_resource_send(
+        IngressFixture::sqlite().await,
+        CarbonKind::Received,
+        false,
+        false,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_owner_receiver_retains_keyed_custody() {
+    use crate::clustering::route_bridge::tests::delivery::{
+        remote_carbon_owner_reply_with_ingress, RemoteCarbonIngressFixture,
+    };
+    let fixture = IngressFixture::sqlite().await;
+    let mut submission = fixture.submission(Some("keyed-carbon-owner"), "carbon body");
+    let owner = submission.sender.to_bare();
+    let source = submission.sender.clone();
+    let effect = ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons {
+        owner: owner.clone(),
+        exclude: vec![source.clone()],
+        kind: CarbonKind::Sent,
+        origin: None,
+        message: Box::new(submission.plan.sanitized_message.clone()),
+    });
+    submission.plan.intents = vec![IngressEffectIntent::RelayCarbons {
+        owner,
+        exclude: vec![source.clone()],
+        kind: CarbonKind::Sent,
+    }];
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(effect.clone()))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("canonical commit");
+    let context = carbon_progress::append_context(
+        &fixture.uow,
+        decision.message_key.expect("key"),
+        &effect,
+        &decision.external_receipts[0],
+    )
+    .await
+    .expect("context")
+    .expect("relay context");
+    let obligation = crate::ingress::identity::IngressAppendObligationRef::from_context(
+        &context,
+        source.to_bare(),
+    );
+    let pool = crate::db::DatabasePool::new(
+        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("shared database");
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress(
+        Arc::new(pool), Arc::new(fixture.authority().await),
+    ).await;
+    let sm = Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(
+            DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+                .await
+                .expect("SM store"),
+        )),
+    );
+    let reply = remote_carbon_owner_reply_with_ingress(
+        source,
+        sm,
+        Some(RemoteCarbonIngressFixture {
+            state: state.clone(),
+            message: submission.plan.sanitized_message.clone(),
+            obligation,
+        }),
+        async {},
+    )
+    .await;
+    assert_eq!(reply.status, RelayRemoteUserSideEffectStatus::Applied);
+    assert_eq!(reply.carbon_recipients.len(), 1);
+    assert_eq!(
+        fixture.count("sm_ingress_appends").await,
+        1,
+        "owner receiver must retain the transported key at the detached sink"
+    );
+    state
+        .deps
+        .protocol
+        .ingress
+        .drain_and_join(Duration::from_secs(1))
+        .await;
+    drop(state);
+    fixture.close().await;
 }

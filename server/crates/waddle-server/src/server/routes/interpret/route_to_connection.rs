@@ -1488,7 +1488,7 @@ tokio::task_local! {
     );
 }
 
-async fn deliver_registered_remote_resource(
+pub(crate) async fn deliver_registered_remote_resource(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,

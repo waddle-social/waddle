@@ -470,8 +470,13 @@ refused startup. Treat the ledger commit as the rollback floor for this database
 `remote_resource_route.v6` and `deliver_ordered.v10`. #1778 now advances
 `remote_resource_route` to `v7` and `deliver_ordered` to `v11` to carry the
 recorded ingress append obligation identity, including through a full-JID
-second hop. Treat the prior `v6`/`v10` endpoints as historical; the current
-endpoints are `remote_resource_route.v7` and `deliver_ordered.v11`.
+second hop. Those cutover versions are historical; the current endpoints are
+`remote_resource_route.v8` and `deliver_ordered.v12`.
+
+#1776 advances `remote_user_side_effect` to `v4` to carry the recorded
+relay-carbon obligation through owner fanout. An older endpoint cannot accept
+that keyed request; do not retry it as an unkeyed side effect. Drain old writers
+before enabling the new delivery guarantees, as described below.
 
 **#1778 ships as a one-shot `Recreate`, like the #1756 cutover before it.** It
 carries no migration, so the reason is purely the wire bump, and specifically the
@@ -916,10 +921,11 @@ fail-closed before rebuilding routes.
 | `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
 | `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key and the observed invitation generation timestamp (falling back to canonical receipt time for older recorded declines). A newer invitation remains available and the recovered decline is not forwarded. A decline whose canonical row is older than the 30-day invitation TTL is not rebuilt (its invitation expired and a newer one for the same tuple could otherwise be consumed); it is metered and stays pending. |
 | `route_direct` | Delegated live full-JID routes are deferred: full target, recipient differs from sender, no recorded recipient archive, singleton full-target fanout and `CaptureOrdinal` identity. Recipient preparation belongs to the destination pipeline. This also conservatively defers detached full-target `<no-store/>` routes without archive evidence. Headline routes are deferred because they require peer delivery with recipient archival for `<store/>`. Groupchat inbox refreshes marked with the typed `InboxPush` route identity finish after a live attempt, including missing or disconnected sessions; maintenance durably discards this ephemeral refresh after a crash without replaying a stale projection. The inbox projection, archived message, MUC fanout, and notification each retain their independent obligations. Older inbox pushes with `CaptureOrdinal` identities and routes to other recipients remain unrecoverable because the canonical message does not prove their payload; use the manual abandoned-obligation repair for those older rows. |
-| `carbons`, `dm_call_thread_state` | Remain deferred by the existing recovery policy. Keyed live carbon copies do not change which families maintenance rebuilds, and call-state mutations are not replayed. |
+| `carbons`, `relay_carbons` | Rebuilt from the canonical message and recorded carbon identity. Local carbon intents retain their frozen resource audience; legacy relay intents retain their owner and exclusions. Both carry the original receipt identity to each receiving resource's live-send or detached-custody gate. Received copies recheck the recipient blocklist. |
+| `dm_call_thread_state` | Deferred; call-state mutations are not replayed. |
 | `pin` | Room pin chains are unrecoverable: the pinner nick was not recorded. |
 | `route_muc` | Kind 2 covers `RouteMucGroupchat` and `RouteMucSystemBroadcast`. Rebuilds only unfinished frozen occupant copies; groupchat excludes sender reflection. Requires a room-canonical envelope (room/nick, exact room stanza-id, occupant-id) or the intent's typed `system_message`. Subject mutation and system broadcast pin/exact `SystemMessageArchive` prerequisites must already be receipted. Missing evidence stays pending: `missing_canonical_provenance`, `missing_payload`, or `prerequisite_pending`. Maintenance never relays remote-owned occupants (`Unavailable`) and never reruns room MAM/inbox projections. |
-| `relay_carbons`, `route_occupant_pm`, `dispatch_to_room_remote`, `group_dm_membership_grant`, `group_dm_invite_ledger`, `muc_invite_membership_grant`, `room_subject_mutation`, `link_preview_media_ref`, `call_signal`, `extension`, `tombstone_replay_deletion`, `error_reply` | Unrecoverable from the recorded envelope and intents alone: these need actor handles, reflected payloads or a sender socket. |
+| `route_occupant_pm`, `dispatch_to_room_remote`, `group_dm_membership_grant`, `group_dm_invite_ledger`, `muc_invite_membership_grant`, `room_subject_mutation`, `link_preview_media_ref`, `call_signal`, `extension`, `tombstone_replay_deletion`, `error_reply` | Unrecoverable from the recorded envelope and intents alone: these need actor handles, reflected payloads or a sender socket. |
 | `archive`, `inbox_project`, `retraction_tombstone` | Phase B obligations should already be receipted; missing receipts indicate a contradiction and are never re-applied. `archive` also includes `SystemMessageArchive`, which recovery cannot rebuild. |
 
 Recovery counts an attempt toward a stall only when it provably changed
@@ -970,6 +976,18 @@ socket, including registered-remote sockets. An expired unstarted reservation ma
 be reclaimed; a started attempt cannot. A completed enqueue repairs missing
 progress or receipts without enqueuing again. Positive evidence that the queue
 rejected a frame permits a new attempt.
+
+Recorded invitation and decline routes use the same per-resource gate. Their
+whole-invitation offline fallback rechecks every frozen resource under the
+canonical lock and commits the pending row with both route and fallback receipts.
+Partial live acceptance or an uncertain attempt suppresses that fallback and its
+delivery-failure compensation. Legacy relay-carbon fanout carries its original
+receipt identity through the remote owner to each live or detached resource.
+For invitations requiring ledger/membership compensation, quota refusal resolves
+the receipt pair before that existing best-effort cleanup. A crash or cleanup
+failure can leave compensation unfinished; the receipt pair must not be cleared
+to retry delivery. Declines without compensation remain retryable after a proven
+quota refusal. This gate does not make compensation a durable recovery workflow.
 
 New detached allocations check the same gate under the canonical row lock and
 commit their SM snapshot and custody proof before releasing it. Thus a retry
@@ -1903,8 +1921,10 @@ time. What stays at-least-once on this path:
   records a frame into the SM queue *before* the transport write, so the obligation
   moves onto that entry and the detach proves it with the session snapshot — whether
   the write failed or merely went unacknowledged. Once the client acknowledges the
-  entry, entry and obligation are both gone; a recovery re-execution after that point
-  is the ordinary lost-receipt duplicate (#1760 direction 2), not this path;
+  entry, the SM entry and its obligation are both gone. Recorded live sends retain
+  their independent completed send-attempt evidence after that acknowledgement,
+  preventing a lost outer receipt from causing another enqueue. Unrecorded live
+  sends do not gain this protection;
 - the first drain takes only the backlog it found and spends at most 2 s authorizing.
   The socket is still registered while it runs, so a producer refilling the queue
   could otherwise hold the detach open; later arrivals go to the post-unregister
@@ -1912,15 +1932,12 @@ time. What stays at-least-once on this path:
 - an old peer answers the v2 frame with `UnknownMessage`: a no-effect failure that
   leaves the owner mirror intact and the obligation unresolved for retry.
 
-`RegistryFrame` live transport is outside the durable append guarantee;
-side-effect carbons also perform their own unkeyed registry appends
-(`clustering/route_bridge/registration/side_effects.rs`). With no unexpired
+Recorded `RegistryFrame` transport and relay-carbon side effects now use the
+live-send gate; detached carbon copies use the custody ledger. With no unexpired
 session and no prior proof, no append occurs and the obligation stays unresolved.
-The #1760 custody limitation above is unchanged and now also applies to keyed
-remote deliveries: quarantine deletes the session's queue but retires only
-gap-covered proofs, so a retained entry's proof can outlive its payload and
-suppress recovery with a false `AlreadyAppended`. This is not lifecycle-safe
-exactly-once delivery.
+The current custody and quarantine rules described above still apply. A completed
+live enqueue proves queue acceptance, not client acknowledgement or exactly-once
+delivery.
 
 Earlier committed progress survives restart and is excluded from later
 decisions. Progress writes and the final aggregate receipt share one

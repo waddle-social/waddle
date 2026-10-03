@@ -332,6 +332,15 @@ async fn authorize_direct_stanza(
     let Stanza::Message(message) = stanza else {
         return Err(IngressUowError::EffectIntentConflict);
     };
+    if let Some(expected) =
+        super::invitation_authority::recorded_message(&envelope, intents, &context.receipt)?
+    {
+        return if super::append_authority::same_message_content(&expected, message) {
+            Ok(())
+        } else {
+            Err(IngressUowError::EffectIntentConflict)
+        };
+    }
     if let waddle_xmpp::ingress::EffectMessageIdentity::StanzaId(stanza_id) = route_identity {
         let mut pin_owned = false;
         for intent in intents {
@@ -432,7 +441,7 @@ async fn accepted_status(
     Ok(None)
 }
 
-async fn delivery_status(
+pub(super) async fn delivery_status(
     tx: &mut IngressUowTransaction<'_>,
     obligation: &SendObligation,
 ) -> Result<Option<FullJidDeliveryOutcome>, IngressUowError> {

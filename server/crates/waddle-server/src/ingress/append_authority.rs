@@ -153,6 +153,13 @@ pub(crate) async fn check_canonical_obligation(
         )
         .await
         .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)??;
+    } else if obligation.receipt.kind.to_storage() == IngressEffectKind::RouteDirect.storage_tag() {
+        tokio::time::timeout(
+            AUTHORIZATION_READ_TIMEOUT,
+            authorize_direct_sender(db, stanza, obligation),
+        )
+        .await
+        .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)??;
     } else {
         check_canonical_sender(db, obligation.message_key, &obligation.sender_bare).await?;
     }
@@ -169,6 +176,40 @@ pub(crate) async fn check_canonical_obligation(
     .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
     if positions != obligation.archive_positions {
         return Err(AppendAuthorityRejection::ArchivePositionMismatch);
+    }
+    Ok(())
+}
+
+async fn authorize_direct_sender(
+    db: &crate::db::Database,
+    stanza: &Stanza,
+    obligation: &super::identity::IngressAppendObligationRef,
+) -> Result<(), AppendAuthorityRejection> {
+    let (envelope, intents) =
+        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
+            .await
+            .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
+    let expected =
+        super::invitation_authority::recorded_message(&envelope, &intents, &obligation.receipt)
+            .map_err(|_| AppendAuthorityRejection::StanzaSenderMismatch)?;
+    if let Some(expected) = expected {
+        let Stanza::Message(message) = stanza else {
+            return Err(AppendAuthorityRejection::NotMessage);
+        };
+        if expected.from.as_ref().map(jid::Jid::to_bare).as_ref() != Some(&obligation.sender_bare)
+            || !same_message_content(&expected, message)
+        {
+            return Err(AppendAuthorityRejection::StanzaSenderMismatch);
+        }
+    } else if envelope
+        .message()
+        .from
+        .as_ref()
+        .map(jid::Jid::to_bare)
+        .as_ref()
+        != Some(&obligation.sender_bare)
+    {
+        return Err(AppendAuthorityRejection::CanonicalSenderMismatch);
     }
     Ok(())
 }
@@ -291,7 +332,7 @@ pub(super) fn recipient_copy_matches(
 /// Room and recipient processing may have appended stamps after that slot in
 /// the live copy. Normalize only this parser representation; every thread
 /// attribute, payload, and the ordering of all other extensions remains exact.
-fn same_message_content(
+pub(super) fn same_message_content(
     expected: &xmpp_parsers::message::Message,
     offered: &xmpp_parsers::message::Message,
 ) -> bool {

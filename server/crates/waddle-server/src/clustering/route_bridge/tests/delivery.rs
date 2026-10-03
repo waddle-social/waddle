@@ -1626,6 +1626,21 @@ pub(crate) async fn remote_carbon_owner_reply(
     sm: Arc<InMemorySmSessionRegistry>,
     before_fanout: impl std::future::Future<Output = ()>,
 ) -> RelayRemoteUserSideEffectReply {
+    remote_carbon_owner_reply_with_ingress(source, sm, None, before_fanout).await
+}
+
+pub(crate) struct RemoteCarbonIngressFixture {
+    pub state: Arc<WebSocketState>,
+    pub message: Message,
+    pub obligation: crate::ingress::identity::IngressAppendObligationRef,
+}
+
+pub(crate) async fn remote_carbon_owner_reply_with_ingress(
+    source: jid::FullJid,
+    sm: Arc<InMemorySmSessionRegistry>,
+    ingress: Option<RemoteCarbonIngressFixture>,
+    before_fanout: impl std::future::Future<Output = ()>,
+) -> RelayRemoteUserSideEffectReply {
     let mut services = services_with_claims(
         origin_identity(),
         receiver_identity(),
@@ -1634,6 +1649,9 @@ pub(crate) async fn remote_carbon_owner_reply(
     )
     .await;
     services.sm_session_registry = sm;
+    if let Some(ingress) = &ingress {
+        services.web_socket_state = Arc::downgrade(&ingress.state);
+    }
     let services = Arc::new(services);
     let bridge = OrderedRelayDeliveryBridge::new(
         CancellationToken::new(),
@@ -1711,6 +1729,12 @@ pub(crate) async fn remote_carbon_owner_reply(
         "remote carbon".to_string(),
     );
 
+    if let Some(ingress) = &ingress {
+        message = ingress.message.clone();
+    }
+    let ingress_append = ingress
+        .as_ref()
+        .map(|ingress| Box::new(ingress.obligation.clone()));
     before_fanout.await;
     bridge
         .apply_remote_user_side_effect_on_owner(RelayRemoteUserSideEffect {
@@ -1718,6 +1742,7 @@ pub(crate) async fn remote_carbon_owner_reply(
             registration_id,
             socket_generation,
             effect: RemoteUserSideEffect::Carbons {
+                ingress_append,
                 owner: owner.clone(),
                 message: RemoteStanza(Stanza::Message(message)),
                 kind: RemoteCarbonKind::Sent,

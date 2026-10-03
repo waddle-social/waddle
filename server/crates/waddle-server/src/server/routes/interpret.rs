@@ -233,8 +233,9 @@ pub(crate) use route_to_connection::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
 pub(crate) use route_to_connection::{
     bounce_undeliverable_iq, deliver_direct_to_full_locally,
     deliver_direct_to_full_with_registered_remote, deliver_full_jid_via_ordered_relay,
-    deliver_peer_to_full_with_registered_remote, queue_processed_for_detached, route_to_connection,
-    undeliverable_iq_reply, DetachedQueueOutcome,
+    deliver_peer_to_full_with_registered_remote, deliver_registered_remote_resource,
+    queue_processed_for_detached, route_to_connection, undeliverable_iq_reply,
+    DetachedQueueOutcome,
 };
 pub(crate) use routing::{
     close_call_setup_from_outcome, deliver_direct_to_full, FullJidDeliveryOutcome,

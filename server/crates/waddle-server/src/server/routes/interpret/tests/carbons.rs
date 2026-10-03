@@ -557,6 +557,7 @@ async fn xep_0280_closed_middle_resource_preserves_other_carbon_deliveries() {
     let incomplete = send_carbons_to_registry_with_capture(
         &registry,
         CarbonRegistryDeps {
+            ingress_delivery: None,
             ingress_effect_capture: None,
             sm_session_registry: None,
             web_socket_state: None,

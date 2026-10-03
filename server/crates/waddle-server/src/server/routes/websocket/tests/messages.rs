@@ -4495,7 +4495,7 @@ async fn muc_private_message_rejects_client_authored_inbox_payload_before_routin
 
 #[tokio::test]
 async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
-    let state = create_test_websocket_state().await;
+    let state = messages_offline::sqlite_state().await;
     let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "decline-room@muc.example.com".parse().expect("room jid");
     let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
@@ -4601,7 +4601,7 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
 /// the room deliver a decline to that third party.
 #[tokio::test]
 async fn muc_mediated_decline_routes_to_ledger_inviter_not_client_supplied_target() {
-    let state = create_test_websocket_state().await;
+    let state = messages_offline::sqlite_state().await;
     let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "decline-full-room@muc.example.com"
         .parse()
@@ -4689,7 +4689,7 @@ async fn muc_mediated_decline_routes_to_ledger_inviter_not_client_supplied_targe
 /// message toward any occupant.
 #[tokio::test]
 async fn muc_mediated_decline_without_outstanding_invite_is_refused() {
-    let state = create_test_websocket_state().await;
+    let state = messages_offline::sqlite_state().await;
     let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "decline-spoof-room@muc.example.com"
         .parse()
@@ -4749,7 +4749,7 @@ async fn muc_mediated_decline_without_outstanding_invite_is_refused() {
 /// pending-delivery store instead of silently dropped.
 #[tokio::test]
 async fn muc_mediated_decline_to_offline_inviter_is_queued_durably() {
-    let state = create_test_websocket_state().await;
+    let state = messages_offline::sqlite_state().await;
     let room_jid: BareJid = "decline-offline-room@muc.example.com"
         .parse()
         .expect("room jid");
@@ -6133,7 +6133,7 @@ async fn xep0045_mediated_invite_offline_invitee_queued_durably() {
 /// inviter's row is consumed.
 #[tokio::test]
 async fn muc_mediated_decline_selects_inviter_by_to_among_multiple() {
-    let state = create_test_websocket_state().await;
+    let state = messages_offline::sqlite_state().await;
     let room_jid: BareJid = "decline-multi-room@muc.example.com"
         .parse()
         .expect("room jid");
@@ -6200,7 +6200,7 @@ async fn muc_mediated_decline_selects_inviter_by_to_among_multiple() {
 /// forwarded, nothing consumed.
 #[tokio::test]
 async fn muc_mediated_decline_ambiguous_target_is_bad_request() {
-    let state = create_test_websocket_state().await;
+    let state = messages_offline::sqlite_state().await;
     let room_jid: BareJid = "decline-ambiguous-room@muc.example.com"
         .parse()
         .expect("room jid");

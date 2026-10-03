@@ -214,19 +214,12 @@ async fn invite_plan(
 }
 
 async fn shared_state(fixture: &IngressFixture) -> Arc<WebSocketState> {
-    let standalone = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let pool = crate::db::DatabasePool::new(
-        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
-        crate::db::PoolConfig,
-    )
-    .await
-    .expect("shared pool");
-    crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress(
-        Arc::new(pool),
-        standalone.deps.protocol.ingress.clone(),
+    crate::server::routes::websocket::tests::create_test_websocket_state_with_durable_ingress(
+        fixture,
     )
     .await
 }
+
 async fn invite_room(
     state: &WebSocketState,
     group_dm: bool,
@@ -822,7 +815,7 @@ async fn registry_failure(fixture: IngressFixture, group_dm: bool) {
     state.deps.protocol.room_registry.wait_for_shutdown().await;
     let mut submission = submission(&fixture, invite_plan(&state, &message, group_dm).await).await;
     refused(&fixture, &submission, PlanFailure::RoomSnapshotUnavailable).await;
-    let healthy = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let healthy = shared_state(&fixture).await;
     let (message, healthy_actor) = invite_room(&healthy, group_dm).await;
     submission.plan = invite_plan(&healthy, &message, group_dm).await;
     deliver_recovered(&fixture, &submission, &healthy).await;

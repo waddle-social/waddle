@@ -542,7 +542,14 @@ pub async fn execute_effects(
                             });
                         }
                     };
-                    if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, effect, deps, deadline).await {
+                    // Membership outcomes resolve compensation on the planned
+                    // invitation. Preserve that decision when its delivery is
+                    // executed transactionally rather than by the generic sink.
+                    let resolved_effect = match &planned[index].effect {
+                        Effect::External(resolved @ (ExternalEffect::RouteToPeer(_) | ExternalEffect::QueueOfflineDelivery(_))) => resolved,
+                        _ => effect,
+                    };
+                    if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, resolved_effect, deps, deadline).await {
                         result
                     } else {
                         let mut execution = planned[index].clone();

@@ -190,6 +190,7 @@ impl From<RemoteCarbonKind> for CarbonKind {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RemoteUserSideEffect {
     Carbons {
+        ingress_append: Option<Box<crate::ingress::identity::IngressAppendObligationRef>>,
         owner: jid::BareJid,
         message: RemoteStanza,
         kind: RemoteCarbonKind,
@@ -215,7 +216,7 @@ pub struct RemoteResourceOutboundFrame {
     pub stanza: RemoteStanza,
     pub kind: DeliveryKind,
     /// The origin's recorded obligation, unverified. The socket node authorizes
-    /// it only if this frame is later drained into an XEP-0198 replay queue.
+    /// it before live enqueue and again if the frame enters XEP-0198 custody.
     pub ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
 }
 

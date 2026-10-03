@@ -21,6 +21,7 @@ mod execute_uow;
 mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;
+mod invitation_authority;
 pub(crate) mod live_delivery;
 pub mod nested;
 pub mod principal;

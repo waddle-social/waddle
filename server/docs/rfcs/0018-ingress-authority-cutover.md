@@ -21,7 +21,9 @@ previews, observers with recorded envelopes, delegated groupchat notification
 recovery, routes of receipted DM pin mutations, and MUC ledger declines.
 Delegated live full-JID routes (including detached full-target no-store routes
 without archive evidence), headline routes, unreceipted DM pin mutations and
-their routes, carbons and DM call state remain deferred. Remote-owner-only
+their routes, and DM call state remain deferred. Carbon recovery rebuilds the
+recorded local audience or legacy relay owner/exclusions with keyed delivery.
+Remote-owner-only
 resources and families lacking reconstructible payloads (including room pin
 chains without a recorded pinner nick) remain pending. Recorded live sends use
 per-obligation/resource leases and durable attempt state (#1776); observer work

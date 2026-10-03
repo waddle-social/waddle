@@ -7,8 +7,7 @@ use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{effects::PlanFailure, plan_message_dispatch};
 use crate::server::routes::websocket::{
-    tests::{create_test_websocket_state, create_test_websocket_state_with_db_pool_and_ingress},
-    WebSocketState,
+    tests::create_test_websocket_state_with_durable_ingress, WebSocketState,
 };
 use jid::{BareJid, FullJid};
 use std::sync::Arc;
@@ -19,18 +18,7 @@ use waddle_xmpp::muc::{room_actor::Join, room_registry_actor::CreateRoom};
 use xmpp_parsers::message::MessageType;
 
 async fn state(fixture: &IngressFixture) -> Arc<WebSocketState> {
-    let pool = crate::db::DatabasePool::new(
-        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
-        crate::db::PoolConfig,
-    )
-    .await
-    .expect("database pool");
-    let standalone = create_test_websocket_state().await;
-    create_test_websocket_state_with_db_pool_and_ingress(
-        Arc::new(pool),
-        standalone.deps.protocol.ingress.clone(),
-    )
-    .await
+    create_test_websocket_state_with_durable_ingress(fixture).await
 }
 
 async fn submission(fixture: &IngressFixture, decline: bool) -> IngressSubmission {

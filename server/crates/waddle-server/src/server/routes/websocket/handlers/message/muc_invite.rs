@@ -505,14 +505,13 @@ pub(super) async fn handle_muc_mediated_invite(
 
     // XEP-0045 §7.8.2: the room adds `from` (the inviter) to the
     // `<invite/>` and sends the invitation from its own bare JID.
-    let mut invite = Message::new(Some(jid::Jid::from(invitee.clone())));
-    invite.id = incoming.id.clone();
-    invite.from = Some(jid::Jid::from(room_jid.clone()));
-    invite.type_ = MessageType::Normal;
-    invite.payloads.push(build_mediated_invite_payload(
+    let invite = mediated_invite_message(
+        incoming,
+        &room_jid,
         &inviter_bare,
+        &invitee,
         &inbound_invite,
-    ));
+    );
 
     let scoped_sink = crate::server::routes::interpret::effects::ScopedInviteSink {
         inner: deps.effects,
@@ -877,7 +876,7 @@ pub(super) async fn deliver_muc_user_message(
     }
 }
 
-pub(super) fn mediated_invitee(message: &Message) -> Option<(jid::BareJid, minidom::Element)> {
+pub(crate) fn mediated_invitee(message: &Message) -> Option<(jid::BareJid, minidom::Element)> {
     let x = message
         .payloads
         .iter()
@@ -889,6 +888,23 @@ pub(super) fn mediated_invitee(message: &Message) -> Option<(jid::BareJid, minid
 
 /// Build the room-relayed `<x xmlns='muc#user'><invite from='inviter'/></x>`
 /// payload (§7.8.2), preserving the inviter's optional `<reason/>`.
+pub(crate) fn mediated_invite_message(
+    incoming: &Message,
+    room: &jid::BareJid,
+    inviter: &jid::BareJid,
+    invitee: &jid::BareJid,
+    inbound_invite: &minidom::Element,
+) -> Message {
+    let mut message = Message::new(Some(invitee.clone().into()));
+    message.id = incoming.id.clone();
+    message.from = Some(room.clone().into());
+    message.type_ = MessageType::Normal;
+    message
+        .payloads
+        .push(build_mediated_invite_payload(inviter, inbound_invite));
+    message
+}
+
 fn build_mediated_invite_payload(
     inviter: &jid::BareJid,
     inbound_invite: &minidom::Element,
