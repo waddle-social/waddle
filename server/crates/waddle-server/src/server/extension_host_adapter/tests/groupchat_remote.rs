@@ -460,7 +460,17 @@ async fn not_owner_reresolves_once(f: IngressFixture) {
         .as_deref(),
         Some(id.as_str())
     );
-    assert!(Cluster::bot_joined(&cluster.origin, &bot).await);
+    assert!(
+        presences(&wire)
+            .iter()
+            .any(|presence| presence.type_ == xmpp_parsers::presence::Type::None),
+        "the bot joined on the origin"
+    );
+    cluster.origin.settle().await;
+    assert!(
+        !Cluster::bot_joined(&cluster.origin, &bot).await,
+        "and left"
+    );
     assert_eq!(f.count("ingress_messages").await, 1);
 
     cluster.claims.set_owner(owner_node());
