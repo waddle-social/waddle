@@ -231,7 +231,7 @@ async fn archive_free_carbon_stamps(fixture: IngressFixture) {
             let mut forged_thread = inner.clone();
             forged_thread.payloads.push(
                 minidom::Element::builder("thread", waddle_xmpp_core::xep0201::CLIENT_STANZA_NS)
-                    .attr("parent", "forged")
+                    .attr(minidom::rxml::xml_ncname!("parent").to_owned(), "forged")
                     .append(id)
                     .build(),
             );
