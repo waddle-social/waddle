@@ -2,6 +2,7 @@ package social.waddle.android.feature.members
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -55,7 +56,11 @@ class MembersViewModelTest {
 
         val client get() = factory.clients.last()
 
-        fun viewModel() = MembersViewModel(sessionManager = manager, roomJid = ROOM)
+        fun viewModel() = MembersViewModel(
+            sessionManager = manager,
+            roomJid = ROOM,
+            currentSession = MutableStateFlow(testSessionInfo()),
+        )
     }
 
     @Before
@@ -190,6 +195,33 @@ class MembersViewModelTest {
         )
         assertEquals(listOf(false, false, true, true), rows.map { it.isBot })
         assertTrue(rows.filter { it.isBot }.none { it.presentNow })
+    }
+
+    @Test
+    fun `an extensions-domain member never seen in presence lists under bots`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomMembersByTier = mapOf(
+            WaddleMucAffiliation.MEMBER to listOf(
+                entry("Alpha@Extensions.Waddle.Test", WaddleMucAffiliation.MEMBER),
+                // Another account's extension service is not ours.
+                entry("carol@extensions.other.test", WaddleMucAffiliation.MEMBER),
+                entry("bob@waddle.test", WaddleMucAffiliation.MEMBER),
+            ),
+        )
+
+        val viewModel = harness.viewModel()
+        runCurrent()
+
+        // No presence was ever emitted: only the address says "bot".
+        val rows = viewModel.uiState.value.rows
+        assertEquals(
+            listOf("bob@waddle.test", "carol@extensions.other.test", "Alpha@Extensions.Waddle.Test"),
+            rows.map { it.jid },
+        )
+        assertEquals(listOf(false, false, true), rows.map { it.isBot })
+        assertFalse(rows.last().presentNow)
+        assertTrue(rows.last().hats.isEmpty())
     }
 
     @Test

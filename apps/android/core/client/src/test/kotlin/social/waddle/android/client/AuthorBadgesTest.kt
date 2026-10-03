@@ -81,6 +81,23 @@ class AuthorBadgesTest {
     }
 
     @Test
+    fun `extension bot address is a localpart on extensions of the own domain`() {
+        val own = "icepuma@waddle.test/phone"
+        assertTrue(isExtensionBotJid("alpha@extensions.waddle.test", own))
+        assertTrue(isExtensionBotJid("Alpha@Extensions.WADDLE.test/bot", own))
+        assertTrue(isExtensionBotJid("alpha@extensions.waddle.test", "Icepuma@Waddle.Test"))
+        // The service itself (no localpart), other domains, and people are not bots.
+        assertFalse(isExtensionBotJid("extensions.waddle.test", own))
+        assertFalse(isExtensionBotJid("@extensions.waddle.test", own))
+        assertFalse(isExtensionBotJid("alpha@extensions.other.test", own))
+        assertFalse(isExtensionBotJid("alpha@sub.extensions.waddle.test", own))
+        assertFalse(isExtensionBotJid("extensions@waddle.test", own))
+        // No account yet: nothing to compare against.
+        assertFalse(isExtensionBotJid("alpha@extensions.waddle.test", null))
+        assertFalse(isExtensionBotJid("alpha@extensions.waddle.test", "no-domain"))
+    }
+
+    @Test
     fun `no presence yields no badge`() {
         assertNull(authorBadgeOf(null))
     }
