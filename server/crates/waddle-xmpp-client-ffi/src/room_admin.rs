@@ -14,10 +14,9 @@
 use jid::BareJid;
 
 use waddle_xmpp_client::discovery::{
-    build_disco_items_iq, build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
-    build_muc_admin_role_set_iq, build_user_search_iq, parse_disco_items_result,
-    parse_muc_admin_affiliation_query, parse_user_search_result, room_bots_from_disco_items,
-    DiscoveryExt, MucAdminAffiliationItem, UserSearchQuery, NODE_WADDLE_ROOM_BOTS,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
+    build_muc_admin_role_set_iq, build_user_search_iq, parse_muc_admin_affiliation_query,
+    parse_user_search_result, DiscoveryExt, MucAdminAffiliationItem, UserSearchQuery,
 };
 use waddle_xmpp_client::messaging::{MessagingExt, MucRole};
 use waddle_xmpp_client::xep::xep0045_owner::{
@@ -29,7 +28,7 @@ use waddle_xmpp_client::xep::xep0045_owner::{
 
 use crate::boundary_convert::jid_domain;
 use crate::error::client_error_to_waddle;
-use crate::messaging_verbs::send_iq_with_timeout;
+use crate::messaging_verbs::{send_iq_with_timeout, IQ_TIMEOUT};
 use crate::{WaddleClient, WaddleError, WaddleMucAffiliation};
 
 // ── Typed FFI payloads ───────────────────────────────────────────────
@@ -261,12 +260,11 @@ impl WaddleClient {
     ) -> Result<Vec<WaddleRoomBot>, WaddleError> {
         let room = self.require_bare_jid(&room_jid)?;
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
-        let iq = build_disco_items_iq(room.as_str(), Some(NODE_WADDLE_ROOM_BOTS));
-        let result = send_iq_with_timeout(&handle, iq)
+        let bots = tokio::time::timeout(IQ_TIMEOUT, handle.discover_room_bots(&room))
             .await
+            .map_err(|_| WaddleError::Timeout)?
             .map_err(|e| client_error_to_waddle(&e))?;
-        let items = parse_disco_items_result(&result).ok_or(WaddleError::MalformedResponse)?;
-        Ok(room_bots_from_disco_items(items)
+        Ok(bots
             .into_iter()
             .map(|bot| WaddleRoomBot {
                 jid: bot.jid.to_string(),
