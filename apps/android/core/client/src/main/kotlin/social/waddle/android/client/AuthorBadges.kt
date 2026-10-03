@@ -4,6 +4,7 @@ import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleMucRole
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddlePresenceHat
+import social.waddle.client.ffi.WaddleRoomBot
 
 /**
  * Author badge derivation, ported from the web's
@@ -33,6 +34,8 @@ private const val RANK_MODERATOR = 2
 private const val RANK_VERIFIED = 1
 private const val RANK_HAT = 0
 
+private val BOT_BADGE = AuthorBadge(AuthorBadgeKind.BOT, "BOT", RANK_HAT)
+
 /** Web `authorityBadge`: XEP-0045 affiliation/role → badge. */
 fun authorityBadge(affiliation: WaddleMucAffiliation?, role: WaddleMucRole?): AuthorBadge? = when {
     affiliation == WaddleMucAffiliation.OWNER ->
@@ -50,19 +53,13 @@ fun authorityBadge(affiliation: WaddleMucAffiliation?, role: WaddleMucRole?): Au
 fun hasBotHat(hats: List<WaddlePresenceHat>): Boolean = hats.any { it.uri == HAT_URI_BOT }
 
 /**
- * `<plugin>@extensions.<own domain>` is a server-hosted extension bot
- * (the server answers it as XEP-0030 `client/bot` and refuses messages
- * to it), so it is a bot even before any presence carries the hat.
- * Compared case-insensitively against the account's own domain; the
- * bare service JID itself (no localpart) is not a bot.
+ * Bare JIDs the server declares as bots: the room's bot list (XEP-0030
+ * disco#items `urn:waddle:room:bots:0`, bots hold no affiliation) plus
+ * the JIDs it hatted `urn:waddle:hats:bot` this session. Normalized
+ * for [messageAuthorBadgeOf].
  */
-fun isExtensionBotJid(jid: String, accountJid: String?): Boolean {
-    val ownDomain = accountJid?.let(::normalizedBareJid)?.substringAfter('@', "").orEmpty()
-    if (ownDomain.isEmpty()) return false
-    val bare = normalizedBareJid(jid)
-    return bare.substringBefore('@', "").isNotEmpty() &&
-        bare.substringAfter('@', "") == "extensions.$ownDomain"
-}
+fun declaredBotJidsOf(roomBots: List<WaddleRoomBot>, hatLearned: Set<String>): Set<String> =
+    (roomBots.map { it.jid } + hatLearned).mapTo(HashSet(), ::normalizedBareJid)
 
 /**
  * Web `descriptiveBadge`: highest-ranked hat, first-wins on ties
@@ -72,7 +69,7 @@ fun descriptiveBadge(hats: List<WaddlePresenceHat>): AuthorBadge? {
     var best: AuthorBadge? = null
     for (hat in hats) {
         val candidate = when (hat.uri) {
-            HAT_URI_BOT -> AuthorBadge(AuthorBadgeKind.BOT, "BOT", RANK_HAT)
+            HAT_URI_BOT -> BOT_BADGE
             HAT_URI_VERIFIED -> AuthorBadge(AuthorBadgeKind.VERIFIED, "VERIFIED", RANK_VERIFIED)
             else -> AuthorBadge(AuthorBadgeKind.HAT, hat.title, RANK_HAT)
         }
@@ -94,3 +91,20 @@ fun authorBadgeOf(presence: WaddlePresence?): AuthorBadge? {
         else -> fromAuthority ?: fromHats
     }
 }
+
+/**
+ * The badge beside a message author. A pinned [authorJid] the server
+ * declares a bot ([declaredBotJids]) is a BOT outright — [presenceOf]
+ * (the nick lookup, which a later occupant may have reused) is only
+ * consulted for everyone else, whose hats/authority apply as usual.
+ */
+fun messageAuthorBadgeOf(
+    authorJid: String?,
+    declaredBotJids: Set<String>,
+    presenceOf: () -> WaddlePresence?,
+): AuthorBadge? =
+    if (authorJid != null && normalizedBareJid(authorJid) in declaredBotJids) {
+        BOT_BADGE
+    } else {
+        authorBadgeOf(presenceOf())
+    }

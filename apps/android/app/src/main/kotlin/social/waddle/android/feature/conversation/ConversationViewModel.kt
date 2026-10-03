@@ -70,6 +70,11 @@ open class ConversationViewModel(
      * avatars. Timeline rows carry their own stamped author JID. Empty for DMs.
      */
     occupantJids: Flow<Map<String, String>> = flowOf(emptyMap()),
+    /**
+     * Bare JIDs the server declares as bots (room bot list + bot hat),
+     * for the BOT badge on message rows. Empty for DMs.
+     */
+    botJids: Flow<Set<String>> = flowOf(emptySet()),
     /** XEP-0492 effective mode (store fallback resolved to §3 default). */
     notifyMode: Flow<WaddleNotifyMode> = flowOf(WaddleNotifyMode.ALWAYS),
     /**
@@ -123,6 +128,10 @@ open class ConversationViewModel(
     /** Occupant presence by nick (hats + authority badges on rows). */
     val authorPresence: StateFlow<Map<String, WaddlePresence>> =
         occupantPresence.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /** Declared bots of this room (normalized bare JIDs); badges their rows. */
+    val declaredBotJids: StateFlow<Set<String>> =
+        botJids.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     /** Current room nick → real bare JID; names typists' avatars. */
     val authorJids: StateFlow<Map<String, String>> =

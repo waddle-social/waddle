@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.client.ffi.WaddleMucAffiliation
+import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomMemberEntry
 
 class RoomMembersStoreTest {
@@ -48,6 +49,21 @@ class RoomMembersStoreTest {
         val state = store.rooms.value.getValue(room)
         assertEquals(MemberListStatus.LOADING, state.status)
         assertEquals(1, state.members.size)
+    }
+
+    @Test
+    fun `bots and members refresh independently`() {
+        store.applyBots(room, listOf(WaddleRoomBot(jid = "alpha@extensions.waddle.test", name = "Alpha")))
+        store.applyLoaded(room, listOf(entry("alice@waddle.test", WaddleMucAffiliation.OWNER)))
+        store.applyUnavailable(room)
+
+        val state = store.rooms.value.getValue(room)
+        assertEquals(listOf("alpha@extensions.waddle.test"), state.bots.map { it.jid })
+        assertEquals(listOf("alice@waddle.test"), state.members.map { it.jid })
+
+        store.applyBots(room, emptyList())
+        assertEquals(1, store.rooms.value.getValue(room).members.size)
+        assertTrue(store.rooms.value.getValue(room).bots.isEmpty())
     }
 
     @Test

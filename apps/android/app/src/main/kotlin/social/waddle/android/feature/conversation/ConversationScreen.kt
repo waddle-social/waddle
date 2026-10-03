@@ -109,6 +109,7 @@ fun ConversationScreen(
         ActivityResultContracts.GetContent(),
     ) { uri -> uri?.let(viewModel::sendAttachment) }
     val authorPresence by viewModel.authorPresence.collectAsStateWithLifecycle()
+    val declaredBotJids by viewModel.declaredBotJids.collectAsStateWithLifecycle()
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var moderateTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
@@ -258,6 +259,7 @@ fun ConversationScreen(
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
                 selfBareJid = selfBareJid,
                 authorPresence = authorPresence,
+                declaredBotJids = declaredBotJids,
                 trustedMediaOrigin = trustedMediaOrigin,
             )
             TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)

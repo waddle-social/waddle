@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -15,6 +16,8 @@ import social.waddle.android.client.store.MemberListStatus
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleException
 import social.waddle.client.ffi.WaddleMucAffiliation
+import social.waddle.client.ffi.WaddlePresenceHat
+import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomMemberEntry
 
 /**
@@ -95,6 +98,75 @@ class XmppSessionManagerRoomAdminTest {
         assertEquals(
             MemberListStatus.UNAVAILABLE,
             harness.manager.roomMembersStore.rooms.value.getValue(room).status,
+        )
+    }
+
+    @Test
+    fun `refreshRoomMembers loads the declared bots alongside the members`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomBots = mapOf(
+            room to listOf(WaddleRoomBot(jid = "alpha@extensions.waddle.test", name = "Alpha")),
+        )
+
+        harness.manager.refreshRoomMembers(room)
+        runCurrent()
+
+        assertEquals(listOf(room), harness.client.listRoomBotsCalls.toList())
+        assertEquals(
+            listOf("alpha@extensions.waddle.test"),
+            harness.manager.roomMembersStore.rooms.value.getValue(room).bots.map { it.jid },
+        )
+    }
+
+    @Test
+    fun `a failed bot query keeps the last bots and never degrades the member list`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomBots = mapOf(
+            room to listOf(WaddleRoomBot(jid = "alpha@extensions.waddle.test", name = null)),
+        )
+        harness.manager.refreshRoomBots(room)
+        runCurrent()
+        harness.client.roomBotsFailure = WaddleException.Stanza("service-unavailable", null)
+
+        harness.manager.refreshRoomMembers(room)
+        runCurrent()
+
+        val state = harness.manager.roomMembersStore.rooms.value.getValue(room)
+        assertEquals(MemberListStatus.LOADED, state.status)
+        assertEquals(listOf("alpha@extensions.waddle.test"), state.bots.map { it.jid })
+    }
+
+    @Test
+    fun `declaredBotJids joins the room bot list with bot-hat jids learned from presence`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomBots = mapOf(
+            room to listOf(WaddleRoomBot(jid = "alpha@extensions.waddle.test", name = "Alpha")),
+        )
+        harness.manager.refreshRoomBots(room)
+        runCurrent()
+        harness.factory.emit(
+            WaddleClientEvent.Presence(
+                testPresence(
+                    from = "$room/zeta",
+                    mucAffiliation = WaddleMucAffiliation.NONE,
+                    mucJid = "Zeta@extensions.waddle.test/bot",
+                    hats = listOf(WaddlePresenceHat(uri = HAT_URI_BOT, title = "Bot")),
+                ),
+            ),
+        )
+        runCurrent()
+
+        assertEquals(
+            setOf("alpha@extensions.waddle.test", "zeta@extensions.waddle.test"),
+            harness.manager.declaredBotJids(room).first(),
+        )
+        // Another room's list does not leak in; hat-learned JIDs are session-wide.
+        assertEquals(
+            setOf("zeta@extensions.waddle.test"),
+            harness.manager.declaredBotJids("other@muc.waddle.test").first(),
         )
     }
 

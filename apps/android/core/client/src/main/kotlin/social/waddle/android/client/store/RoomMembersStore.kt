@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomMemberEntry
 
 /** Load state of a room's XEP-0045 §9.5 member list. */
@@ -26,6 +27,12 @@ enum class MemberListStatus {
 data class RoomMembersState(
     val status: MemberListStatus = MemberListStatus.LOADING,
     val members: List<WaddleRoomMemberEntry> = emptyList(),
+    /**
+     * Extension bots the server declares for the room (XEP-0030
+     * `urn:waddle:room:bots:0`). They hold no affiliation, so they are
+     * never in [members].
+     */
+    val bots: List<WaddleRoomBot> = emptyList(),
 )
 
 /**
@@ -50,7 +57,16 @@ class RoomMembersStore {
 
     fun applyLoaded(roomJid: String, members: List<WaddleRoomMemberEntry>) {
         _rooms.update { rooms ->
-            rooms + (roomJid to RoomMembersState(MemberListStatus.LOADED, members))
+            val previous = rooms[roomJid] ?: RoomMembersState()
+            rooms + (roomJid to previous.copy(status = MemberListStatus.LOADED, members = members))
+        }
+    }
+
+    /** Replace the room's declared bots; the member list state is untouched. */
+    fun applyBots(roomJid: String, bots: List<WaddleRoomBot>) {
+        _rooms.update { rooms ->
+            val previous = rooms[roomJid] ?: RoomMembersState()
+            rooms + (roomJid to previous.copy(bots = bots))
         }
     }
 

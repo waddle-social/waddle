@@ -545,7 +545,17 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
     @Volatile
     var roomBots: Map<String, List<WaddleRoomBot>> = emptyMap()
 
-    override suspend fun listRoomBots(roomJid: String): List<WaddleRoomBot> = roomBots[roomJid] ?: emptyList()
+    @Volatile
+    var roomBotsFailure: Throwable? = null
+
+    /** Recorded room JIDs of [listRoomBots] queries. */
+    val listRoomBotsCalls = CopyOnWriteArrayList<String>()
+
+    override suspend fun listRoomBots(roomJid: String): List<WaddleRoomBot> {
+        listRoomBotsCalls += roomJid
+        roomBotsFailure?.let { throw it }
+        return roomBots[roomJid] ?: emptyList()
+    }
 
     /** Recorded (roomJid, targetJid, affiliation, reason) affiliation sets. */
     val setAffiliationCalls = CopyOnWriteArrayList<List<Any?>>()

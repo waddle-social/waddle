@@ -6,10 +6,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -382,6 +385,18 @@ class XmppSessionManager(
 
     /** Refresh a room's §9.5 member list into [roomMembersStore]. */
     suspend fun refreshRoomMembers(roomJid: String) = roomAdmin.refreshRoomMembers(roomJid)
+
+    /** Refresh only a room's declared bots (see [declaredBotJids]). */
+    suspend fun refreshRoomBots(roomJid: String) = roomAdmin.refreshRoomBots(roomJid)
+
+    /**
+     * Bare JIDs (normalized) the server declares as bots in [roomJid]:
+     * its bot list plus bot-hat JIDs learned this session.
+     */
+    fun declaredBotJids(roomJid: String): Flow<Set<String>> =
+        combine(roomMembersStore.rooms, presenceStore.botJids) { rooms, hatLearned ->
+            declaredBotJidsOf(rooms[roomJid]?.bots.orEmpty(), hatLearned)
+        }.distinctUntilChanged()
 
     /** XEP-0045 §5.2 affiliation change (ban = outcast, remove = none). */
     suspend fun setRoomAffiliation(
