@@ -41,7 +41,13 @@ pub(super) async fn handle_account_disco_info<'a>(
         ));
     };
 
-    match local_xmpp_account_exists(state, localpart.as_str(), req.domain).await {
+    match crate::auth::local_account_exists(
+        state.deps.app_state.db_pool.global_actor(),
+        localpart.as_str(),
+        req.domain,
+    )
+    .await
+    {
         Ok(true) => {
             let identities = vec![build_pep_identity()];
             let mut features = vec![Feature::disco_info()];
@@ -70,33 +76,4 @@ pub(super) async fn handle_account_disco_info<'a>(
             ))
         }
     }
-}
-
-async fn local_xmpp_account_exists(
-    state: &WebSocketState,
-    localpart: &str,
-    domain: &str,
-) -> Result<bool, String> {
-    let row = state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .ask(DbQueryOne {
-            sql: r#"
-                SELECT 1
-                WHERE EXISTS (
-                    SELECT 1 FROM native_users WHERE username = ? AND domain = ?
-                )
-                OR EXISTS (
-                    SELECT 1 FROM users WHERE xmpp_localpart = ?
-                )
-            "#
-            .to_string(),
-            params: vec![localpart.into(), domain.into(), localpart.into()],
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-
-    Ok(row.is_some())
 }
