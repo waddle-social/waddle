@@ -1,7 +1,9 @@
 package social.waddle.android.client
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleMucRole
@@ -61,6 +63,21 @@ class AuthorBadgesTest {
         val badge = authorBadgeOf(presence)
         assertEquals("BOT", badge?.label)
         assertEquals(AuthorBadgeKind.BOT, badge?.kind)
+    }
+
+    @Test
+    fun `bot hat is detected by uri among other hats`() {
+        assertTrue(
+            hasBotHat(
+                listOf(
+                    WaddlePresenceHat(uri = HAT_URI_VERIFIED, title = "Verified"),
+                    WaddlePresenceHat(uri = HAT_URI_BOT, title = "Helper"),
+                ),
+            ),
+        )
+        // A look-alike title is not the hat.
+        assertFalse(hasBotHat(listOf(WaddlePresenceHat(uri = "urn:example:bot", title = "Bot"))))
+        assertFalse(hasBotHat(emptyList()))
     }
 
     @Test

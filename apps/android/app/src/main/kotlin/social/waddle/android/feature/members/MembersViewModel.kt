@@ -18,6 +18,7 @@ import social.waddle.android.AppGraph
 import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.canManageMembersOf
+import social.waddle.android.client.hasBotHat
 import social.waddle.android.client.store.MemberListStatus
 import social.waddle.android.client.store.RoomMembersState
 import social.waddle.android.jid.bareJidOf
@@ -36,11 +37,14 @@ data class MemberRow(
     val affiliation: WaddleMucAffiliation,
     /** Occupant nick while present (the §8.2 kick address). */
     val nick: String?,
+    /** Never true for bots: their lazy room presence is meaningless. */
     val presentNow: Boolean,
     /** XEP-0317 hat titles from the occupant presence. */
     val hats: List<String>,
     /** Presence-only row: shown, never editable (web parity). */
     val inferred: Boolean,
+    /** Server-hatted extension bot (`urn:waddle:hats:bot`): own section. */
+    val isBot: Boolean = false,
 )
 
 data class MembersUiState(
@@ -75,13 +79,14 @@ class MembersViewModel(
     val uiState: StateFlow<MembersUiState> = combine(
         sessionManager.roomMembersStore.rooms,
         sessionManager.presenceStore.occupants,
+        sessionManager.presenceStore.botJids,
         search,
-    ) { rooms, occupants, searchState ->
+    ) { rooms, occupants, botJids, searchState ->
         val members = rooms[roomJid] ?: RoomMembersState()
         val roomOccupants = occupants[roomJid].orEmpty()
         MembersUiState(
             status = members.status,
-            rows = memberRowsOf(members, roomOccupants),
+            rows = memberRowsOf(members, roomOccupants, botJids),
             canManage = canManageMembersOf(roomOccupants),
             searchQuery = searchState.query,
             searchResults = searchState.results,
@@ -188,11 +193,14 @@ private fun tierOrderOf(affiliation: WaddleMucAffiliation): Int = when (affiliat
  * Merge the authoritative member list with live occupants: list rows
  * gain "present now" + nick + hats when an occupant's real JID
  * matches; occupants missing from the list append as read-only
- * inferred rows (web `mergeMentionMembers` behavior).
+ * inferred rows (web `mergeMentionMembers` behavior). Bots
+ * ([botJids] or a bot hat on the occupant) sort after everyone else
+ * and never read as present.
  */
 internal fun memberRowsOf(
     members: RoomMembersState,
     occupants: Map<String, WaddlePresence>,
+    botJids: Set<String> = emptySet(),
 ): List<MemberRow> {
     val occupantsByBareJid = occupants.entries
         .mapNotNull { (nick, presence) ->
@@ -202,14 +210,16 @@ internal fun memberRowsOf(
     val listedJids = members.members.map { it.jid }.toSet()
     val listed = members.members.map { entry ->
         val occupant = occupantsByBareJid[entry.jid]
+        val isBot = entry.jid in botJids || occupant?.second?.hats?.let(::hasBotHat) == true
         MemberRow(
             jid = entry.jid,
             displayName = entry.nick ?: localpartOf(entry.jid),
             affiliation = entry.affiliation,
             nick = occupant?.first,
-            presentNow = occupant != null,
+            presentNow = occupant != null && !isBot,
             hats = occupant?.second?.hats?.map { it.title }.orEmpty(),
             inferred = false,
+            isBot = isBot,
         )
     }
     val inferred = occupants.entries
@@ -218,17 +228,20 @@ internal fun memberRowsOf(
             bare == null || bare !in listedJids
         }
         .map { (nick, presence) ->
+            val jid = presence.mucJid?.let(::bareJidOf)
+            val isBot = jid in botJids || hasBotHat(presence.hats)
             MemberRow(
-                jid = presence.mucJid?.let(::bareJidOf),
+                jid = jid,
                 displayName = nick,
                 affiliation = presence.mucAffiliation ?: WaddleMucAffiliation.NONE,
                 nick = nick,
-                presentNow = true,
+                presentNow = !isBot,
                 hats = presence.hats.map { it.title },
                 inferred = true,
+                isBot = isBot,
             )
         }
     return (listed + inferred).sortedWith(
-        compareBy({ tierOrderOf(it.affiliation) }, { it.displayName.lowercase() }),
+        compareBy({ it.isBot }, { tierOrderOf(it.affiliation) }, { it.displayName.lowercase() }),
     )
 }

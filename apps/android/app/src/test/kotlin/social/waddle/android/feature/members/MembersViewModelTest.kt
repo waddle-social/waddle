@@ -17,6 +17,7 @@ import org.junit.Before
 import org.junit.Test
 import social.waddle.android.client.FakeClientFactory
 import social.waddle.android.client.FakeNetworkSignal
+import social.waddle.android.client.HAT_URI_BOT
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
@@ -144,6 +145,70 @@ class MembersViewModelTest {
         val drifter = viewModel.uiState.value.rows.single { it.displayName == "drifter" }
         assertTrue(drifter.inferred)
         assertTrue(drifter.presentNow)
+    }
+
+    private fun botPresence(nick: String, jid: String, type: String = "available") = WaddleClientEvent.Presence(
+        testPresence(
+            from = "$ROOM/$nick",
+            presenceType = type,
+            mucAffiliation = WaddleMucAffiliation.MEMBER,
+            mucJid = "$jid/bot",
+            hats = listOf(WaddlePresenceHat(uri = HAT_URI_BOT, title = "Bot")),
+        ),
+    )
+
+    @Test
+    fun `bots sort into their own trailing section and never read as present`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomMembersByTier = mapOf(
+            WaddleMucAffiliation.MEMBER to listOf(
+                entry("alpha@extensions.waddle.test", WaddleMucAffiliation.MEMBER),
+                entry("bob@waddle.test", WaddleMucAffiliation.MEMBER),
+            ),
+            WaddleMucAffiliation.OWNER to listOf(entry("icepuma@waddle.test", WaddleMucAffiliation.OWNER)),
+        )
+        seedSelfAsOwner(harness)
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        // Presence-only bot (not in the §9.5 list) is a bot row too.
+        harness.factory.emit(botPresence("zeta", "zeta@extensions.waddle.test"))
+        runCurrent()
+
+        val viewModel = harness.viewModel()
+        runCurrent()
+
+        val rows = viewModel.uiState.value.rows
+        // alpha sorts before bob by name, yet bots trail every person.
+        assertEquals(
+            listOf(
+                "icepuma@waddle.test",
+                "bob@waddle.test",
+                "alpha@extensions.waddle.test",
+                "zeta@extensions.waddle.test",
+            ),
+            rows.map { it.jid },
+        )
+        assertEquals(listOf(false, false, true, true), rows.map { it.isBot })
+        assertTrue(rows.filter { it.isBot }.none { it.presentNow })
+    }
+
+    @Test
+    fun `a bot stays in the bots section after its room presence goes away`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomMembersByTier = mapOf(
+            WaddleMucAffiliation.MEMBER to listOf(entry("alpha@extensions.waddle.test", WaddleMucAffiliation.MEMBER)),
+        )
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test"))
+        harness.factory.emit(botPresence("alpha", "alpha@extensions.waddle.test", type = "unavailable"))
+        runCurrent()
+
+        val viewModel = harness.viewModel()
+        runCurrent()
+
+        val alpha = viewModel.uiState.value.rows.single()
+        assertTrue(alpha.isBot)
+        assertFalse(alpha.presentNow)
     }
 
     @Test
