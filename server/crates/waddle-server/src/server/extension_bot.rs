@@ -1,9 +1,10 @@
 //! Extension bots: automated XMPP entities at `<plugin>@<extensions domain>/bot`.
 //!
 //! A bot has no account; the server speaks for it. It is identified the
-//! way XMPP intends: XEP-0030 identity `client/bot` for the entity,
-//! the server-assigned XEP-0317 Bot hat in rooms, and XEP-0045
-//! affiliation/role for authority only.
+//! way XMPP intends: XEP-0030 identity `client/bot` for the entity and
+//! the server-assigned XEP-0317 Bot hat in rooms. It holds a room
+//! occupancy only for one send, without an affiliation; the rooms it
+//! posted in are listed on the room's `urn:waddle:room:bots:0` node.
 
 use std::sync::Arc;
 

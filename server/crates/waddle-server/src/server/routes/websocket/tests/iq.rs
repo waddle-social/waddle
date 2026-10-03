@@ -1346,7 +1346,8 @@ async fn pep_item_for_test(
 
 /// XEP-0054, XEP-0292 and XEP-0084 for an extension bot, which has no account:
 /// the server answers from its manifest. vcard-temp carries FN (and DESC),
-/// the vCard4 PEP node one `current` item with fn (and note), the avatar
+/// the vCard4 PEP node one `current` item with fn (and note) and the
+/// `application` kind XEP-0292 §6 recommends for automated entities, the avatar
 /// metadata node one item with publishing disabled. Other PEP nodes and
 /// unknown bots do not exist.
 #[tokio::test]
@@ -1400,6 +1401,10 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
     let parsed = waddle_xmpp::xep::xep0292::parse_vcard4(&vcard4);
     assert_eq!(parsed.full_name.as_deref(), Some(installed.name.as_str()));
     assert_eq!(parsed.note, installed.description);
+    assert_eq!(
+        parsed.kind.as_deref(),
+        Some(waddle_xmpp::xep::xep0292::KIND_APPLICATION)
+    );
 
     let metadata = pep_item_for_test(
         &state,

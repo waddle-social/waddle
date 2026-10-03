@@ -36,6 +36,9 @@ pub const NS_VCARD4: &str = "urn:ietf:params:xml:ns:vcard-4.0";
 /// PEP node for vCard4 publication.
 pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
 
+/// KIND value XEP-0292 §6 recommends for automated entities (RFC 6473).
+pub const KIND_APPLICATION: &str = "application";
+
 /// Errors that can occur when parsing vCard4.
 #[derive(Debug, Error)]
 pub enum VCard4Error {
@@ -71,6 +74,9 @@ pub struct VCard4 {
     /// value in a `<text>` grandchild like other text properties
     /// (e.g. `<pronouns><text>they/them</text></pronouns>`).
     pub pronouns: Option<String>,
+    /// Entity kind (RFC 6350 §6.1.4 KIND). XEP-0292 §6 recommends
+    /// `application` for automated entities.
+    pub kind: Option<String>,
 }
 
 impl VCard4 {
@@ -133,6 +139,12 @@ impl VCard4 {
         self
     }
 
+    /// Set the entity kind.
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
+        self
+    }
+
     /// Returns the best display name (full_name > nickname > None).
     pub fn display_name(&self) -> Option<&str> {
         self.full_name.as_deref().or(self.nickname.as_deref())
@@ -150,6 +162,7 @@ impl VCard4 {
             && self.url.is_none()
             && self.photo_uri.is_none()
             && self.pronouns.is_none()
+            && self.kind.is_none()
     }
 }
 
@@ -194,6 +207,7 @@ pub fn parse_vcard4(elem: &Element) -> VCard4 {
         url: uri_prop("url"),
         photo_uri: uri_prop("photo"),
         pronouns: text_prop("pronouns"),
+        kind: text_prop("kind"),
     }
 }
 
@@ -248,6 +262,9 @@ pub fn build_vcard4_element(vcard: &VCard4) -> Element {
     }
     if let Some(ref v) = vcard.pronouns {
         append_text_prop(&mut elem, "pronouns", v);
+    }
+    if let Some(ref v) = vcard.kind {
+        append_text_prop(&mut elem, "kind", v);
     }
 
     elem
@@ -345,6 +362,21 @@ mod tests {
             Some("https://example.com/juliet.jpg")
         );
         assert_eq!(parsed.pronouns.as_deref(), Some("she/her"));
+    }
+
+    /// XEP-0292 §6: an automated entity's vCard names its KIND.
+    #[test]
+    fn test_kind_round_trips_for_automated_entities() {
+        let vcard = VCard4::new()
+            .with_full_name("Polls")
+            .with_kind(KIND_APPLICATION);
+        let elem = build_vcard4_element(&vcard);
+        let kind = elem.get_child("kind", NS_VCARD4).expect("kind property");
+        assert_eq!(
+            kind.get_child("text", NS_VCARD4).map(|text| text.text()),
+            Some(KIND_APPLICATION.to_owned())
+        );
+        assert_eq!(parse_vcard4(&elem), vcard);
     }
 
     #[test]

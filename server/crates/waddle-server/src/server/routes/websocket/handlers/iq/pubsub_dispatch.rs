@@ -522,16 +522,14 @@ pub(super) async fn handle_pubsub_iq(
     Vec::new()
 }
 
-/// Detect XEP-0084 §4.3's empty-`<metadata/>` "I have no avatar"
-/// publish: the metadata node, payload is a `<metadata>` element with
-/// no children. Used to flip `avatar_source='oidc'` so a user who
-/// retracts their own picture re-opts into OIDC management.
-/// XEP-0292 §3 and XEP-0084 §4.5 keep the single item at this id.
+/// The single item a bot's server-answered PEP node holds, as on the
+/// single-item vCard4 node every account has.
 const EXTENSION_BOT_PEP_ITEM_ID: &str = "current";
 
 /// The PEP payload the server publishes for an installed extension bot: a
-/// XEP-0292 vCard4 with its name and description, and XEP-0084 metadata with
-/// avatar publishing disabled. `None` for anything else.
+/// XEP-0292 vCard4 with its name, description and `application` kind (§6),
+/// and XEP-0084 metadata with avatar publishing disabled (§3.5). `None` for
+/// anything else.
 fn extension_bot_pep_item(state: &WebSocketState, target: &Jid, node: &str) -> Option<Element> {
     if node != waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4
         && node != waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA
@@ -548,13 +546,19 @@ fn extension_bot_pep_item(state: &WebSocketState, target: &Jid, node: &str) -> O
             Element::builder("metadata", waddle_xmpp::xep::xep0084::NS_AVATAR_METADATA).build(),
         );
     }
-    let mut vcard = waddle_xmpp::xep::xep0292::VCard4::new().with_full_name(bot.name);
+    let mut vcard = waddle_xmpp::xep::xep0292::VCard4::new()
+        .with_full_name(bot.name)
+        .with_kind(waddle_xmpp::xep::xep0292::KIND_APPLICATION);
     if let Some(description) = bot.description {
         vcard = vcard.with_note(description);
     }
     Some(waddle_xmpp::xep::xep0292::build_vcard4_element(&vcard))
 }
 
+/// Detect XEP-0084 §4.3's empty-`<metadata/>` "I have no avatar"
+/// publish: the metadata node, payload is a `<metadata>` element with
+/// no children. Used to flip `avatar_source='oidc'` so a user who
+/// retracts their own picture re-opts into OIDC management.
 fn is_user_avatar_retract(node: &str, item: &waddle_xmpp::pubsub::PubSubItem) -> bool {
     if node != waddle_xmpp::xep::xep0084::NODE_AVATAR_METADATA {
         return false;
