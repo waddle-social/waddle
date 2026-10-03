@@ -173,11 +173,12 @@ async fn route_bare_jid_message_to_existing_oidc_user_persists_offline() {
         .global_actor()
         .ask(DbExecute {
             sql: "INSERT INTO users \
-                  (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                  (jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at) \
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 .to_string(),
             params: vec![
                 "bob@example.com".into(),
+                "bob".into(),
                 "bob".into(),
                 "bob".into(),
                 "Bob".into(),

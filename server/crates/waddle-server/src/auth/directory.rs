@@ -148,26 +148,32 @@ fn text(row: &[crate::db::Value], index: usize) -> Result<String, AuthError> {
 /// account through either the OIDC `users` table or the native `native_users`
 /// table.
 ///
-/// `users` rows carry no `domain` column — OIDC accounts are always local to
-/// the server's own domain — so they are matched on `xmpp_localpart` alone.
-/// Native accounts are matched on `(username, domain)`. Callers are expected
-/// to have already constrained `domain` to the local server domain (group-DM
-/// validation, for example, rejects non-local members before reaching here).
+/// Both sides compare the JID library's canonical keys exactly, so a name
+/// matches whatever case or Unicode form it was registered with. `users` rows
+/// carry no `domain` column — OIDC accounts are always local to the server's
+/// own domain — so they are matched on the localpart alone; native accounts
+/// on their bare JID. Callers are expected to have already constrained
+/// `domain` to the local server domain (group-DM validation, for example,
+/// rejects non-local members before reaching here).
 pub async fn local_account_exists(
     actor: &ActorRef<DbActor>,
     localpart: &str,
     domain: &str,
 ) -> Result<bool, AuthError> {
+    let (Some(localpart), Some(jid)) = (
+        canonical_localpart(localpart),
+        canonical_account_jid(localpart, domain),
+    ) else {
+        return Ok(false);
+    };
     let row = actor
         .ask(DbQueryOne {
-            // JID localparts and domains compare case-insensitively; native
-            // usernames keep the case they were registered with.
-            sql: "SELECT 1 FROM users WHERE lower(xmpp_localpart) = lower(?) \
+            sql: "SELECT 1 FROM users WHERE localpart_key = ? \
                   UNION ALL \
-                  SELECT 1 FROM native_users WHERE lower(username) = lower(?) AND lower(domain) = lower(?) \
+                  SELECT 1 FROM native_users WHERE jid_key = ? \
                   LIMIT 1"
                 .to_string(),
-            params: vec![localpart.into(), localpart.into(), domain.into()],
+            params: vec![localpart.as_str().into(), jid.as_str().into()],
         })
         .await
         .map_err(|error| AuthError::DatabaseError(error.to_string()))?;

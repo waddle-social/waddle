@@ -200,13 +200,13 @@ pub(crate) async fn seed_local_account(state: &WebSocketState, localpart: &str) 
     let sql = match state.deps.app_state.db_pool.global().driver() {
         crate::db::DatabaseDriver::Sqlite => {
             "INSERT OR IGNORE INTO users \
-             (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+             (jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         }
         crate::db::DatabaseDriver::Postgres => {
             "INSERT INTO users \
-             (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
+             (jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
         }
     };
     state
@@ -218,6 +218,7 @@ pub(crate) async fn seed_local_account(state: &WebSocketState, localpart: &str) 
             sql: sql.to_string(),
             params: vec![
                 format!("{localpart}@example.com").into(),
+                localpart.into(),
                 localpart.into(),
                 localpart.into(),
                 "Test User".into(),

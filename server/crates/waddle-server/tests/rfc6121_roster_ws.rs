@@ -685,6 +685,70 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
     let _ = alice.close().await;
 }
 
+/// An account registered as `Äda` is `äda@localhost` (RFC 6122 nodeprep folds
+/// non-ASCII case, which SQL `lower()` does not): adding and subscribing to
+/// that JID reach the account instead of being refused as a non-account.
+#[tokio::test]
+async fn contacts_match_accounts_on_their_canonical_localpart() {
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let ada_password = format!("ada-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("Äda", &ada_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice connection");
+    let mut ada = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "Äda",
+        &ada_password,
+        &format!("ada-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("Äda connection");
+    let _initial = send_roster_get(&mut alice, "canonical-initial").await;
+    let _ada_initial = send_roster_get(&mut ada, "canonical-ada-initial").await;
+    ada.send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("Äda available");
+
+    alice
+        .send(r#"<iq xmlns="jabber:client" type="set" id="add-ada"><query xmlns="jabber:iq:roster"><item jid="äda@localhost"/></query></iq>"#)
+        .await
+        .expect("send roster add");
+    let added = alice
+        .recv_matching(|frame| frame.contains("add-ada"))
+        .await
+        .expect("roster add reply");
+    assert!(added.contains("type='result'"), "{added}");
+
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribe" to="äda@localhost"/>"#)
+        .await
+        .expect("send subscribe");
+    let pending = alice
+        .recv_matching(|frame| frame.contains("ask='subscribe'"))
+        .await
+        .expect("pending subscribe push");
+    assert!(pending.contains("jid='äda@localhost'"), "{pending}");
+    let request = ada
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("Äda receives the subscription request");
+    assert!(request.contains("from='alice@localhost'"), "{request}");
+
+    let _ = ada.close().await;
+    let _ = alice.close().await;
+}
+
 /// A roster contact is an existing local account. A subscribe to a name
 /// nobody registered is declined from that JID (RFC 6121 §8.5.1), a roster
 /// add of a non-account is refused, and neither writes or pushes an item.

@@ -60,8 +60,8 @@ async fn make_requester_native(f: &IngressFixture) {
     f.execute("DELETE FROM users WHERE jid = 'romeo@example.com'", ())
         .await;
     f.execute(
-        "INSERT INTO native_users (username, domain, password_hash, salt, stored_key, server_key) VALUES (?, ?, ?, ?, ?, ?)",
-        crate::db_params!["romeo", "example.com", "unused", "unused", vec![0_u8; 32], vec![0_u8; 32]],
+        "INSERT INTO native_users (username, domain, jid_key, password_hash, salt, stored_key, server_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        crate::db_params!["romeo", "example.com", "romeo@example.com", "unused", "unused", vec![0_u8; 32], vec![0_u8; 32]],
     ).await;
     assert_eq!(f.count("users WHERE jid = 'romeo@example.com'").await, 0);
 }

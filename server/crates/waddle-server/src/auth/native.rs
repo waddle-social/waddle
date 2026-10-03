@@ -144,13 +144,17 @@ impl NativeUserStore {
         Ok(user_id)
     }
 
-    /// Check if a username exists in the given domain.
+    /// Check if an account holds the JID `username@domain`, in whatever case
+    /// or Unicode form it was registered.
     pub async fn user_exists(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(false);
+        };
         let row = self
             .actor
             .ask(DbQueryOne {
-                sql: "SELECT 1 FROM native_users WHERE username = ? AND domain = ?".to_string(),
-                params: vec![username.into(), domain.into()],
+                sql: "SELECT 1 FROM native_users WHERE jid_key = ?".to_string(),
+                params: vec![jid.as_str().into()],
             })
             .await
             .map_err(db_err)?;
@@ -164,16 +168,19 @@ impl NativeUserStore {
         username: &str,
         domain: &str,
     ) -> Result<Option<ScramCredentials>, AuthError> {
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(None);
+        };
         let row = self
             .actor
             .ask(DbQueryOne {
                 sql: r#"
                     SELECT salt, iterations, stored_key, server_key
                     FROM native_users
-                    WHERE username = ? AND domain = ?
+                    WHERE jid_key = ?
                 "#
                 .to_string(),
-                params: vec![username.into(), domain.into()],
+                params: vec![jid.as_str().into()],
             })
             .await
             .map_err(db_err)?;
@@ -231,12 +238,14 @@ impl NativeUserStore {
     ) -> Result<bool, AuthError> {
         use argon2::password_hash::PasswordVerifier;
 
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(false);
+        };
         let row = self
             .actor
             .ask(DbQueryOne {
-                sql: "SELECT password_hash FROM native_users WHERE username = ? AND domain = ?"
-                    .to_string(),
-                params: vec![username.into(), domain.into()],
+                sql: "SELECT password_hash FROM native_users WHERE jid_key = ?".to_string(),
+                params: vec![jid.as_str().into()],
             })
             .await
             .map_err(db_err)?;
@@ -289,7 +298,7 @@ impl NativeUserStore {
                 sql: r#"
                     UPDATE native_users
                     SET password_hash = ?, salt = ?, stored_key = ?, server_key = ?, updated_at = datetime('now')
-                    WHERE username = ? AND domain = ?
+                    WHERE jid_key = ?
                 "#
                 .to_string(),
                 params: vec![
@@ -297,8 +306,10 @@ impl NativeUserStore {
                     scram_salt_b64.into(),
                     stored_key.into(),
                     server_key.into(),
-                    username.into(),
-                    domain.into(),
+                    canonical_account_jid(username, domain)
+                        .as_ref()
+                        .map(|jid| jid.as_str())
+                        .into(),
                 ],
             })
             .await
@@ -314,11 +325,14 @@ impl NativeUserStore {
 
     /// Delete a native user.
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
+        let Some(jid) = canonical_account_jid(username, domain) else {
+            return Ok(false);
+        };
         let affected = self
             .actor
             .ask(DbExecute {
-                sql: "DELETE FROM native_users WHERE username = ? AND domain = ?".to_string(),
-                params: vec![username.into(), domain.into()],
+                sql: "DELETE FROM native_users WHERE jid_key = ?".to_string(),
+                params: vec![jid.as_str().into()],
             })
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to delete user: {}", e)))?;
