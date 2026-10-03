@@ -171,17 +171,13 @@ impl GroupchatFixture {
     /// Wait until the last send's bot has left: the leave holds the
     /// bot/room lock until it is done.
     pub async fn settle(&self) {
-        let _done = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.adapter
-                .state
-                .deps
-                .protocol
-                .extension_bot_rooms
-                .lock(&direct_ingress::plugin(), &self.room),
-        )
-        .await
-        .expect("the bot's leave finishes");
+        self.adapter
+            .state
+            .deps
+            .protocol
+            .extension_bot_rooms
+            .settled(&direct_ingress::plugin(), &self.room)
+            .await;
     }
 
     pub fn drain(&mut self) -> Vec<Stanza> {
@@ -454,5 +450,96 @@ async fn extension_groupchat_requester_sender_sqlite() {
 async fn extension_groupchat_requester_sender_postgres() {
     if let Some(f) = IngressFixture::postgres("groupchat_requester").await {
         requester_uses_plugin_sender(f).await;
+    }
+}
+
+/// A managed room nobody is in goes dormant and is evicted. A bot send loads
+/// it again from its channel, as a member join does, instead of reporting
+/// the room missing.
+async fn send_loads_an_evicted_room(f: IngressFixture) {
+    let adapter = direct_ingress::adapter(&f).await;
+    let room: BareJid = "extension-room@muc.example.com".parse().expect("room");
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        adapter.state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "extension-room".into(),
+            name: "Extension room".into(),
+            description: None,
+            channel_type: "text".into(),
+            position: 0,
+            is_default: false,
+            pin_permission: Default::default(),
+            members_only: false,
+            public_room: true,
+        },
+    )
+    .await
+    .expect("managed channel");
+    let mut tx = f.uow.begin().await.expect("grant transaction");
+    ExtensionGrantRepository::sync_configured(
+        &mut tx,
+        &[ConfiguredPluginGrants {
+            plugin: direct_ingress::plugin(),
+            can_send: true,
+            provider_rooms: vec![room.clone()],
+        }],
+    )
+    .await
+    .expect("provider room grant");
+    tx.commit().await.expect("grant commit");
+    let invocation = ExtensionInvocation {
+        session: None,
+        actor_jid: adapter
+            .plugin_actor_jid(&direct_ingress::plugin())
+            .expect("plugin actor"),
+        plugin_id: direct_ingress::plugin(),
+        source_room: Some(room.clone()),
+        kind: InvocationKind::ProviderWebhook,
+        provider_room_grants: vec![room.clone()],
+    };
+    for origin in ["before-eviction", "after-eviction"] {
+        adapter
+            .send_message(
+                &invocation,
+                HostSendMessage {
+                    target: HostMessageTarget::Room(room.clone()),
+                    ..direct_ingress::request(origin)
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{origin}: {error:?}"));
+        adapter
+            .state
+            .deps
+            .protocol
+            .extension_bot_rooms
+            .settled(&direct_ingress::plugin(), &room)
+            .await;
+        let counts =
+            crate::server::session_janitors::sweep_dormant_rooms_once(&adapter.state).await;
+        assert_eq!(counts.evicted, 1, "{origin}: the bot left the room dormant");
+    }
+    assert_eq!(f.count("ingress_messages").await, 2);
+    assert!(
+        adapter
+            .state
+            .deps
+            .protocol
+            .ingress
+            .drain_and_join(Duration::from_secs(10))
+            .await
+    );
+    drop(adapter);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_send_loads_an_evicted_room_sqlite() {
+    send_loads_an_evicted_room(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_groupchat_send_loads_an_evicted_room_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_evicted").await {
+        send_loads_an_evicted_room(f).await;
     }
 }

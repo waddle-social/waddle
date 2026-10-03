@@ -34,6 +34,14 @@ impl BotRoomLocks {
             .clone();
         lock.lock_owned().await
     }
+
+    /// Waits until the last send of `plugin` into `room` has left.
+    #[cfg(test)]
+    pub(super) async fn settled(&self, plugin: &waddle_extensions::PluginId, room: &BareJid) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.lock(plugin, room))
+            .await
+            .expect("the bot's leave finishes");
+    }
 }
 
 impl ExtensionHostAdapter {

@@ -375,10 +375,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
         .await
     {
         Ok(Some(actor)) => actor,
-        Ok(None) => {
-            warn!(room = %room_jid, "Extension bot groupchat room not registered; dropping");
-            return Err(ExtensionBotDispatchError::RoomNotRegistered);
-        }
+        Ok(None) => load_managed_room(state, &room_jid).await?,
         Err(error) => {
             warn!(
                 room = %room_jid,
@@ -592,6 +589,43 @@ pub(crate) async fn plan_extension_bot_groupchat(
         digest_input,
     )
     .await
+}
+
+/// A managed room with no live actor went dormant and was evicted: load it
+/// the way a member join does, from its channel and durable state. A room
+/// another node claimed meanwhile is that node's to post in.
+async fn load_managed_room(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room_jid: &BareJid,
+) -> Result<ActorRef<RoomActor>, ExtensionBotDispatchError> {
+    use crate::server::routes::websocket::handlers::presence::get_managed_channel_for_room;
+    use waddle_xmpp::muc::room_registry_actor::RoomRegistryError;
+    let channel = match get_managed_channel_for_room(state, room_jid).await {
+        Ok(Some(channel)) => channel,
+        Ok(None) => {
+            warn!(room = %room_jid, "Extension bot groupchat room is no channel; dropping");
+            return Err(ExtensionBotDispatchError::RoomNotRegistered);
+        }
+        Err(error) => {
+            warn!(room = %room_jid, %error, "Extension bot channel lookup failed; dropping");
+            return Err(ExtensionBotDispatchError::RoomLookupFailed);
+        }
+    };
+    match crate::server::routes::websocket::get_or_create_room_actor(
+        state,
+        room_jid,
+        channel.room_config(),
+        crate::server::routes::websocket::handlers::presence::parse_room_jid_context(room_jid).0,
+        channel.id,
+    )
+    .await
+    {
+        Ok(acquisition) => Ok(acquisition.actor_ref),
+        Err(RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
+            Err(PlanFailure::RoomOwnedRemotely.into())
+        }
+        Err(_) => Err(ExtensionBotDispatchError::RoomLookupFailed),
+    }
 }
 
 /// The longest planning waits for cross-node join presences. A healthy peer

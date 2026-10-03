@@ -39,7 +39,6 @@ mod probe;
 mod regular;
 mod subscription;
 
-#[cfg(test)]
 pub use muc::parse_room_jid_context;
 pub(crate) use muc::registered_remote_resource_write_accepted_delivery;
 pub(crate) use muc::RegisteredRemoteDelivery;

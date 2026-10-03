@@ -1242,20 +1242,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
 
                 let config = managed_channel
                     .as_ref()
-                    .map(|channel| RoomConfig {
-                        name: channel.name.clone(),
-                        description: channel.description.clone(),
-                        members_only: channel.members_only,
-                        public_room: channel.public_room,
-                        moderated: channel.channel_type == "announcement",
-                        forum: channel.channel_type == "forum",
-                        group_dm: channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
-                        // #422: load persisted pin policy so the actor's
-                        // snapshot matches the channel's last-saved value
-                        // even after eviction.
-                        pin_permission: channel.pin_permission,
-                        ..Default::default()
-                    })
+                    .map(XmppChannelRecord::room_config)
                     .unwrap_or_else(|| RoomConfig {
                         name: room_jid
                             .node()
