@@ -135,6 +135,7 @@ impl OrderedRelayDeliveryBridge {
         let result = self
             .send_prepared_to_owner(&prepared.previous_owner, prepared.envelope.clone())
             .await;
+        let (prepared, result) = self.resend_after_gap(prepared, result).await;
         if allow_target_refresh_retry
             && matches!(
                 &result,
@@ -164,7 +165,7 @@ impl OrderedRelayDeliveryBridge {
             }
         }
 
-        self.finish_prepared_delivery_result(prepared, result).await
+        self.finish_resolved_delivery_result(prepared, result).await
     }
 
     pub(in super::super) async fn send_prepared_to_owner(
@@ -177,7 +178,7 @@ impl OrderedRelayDeliveryBridge {
             crate::clustering::route_bridge::tests::diversion_recovery::TEST_ORDERED_RELAY
                 .try_with(Arc::clone)
         {
-            return relay.deliver(envelope).await;
+            return relay.deliver(owner, envelope).await;
         }
         #[cfg(test)]
         if let Ok(receiver) = super::muc::cleanup::TEST_CLEANUP_RELAY.try_with(Arc::clone) {
@@ -272,6 +273,16 @@ impl OrderedRelayDeliveryBridge {
         result: Result<OrderedRelayReply, RelayAskError>,
     ) -> Option<RemoteDeliveryOutcome> {
         let (prepared, result) = self.resend_after_gap(prepared, result).await;
+        self.finish_resolved_delivery_result(prepared, result).await
+    }
+
+    // The gap retry has already been considered for this owner. Keep final
+    // classification separate so owner refresh cannot trigger a second resend.
+    async fn finish_resolved_delivery_result(
+        self: Arc<Self>,
+        prepared: PreparedRemoteDelivery,
+        result: Result<OrderedRelayReply, RelayAskError>,
+    ) -> Option<RemoteDeliveryOutcome> {
         match result {
             Ok(OrderedRelayReply::Ack(ack)) => {
                 let (client_replies, frame_completion) = ack.into_frame_delivery(
