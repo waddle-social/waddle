@@ -9,8 +9,11 @@ use waddle_xmpp::{ingress::MessageKey, ownership::NodeIdentity};
 use super::{CanonicalMessageRepository, IngressUowError, IngressUowTransaction};
 use crate::{db::DatabaseDriver, ingress::decision::EffectReceiptKey};
 
+/// One resource within a recorded effect. The caller must authorize the resource
+/// against the frozen intent before claiming; the foreign key validates only the
+/// message and receipt identity, not the audience or effect kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SendObligation {
+pub struct SendObligation {
     pub message: MessageKey,
     pub receipt: EffectReceiptKey,
     pub recipient: FullJid,
@@ -19,26 +22,39 @@ pub(crate) struct SendObligation {
 /// Capability returned only after winning the durable claim. Commit its
 /// transaction before using it to start a queue attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SendLease {
+pub struct SendLease {
     obligation: SendObligation,
     owner: NodeIdentity,
     token: Uuid,
 }
 
+/// Whether this obligation can begin a new queue attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SendClaim {
+pub enum SendClaim {
+    /// Commit the claim transaction before starting this reservation.
     Acquired(SendLease),
+    /// Another unexpired reservation owns this obligation.
     Busy,
+    /// An attempt started, but its outcome is unknown; this is not delivery proof.
     Ambiguous,
+    /// A previous holder durably recorded enqueue success.
     Completed,
 }
 
-pub(crate) struct SendAttemptRepository;
+/// Transaction-scoped queue exclusion, independent of delivery authorization.
+///
+/// Like the other ingress repositories, mutations take a caller-owned unit of
+/// work transaction. The caller must commit a successful `start` before touching
+/// the sink and retain its socket-owner witness across database awaits.
+/// The supplied node identity records the lease holder; it is not a live node
+/// authority guard. Callers must separately fence node rotation or shutdown at
+/// the actual sink boundary.
+pub struct SendAttemptRepository;
 
 impl SendAttemptRepository {
     /// Serialize claims on the canonical message, including the absent-row
     /// case. Only an expired, not-yet-started lease can be reclaimed.
-    pub(crate) async fn claim(
+    pub async fn claim(
         tx: &mut IngressUowTransaction<'_>,
         obligation: &SendObligation,
         owner: &NodeIdentity,
@@ -104,7 +120,7 @@ impl SendAttemptRepository {
 
     /// Commit this transition before queue invocation. A false result revokes
     /// permission to invoke, even if this process originally won the claim.
-    pub(crate) async fn start(
+    pub async fn start(
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
@@ -120,7 +136,7 @@ impl SendAttemptRepository {
 
     /// Record observed enqueue success. Expiry after start does not revoke
     /// the token, since a started attempt can never be stolen.
-    pub(crate) async fn complete(
+    pub async fn complete(
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
@@ -135,7 +151,7 @@ impl SendAttemptRepository {
 
     /// Caller must have positive evidence that this attempt never enqueued.
     /// Timeout, cancellation, and a lost reply are not such evidence.
-    pub(crate) async fn release_proven_not_enqueued(
+    pub async fn release_proven_not_enqueued(
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
