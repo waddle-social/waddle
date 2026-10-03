@@ -25,12 +25,14 @@ final class RoomMembersModel {
         guard !isLoading else { return }
         isLoading = true
         loadError = nil
+        // The bots load on their own: a slow or failed bot query never
+        // holds the spinner or the people.
+        Task { await session.refreshRoomBots(in: room) }
         do {
             members = try await session.members(of: room)
         } catch {
             loadError = ActionErrorCopy.message(for: error, fallback: "Couldn't load members. Try again.")
         }
-        await session.refreshRoomBots(in: room)
         isLoading = false
     }
 
