@@ -520,6 +520,89 @@ async fn extension_groupchat_requester_sender_postgres() {
 /// the room missing.
 async fn send_loads_an_evicted_room(f: IngressFixture) {
     let adapter = direct_ingress::adapter(&f).await;
+    let (room, invocation) = managed_room(&f, &adapter).await;
+    for origin in ["before-eviction", "after-eviction"] {
+        managed_send(&adapter, &invocation, &room, origin).await;
+        adapter
+            .state
+            .deps
+            .protocol
+            .extension_bot_rooms
+            .settled(&direct_ingress::plugin(), &room)
+            .await;
+        let counts =
+            crate::server::session_janitors::sweep_dormant_rooms_once(&adapter.state).await;
+        assert_eq!(counts.evicted, 1, "{origin}: the bot left the room dormant");
+    }
+    assert_eq!(f.count("ingress_messages").await, 2);
+    close_node(adapter, f).await;
+}
+
+/// Room presence is in memory only. A restarted node restores the room from
+/// durable state without the bot that lingered before the restart, so the
+/// room goes dormant with no leave left to run.
+async fn restart_drops_a_lingering_bot(f: IngressFixture) {
+    use crate::server::routes::websocket::handlers::presence::{
+        get_managed_channel_for_room, parse_room_jid_context,
+    };
+    let adapter = direct_ingress::adapter(&f).await;
+    let (room, invocation) = managed_room(&f, &adapter).await;
+    managed_send(&adapter, &invocation, &room, "before-restart").await;
+    let bot = &invocation.actor_jid;
+    assert!(bot_in_room(&adapter, &room, bot).await, "the bot lingers");
+    let restarted = direct_ingress::node(&f).await;
+    let channel = get_managed_channel_for_room(&restarted.state, &room)
+        .await
+        .expect("channel lookup")
+        .expect("managed channel");
+    crate::server::routes::websocket::get_or_create_room_actor(
+        &restarted.state,
+        &room,
+        channel.room_config(),
+        parse_room_jid_context(&room).0,
+        channel.id,
+    )
+    .await
+    .expect("room restored from durable state");
+    assert!(
+        !bot_in_room(&restarted, &room, bot).await,
+        "the lingering bot is not restored"
+    );
+    let counts = crate::server::session_janitors::sweep_dormant_rooms_once(&restarted.state).await;
+    assert_eq!(counts.evicted, 1, "the restored room goes dormant");
+    drop(restarted);
+    close_node(adapter, f).await;
+}
+
+/// Whether `adapter`'s node has `room` loaded with `bot` in it.
+async fn bot_in_room(adapter: &ExtensionHostAdapter, room: &BareJid, bot: &FullJid) -> bool {
+    let Some(actor) = adapter
+        .state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room.clone(),
+        })
+        .await
+        .expect("room lookup")
+    else {
+        return false;
+    };
+    actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .room
+        .find_occupant_by_real_jid(bot)
+        .is_some()
+}
+
+/// A managed channel's room the plugin may post into, and its invocation.
+async fn managed_room(
+    f: &IngressFixture,
+    adapter: &ExtensionHostAdapter,
+) -> (BareJid, ExtensionInvocation) {
     let room: BareJid = "extension-room@muc.example.com".parse().expect("room");
     crate::server::xmpp_state::upsert_xmpp_channel(
         adapter.state.deps.app_state.db_pool.global_actor().clone(),
@@ -559,29 +642,28 @@ async fn send_loads_an_evicted_room(f: IngressFixture) {
         kind: InvocationKind::ProviderWebhook,
         provider_room_grants: vec![room.clone()],
     };
-    for origin in ["before-eviction", "after-eviction"] {
-        adapter
-            .send_message(
-                &invocation,
-                HostSendMessage {
-                    target: HostMessageTarget::Room(room.clone()),
-                    ..direct_ingress::request(origin)
-                },
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{origin}: {error:?}"));
-        adapter
-            .state
-            .deps
-            .protocol
-            .extension_bot_rooms
-            .settled(&direct_ingress::plugin(), &room)
-            .await;
-        let counts =
-            crate::server::session_janitors::sweep_dormant_rooms_once(&adapter.state).await;
-        assert_eq!(counts.evicted, 1, "{origin}: the bot left the room dormant");
-    }
-    assert_eq!(f.count("ingress_messages").await, 2);
+    (room, invocation)
+}
+
+async fn managed_send(
+    adapter: &ExtensionHostAdapter,
+    invocation: &ExtensionInvocation,
+    room: &BareJid,
+    origin: &str,
+) {
+    adapter
+        .send_message(
+            invocation,
+            HostSendMessage {
+                target: HostMessageTarget::Room(room.clone()),
+                ..direct_ingress::request(origin)
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{origin}: {error:?}"));
+}
+
+async fn close_node(adapter: ExtensionHostAdapter, f: IngressFixture) {
     assert!(
         adapter
             .state
@@ -593,6 +675,17 @@ async fn send_loads_an_evicted_room(f: IngressFixture) {
     );
     drop(adapter);
     f.close().await;
+}
+
+#[tokio::test]
+async fn extension_groupchat_restart_drops_a_lingering_bot_sqlite() {
+    restart_drops_a_lingering_bot(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_groupchat_restart_drops_a_lingering_bot_postgres() {
+    if let Some(f) = IngressFixture::postgres("groupchat_restart").await {
+        restart_drops_a_lingering_bot(f).await;
+    }
 }
 
 #[tokio::test]
