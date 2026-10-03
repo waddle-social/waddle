@@ -147,6 +147,34 @@ async fn live_full_dm_plans_recipient_effects_and_processed_copy_without_sending
 }
 
 #[tokio::test]
+async fn live_full_dm_without_recipient_dispatcher_refuses_unreceipted_delivery() {
+    let registry = test_registry();
+    let target: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let users = waddle_xmpp::registry::UserRegistryActor::spawn(
+        waddle_xmpp::registry::UserRegistryActor::new(),
+    );
+    register_into_both_tiers(&registry, &users, &target, tx).await;
+    let deps = Deps::registry_with_user_registry(&registry, &users);
+    let plan = plan_message_dispatch(&mut sender_machine(), outgoing(target.into()), &deps).await;
+    assert_eq!(
+        plan.failure,
+        Some(super::super::effects::PlanFailure::RecipientDispatcherUnavailable),
+        "recipient preparation is required"
+    );
+    assert!(
+        !plan.plan.iter().any(|item| matches!(
+            &item.effect,
+            Effect::External(ExternalEffect::Delivery(
+                ExternalDeliveryEffect::RouteToPeer { .. }
+            ))
+        )),
+        "an incomplete plan must not delegate recipient persistence"
+    );
+    assert!(rx.try_recv().is_err(), "planning must not enqueue");
+}
+
+#[tokio::test]
 async fn stored_full_headline_plans_recipient_archive_before_processed_delivery() {
     let registry = test_registry();
     let target: jid::FullJid = "bob@example.com/phone"

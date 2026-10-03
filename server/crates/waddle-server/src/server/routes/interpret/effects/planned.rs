@@ -137,6 +137,8 @@ pub enum PlanFailure {
     DmPinTargetLookup,
     #[error("recipient blocklist could not be read")]
     RecipientBlocklistRead,
+    #[error("recipient message dispatcher is unavailable")]
+    RecipientDispatcherUnavailable,
     #[error("detached session inventory could not be read")]
     DetachedInventoryRead,
 }

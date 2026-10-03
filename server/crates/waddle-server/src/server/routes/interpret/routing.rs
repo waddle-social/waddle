@@ -243,6 +243,9 @@ pub(super) async fn run_selected_recipient_pass(
                 };
             }
         };
+    // StanzaFromPeer forces recipient locality even when the original `to`
+    // is full. Handlers use this bare owner, while delivery_fanout carries
+    // the actual resource exclusion; keep the original stanza's `to` intact.
     let synthetic_full = recipient_bare.with_resource(&synthetic_resource);
 
     // Fail-closed on blocklist load error, mirroring

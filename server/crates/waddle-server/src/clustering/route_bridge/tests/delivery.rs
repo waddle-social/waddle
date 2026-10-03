@@ -1338,6 +1338,119 @@ async fn receiver_delivers_full_jid_iq_as_peer_stanza() {
         waddle_xmpp::registry::DeliveryKind::PeerStanza
     );
 }
+/// Recipient preparation is complete before relay: both the reserved receiver
+/// and a target-owner refresh must preserve the original's DirectFrame delivery.
+#[tokio::test]
+async fn processed_direct_full_jid_preserves_identity_on_receiver_and_owner_refresh() {
+    use crate::server::routes::websocket::tests::register_test_connection;
+    use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId, StanzaIdCarrier};
+
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles::default(),
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let keypair = Keypair::generate_ed25519();
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        keypair.public().to_peer_id().to_string(),
+    )
+    .await;
+    services.connection_registry = Arc::clone(&state.deps.protocol.connection_registry);
+    services.user_registry = state.deps.protocol.user_registry.clone();
+    services.web_socket_state = Arc::downgrade(&state);
+    let services = Arc::new(services);
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, mut rx) = mpsc::channel(2);
+    register_test_connection(&state, &target, tx).await;
+    let stamp = StanzaId::new("committed-recipient-archive", target.to_bare().into());
+    let mut message = Message::new(Some(target.clone().into()));
+    message.from = Some(sender_full().into());
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .bodies
+        .insert(Default::default(), "prepared original".into());
+    add_stanza_id(&mut message, &stamp);
+    let stanza = Stanza::Message(message);
+    let mut envelope = envelope_for_services(&services).await;
+    envelope.payload = OrderedRelayPayload::ProcessedDirectMessage {
+        recipient: target.clone().into(),
+        stanza: RemoteStanza(stanza.clone()),
+        ingress_append: None,
+    };
+    let envelope = sign_envelope(envelope, &keypair);
+
+    for refreshed_owner in [false, true] {
+        if refreshed_owner {
+            let outcome = deliver_local_after_target_refresh_outcome(
+                &services,
+                &target.clone().into(),
+                &stanza,
+                &envelope.payload,
+                None,
+            )
+            .await;
+            assert_eq!(outcome.delivery, FullJidDeliveryOutcome::Delivered);
+            assert!(outcome.client_replies.is_empty());
+        } else {
+            let replies = bridge
+                .deliver_reserved(&envelope, &mut None)
+                .await
+                .expect("reserved processed original reaches the recipient");
+            assert!(replies.is_empty());
+        }
+        let outbound = rx
+            .try_recv()
+            .expect("prepared original queued for transport");
+        assert_eq!(
+            outbound.kind,
+            DeliveryKind::DirectFrame,
+            "receiver must bypass the recipient archive/inbox/carbon pipeline"
+        );
+        assert_eq!(outbound.stanza.to_element(), stanza.to_element());
+        let Stanza::Message(delivered) = outbound.stanza else {
+            panic!("direct message");
+        };
+        assert_eq!(delivered.to, Some(target.clone().into()));
+        assert_eq!(delivered.stanza_ids(), vec![stamp.clone()]);
+        assert!(rx.try_recv().is_err(), "one original per delivery attempt");
+    }
+    assert!(
+        state
+            .deps
+            .protocol
+            .mam_storage
+            .query_messages(
+                &target.to_bare(),
+                waddle_xmpp::mam::MamArchiveKind::Personal,
+                &Default::default(),
+            )
+            .await
+            .expect("recipient archive")
+            .messages
+            .is_empty(),
+        "relay does not create a second recipient archive"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .inbox_storage
+            .list(&target.to_bare())
+            .await
+            .expect("recipient inbox")
+            .is_empty(),
+        "relay does not project recipient unread again"
+    );
+}
+
 #[tokio::test]
 async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallback() {
     let services = Arc::new(

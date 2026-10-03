@@ -30,6 +30,50 @@ impl waddle_xmpp::xep::xep0191::BlockingStorage for FailingBlockingStorage {
 }
 
 #[tokio::test]
+async fn live_full_jid_planning_blocklist_failure_refuses_peer_fallback() {
+    use super::super::effects::{PlanFailure, PlanSink};
+    let registry = ConnectionRegistry::new();
+    let users = waddle_xmpp::registry::UserRegistryActor::spawn(
+        waddle_xmpp::registry::UserRegistryActor::new(),
+    );
+    let target: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &users, &target, tx).await;
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(FailingBlockingStorage);
+    let dispatcher = pipelined_dispatcher();
+    let sink = PlanSink::new();
+    let capture = crate::ingress::IngressEffectCapture::new();
+    let deps = Deps {
+        message_dispatcher: Some(&dispatcher),
+        blocking_storage: Some(&blocking),
+        local_domain: "example.com",
+        effects: &sink,
+        ingress_effect_capture: Some(capture.clone()),
+        ..Deps::registry_with_user_registry(&registry, &users)
+    };
+    interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: target.clone().into(),
+            stanza: Box::new(Stanza::Message(chat_msg(
+                jid("alice@example.com/web"),
+                target.into(),
+                "must not bypass preparation",
+            ))),
+            call_setup: None,
+        }],
+        &deps,
+    )
+    .await;
+    assert_eq!(sink.failure(), Some(PlanFailure::RecipientBlocklistRead));
+    assert!(
+        sink.snapshot().is_empty(),
+        "no unprepared delivery or persistence"
+    );
+    assert!(capture.snapshot().intents.is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_delivery() {
     // A transient blocklist-storage error must not drop a DM to LIVE
     // recipients: the legacy per-resource PeerStanza path still runs
