@@ -388,6 +388,7 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
             archive: target.to_bare(),
             ordinal: ArchiveOrdinal::FIRST,
         }],
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
     });
     let stanza = Stanza::Message(message);
     assert_eq!(

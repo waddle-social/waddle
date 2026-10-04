@@ -963,8 +963,13 @@ pub(super) async fn append_detached(
         return Ok(false);
     }
     match context {
-        Some(context) => sm
-            .record_keyed_stanza_for_detached_bound_resource(
+        Some(context) => {
+            // A relayed claim is authorized at this append decision and nowhere
+            // earlier (#1790). Rejected keyed copies never degrade to unkeyed appends.
+            if context.ensure_verified(stanza).await.is_err() {
+                return Ok(false);
+            }
+            sm.record_keyed_stanza_for_detached_bound_resource(
                 target,
                 stanza,
                 context.received_at.unwrap_or_else(chrono::Utc::now),
@@ -977,7 +982,8 @@ pub(super) async fn append_detached(
                         outcome,
                         waddle_xmpp::stream_management::SmKeyedAppendOutcome::Suppressed
                     )
-            }),
+            })
+        }
         None => {
             sm.record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
                 .await

@@ -22,6 +22,7 @@ async fn recorded(fixture: &IngressFixture) -> (SmIngressAppendContext, FullJid,
             received_at: None,
             archive_positions: vec![],
             dispatch_stream: None,
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         },
         target,
         Stanza::Message(submission.plan.sanitized_message),
@@ -483,6 +484,7 @@ async fn frozen_pin_notification_allows_sender_copy_but_rejects_substituted_payl
         received_at: None,
         archive_positions: vec![],
         dispatch_stream: None,
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
     };
     // This notification stays addressed to the peer even on the sender's own
     // frozen resource, as specified by the pin fanout planner.
@@ -568,6 +570,7 @@ async fn unarchived_recipient_stamp(hint: Option<waddle_xmpp::xep::xep0334::Hint
         received_at: None,
         archive_positions: vec![],
         dispatch_stream: None,
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
     };
     let mut delivered = submission.plan.sanitized_message.clone();
     add_stanza_id(

@@ -597,6 +597,7 @@ pub async fn execute_effects(
                                         received_at: progress.received_at,
                                         archive_positions,
                                         dispatch_stream: dispatch_stream.clone(),
+                                        authority: crate::ingress::append_authority::AppendAuthority::Verified,
                                     });
                                 }
                             }

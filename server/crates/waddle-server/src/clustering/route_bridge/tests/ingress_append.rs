@@ -1,17 +1,21 @@
 //! A supplied ingress key is mandatory authority: rejected claims never deliver.
 use super::*;
 use crate::ingress::{
-    commit::commit_submission, identity::IngressAppendObligationRef, test_support::IngressFixture,
+    append_authority::canonical_reads, commit::commit_submission,
+    identity::IngressAppendObligationRef, test_support::IngressFixture,
 };
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthorityCase {
     Authorized,
     LiveRecipient,
+    /// Replays the preceding live delivery's completed obligation under a
+    /// different, validly claimed sender (#1790 R1-1).
+    CompletedSenderMismatch,
     CanonicalAbsent,
     CanonicalSenderMismatch,
     ClaimMismatch,
@@ -19,11 +23,26 @@ enum AuthorityCase {
     ArchivePositionMismatch,
 }
 
+const DETACHED_CASES: &[AuthorityCase] = &[
+    AuthorityCase::Authorized,
+    AuthorityCase::CanonicalAbsent,
+    AuthorityCase::CanonicalSenderMismatch,
+    AuthorityCase::ClaimMismatch,
+    AuthorityCase::StanzaMismatch,
+    AuthorityCase::ArchivePositionMismatch,
+];
+const LIVE_CASES: &[AuthorityCase] = &[AuthorityCase::Authorized, AuthorityCase::LiveRecipient];
+const COMPLETED_LIVE_CASES: &[AuthorityCase] = &[
+    AuthorityCase::Authorized,
+    AuthorityCase::LiveRecipient,
+    AuthorityCase::CompletedSenderMismatch,
+];
+
 async fn ingress_append_authority(
     fixture: IngressFixture,
     second_hop: bool,
     muc: bool,
-    live_recipient: bool,
+    cases: &[AuthorityCase],
 ) {
     let persistence = Arc::new(
         crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
@@ -104,26 +123,65 @@ async fn ingress_append_authority(
         },
     );
 
-    let cases: &[AuthorityCase] = if live_recipient {
-        &[AuthorityCase::Authorized, AuthorityCase::LiveRecipient]
-    } else {
-        &[
-            AuthorityCase::Authorized,
-            AuthorityCase::CanonicalAbsent,
-            AuthorityCase::CanonicalSenderMismatch,
-            AuthorityCase::ClaimMismatch,
-            AuthorityCase::StanzaMismatch,
-            AuthorityCase::ArchivePositionMismatch,
-        ]
-    };
+    let mut completed: Option<(
+        jid::FullJid,
+        IngressAppendObligationRef,
+        Message,
+        mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
+    )> = None;
     for (index, case) in cases.iter().copied().enumerate() {
         if muc && index != 0 {
+            continue;
+        }
+        if case == AuthorityCase::CompletedSenderMismatch {
+            // The durable status of a completed send would ACK this replay on
+            // receipt, target and positions alone; only the canonical sender
+            // read refuses it.
+            let (recipient, mut obligation, mut message, mut rx) = completed
+                .take()
+                .expect("a completed live delivery precedes");
+            assert_ne!(sender_full().to_bare(), obligation.sender_bare);
+            obligation.sender_bare = sender_full().to_bare();
+            message.from = Some(sender_full().into());
+            let ledger_key = waddle_xmpp::stream_management::SmIngressAppendKey {
+                message_key: obligation.message_key,
+                kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+                    obligation.receipt.kind.to_storage(),
+                ),
+                semantic_identity_hash: obligation.receipt.semantic_identity_hash,
+                resource: recipient.clone(),
+            };
+            // The fixture envelope's sender claim is the other user's own, valid one.
+            let mut envelope = envelope_for_services(&services).await;
+            envelope.channel.recipient =
+                crate::clustering::ordered_relay::OrderedRelayRecipient::FullJid(recipient.clone());
+            envelope.payload = OrderedRelayPayload::Message {
+                recipient: recipient.clone().into(),
+                stanza: RemoteStanza(Stanza::Message(message)),
+                ingress_append: Some(obligation),
+            };
+            let reads_before = canonical_reads::count();
+            let result = bridge
+                .deliver_reserved(&sign_envelope(envelope, &keypair), &mut None)
+                .await;
+            assert!(
+                matches!(result, Err(OrderedRelayNackReason::TargetUnavailable)),
+                "a completed obligation under another sender must not be ACKed: {result:?}"
+            );
+            assert_eq!(canonical_reads::count() - reads_before, 1);
+            assert!(rx.try_recv().is_err(), "no second live copy");
+            assert!(
+                crate::sm_persistence::ingress_append::get(&fixture.db, &ledger_key)
+                    .await
+                    .expect("ledger read")
+                    .is_none()
+            );
             continue;
         }
         let recipient = target_bare()
             .with_resource_str(&format!("authority-{index}"))
             .expect("recipient");
-        let mut live_rx = if matches!(case, AuthorityCase::LiveRecipient) {
+        let live_rx = if matches!(case, AuthorityCase::LiveRecipient) {
             let (tx, rx) = mpsc::channel(1);
             let entry = ConnectionEntry::new(tx);
             services
@@ -225,6 +283,9 @@ async fn ingress_append_authority(
         message.to = Some(recipient.clone().into());
         match case {
             AuthorityCase::Authorized | AuthorityCase::LiveRecipient => {}
+            AuthorityCase::CompletedSenderMismatch => {
+                unreachable!("replays the completed obligation above")
+            }
             AuthorityCase::CanonicalAbsent => {
                 obligation.message_key = waddle_xmpp::ingress::MessageKey::new()
             }
@@ -243,6 +304,8 @@ async fn ingress_append_authority(
             ),
         }
         let alternate_sender = matches!(case, AuthorityCase::CanonicalSenderMismatch);
+        let offered = obligation.clone();
+        let reads_before = canonical_reads::count();
         let ledger_key = waddle_xmpp::stream_management::SmIngressAppendKey {
             message_key: obligation.message_key,
             kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
@@ -352,7 +415,21 @@ async fn ingress_append_authority(
                 result.expect("authorized keyed delivery");
             }
         }
-        if let Some(rx) = live_rx.as_mut() {
+        // #1790: the canonical read happens once, at the append decision that
+        // trusts the claim; the synchronous binding checks need none.
+        assert_eq!(
+            canonical_reads::count() - reads_before,
+            if matches!(
+                case,
+                AuthorityCase::ClaimMismatch | AuthorityCase::StanzaMismatch
+            ) {
+                0
+            } else {
+                1
+            },
+            "{case:?}"
+        );
+        if let Some(mut rx) = live_rx {
             let outbound = rx
                 .try_recv()
                 .expect("live recipient receives relayed stanza");
@@ -372,6 +449,7 @@ async fn ingress_append_authority(
                     .is_none()
             );
             assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+            completed = Some((recipient, offered, message, rx));
             continue;
         }
         let queued = sm
@@ -416,8 +494,9 @@ async fn ingress_append_authority(
     fixture.close().await;
 }
 
-// An intermediate sender owner has no local detached recipient. It must still
-// authorize the key before forwarding, so recovery cannot append it twice.
+// An intermediate sender owner has no local detached recipient. It forwards the
+// obligation unchanged and never reads canonical state: the next receiver
+// authorizes it at its own append decision (#1790).
 async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture) {
     let pool = crate::db::DatabasePool::new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
@@ -553,6 +632,11 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         Some(&obligation),
         "intermediate hop must preserve the append obligation"
     );
+    assert_eq!(
+        canonical_reads::count(),
+        0,
+        "an intermediate hop never reads canonical state"
+    );
     fixture.close().await;
 }
 
@@ -570,44 +654,61 @@ async fn postgres_forwarded_obligation_survives_intermediate_hop() {
 
 #[tokio::test]
 async fn sqlite_live_recipient_delivery_writes_no_append_ledger_row() {
-    ingress_append_authority(IngressFixture::sqlite().await, false, false, true).await;
+    ingress_append_authority(IngressFixture::sqlite().await, false, false, LIVE_CASES).await;
 }
 #[tokio::test]
 async fn postgres_live_recipient_delivery_writes_no_append_ledger_row() {
     if let Some(fixture) = IngressFixture::postgres("live_recipient_append_auth").await {
-        ingress_append_authority(fixture, false, false, true).await;
+        ingress_append_authority(fixture, false, false, LIVE_CASES).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_completed_obligation_with_mismatched_canonical_sender_is_refused_live() {
+    ingress_append_authority(
+        IngressFixture::sqlite().await,
+        false,
+        false,
+        COMPLETED_LIVE_CASES,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_completed_obligation_with_mismatched_canonical_sender_is_refused_live() {
+    if let Some(fixture) = IngressFixture::postgres("completed_sender_mismatch").await {
+        ingress_append_authority(fixture, false, false, COMPLETED_LIVE_CASES).await;
     }
 }
 
 #[tokio::test]
 async fn sqlite_ordered_ingress_append_authorization() {
-    ingress_append_authority(IngressFixture::sqlite().await, false, false, false).await;
+    ingress_append_authority(IngressFixture::sqlite().await, false, false, DETACHED_CASES).await;
 }
 #[tokio::test]
 async fn postgres_ordered_ingress_append_authorization() {
     if let Some(fixture) = IngressFixture::postgres("ordered_append_auth").await {
-        ingress_append_authority(fixture, false, false, false).await;
+        ingress_append_authority(fixture, false, false, DETACHED_CASES).await;
     }
 }
 #[tokio::test]
 async fn sqlite_second_hop_ingress_append_authorization() {
-    ingress_append_authority(IngressFixture::sqlite().await, true, false, false).await;
+    ingress_append_authority(IngressFixture::sqlite().await, true, false, DETACHED_CASES).await;
 }
 #[tokio::test]
 async fn postgres_second_hop_ingress_append_authorization() {
     if let Some(fixture) = IngressFixture::postgres("second_hop_append_auth").await {
-        ingress_append_authority(fixture, true, false, false).await;
+        ingress_append_authority(fixture, true, false, DETACHED_CASES).await;
     }
 }
 
 #[tokio::test]
 async fn sqlite_muc_occupant_ingress_append_is_keyed() {
-    ingress_append_authority(IngressFixture::sqlite().await, false, true, false).await;
+    ingress_append_authority(IngressFixture::sqlite().await, false, true, DETACHED_CASES).await;
 }
 #[tokio::test]
 async fn postgres_muc_occupant_ingress_append_is_keyed() {
     if let Some(fixture) = IngressFixture::postgres("muc_occupant_append").await {
-        ingress_append_authority(fixture, false, true, false).await;
+        ingress_append_authority(fixture, false, true, DETACHED_CASES).await;
     }
 }
 
@@ -666,6 +767,7 @@ async fn origin_preparation_signs_direct_and_muc_ingress_append_obligations() {
             received_at: Some(
                 chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp"),
             ),
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         };
         let expected = IngressAppendObligationRef::from_context(
             &context,

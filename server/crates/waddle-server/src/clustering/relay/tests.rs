@@ -636,6 +636,7 @@ fn keyed_carbon_side_effect_retains_original_obligation_on_wire() {
         received_at: Some(chrono::Utc::now()),
         archive_positions: Vec::new(),
         dispatch_stream: None,
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
     };
     let obligation = IngressAppendObligationRef::from_context(&context, sender.clone());
     let mut message = xmpp_parsers::message::Message::new(Some(sender.clone().into()));

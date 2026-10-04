@@ -87,6 +87,7 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             message_key: decision.message_key.expect("canonical"),
             receipt: crate::ingress::receipt_key(&intent).expect("receipt"),
             received_at: None,
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         };
         let original = &submission.plan.sanitized_message;
         let carbon = wrapper(original, &owner, &target, kind);
@@ -217,6 +218,7 @@ async fn archive_free_carbon_stamps(fixture: IngressFixture) {
             received_at: None,
             archive_positions: vec![],
             dispatch_stream: None,
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         };
         let original = &submission.plan.sanitized_message;
         let mut inner = original.clone();

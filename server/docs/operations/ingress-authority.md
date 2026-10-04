@@ -1940,9 +1940,20 @@ and forwards the append context (`clustering/route_bridge/delivery/local.rs`).
 The receiver requires `sender_bare` to match the validated sender claim and
 stanza `from`, and a canonical ingress row for `message_key` naming that sender.
 Failed authorization warns and increments
-`waddle.clustering.ingress_append.authorization_failed`, then degrades to an
-unkeyed append; delivery never fails because the check failed.
-That fallback remains at-least-once.
+`waddle.clustering.ingress_append.authorization_failed`, then refuses the keyed
+copy (`TargetUnavailable` on the ordered receiver, `Unavailable` on the
+remote-resource paths); a rejected keyed copy never degrades to an unkeyed append.
+
+Authorization is resolved at the append decision, not at the relay entry point
+(#1790). The receiver entry points run only the synchronous checks (sender claim
+and stanza binding) and attach a deferred authority to the append context. The
+canonical-row read runs once, on the first consumer that trusts the context: the
+local socket boundary verifies it before consulting durable delivery status and
+then re-authorizes transactionally; the detached fallback verifies it
+immediately before the keyed `sm_ingress_appends` append; and for a registered
+remote socket the socket node performs its own read. A forwarding hop re-sends
+the obligation unread, because its receiver authorizes it. A relay therefore
+pays one canonical read per append decision instead of one per hop.
 
 Registered-remote-socket and local UserActor drains are keyed (#1789, #1805).
 Local `TrySendPeer` and `TrySendDirect` preserve the typed ingress obligation

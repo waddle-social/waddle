@@ -62,6 +62,7 @@ pub(super) async fn append_context(
         received_at: Some(received_at),
         archive_positions,
         dispatch_stream: None,
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
     }))
 }
 

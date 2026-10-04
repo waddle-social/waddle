@@ -30,6 +30,7 @@ async fn keyed_fallback_never_enters_an_actor_registered_after_socket_lookup() {
             received_at: None,
             archive_positions: Vec::new(),
             dispatch_stream: None,
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         };
         let outcome = if direct {
             deliver_direct_to_full(Some(&users), None, &target, &stanza, Some(&context)).await

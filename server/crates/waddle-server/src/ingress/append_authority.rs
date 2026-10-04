@@ -23,9 +23,13 @@ mod carbon_tests;
 #[path = "append_authority_room_tests.rs"]
 mod room_tests;
 
+#[cfg(all(test, feature = "clustering"))]
+#[path = "append_authority_deferred_tests.rs"]
+mod deferred_tests;
+
 const AUTHORIZATION_READ_TIMEOUT: Duration = Duration::from_millis(250);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum AppendAuthorityRejection {
     IneligibleKind,
     NotMessage,
@@ -65,6 +69,108 @@ impl AppendAuthorityRejection {
                 IngressAppendAuthorizationFailure::Indeterminate
             }
         }
+    }
+}
+
+/// Whether a keyed append context's claim is proven against the canonical row.
+///
+/// Never serialized: relays forward only the obligation's data fields, and every
+/// receiver establishes its own authority (#1790).
+#[derive(Clone)]
+pub(crate) enum AppendAuthority {
+    /// Minted by this node's own ingress commit, or already verified against the
+    /// canonical row.
+    Verified,
+    /// A relayed claim that passed the synchronous checks only (sender claim and
+    /// stanza binding). The canonical read runs on the first
+    /// [`AppendAuthority::ensure_verified`], once per context clone-tree.
+    #[cfg(feature = "clustering")]
+    Deferred(std::sync::Arc<DeferredAppendAuthority>),
+}
+
+impl std::fmt::Debug for AppendAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Verified => f.write_str("Verified"),
+            #[cfg(feature = "clustering")]
+            Self::Deferred(deferred) => f
+                .debug_struct("Deferred")
+                .field("resolved", &deferred.result.get())
+                .finish(),
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+pub(crate) struct DeferredAppendAuthority {
+    db: crate::db::Database,
+    obligation: super::identity::IngressAppendObligationRef,
+    result: tokio::sync::OnceCell<Result<(), AppendAuthorityRejection>>,
+}
+
+#[cfg(feature = "clustering")]
+impl DeferredAppendAuthority {
+    pub(crate) fn new(
+        db: crate::db::Database,
+        obligation: super::identity::IngressAppendObligationRef,
+    ) -> Self {
+        Self {
+            db,
+            obligation,
+            result: tokio::sync::OnceCell::new(),
+        }
+    }
+}
+
+impl AppendAuthority {
+    /// Resolve the canonical authority before the first action that trusts it.
+    /// A deferred claim is read once; its failure is recorded once and cached.
+    pub(crate) async fn ensure_verified(
+        &self,
+        stanza: &Stanza,
+    ) -> Result<(), AppendAuthorityRejection> {
+        match self {
+            Self::Verified => {
+                // Only a deferred claim inspects the stanza it is bound to.
+                let _ = stanza;
+                Ok(())
+            }
+            #[cfg(feature = "clustering")]
+            Self::Deferred(deferred) => deferred
+                .result
+                .get_or_init(|| {
+                    // Keep canonical decoding state off the caller's future:
+                    // unoptimized interpreter futures must fit the default stack.
+                    Box::pin(async {
+                        let result =
+                            check_canonical_obligation(&deferred.db, stanza, &deferred.obligation)
+                                .await;
+                        if let Err(reason) = &result {
+                            record_authorization_failure(reason, &deferred.obligation.sender_bare);
+                        }
+                        result
+                    })
+                })
+                .await
+                .clone(),
+        }
+    }
+}
+
+/// Canonical-row authorization reads, counted per test process (nextest runs
+/// one test per process) so tests can assert where the read happens (#1790).
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) mod canonical_reads {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static READS: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn record() {
+        READS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn count() -> usize {
+        READS.load(Ordering::SeqCst)
     }
 }
 
@@ -136,6 +242,8 @@ pub(crate) async fn check_canonical_obligation(
     stanza: &Stanza,
     obligation: &super::identity::IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {
+    #[cfg(all(test, feature = "clustering"))]
+    canonical_reads::record();
     if obligation.receipt.kind.to_storage() == IngressEffectKind::RouteMucGroupchat.storage_tag()
         || (obligation.receipt.kind.to_storage() == IngressEffectKind::RouteDirect.storage_tag()
             && matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat))

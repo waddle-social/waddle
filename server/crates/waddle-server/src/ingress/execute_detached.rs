@@ -156,6 +156,7 @@ pub(super) async fn execute(
             received_at: progress.received_at,
             archive_positions,
             dispatch_stream,
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         });
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;

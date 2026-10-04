@@ -101,7 +101,23 @@ impl IngressAppendObligationRef {
             received_at: self.received_at,
             archive_positions: self.archive_positions,
             dispatch_stream: self.dispatch_stream,
+            authority: super::append_authority::AppendAuthority::Verified,
         }
+    }
+
+    /// A relayed claim whose canonical read is deferred to the first consumer
+    /// that trusts it (#1790). Call only after the synchronous checks passed.
+    #[cfg(feature = "clustering")]
+    pub(crate) fn into_deferred_context(
+        self,
+        db: crate::db::Database,
+    ) -> crate::server::routes::interpret::SmIngressAppendContext {
+        let mut context = self.clone().into_context();
+        context.authority =
+            super::append_authority::AppendAuthority::Deferred(std::sync::Arc::new(
+                super::append_authority::DeferredAppendAuthority::new(db, self),
+            ));
+        context
     }
 
     /// Only recorded direct and MUC groupchat routes allocate keyed SM appends.

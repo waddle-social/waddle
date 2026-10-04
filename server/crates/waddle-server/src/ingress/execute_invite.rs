@@ -214,6 +214,7 @@ async fn prepare(
             received_at: Some(route.fallback.original_receipt_at),
             archive_positions,
             dispatch_stream: None,
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         },
     };
     if already_resolved(&mut tx, &invitation, route).await? {

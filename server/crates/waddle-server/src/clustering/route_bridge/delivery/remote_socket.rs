@@ -139,8 +139,7 @@ impl OrderedRelayDeliveryBridge {
                     &origin.sender_entity,
                     &stanza.0,
                     ingress_append.as_ref(),
-                )
-                .await;
+                );
                 if ingress_append.is_some() && context.is_none() {
                     return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
                 }
@@ -178,8 +177,7 @@ impl OrderedRelayDeliveryBridge {
                     &origin.sender_entity,
                     &stanza.0,
                     ingress_append.as_ref(),
-                )
-                .await;
+                );
                 if ingress_append.is_some() && ingress_append_context.is_none() {
                     return remote_resource_route_reply(FullJidDeliveryOutcome::Unavailable.into());
                 }
