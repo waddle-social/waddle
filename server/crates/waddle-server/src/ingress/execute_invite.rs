@@ -246,7 +246,7 @@ async fn finish(
     let mut blocked = false;
     let mut expired_ambiguity = false;
     for recipient in &route.resources {
-        expired_ambiguity |= SendAttemptRepository::has_expired_started(
+        expired_ambiguity |= SendAttemptRepository::has_expired_attempt(
             &mut tx,
             &SendObligation {
                 message: invitation.key,

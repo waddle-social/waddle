@@ -1288,3 +1288,110 @@ async fn sqlite_invite_expired_partial_start_hands_off_without_repeating_live_si
     assert_eq!(fixture.count("pending_delivery").await, 0);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn sqlite_invite_expired_partial_claim_without_start_hands_off() {
+    use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
+    let fixture = IngressFixture::sqlite().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first");
+    let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    registry.register(first.clone(), sender);
+    let mut submission = invite_submission(&fixture, &first);
+    let route_intent = submission
+        .plan
+        .intents
+        .iter_mut()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteDirect { .. }))
+        .expect("route");
+    if let IngressEffectIntent::RouteDirect { fanout, .. } = route_intent {
+        fanout.push(second.clone());
+    }
+    let receipt = crate::ingress::receipt_key(route_intent).expect("receipt");
+    let Effect::External(ExternalEffect::RouteToPeer(route)) = &mut submission.plan.plan[0].effect
+    else {
+        panic!("invitation")
+    };
+    route.resources.push(second.clone());
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("canonical");
+    let key = decision.message_key.expect("key");
+    // The sibling claimed a reservation and died before `start()`: no sink
+    // owner, no start evidence, and no socket to retry against.
+    let mut tx = fixture.uow.begin().await.expect("claim");
+    let SendClaim::Acquired(_) = SendAttemptRepository::claim(
+        &mut tx,
+        &SendObligation {
+            message: key,
+            receipt,
+            recipient: second,
+        },
+        &waddle_xmpp::ownership::NodeIdentity::local(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("claim") else {
+        panic!("fresh")
+    };
+    tx.commit().await.expect("commit");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.pending_delivery_storage = Some(&storage);
+    let before = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_ne!(before.outcomes[0].1, ExternalOutcome::Done);
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    fixture
+        .execute(
+            "UPDATE ingress_send_attempts SET expires_at_ms = 0 WHERE state = 0",
+            (),
+        )
+        .await;
+    let after = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        after.outcomes[0].1,
+        ExternalOutcome::Done,
+        "an expired never-started reservation must not stay uncertain forever"
+    );
+    assert_eq!(fixture.count("pending_delivery").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert!(
+        receiver.try_recv().is_err(),
+        "accepted sibling is not directly sent twice"
+    );
+    fixture.execute("DELETE FROM pending_delivery", ()).await;
+    let replay = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(replay.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(
+        fixture.count("pending_delivery").await,
+        0,
+        "settled receipts prevent recreating consumed custody"
+    );
+    fixture.close().await;
+}
