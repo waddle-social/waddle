@@ -41,6 +41,13 @@ pub(crate) struct TestStateOverrides {
     pub(crate) share_app_room_registry: bool,
 }
 
+/// Push-service signing secret shared by every test state in this process, so
+/// states built over one database agree on it without a fixed key in source.
+fn test_push_service_secret() -> &'static [u8] {
+    static SECRET: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    SECRET.get_or_init(rand::random)
+}
+
 pub(crate) async fn empty_extension_manager() -> Arc<ExtensionManager> {
     Arc::new(
         ExtensionManager::from_config(ExtensionConfig {
@@ -171,7 +178,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
     let push_service = Arc::new(
         crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             app_state.db_pool.global().clone(),
-            b"waddle-push-service-test-secret-key",
+            test_push_service_secret(),
             "push.example.com".parse().expect("push service jid"),
             pubsub_storage.clone(),
         )

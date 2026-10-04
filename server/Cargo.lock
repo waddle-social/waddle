@@ -7803,7 +7803,6 @@ dependencies = [
  "uuid",
  "waddle-ecdysis",
  "waddle-extensions",
- "waddle-server",
  "waddle-sfu",
  "waddle-ws-test-support",
  "waddle-xmpp",

@@ -1,5 +1,7 @@
 //! XEP-0045 §7.8.2 decline recovery through the public server test-support API.
 
+#![cfg(feature = "test-support")]
+
 pub mod ingress_support;
 
 use ingress_support::IngressFixture;
