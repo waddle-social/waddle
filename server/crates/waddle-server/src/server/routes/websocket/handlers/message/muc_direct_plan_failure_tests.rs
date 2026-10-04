@@ -782,10 +782,20 @@ async fn decline_delivery_failure_retains_winner(fixture: IngressFixture) {
             std::time::Duration::from_secs(5),
         )
         .await;
-        assert!(report
-            .outcomes
-            .iter()
-            .any(|(_, outcome)| *outcome == crate::ingress::execute::ExternalOutcome::Failed));
+        assert!(
+            report.outcomes.iter().any(|(_, outcome)| {
+                *outcome == crate::ingress::execute::ExternalOutcome::Uncertain
+            }),
+            "canonical quota refusal retains retryable delivery: {report:?}"
+        );
+        assert_eq!(fixture.count("pending_delivery").await, 0);
+        assert_eq!(
+            fixture
+                .count("ingress_messages WHERE terminal_at IS NOT NULL")
+                .await,
+            0,
+            "quota refusal must not terminalize the winning decline"
+        );
     }
     assert!(
         list_invites(actor, &invite.room, &invite.invitee)
