@@ -123,9 +123,12 @@ const REVISIONS_POSTGRES: &str = "DELETE FROM extension_room_source_revisions
     ORDER BY s.captured_at_ms, v.source_key, v.room_jid, v.room_stanza_id
     LIMIT ? FOR UPDATE OF v SKIP LOCKED)";
 
-/// Lock first, then delete with the predicates re-evaluated by a fresh
-/// statement: every writer that references a source (capture, correction,
-/// claim, finish) holds this row lock while it does so.
+/// Lock first, then delete the whole locked set with one statement that
+/// re-checks every predicate. Every writer that references a source (capture,
+/// correction, claim, finish) holds this row lock while it does so, and the
+/// delete is a fresh statement whose snapshot follows the lock, so it sees any
+/// reference committed before the lock was granted. One statement per batch
+/// keeps the transaction's round trips constant, whatever the candidate count.
 const SOURCE_CANDIDATES_SQLITE: &str = "SELECT s.source_key FROM extension_room_sources s
     WHERE s.retracted = 1 AND s.captured_at_ms <= ?
       AND NOT EXISTS (SELECT 1 FROM extension_room_source_revisions v
@@ -144,15 +147,20 @@ const SOURCE_CANDIDATES_POSTGRES: &str = "SELECT s.source_key FROM extension_roo
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
         WHERE p.source_key = s.source_key)
     ORDER BY s.captured_at_ms, s.source_key LIMIT ? FOR UPDATE OF s SKIP LOCKED";
-const SOURCE_DELETE: &str = "DELETE FROM extension_room_sources WHERE source_key IN (
-    SELECT s.source_key FROM extension_room_sources s
-    WHERE s.source_key = ? AND s.retracted = 1 AND s.captured_at_ms <= ?
+const SOURCE_DELETE_SUFFIX: &str = ") AND retracted = 1 AND captured_at_ms <= ?
       AND NOT EXISTS (SELECT 1 FROM extension_room_source_revisions v
-        WHERE v.source_key = s.source_key)
+        WHERE v.source_key = extension_room_sources.source_key)
       AND NOT EXISTS (SELECT 1 FROM extension_room_observation_work w
-        WHERE w.source_key = s.source_key)
+        WHERE w.source_key = extension_room_sources.source_key)
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
-        WHERE p.source_key = s.source_key))";
+        WHERE p.source_key = extension_room_sources.source_key)";
+
+/// `DELETE` of `count` locked candidates; only the bound-parameter count
+/// varies (at most the 256-row budget plus the cutoff, under SQLite's 999).
+fn source_delete_sql(count: usize) -> String {
+    let placeholders = vec!["?"; count].join(", ");
+    format!("DELETE FROM extension_room_sources WHERE source_key IN ({placeholders}{SOURCE_DELETE_SUFFIX}")
+}
 
 fn dialect(driver: DatabaseDriver, sqlite: &'static str, postgres: &'static str) -> &'static str {
     match driver {
@@ -238,11 +246,12 @@ pub(super) async fn collect_expired(
             candidates.push(key);
         }
         drop(rows);
-        for key in candidates {
-            batch.sources += tx
-                .execute(SOURCE_DELETE, crate::db_params![&key, cutoff_ms])
-                .await
-                .map_err(retention_error)?;
+        if !candidates.is_empty() {
+            let sql = source_delete_sql(candidates.len());
+            let mut params: Vec<crate::db::Value> =
+                candidates.into_iter().map(crate::db::Value::from).collect();
+            params.push(crate::db::Value::from(cutoff_ms));
+            batch.sources = tx.execute(&sql, params).await.map_err(retention_error)?;
         }
     }
     batch.exhausted = batch.total() >= u64::from(limit);

@@ -631,6 +631,49 @@ async fn retracted_source_with_oversized_revision_chain_drains_within_budget(
     fixture.close().await;
 }
 
+async fn full_batch_of_retracted_sources_is_collected_in_one_batch(fixture: IngressFixture) {
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    let t0 = Utc::now();
+    // Earlier batches spent their budget on revision mappings, leaving a full
+    // budget of retracted sources with nothing left to drain.
+    let mut tx = fixture.db.begin_immediate().await.expect("sources");
+    for index in 0..BATCH {
+        tx.execute(
+            "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted, captured_at_ms) VALUES (?, ?, 'author@example.org', ?, ?, NULL, 0, '{}', 1, ?)",
+            crate::db_params![Uuid::now_v7().to_string(), room().to_string(), format!("retracted-{index}"), format!("retracted-{index}"), ms(t0)],
+        )
+        .await
+        .expect("retracted source");
+    }
+    tx.commit().await.expect("sources commit");
+    let batch = collect(&fixture, horizon(t0), BATCH).await;
+    assert_eq!(
+        batch,
+        ObserverRetentionBatch {
+            sources: u64::from(BATCH),
+            exhausted: true,
+            ..ObserverRetentionBatch::default()
+        }
+    );
+    assert_eq!(fixture.count("extension_room_sources").await, 0);
+    assert_eq!(collect(&fixture, horizon(t0), BATCH).await.total(), 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn full_batch_of_retracted_sources_is_collected_in_one_batch_sqlite() {
+    full_batch_of_retracted_sources_is_collected_in_one_batch(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn full_batch_of_retracted_sources_is_collected_in_one_batch_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("observer_retention_source_batch").await {
+        full_batch_of_retracted_sources_is_collected_in_one_batch(fixture).await;
+    }
+}
+
 #[tokio::test]
 async fn retracted_source_with_oversized_revision_chain_drains_within_budget_sqlite() {
     retracted_source_with_oversized_revision_chain_drains_within_budget(

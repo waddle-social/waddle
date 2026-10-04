@@ -107,6 +107,9 @@ pub(super) struct MaintenanceCursor {
     /// Highest receipt total already credited per row, so a delayed worker
     /// and a later pass's worker never credit the same receipt twice.
     recovery_credited: Arc<Mutex<CreditedRows>>,
+    /// Earliest instant the observer-retention phase runs again; `None` means
+    /// due now, so a fresh cursor collects at startup.
+    observer_retention_due_at: Arc<Mutex<Option<tokio::time::Instant>>>,
     #[cfg(test)]
     accounting_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -137,6 +140,32 @@ impl MaintenanceCursor {
             .after
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = after;
+    }
+
+    pub(super) fn observer_retention_due(&self) -> bool {
+        self.observer_retention_due_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none_or(|at| tokio::time::Instant::now() >= at)
+    }
+
+    /// A complete run waits out the interval; anything else stays due so a
+    /// backlog or a failure retries at pass cadence.
+    fn observer_retention_ran(&self, outcome: MaintenanceOutcome) {
+        *self
+            .observer_retention_due_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (outcome
+            == MaintenanceOutcome::Complete)
+            .then(|| tokio::time::Instant::now() + OBSERVER_RETENTION_INTERVAL);
+    }
+
+    #[cfg(test)]
+    pub(super) fn expire_observer_retention_interval(&self) {
+        *self
+            .observer_retention_due_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -241,9 +270,16 @@ pub(super) async fn run_maintenance_pass_with_cursor(
             IngressGcOutcome::Failed | IngressGcOutcome::Unattested => MaintenanceOutcome::Failed,
         };
         record(IngressMaintenancePhase::RetentionGc, retention);
-        let observer =
-            collect_observer_history(database, budget.retention, crate::time::now_ms()).await;
-        record(IngressMaintenancePhase::ObserverRetention, observer);
+        // Observer history ages over days: commit-triggered passes must not
+        // each pay for its write transaction. A skipped phase records nothing.
+        let observer = if cursor.observer_retention_due() {
+            let outcome =
+                collect_observer_history(database, budget.retention, crate::time::now_ms()).await;
+            cursor.observer_retention_ran(outcome);
+            record(IngressMaintenancePhase::ObserverRetention, outcome)
+        } else {
+            MaintenanceOutcome::Complete
+        };
         combine(
             combine(combine(terminalization, recovery), retention),
             observer,
@@ -256,6 +292,11 @@ pub(super) async fn run_maintenance_pass_with_cursor(
 
 /// Physical row deletions per observer-retention transaction (#1901).
 const OBSERVER_GC_BATCH_LIMIT: u32 = 256;
+
+/// Shortest gap between complete observer-retention runs (#1901). Like the
+/// orphan-proof sweep's interval, it keeps work that is days from being due
+/// off the passes that every committed decision triggers.
+const OBSERVER_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Observer history has no FK to canonical rows, so it ages out by its own
 /// settlement clock (#1901). It shares canonical retention's per-operation

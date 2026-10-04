@@ -393,8 +393,12 @@ source change, supersession, retraction, generation change), a publication when
 it is published or staled, a receipt `recorded_at_ms` when it is written, and a
 source `captured_at_ms` when it is captured.
 
-The `observer_retention` maintenance phase runs after `retention_gc` in every
-pass. Each transaction deletes at most 256 rows across all five statements
+The `observer_retention` maintenance phase runs after `retention_gc`, at most
+once per `OBSERVER_RETENTION_INTERVAL` (60 s): after a `complete` run it waits
+out the interval, so passes triggered by committed decisions skip it and record
+nothing for it; a `partial`, `failed` or `timed_out` run stays due and retries
+on the next pass, and a freshly started pod runs it on its first pass. Each
+transaction deletes at most 256 rows across all five statements
 (publications, then work, receipts, retracted-source revisions and retracted
 sources), selecting candidates with the protective predicates in the same
 statement and `FOR UPDATE SKIP LOCKED` on PostgreSQL. It uses the retention GC
@@ -415,8 +419,11 @@ they are absent, adds `settled_at_ms` (work, publications), `recorded_at_ms`
 `source_key` indexes. Existing final work, settled publications, receipts and
 sources are stamped with the migration time, so pre-existing history ages out
 eight days after the upgrade, never immediately. On PostgreSQL it grants
-`SELECT` on all six observer tables to `pg_monitor`. No cutover is required:
-old binaries ignore the new nullable or defaulted columns.
+`SELECT` on all six observer tables to `pg_monitor`. The columns themselves are
+nullable or defaulted, but the append-only migration ledger still refuses to
+start a binary that does not know version 1023, so the deployment is one-way:
+production stays on the `Recreate` strategy adopted for V1022 (#1899), and a
+rollback is a roll-forward correction, never an older image.
 
 ### Inspecting observer history
 
