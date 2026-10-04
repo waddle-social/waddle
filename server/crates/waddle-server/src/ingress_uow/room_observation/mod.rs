@@ -6,6 +6,7 @@
 
 mod observation_body;
 mod publications;
+mod retention;
 mod schema;
 mod sources;
 mod work;
@@ -20,6 +21,7 @@ use waddle_extensions::{
 };
 use waddle_xmpp::ingress::MessageKey;
 
+pub use retention::ObserverRetentionBatch;
 pub use schema::initialize_room_observations;
 
 /// No provider body, message text, key, JID, or raw SQL diagnostic is exposed
@@ -28,6 +30,8 @@ pub use schema::initialize_room_observations;
 pub enum ObservationError {
     #[error("room observation database operation failed")]
     Database,
+    #[error("room observation database operation timed out")]
+    Timeout,
     #[error("room observation node authority is no longer current")]
     AuthorityStopped,
     #[error("stored room observation data is malformed")]
@@ -92,8 +96,9 @@ impl RoomObservationRepository {
     pub async fn sync_configured(
         tx: &mut super::IngressUowTransaction<'_>,
         configured: &[ConfiguredRoomObserver],
+        now_ms: i64,
     ) -> Result<(), ObservationError> {
-        sources::sync_configured(tx, configured).await
+        sources::sync_configured(tx, configured, now_ms).await
     }
 
     pub(crate) async fn capture(
@@ -107,8 +112,9 @@ impl RoomObservationRepository {
         tx: &mut super::IngressUowTransaction<'_>,
         room: &jid::BareJid,
         target: &waddle_xmpp_core::xep0359::StanzaId,
+        now_ms: i64,
     ) -> Result<(), ObservationError> {
-        sources::retract(tx, room, target).await
+        sources::retract(tx, room, target, now_ms).await
     }
 
     pub async fn claim(
@@ -152,8 +158,9 @@ impl RoomObservationRepository {
     pub async fn publication(
         tx: &mut super::IngressUowTransaction<'_>,
         subscription: &RoomObservationSubscription,
+        now_ms: i64,
     ) -> Result<Option<RoomPublication>, ObservationError> {
-        publications::publication(tx, subscription).await
+        publications::publication(tx, subscription, now_ms).await
     }
 
     pub async fn assert_publication(
@@ -166,7 +173,20 @@ impl RoomObservationRepository {
     pub async fn mark_published(
         tx: &mut super::IngressUowTransaction<'_>,
         id: &Uuid,
+        now_ms: i64,
     ) -> Result<bool, ObservationError> {
-        publications::mark_published(tx, id).await
+        publications::mark_published(tx, id, now_ms).await
+    }
+
+    /// Delete one bounded batch of settled observer history older than
+    /// [`retention::OBSERVER_HISTORY_RETENTION`] (#1901). `limit` bounds physical row
+    /// deletions across every table. Active work, pending publications, and
+    /// anything still evidence for a non-terminal canonical row survive.
+    pub(crate) async fn collect_expired(
+        tx: &mut crate::db::Transaction<'_>,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<ObserverRetentionBatch, ObservationError> {
+        retention::collect_expired(tx, now_ms, limit).await
     }
 }

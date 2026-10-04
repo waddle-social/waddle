@@ -48,6 +48,7 @@ fn canonical_scope(scope: &RoomObservationScope) -> RoomObservationScope {
 pub(super) async fn sync_configured(
     tx: &mut IngressUowTransaction<'_>,
     configured: &[ConfiguredRoomObserver],
+    now_ms: i64,
 ) -> Result<(), ObservationError> {
     let mut seen = std::collections::HashSet::new();
     for observer in configured {
@@ -96,7 +97,7 @@ pub(super) async fn sync_configured(
                 crate::db_params![generation, observer.identity.as_str(), &scope_json, max_concurrent, observer.plugin.as_str(), generation],
             )
             .await?;
-        stale_generation(tx, &observer.plugin, generation).await?;
+        stale_generation(tx, &observer.plugin, generation, now_ms).await?;
     }
     Ok(())
 }
@@ -209,6 +210,7 @@ pub(super) async fn terminal_receipt(
     subscription: &RoomObservationSubscription,
     key: MessageKey,
     category: &'static str,
+    now_ms: i64,
 ) -> Result<(), ObservationError> {
     // This is the exact semantic receipt identity used by ingress::receipt_key
     // for a frozen RoomObserver intent. The sender/requester fields are not
@@ -229,8 +231,8 @@ pub(super) async fn terminal_receipt(
     .await
     .map_err(|_| ObservationError::Database)?;
     tx.transaction_mut().execute(
-        "INSERT INTO extension_room_observation_receipts (plugin_id, generation, room_jid, message_key, category) VALUES (?, ?, ?, ?, ?) ON CONFLICT (plugin_id, generation, room_jid, message_key) DO NOTHING",
-        crate::db_params![subscription.plugin.as_str(), i64::try_from(subscription.generation.get()).map_err(|_| ObservationError::GenerationOutOfRange)?, subscription.room.to_string(), key.to_storage().to_string(), category],
+        "INSERT INTO extension_room_observation_receipts (plugin_id, generation, room_jid, message_key, category, recorded_at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (plugin_id, generation, room_jid, message_key) DO NOTHING",
+        crate::db_params![subscription.plugin.as_str(), i64::try_from(subscription.generation.get()).map_err(|_| ObservationError::GenerationOutOfRange)?, subscription.room.to_string(), key.to_storage().to_string(), category, now_ms],
     ).await?;
     Ok(())
 }
@@ -240,6 +242,7 @@ pub(super) async fn stale_source_work(
     source_key: MessageKey,
     before_revision: Option<u64>,
     category: &'static str,
+    now_ms: i64,
 ) -> Result<(), ObservationError> {
     let key = source_key.to_storage().to_string();
     let revision = before_revision
@@ -261,12 +264,12 @@ pub(super) async fn stale_source_work(
     }
     drop(rows);
     tx.transaction_mut().execute(
-        "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = ?, body = '', lease_id = NULL, lease_until_ms = NULL WHERE source_key = ? AND status IN ('pending', 'leased', 'started') AND (? IS NULL OR revision < ?)",
-        crate::db_params![category, &key, revision, revision],
+        "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = ?, body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE source_key = ? AND status IN ('pending', 'leased', 'started') AND (? IS NULL OR revision < ?)",
+        crate::db_params![category, now_ms, &key, revision, revision],
     ).await?;
     tx.transaction_mut().execute(
-        "UPDATE extension_room_publications SET status = 'stale' WHERE source_key = ? AND status = 'pending' AND (? IS NULL OR revision < ?)",
-        crate::db_params![&key, revision, revision],
+        "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE source_key = ? AND status = 'pending' AND (? IS NULL OR revision < ?)",
+        crate::db_params![now_ms, &key, revision, revision],
     ).await?;
     for (plugin, generation, identity, room, message_key) in pending {
         let subscription = RoomObservationSubscription {
@@ -281,7 +284,7 @@ pub(super) async fn stale_source_work(
         let message_key = MessageKey::from_storage(
             Uuid::parse_str(&message_key).map_err(|_| ObservationError::Codec)?,
         );
-        terminal_receipt(tx, &subscription, message_key, category).await?;
+        terminal_receipt(tx, &subscription, message_key, category, now_ms).await?;
     }
     Ok(())
 }
@@ -290,6 +293,7 @@ async fn stale_generation(
     tx: &mut IngressUowTransaction<'_>,
     plugin: &PluginId,
     generation: i64,
+    now_ms: i64,
 ) -> Result<(), ObservationError> {
     let mut rows = tx.transaction_mut().query(
         "SELECT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started') UNION SELECT source_key FROM extension_room_publications WHERE plugin_id = ? AND generation < ? AND status = 'pending' ORDER BY source_key",
@@ -322,12 +326,12 @@ async fn stale_generation(
         }
         drop(rows);
         tx.transaction_mut().execute(
-            "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'generation_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started')",
-            crate::db_params![&source_key, plugin.as_str(), generation],
+            "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'generation_changed', body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started')",
+            crate::db_params![now_ms, &source_key, plugin.as_str(), generation],
         ).await?;
         tx.transaction_mut().execute(
-            "UPDATE extension_room_publications SET status = 'stale' WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status = 'pending'",
-            crate::db_params![&source_key, plugin.as_str(), generation],
+            "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status = 'pending'",
+            crate::db_params![now_ms, &source_key, plugin.as_str(), generation],
         ).await?;
         for (old_generation, identity, room, message_key) in pending {
             let subscription = RoomObservationSubscription {
@@ -342,7 +346,7 @@ async fn stale_generation(
             let message_key = MessageKey::from_storage(
                 Uuid::parse_str(&message_key).map_err(|_| ObservationError::Codec)?,
             );
-            terminal_receipt(tx, &subscription, message_key, "generation_changed").await?;
+            terminal_receipt(tx, &subscription, message_key, "generation_changed", now_ms).await?;
         }
     }
     Ok(())
@@ -391,6 +395,7 @@ pub(super) async fn capture(
         observed_at: now,
         correction_target,
     } = source;
+    let now_ms = now.timestamp_millis();
     // Match the core room validator: malformed replace payloads are ordinary
     // messages there and must not make optional observation abort the archive.
     let correction = xep0308::extract_correction_from_message(message);
@@ -421,7 +426,7 @@ pub(super) async fn capture(
         if active_subscription(tx, &subscription).await? {
             active.push(subscription);
         } else {
-            terminal_receipt(tx, &subscription, key, "subscription_unavailable").await?;
+            terminal_receipt(tx, &subscription, key, "subscription_unavailable", now_ms).await?;
         }
     }
     // A stale replica's frozen observer is no longer allowed to schedule
@@ -438,13 +443,13 @@ pub(super) async fn capture(
         .unwrap_or("");
     let Some(stanza_id) = current_stanza_id(message, room) else {
         for subscription in &subscriptions {
-            terminal_receipt(tx, subscription, key, "missing_room_stanza_id").await?;
+            terminal_receipt(tx, subscription, key, "missing_room_stanza_id", now_ms).await?;
         }
         return Ok(());
     };
     if body.trim().is_empty() && correction.is_none() {
         for subscription in &subscriptions {
-            terminal_receipt(tx, subscription, key, "empty_body").await?;
+            terminal_receipt(tx, subscription, key, "empty_body", now_ms).await?;
         }
         return Ok(());
     }
@@ -457,6 +462,7 @@ pub(super) async fn capture(
                     subscription,
                     key,
                     "missing_authoritative_correction_target",
+                    now_ms,
                 )
                 .await?;
             }
@@ -465,13 +471,14 @@ pub(super) async fn capture(
         let Some(mut stored) = source_for_authoritative_target(tx, room, sender, target).await?
         else {
             for subscription in &subscriptions {
-                terminal_receipt(tx, subscription, key, "unknown_correction_target").await?;
+                terminal_receipt(tx, subscription, key, "unknown_correction_target", now_ms)
+                    .await?;
             }
             return Ok(());
         };
         if stored.retracted {
             for subscription in &subscriptions {
-                terminal_receipt(tx, subscription, key, "retracted_source").await?;
+                terminal_receipt(tx, subscription, key, "retracted_source", now_ms).await?;
             }
             return Ok(());
         }
@@ -499,6 +506,7 @@ pub(super) async fn capture(
                 stored.key,
                 Some(stored.source.revision.get()),
                 "superseded",
+                now_ms,
             )
             .await?;
         }
@@ -509,14 +517,14 @@ pub(super) async fn capture(
             xep0359::extract_origin_id(message).and_then(|id| OriginId::new(id.id).ok())
         else {
             for subscription in &subscriptions {
-                terminal_receipt(tx, subscription, key, "missing_origin_id").await?;
+                terminal_receipt(tx, subscription, key, "missing_origin_id", now_ms).await?;
             }
             return Ok(());
         };
         let source = source_for_new_message(room, sender, stanza_id.clone(), origin, body, now)?;
         tx.transaction_mut().execute(
-            "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0) ON CONFLICT (source_key) DO NOTHING",
-            crate::db_params![key.to_storage().to_string(), room.to_string(), sender.to_string(), source.stanza_id.as_str(), source.revision_stanza_id.as_str(), source.origin_id.as_ref().map(OriginId::as_str), serde_json::to_string(&source)?],
+            "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted, captured_at_ms) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?) ON CONFLICT (source_key) DO NOTHING",
+            crate::db_params![key.to_storage().to_string(), room.to_string(), sender.to_string(), source.stanza_id.as_str(), source.revision_stanza_id.as_str(), source.origin_id.as_ref().map(OriginId::as_str), serde_json::to_string(&source)?, now_ms],
         ).await?;
         let stored = load_source(tx, key)
             .await?
@@ -542,7 +550,7 @@ pub(super) async fn capture(
     // content and correction invalidation retain the complete source revision.
     let Some(body) = observation_body(message, body) else {
         for subscription in &subscriptions {
-            terminal_receipt(tx, subscription, key, "empty_body").await?;
+            terminal_receipt(tx, subscription, key, "empty_body", now_ms).await?;
         }
         return Ok(());
     };
@@ -561,6 +569,7 @@ pub(super) async fn retract(
     tx: &mut IngressUowTransaction<'_>,
     room: &BareJid,
     target: &xep0359::StanzaId,
+    now_ms: i64,
 ) -> Result<(), ObservationError> {
     if target.by != *room {
         return Ok(());
@@ -591,6 +600,6 @@ pub(super) async fn retract(
             crate::db_params![&key],
         )
         .await?;
-    stale_source_work(tx, source.key, None, "retracted").await?;
+    stale_source_work(tx, source.key, None, "retracted", now_ms).await?;
     Ok(())
 }

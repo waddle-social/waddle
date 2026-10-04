@@ -64,7 +64,8 @@ impl RoomObservationActors {
         initialize_room_observations(state.deps.app_state.db_pool.global()).await?;
         let authority = &state.deps.protocol.ingress;
         let mut tx = authority.observation_transaction().await?;
-        RoomObservationRepository::sync_configured(&mut tx, &configured).await?;
+        RoomObservationRepository::sync_configured(&mut tx, &configured, crate::time::now_ms())
+            .await?;
         tx.commit().await?;
         let tasks = TaskTracker::new();
         let process_limit = Arc::new(Semaphore::new(32));

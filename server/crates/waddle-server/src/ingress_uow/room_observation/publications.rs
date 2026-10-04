@@ -82,6 +82,7 @@ async fn load_locked(
 pub(super) async fn publication(
     tx: &mut IngressUowTransaction<'_>,
     subscription: &RoomObservationSubscription,
+    now_ms: i64,
 ) -> Result<Option<RoomPublication>, ObservationError> {
     if !active_subscription(tx, subscription).await? {
         return Ok(None);
@@ -112,8 +113,8 @@ pub(super) async fn publication(
         };
         if !current(&stored, &source) {
             tx.transaction_mut().execute(
-                "UPDATE extension_room_publications SET status = 'stale' WHERE id = ? AND status = 'pending'",
-                crate::db_params![id.to_string()],
+                "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE id = ? AND status = 'pending'",
+                crate::db_params![now_ms, id.to_string()],
             ).await?;
             continue;
         }
@@ -165,10 +166,11 @@ pub(super) async fn assert_publication(
 pub(super) async fn mark_published(
     tx: &mut IngressUowTransaction<'_>,
     id: &Uuid,
+    now_ms: i64,
 ) -> Result<bool, ObservationError> {
     let changed = tx.transaction_mut().execute(
-        "UPDATE extension_room_publications SET status = 'published' WHERE id = ? AND status = 'pending'",
-        crate::db_params![id.to_string()],
+        "UPDATE extension_room_publications SET status = 'published', settled_at_ms = ? WHERE id = ? AND status = 'pending'",
+        crate::db_params![now_ms, id.to_string()],
     ).await?;
     Ok(changed == 1)
 }

@@ -1,5 +1,6 @@
 mod invocation_fence;
 mod reply_fallback;
+mod retention;
 
 use chrono::Utc;
 use jid::BareJid;
@@ -184,9 +185,13 @@ async fn capture_rollback_duplicate_and_monotonic_generation(fixture: IngressFix
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("begin");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         key,
@@ -204,9 +209,13 @@ async fn capture_rollback_duplicate_and_monotonic_generation(fixture: IngressFix
 
     let mut tx = fixture.uow.begin().await.expect("retry");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         key,
@@ -230,14 +239,23 @@ async fn capture_rollback_duplicate_and_monotonic_generation(fixture: IngressFix
     .await
     .expect("duplicate");
     let newer = configured_observer(2, 'b');
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&newer))
+    Repo::sync_configured(&mut tx, std::slice::from_ref(&newer), crate::time::now_ms())
         .await
         .expect("advance");
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("stale skip");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("stale skip");
     assert_eq!(
-        Repo::sync_configured(&mut tx, &[configured_observer(2, 'c')]).await,
+        Repo::sync_configured(
+            &mut tx,
+            &[configured_observer(2, 'c')],
+            crate::time::now_ms()
+        )
+        .await,
         Err(ObservationError::IdentityConflict)
     );
     tx.commit().await.expect("commit");
@@ -270,9 +288,13 @@ async fn lease_fence_and_publication_share_receipt_commit(fixture: IngressFixtur
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("capture");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         key,
@@ -352,13 +374,13 @@ async fn lease_fence_and_publication_share_receipt_commit(fixture: IngressFixtur
         "completed work no longer retains the message body"
     );
     let mut tx = fixture.uow.begin().await.expect("publish");
-    let publication = Repo::publication(&mut tx, &subscription)
+    let publication = Repo::publication(&mut tx, &subscription, crate::time::now_ms())
         .await
         .expect("publication")
         .expect("pending");
     let mut other_observer = observer.clone();
     other_observer.plugin = PluginId::new("other-observer").expect("plugin");
-    Repo::sync_configured(&mut tx, &[other_observer.clone()])
+    Repo::sync_configured(&mut tx, &[other_observer.clone()], crate::time::now_ms())
         .await
         .expect("other plugin");
     let mut mismatched = publication.clone();
@@ -370,9 +392,11 @@ async fn lease_fence_and_publication_share_receipt_commit(fixture: IngressFixtur
     assert!(Repo::assert_publication(&mut tx, &publication)
         .await
         .expect("assert"));
-    assert!(Repo::mark_published(&mut tx, &publication.id)
-        .await
-        .expect("mark"));
+    assert!(
+        Repo::mark_published(&mut tx, &publication.id, crate::time::now_ms())
+            .await
+            .expect("mark")
+    );
     tx.commit().await.expect("publish commit");
     fixture.close().await;
 }
@@ -400,9 +424,13 @@ async fn empty_correction_and_retraction_cancel_prior_work(fixture: IngressFixtu
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("root");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         key,
@@ -478,6 +506,7 @@ async fn empty_correction_and_retraction_cancel_prior_work(fixture: IngressFixtu
         &mut tx,
         &room(),
         &StanzaId::new("room-stanza-root", room().into()),
+        crate::time::now_ms(),
     )
     .await
     .expect("retract");
@@ -513,9 +542,13 @@ async fn distinct_room_sources_can_hold_distinct_leases() {
     let subscription = subscription(&observer);
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("capture");
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     for (wire, stanza, origin) in [
         ("wire-first", "stanza-first", "origin-first"),
         ("wire-second", "stanza-second", "origin-second"),
@@ -563,9 +596,13 @@ async fn explicit_generation_revocation_disposes_work_and_its_ingress_receipt() 
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("capture");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         key,
@@ -582,7 +619,7 @@ async fn explicit_generation_revocation_disposes_work_and_its_ingress_receipt() 
     let mut revoked = configured_observer(2, 'b');
     revoked.scope = RoomObservationScope::Rooms(vec![]);
     let mut tx = fixture.uow.begin().await.expect("revoke");
-    Repo::sync_configured(&mut tx, &[revoked.clone()])
+    Repo::sync_configured(&mut tx, &[revoked.clone()], crate::time::now_ms())
         .await
         .expect("revoke");
     assert!(Repo::claim(&mut tx, &subscription, now.timestamp_millis())
@@ -614,9 +651,13 @@ async fn due_room_cursor_wraps_within_configured_scope() {
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("capture");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         key,
@@ -649,9 +690,13 @@ async fn distinct_sources_can_reuse_the_same_client_wire_id() {
     let observer = configured_observer(1, 'a');
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("sources");
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     for (stanza, origin) in [
         ("room-stanza-first", "origin-first"),
         ("room-stanza-second", "origin-second"),
@@ -683,9 +728,13 @@ async fn correction_of_earlier_revision_keeps_the_canonical_source(fixture: Ingr
     let observer = configured_observer(1, 'a');
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("source chain");
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     let root_key = MessageKey::new();
     record_message(&mut tx, root_key).await;
     capture(
@@ -787,9 +836,13 @@ async fn stale_replica_correction_invalidates_new_generation_result(fixture: Ing
     let root_key = MessageKey::new();
     let mut tx = fixture.uow.begin().await.expect("root");
     record_message(&mut tx, root_key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&current))
-        .await
-        .expect("current config");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&current),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("current config");
     capture(
         &mut tx,
         root_key,

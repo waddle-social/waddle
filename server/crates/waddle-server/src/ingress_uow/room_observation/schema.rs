@@ -40,6 +40,7 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
     revision BIGINT NOT NULL,
     source_json TEXT NOT NULL,
     retracted BIGINT NOT NULL DEFAULT 0,
+    captured_at_ms BIGINT NOT NULL DEFAULT 0,
     UNIQUE (room_jid, root_stanza_id)
 )"#,
         (),
@@ -76,6 +77,7 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
     lease_node_incarnation TEXT,
     terminal_category TEXT,
     usage_json TEXT,
+    settled_at_ms BIGINT NULL,
     UNIQUE (plugin_id, generation, room_jid, source_key, revision)
 )"#,
         (),
@@ -94,6 +96,7 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
     room_jid TEXT NOT NULL,
     message_key TEXT NOT NULL,
     category TEXT NOT NULL,
+    recorded_at_ms BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (plugin_id, generation, room_jid, message_key)
 )"#,
         (),
@@ -113,6 +116,7 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
     source_json TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     status TEXT NOT NULL,
+    settled_at_ms BIGINT NULL,
     UNIQUE (work_id, output_index)
 )"#,
         (),
@@ -124,6 +128,19 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
         (),
     )
     .await?;
+    // Retention indexes match V1023; the tables always exist in their
+    // migrated shape by the time startup DDL runs.
+    for index in [
+        "CREATE INDEX IF NOT EXISTS extension_room_observation_work_settled ON extension_room_observation_work (status, settled_at_ms)",
+        "CREATE INDEX IF NOT EXISTS extension_room_observation_work_source ON extension_room_observation_work (source_key)",
+        "CREATE INDEX IF NOT EXISTS extension_room_publications_settled ON extension_room_publications (status, settled_at_ms)",
+        "CREATE INDEX IF NOT EXISTS extension_room_publications_source ON extension_room_publications (source_key)",
+        "CREATE INDEX IF NOT EXISTS extension_room_observation_receipts_recorded ON extension_room_observation_receipts (recorded_at_ms)",
+        "CREATE INDEX IF NOT EXISTS extension_room_sources_captured ON extension_room_sources (captured_at_ms)",
+        "CREATE INDEX IF NOT EXISTS extension_room_source_revisions_source ON extension_room_source_revisions (source_key)",
+    ] {
+        tx.execute(index, ()).await?;
+    }
     tx.commit().await?;
     Ok(())
 }

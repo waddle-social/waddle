@@ -846,14 +846,17 @@ pub enum IngressMaintenancePhase {
     Terminalization,
     Recovery,
     RetentionGc,
+    /// Bounded retention of settled room-observer history (#1901).
+    ObserverRetention,
 }
 
 impl IngressMaintenancePhase {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Pass,
         Self::Terminalization,
         Self::Recovery,
         Self::RetentionGc,
+        Self::ObserverRetention,
     ];
 }
 
@@ -869,6 +872,38 @@ impl MetricAttribute for IngressMaintenancePhase {
             Self::Terminalization => "terminalization",
             Self::Recovery => "recovery",
             Self::RetentionGc => "retention_gc",
+            Self::ObserverRetention => "observer_retention",
+        }
+    }
+}
+
+/// `table` — the room-observer history family reclaimed by observer
+/// retention. `Source` covers retracted source identities and their
+/// revision mappings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserverHistoryTable {
+    Work,
+    Publication,
+    Receipt,
+    Source,
+}
+
+impl ObserverHistoryTable {
+    pub const ALL: [Self; 4] = [Self::Work, Self::Publication, Self::Receipt, Self::Source];
+}
+
+impl sealed::Sealed for ObserverHistoryTable {}
+impl MetricAttribute for ObserverHistoryTable {
+    fn key(&self) -> &'static str {
+        "table"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Work => "work",
+            Self::Publication => "publication",
+            Self::Receipt => "receipt",
+            Self::Source => "source",
         }
     }
 }

@@ -177,9 +177,10 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
 | `ingress.gc.reclaimed_messages` | `ingress_gc_reclaimed_messages_total` | Reclamation progress |
-| `ingress.maintenance.runs{phase,outcome}` (phases: `pass`, `terminalization`, `recovery`, `retention_gc`) | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
+| `ingress.maintenance.runs{phase,outcome}` (phases: `pass`, `terminalization`, `recovery`, `retention_gc`, `observer_retention`) | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
 | `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
 | `ingress.maintenance.recovered_obligations` | `ingress_maintenance_recovered_obligations_total` | Recovery progress |
+| `ingress.maintenance.reclaimed_observer_rows{table}` (tables: `work`, `publication`, `receipt`, `source`; `source` counts retracted sources and their revision mappings) | `ingress_maintenance_reclaimed_observer_rows_total` | Observer history reclamation progress (#1901); zero-registered |
 | `ingress.maintenance.unrecoverable_obligations{kind,reason}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported evaluations and stalled recovery classifications; read alongside `IngressNonTerminalBacklog` |
 | `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | Frozen groupchat copies settled for occupants the room no longer lists; not zero-registered, so read it as "did this ever tick" |
 | `muc.ghost_occupants.evicted` | `muc_ghost_occupants_evicted_total` | XEP-0045 ghost occupants removed from a room by a stalled groupchat obligation; not zero-registered, and every tick means a cleanup leak happened upstream |
@@ -267,7 +268,8 @@ period in `(created_at, message_key)` order. Each row is locked and its receipt
 completeness rechecked before terminalization. Contended or failed rows leave
 the pass partial while pagination continues to later rows. Continuations retain
 the keyset cursor so a contended prefix cannot starve later rows, then wrap to
-retry skipped rows. Phase order is terminalization → recovery → retention GC.
+retry skipped rows. Phase order is terminalization → recovery → retention GC →
+observer retention (see "Observer history retention (#1901)").
 Terminalization has a 2 s budget; recovery has a 4 s phase budget and a 1 s
 absolute per-row deadline covering freeze, execute, delegate and recount.
 Recovery scans pages of 64 keys and attempts at most 64 rows per pass.
@@ -304,8 +306,8 @@ not by itself make the phase partial; later scans retry it subject to stall
 parking (see "What recovery handles").
 
 `ingress.maintenance.runs` labels phases as `pass`, `terminalization`,
-`recovery`, or `retention_gc`, with outcomes `complete`, `partial`, `failed`, or
-`timed_out`.
+`recovery`, `retention_gc`, or `observer_retention`, with outcomes `complete`,
+`partial`, `failed`, or `timed_out`.
 The `pass` series includes attestation and hard-deadline failures.
 `IngressMaintenanceFailing` warns on failed or timed-out passes in the last
 hour. A partial pass can be ordinary bounded backlog progress or skipped
@@ -355,6 +357,377 @@ A `partial` result means bounded progress with more work pending, not failure;
 `failed` or `timed_out` requires investigation. See
 [ingress epoch guards](ingress-epoch-guards.md) for lock order and activation
 preconditions; the cutover does not itself authorize an epoch activation.
+
+## Observer history retention (#1901)
+
+The six `extension_room_*` tables deliberately have no foreign key to
+`ingress_messages`: cleanup of an archive source must not erase pending
+observation work or a result awaiting publication. They therefore do not die
+with the canonical row the way `ingress_send_attempts` do. Send attempts die
+with the canonical row through their FK cascade; observer history has no FK and
+dies by its own clock plus a guard on the canonical row's terminal state.
+
+`OBSERVER_HISTORY_RETENTION` is eight days, the same horizon as canonical
+retention (`ALIAS_RETENTION`), measured from the observer row's own settlement.
+With `cutoff = now - 8 days`, a row is collectable only when **all** of the
+following hold:
+
+| Row | Collectable when |
+| --- | --- |
+| `extension_room_observation_work` final (`completed`, `terminal`, `stale`) | `settled_at_ms <= cutoff`; no `extension_room_publications` row with `work_id = id AND status = 'pending'`; no `ingress_messages` row with `message_key = work.message_key AND terminal_at IS NULL` (recovery may still rebuild the kind-28 effect for a non-terminal canonical row and must find its evidence) |
+| `extension_room_publications` `published` or `stale` | `settled_at_ms <= cutoff` (the publication's own settlement), independent of its work row; `pending` is never collected |
+| `extension_room_observation_receipts` | `recorded_at_ms <= cutoff`; no active (`pending`, `leased`, `started`) work for the same `(plugin_id, generation, room_jid, message_key)`; no non-terminal `ingress_messages` row for `message_key` |
+| `extension_room_sources` and its `extension_room_source_revisions` | **Only retracted sources** (`retracted = 1`): `captured_at_ms <= cutoff`; no work row (any status) and no publication row (any status) references `source_key`. Revisions are deleted first, in budgeted batches; the source row is deleted only when, under the source row lock, zero revisions remain and the predicates still hold. **Non-retracted source identity is never collected**: room correction validation accepts a correction of any archived message by its continuously joined sender with no age cutoff, and capture resolves the target through `extension_room_source_revisions`, so a live subscription needs the identity for as long as the room archive holds the message. Source identity lifetime is the archive's lifetime (the archive has no retention today); `source_json` stays with it. |
+| `extension_room_observers` | never collected (configuration; generation revocation is the existing procedure) |
+
+The canonical-row predicate, not the horizon alone, preserves duplicate
+suppression across the replay horizon: observer evidence outlives every
+non-terminal canonical row regardless of age. What this bounds is execution
+history (work, publications, receipts) and retracted sources; a correction or
+retraction of a non-retracted source keeps resolving for as long as the archive
+holds the message.
+
+Writers stamp the clock in the same transaction as the state change: work gets
+`settled_at_ms` when it leaves the active statuses (finish, retry exhaustion,
+source change, supersession, retraction, generation change), a publication when
+it is published or staled, a receipt `recorded_at_ms` when it is written, and a
+source `captured_at_ms` when it is captured.
+
+The `observer_retention` maintenance phase runs after `retention_gc` in every
+pass. Each transaction deletes at most 256 rows across all five statements
+(publications, then work, receipts, retracted-source revisions and retracted
+sources), selecting candidates with the protective predicates in the same
+statement and `FOR UPDATE SKIP LOCKED` on PostgreSQL. It uses the retention GC
+bounds: a 2 s cooperative budget, a 6 s hard deadline, 100 ms lock and 250 ms
+statement timeouts. A pass cut by the budget is `partial` and continues on the
+coordinator's backoff. Failures are `ingress.maintenance.runs{phase="observer_retention",outcome="failed"|"timed_out"}`
+and therefore feed `IngressMaintenanceFailing`. Reclaimed rows are counted by
+`ingress.maintenance.reclaimed_observer_rows{table}`. The observer tables are
+not canonical ingress authority, so they are not in `EPOCH_GUARDED_TABLES`, carry
+no epoch-guard triggers, and the phase takes no epoch lock; the pass's
+attestation gate covers it.
+
+### V1023
+
+V1023 creates the four startup-owned observer tables in their prior shape if
+they are absent, adds `settled_at_ms` (work, publications), `recorded_at_ms`
+(receipts) and `captured_at_ms` (sources), and adds the retention and
+`source_key` indexes. Existing final work, settled publications, receipts and
+sources are stamped with the migration time, so pre-existing history ages out
+eight days after the upgrade, never immediately. On PostgreSQL it grants
+`SELECT` on all six observer tables to `pg_monitor`. No cutover is required:
+old binaries ignore the new nullable or defaulted columns.
+
+### Inspecting observer history
+
+Run these read-only statements as `pg_monitor` (or the application role). The
+parity test executes this block under `SET ROLE pg_monitor`, so keep each
+statement self-contained and free of placeholders.
+
+<!-- observer-retention-inspection:begin -->
+```sql
+-- Work backlog by status and category, with the oldest settlement.
+SELECT status, terminal_category, count(*) AS rows,
+       min(settled_at_ms) AS oldest_settled_at_ms
+FROM extension_room_observation_work
+GROUP BY status, terminal_category
+ORDER BY status, terminal_category;
+
+-- Publications by status, with the oldest settlement.
+SELECT status, count(*) AS rows, min(settled_at_ms) AS oldest_settled_at_ms
+FROM extension_room_publications
+GROUP BY status
+ORDER BY status;
+
+-- Pending publications whose source no longer exists.
+SELECT publication.id, publication.work_id, publication.plugin_id,
+       publication.generation, publication.room_jid
+FROM extension_room_publications publication
+WHERE publication.status = 'pending'
+  AND NOT EXISTS (
+    SELECT 1 FROM extension_room_sources source
+    WHERE source.source_key = publication.source_key
+  )
+ORDER BY publication.room_jid, publication.id;
+
+-- Settled work past the horizon that is kept only by a non-terminal canonical row.
+SELECT work.id, work.message_key, work.status, work.terminal_category,
+       work.settled_at_ms
+FROM extension_room_observation_work work
+JOIN ingress_messages message
+  ON message.message_key = CAST(work.message_key AS uuid)
+WHERE work.status IN ('completed', 'terminal', 'stale')
+  AND message.terminal_at IS NULL
+  AND work.settled_at_ms <= CAST(FLOOR(EXTRACT(EPOCH FROM now()) * 1000) AS BIGINT) - 691200000
+ORDER BY work.settled_at_ms, work.id;
+
+-- Receipt and source volume, with the oldest timestamps.
+SELECT count(*) AS receipts, min(recorded_at_ms) AS oldest_recorded_at_ms
+FROM extension_room_observation_receipts;
+SELECT retracted, count(*) AS sources, min(captured_at_ms) AS oldest_captured_at_ms
+FROM extension_room_sources
+GROUP BY retracted
+ORDER BY retracted;
+SELECT count(*) AS revision_mappings FROM extension_room_source_revisions;
+
+-- Configured observer generations (Class A below compares against these).
+SELECT plugin_id, generation FROM extension_room_observers ORDER BY plugin_id;
+```
+<!-- observer-retention-inspection:end -->
+
+Retention never collects active work or pending publications. If they persist,
+the work is either still being serviced, or it is genuinely unsupported and
+needs the disposition below. Never delete observer rows by hand to silence a
+backlog.
+
+### Disposition for unsupported observer work (#1901)
+
+There is no code path that resets observer work. Two classes of rows can remain
+active forever and are retired only by this reviewed-manifest procedure, which
+mirrors "Repair for abandoned obligations (#1749)":
+
+- **Class A, unsupported work**: `pending` work whose `(plugin_id, generation)`
+  is no longer the configured generation in `extension_room_observers`, or whose
+  room the operator has established as permanently unrestorable.
+- **Class B, stranded publications**: `pending` publications for a room the
+  operator has established as permanently lost, **independently of work status
+  and source existence**. Successful settlement creates `completed` work and its
+  `pending` publications atomically, and the observer actor returns before
+  publishing when the room cannot be restored, so these rows are otherwise
+  invisible.
+
+The disposition records **abandonment, not callback success**. Class A work
+becomes `terminal` with category `operator_unsupported`; the completed callback
+outcome of a Class B row's work is preserved. For each Class A row it writes
+the same ingress receipt normal terminal settlement writes for the exact kind-28
+pair. Maintenance keeps the canonical row non-terminal until that exact receipt
+exists, and terminal work is no longer claimable, so without it the canonical
+row, and through the retention guard the work and receipt rows, would be pinned
+forever. Terminalization then settles the canonical row on the next pass, and
+observer retention collects the history at the horizon. Running this is the
+operator's decision after reviewing the affected rooms and accepting the loss.
+
+First run the read-only dry run, replacing the placeholder room list (use a
+list that matches nothing to select only retired generations). Keep its output
+as the reviewed manifest: every work row with its `status` and `attempt`, every
+publication, and the exact pending `(message_key, kind = 28,
+semantic_identity_hash)` pair of each Class A row. The pair's hash is
+`sha256(room_jid|plugin_id|generation|identity)`, which the query computes. Do
+not include `leased` or `started` work whose lease has not expired: uncertain
+work is never reset.
+
+<!-- observer-disposition-dry-run:begin -->
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+-- Class A candidates.
+SELECT work.id, work.plugin_id, work.generation, work.room_jid,
+       work.message_key, work.status, work.attempt, work.lease_until_ms,
+       observer.generation AS configured_generation,
+       CASE WHEN observer.generation IS DISTINCT FROM work.generation
+            THEN 'generation_retired' ELSE 'room_lost' END AS reason
+FROM extension_room_observation_work work
+LEFT JOIN extension_room_observers observer USING (plugin_id)
+WHERE work.status IN ('pending', 'leased', 'started')
+  AND (observer.generation IS DISTINCT FROM work.generation
+       OR work.room_jid IN ('<permanently-lost-room>'))
+ORDER BY work.room_jid, work.id;
+
+-- Class A dependants and Class B publications.
+SELECT publication.id, publication.work_id, publication.room_jid,
+       publication.plugin_id, publication.generation, work.status AS work_status
+FROM extension_room_publications publication
+LEFT JOIN extension_room_observation_work work ON work.id = publication.work_id
+WHERE publication.status = 'pending'
+  AND (publication.room_jid IN ('<permanently-lost-room>')
+       OR work.status IN ('pending', 'leased', 'started'))
+ORDER BY publication.room_jid, publication.id;
+
+-- Exact pending ingress pair of each Class A row.
+SELECT work.id AS work_id, intent.message_key, intent.kind,
+       encode(intent.semantic_identity_hash, 'hex') AS semantic_identity_hash
+FROM extension_room_observation_work work
+JOIN ingress_effect_intents intent
+  ON intent.message_key = CAST(work.message_key AS uuid)
+ AND intent.kind = 28
+ AND intent.semantic_identity_hash = sha256(convert_to(
+       work.room_jid || '|' || work.plugin_id || '|' || work.generation::text
+       || '|' || work.identity, 'UTF8'))
+WHERE work.status IN ('pending', 'leased', 'started')
+  AND NOT EXISTS (
+    SELECT 1 FROM ingress_effect_receipts receipt
+    WHERE receipt.message_key = intent.message_key
+      AND receipt.kind = intent.kind
+      AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+  )
+ORDER BY intent.message_key, work.id;
+COMMIT;
+```
+<!-- observer-disposition-dry-run:end -->
+
+Then connect `psql` to the primary with the **application role, never
+`pg_monitor`**. Replace all placeholders and expand the `VALUES` lists from the
+reviewed output; omit an `INSERT` whose list is empty. The SQLite and PostgreSQL
+retention tests apply this procedure (PostgreSQL runs both blocks verbatim with
+the placeholders filled in), so keep the marked blocks executable. Preserve every
+`RETURNING` result and the commit result with the dry-run output as the audit
+record. The epoch singleton is locked first, exactly as in #1749, because the
+ingress receipt table is epoch-guarded; then observer work, publications and
+canonical rows in key order, the order the observer settlement path takes them.
+On any error, including a deadlock or lock timeout, `ROLLBACK`, run a fresh dry
+run and review; do not weaken the checks.
+
+<!-- observer-disposition-write:begin -->
+```sql
+\set ON_ERROR_STOP on
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE;
+SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE;
+SET LOCAL waddle.protocol_epoch = '<current epoch>';
+SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true);
+
+CREATE TEMP TABLE reviewed_work (
+  id text PRIMARY KEY,
+  status text NOT NULL,
+  attempt bigint NOT NULL,
+  reason text NOT NULL CHECK (reason IN ('generation_retired', 'room_lost'))
+) ON COMMIT DROP;
+CREATE TEMP TABLE reviewed_publications (
+  id text PRIMARY KEY
+) ON COMMIT DROP;
+CREATE TEMP TABLE reviewed_pending (
+  work_id text NOT NULL REFERENCES reviewed_work (id),
+  message_key uuid NOT NULL,
+  kind integer NOT NULL CHECK (kind = 28),
+  semantic_identity_hash bytea NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
+  PRIMARY KEY (message_key, kind, semantic_identity_hash)
+) ON COMMIT DROP;
+INSERT INTO reviewed_work (id, status, attempt, reason) VALUES
+  ('<reviewed-work-id>', '<reviewed-status>', <reviewed-attempt>, '<generation_retired|room_lost>');
+INSERT INTO reviewed_publications (id) VALUES
+  ('<reviewed-publication-id>');
+INSERT INTO reviewed_pending (work_id, message_key, kind, semantic_identity_hash) VALUES
+  ('<reviewed-work-id>', '<reviewed-message-key>'::uuid, 28, decode('<reviewed-hex-hash>', 'hex'));
+
+SELECT work.id FROM extension_room_observation_work work
+JOIN reviewed_work reviewed USING (id)
+ORDER BY work.id
+FOR UPDATE OF work;
+SELECT publication.id FROM extension_room_publications publication
+WHERE publication.id IN (SELECT id FROM reviewed_publications)
+   OR publication.work_id IN (SELECT id FROM reviewed_work)
+ORDER BY publication.id
+FOR UPDATE OF publication;
+SELECT message.message_key FROM ingress_messages message
+WHERE message.message_key IN (SELECT message_key FROM reviewed_pending)
+ORDER BY message.message_key
+FOR UPDATE OF message;
+
+DO $$
+DECLARE
+  now_ms bigint := CAST(FLOOR(EXTRACT(EPOCH FROM now()) * 1000) AS BIGINT);
+BEGIN
+  IF (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1)
+       IS DISTINCT FROM current_setting('waddle.protocol_epoch') THEN
+    RAISE EXCEPTION 'epoch changed or singleton missing; abort disposition';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM reviewed_work)
+     AND NOT EXISTS (SELECT 1 FROM reviewed_publications) THEN
+    RAISE EXCEPTION 'manifest empty';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM reviewed_work reviewed
+    LEFT JOIN extension_room_observation_work work USING (id)
+    WHERE work.id IS NULL
+       OR work.status IS DISTINCT FROM reviewed.status
+       OR work.attempt IS DISTINCT FROM reviewed.attempt
+       OR work.status NOT IN ('pending', 'leased', 'started')
+       OR (work.status IN ('leased', 'started')
+           AND (work.lease_until_ms IS NULL OR work.lease_until_ms > now_ms))
+  ) THEN
+    RAISE EXCEPTION 'work row missing, changed since review, or holds an unexpired lease';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM reviewed_work reviewed
+    JOIN extension_room_observation_work work USING (id)
+    JOIN extension_room_observers observer USING (plugin_id)
+    WHERE reviewed.reason = 'generation_retired'
+      AND observer.generation = work.generation
+  ) THEN
+    RAISE EXCEPTION 'a retired generation is configured again; abort disposition';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM reviewed_publications reviewed
+    LEFT JOIN extension_room_publications publication USING (id)
+    WHERE publication.id IS NULL OR publication.status <> 'pending'
+  ) OR EXISTS (
+    SELECT 1 FROM extension_room_publications publication
+    WHERE publication.work_id IN (SELECT id FROM reviewed_work)
+      AND publication.status = 'pending'
+      AND publication.id NOT IN (SELECT id FROM reviewed_publications)
+  ) THEN
+    RAISE EXCEPTION 'publication set differs from reviewed manifest';
+  END IF;
+  IF EXISTS (
+    WITH actual_pending AS (
+      SELECT work.id AS work_id, intent.message_key, intent.kind,
+             intent.semantic_identity_hash
+      FROM extension_room_observation_work work
+      JOIN reviewed_work reviewed USING (id)
+      JOIN ingress_effect_intents intent
+        ON intent.message_key = CAST(work.message_key AS uuid)
+       AND intent.kind = 28
+       AND intent.semantic_identity_hash = sha256(convert_to(
+             work.room_jid || '|' || work.plugin_id || '|' || work.generation::text
+             || '|' || work.identity, 'UTF8'))
+      WHERE NOT EXISTS (
+        SELECT 1 FROM ingress_effect_receipts receipt
+        WHERE receipt.message_key = intent.message_key
+          AND receipt.kind = intent.kind
+          AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+      )
+    )
+    (SELECT * FROM actual_pending EXCEPT SELECT * FROM reviewed_pending)
+    UNION ALL
+    (SELECT * FROM reviewed_pending EXCEPT SELECT * FROM actual_pending)
+  ) THEN
+    RAISE EXCEPTION 'pending ingress pairs differ from reviewed manifest; abort disposition';
+  END IF;
+END $$;
+
+UPDATE extension_room_observation_work
+SET status = 'terminal', terminal_category = 'operator_unsupported', body = '',
+    lease_id = NULL, lease_until_ms = NULL,
+    settled_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM now()) * 1000) AS BIGINT)
+WHERE id IN (SELECT id FROM reviewed_work)
+RETURNING *;
+
+UPDATE extension_room_publications
+SET status = 'stale',
+    settled_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM now()) * 1000) AS BIGINT)
+WHERE id IN (SELECT id FROM reviewed_publications) AND status = 'pending'
+RETURNING *;
+
+INSERT INTO extension_room_observation_receipts
+  (plugin_id, generation, room_jid, message_key, category, recorded_at_ms)
+SELECT work.plugin_id, work.generation, work.room_jid, work.message_key,
+       'operator_unsupported', CAST(FLOOR(EXTRACT(EPOCH FROM now()) * 1000) AS BIGINT)
+FROM extension_room_observation_work work
+WHERE work.id IN (SELECT id FROM reviewed_work)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+SELECT message_key, kind, semantic_identity_hash FROM reviewed_pending
+ON CONFLICT DO NOTHING
+RETURNING *;
+COMMIT;
+```
+<!-- observer-disposition-write:end -->
+
+The ingress receipt is the same abandonment receipt #1749 writes; it does not
+claim the callback ran. Verify afterwards that the next maintenance pass
+terminalizes each affected canonical row (`ingress_messages.terminal_at` set)
+and that the observer rows disappear from the inspection queries after the
+horizon. `ingress.maintenance.reclaimed_observer_rows` then counts them.
 
 ## One-shot Recreate cutover
 
@@ -1088,9 +1461,10 @@ The send ledger already has an `ON DELETE CASCADE` relationship to its canonical
 intent. Once delivery, offline custody, or an explicit policy disposition settles
 the obligation and canonical retention expires, GC removes its send attempts.
 Unresolved evidence is never blindly age-deleted. Observer history deliberately
-has no such FK while publications can remain pending; bounded retention of its
-terminal history is tracked separately in
-[#1901](https://github.com/waddle-social/waddle/issues/1901).
+has no such FK while publications can remain pending; its settled history ages
+out by its own clock under "Observer history retention (#1901)", and genuinely
+unsupported observer work is retired only by that section's reviewed
+disposition.
 
 Best-effort `InboxPush` projection refreshes remain terminal-on-attempt and are
 not recipient message copies. Sender response/host frames and authorization-

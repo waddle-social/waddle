@@ -559,6 +559,11 @@
           serverTestArgs = testArgs // {
             postUnpack = testArgs.postUnpack + ''
               cp -R ${./server/charts} "$sourceRoot/charts"
+              # The observer-retention runbook parity tests (#1901) execute
+              # the SQL blocks marked in this runbook.
+              mkdir -p "$sourceRoot/docs/operations"
+              cp ${./server/docs/operations/ingress-authority.md} \
+                "$sourceRoot/docs/operations/ingress-authority.md"
             '';
           };
           serverPostgresTestArgs = serverTestArgs // {

@@ -19,7 +19,9 @@ pub(super) async fn publish_pending(
 ) -> Result<(), ObservationRuntimeError> {
     let authority = &state.deps.protocol.ingress;
     let mut tx = authority.observation_transaction().await?;
-    let publication = RoomObservationRepository::publication(&mut tx, subscription).await?;
+    let publication =
+        RoomObservationRepository::publication(&mut tx, subscription, crate::time::now_ms())
+            .await?;
     tx.commit().await?;
     let Some(publication) = publication else {
         return Ok(());

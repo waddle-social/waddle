@@ -12,7 +12,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use waddle_xmpp::ingress::MessageKey;
-use waddle_xmpp::telemetry::attributes::{IngressGcOutcome, IngressMaintenancePhase};
+use waddle_xmpp::telemetry::attributes::{
+    IngressGcOutcome, IngressMaintenancePhase, ObserverHistoryTable,
+};
 
 use crate::db::Database;
 use crate::ingress_substrate::{
@@ -20,7 +22,10 @@ use crate::ingress_substrate::{
     unreceipted_nonterminal_candidates, AliasGcProgress, EffectReceiptKind, IngressSubstrateError,
     RecoveryCandidate, RecoveryEvidence,
 };
-use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
+use crate::ingress_uow::{
+    IngressUnitOfWork, IngressUowError, ObservationError, ObserverRetentionBatch,
+    RoomObservationRepository,
+};
 
 use super::gc::{run_retention_gc_with_budget, RetentionGcBudget};
 use super::recovery_executor::AttemptClassification;
@@ -234,11 +239,92 @@ pub(super) async fn run_maintenance_pass_with_cursor(
             IngressGcOutcome::Failed | IngressGcOutcome::Unattested => MaintenanceOutcome::Failed,
         };
         record(IngressMaintenancePhase::RetentionGc, retention);
-        combine(combine(terminalization, recovery), retention)
+        let observer =
+            collect_observer_history(database, budget.retention, crate::time::now_ms()).await;
+        record(IngressMaintenancePhase::ObserverRetention, observer);
+        combine(
+            combine(combine(terminalization, recovery), retention),
+            observer,
+        )
     })
     .await
     .unwrap_or(MaintenanceOutcome::TimedOut);
     record(IngressMaintenancePhase::Pass, result)
+}
+
+/// Physical row deletions per observer-retention transaction (#1901).
+const OBSERVER_GC_BATCH_LIMIT: u32 = 256;
+
+/// Observer history has no FK to canonical rows, so it ages out by its own
+/// settlement clock (#1901). It shares canonical retention's per-operation
+/// bounds. The observer tables are not epoch-guarded authority, so no epoch
+/// lock is taken; the pass's attestation gate already covers it.
+pub(crate) async fn collect_observer_history(
+    database: &Database,
+    budget: RetentionGcBudget,
+    now_ms: i64,
+) -> MaintenanceOutcome {
+    let deadline = tokio::time::Instant::now() + budget.cooperative;
+    let run = async {
+        loop {
+            let batch = match observer_retention_batch(database, budget, now_ms).await {
+                Ok(batch) => batch,
+                Err(error) => {
+                    tracing::warn!(%error, "observer history retention failed");
+                    return if error == ObservationError::Timeout {
+                        MaintenanceOutcome::TimedOut
+                    } else {
+                        MaintenanceOutcome::Failed
+                    };
+                }
+            };
+            if !batch.exhausted {
+                return MaintenanceOutcome::Complete;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return MaintenanceOutcome::Partial;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(budget.hard_deadline, run)
+        .await
+        .unwrap_or(MaintenanceOutcome::TimedOut)
+}
+
+async fn observer_retention_batch(
+    database: &Database,
+    budget: RetentionGcBudget,
+    now_ms: i64,
+) -> Result<ObserverRetentionBatch, ObservationError> {
+    let mut tx = tokio::time::timeout(budget.lock_timeout, database.begin_immediate())
+        .await
+        .map_err(|_| ObservationError::Timeout)??;
+    if !set_local_transaction_timeouts(&mut tx, budget.lock_timeout, budget.statement_timeout)
+        .await?
+    {
+        return Err(ObservationError::Database);
+    }
+    let batch =
+        RoomObservationRepository::collect_expired(&mut tx, now_ms, OBSERVER_GC_BATCH_LIMIT)
+            .await?;
+    tx.commit().await?;
+    for (table, rows) in [
+        (ObserverHistoryTable::Publication, batch.publications),
+        (ObserverHistoryTable::Work, batch.work),
+        (ObserverHistoryTable::Receipt, batch.receipts),
+        (
+            ObserverHistoryTable::Source,
+            batch.revisions + batch.sources,
+        ),
+    ] {
+        if rows > 0 {
+            waddle_xmpp::telemetry::reliability::add_ingress_maintenance_reclaimed_observer_rows(
+                rows, table,
+            );
+        }
+    }
+    Ok(batch)
 }
 
 fn failure_outcome(error: &IngressUowError) -> MaintenanceOutcome {

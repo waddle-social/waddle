@@ -254,8 +254,13 @@ pub(super) async fn apply_durable(
                 MamArchiveRepository::replace_with_tombstone(tx, archive, target, tombstone)
                     .await?;
                 if tx.room_observers_enabled() {
-                    crate::ingress_uow::RoomObservationRepository::retract(tx, archive, target)
-                        .await?;
+                    crate::ingress_uow::RoomObservationRepository::retract(
+                        tx,
+                        archive,
+                        target,
+                        crate::time::now_ms(),
+                    )
+                    .await?;
                 }
             }
             DurableEffect::Direct(DurableDirectEffect::DmCallThreadProjection {
@@ -281,7 +286,12 @@ pub(super) async fn apply_durable(
         }
     }
     if let Some(publication) = publication {
-        crate::ingress_uow::RoomObservationRepository::mark_published(tx, &publication.id).await?;
+        crate::ingress_uow::RoomObservationRepository::mark_published(
+            tx,
+            &publication.id,
+            crate::time::now_ms(),
+        )
+        .await?;
     }
     Ok(applied)
 }
