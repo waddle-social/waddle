@@ -779,7 +779,9 @@
                 ''}
                 # Match the archive's compiler improvements while retaining
                 # this lane's default-feature coverage and dependency cache.
-                nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --profile ci --lib --tests
+                # `test-support` is an empty feature that only exposes test fixtures,
+                # so the public suites gated on it run here too (#1777).
+                nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --features test-support --profile ci --lib --tests
                   --config profile.ci-test.package.waddle-server.opt-level=0
                   --config profile.ci-test.package.waddle-xmpp.opt-level=0)
                 echo "WADDLE_CI_METRIC lane=xmpp-server phase=compile waddle_server_opt_level=0 waddle_xmpp_opt_level=0 dependency_profile_unchanged=true"
