@@ -1602,17 +1602,19 @@ async fn postgres_disposition_dry_run_reads_one_snapshot() {
 /// Enough recent history, plus a little expired history, that a planner
 /// with statistics prefers indexes for the protective guards.
 async fn seed_planner_history(fixture: &IngressFixture) {
-    let now = crate::time::now_ms();
     let mut tx = fixture.db.begin_immediate().await.expect("planner seed");
     for index in 0..3_000_i64 {
-        // Settled history: mostly recent, 1% expired, plus a little active work.
+        // Settled history is one expired cohort stamped at a single instant,
+        // as V1023's backfill leaves it, across every final status, plus a
+        // little active work. 1% of sources are retracted.
         let expired = index % 100 == 0;
-        let settled_at = if expired { 0 } else { now };
+        let settled_at = 0_i64;
         let status = if index % 100 == 1 {
             "pending"
         } else {
-            "completed"
+            ["completed", "terminal", "stale"][usize::try_from(index % 3).expect("index")]
         };
+        let publication_status = if index % 2 == 0 { "published" } else { "stale" };
         let work_id = Uuid::now_v7().to_string();
         let source_key = Uuid::now_v7().to_string();
         let message_key = Uuid::now_v7().to_string();
@@ -1623,8 +1625,8 @@ async fn seed_planner_history(fixture: &IngressFixture) {
         .await
         .expect("work");
         tx.execute(
-            "INSERT INTO extension_room_publications (id, work_id, output_index, source_key, plugin_id, generation, identity, room_jid, revision, source_json, payload_json, status, settled_at_ms) VALUES (?, ?, 0, ?, 'observer', 1, 'identity', 'room@conference.example.org', 0, '{}', '{}', 'published', ?)",
-            crate::db_params![Uuid::now_v7().to_string(), &work_id, &source_key, settled_at],
+            "INSERT INTO extension_room_publications (id, work_id, output_index, source_key, plugin_id, generation, identity, room_jid, revision, source_json, payload_json, status, settled_at_ms) VALUES (?, ?, 0, ?, 'observer', 1, 'identity', 'room@conference.example.org', 0, '{}', '{}', ?, ?)",
+            crate::db_params![Uuid::now_v7().to_string(), &work_id, &source_key, publication_status, settled_at],
         )
         .await
         .expect("publication");
@@ -1672,6 +1674,15 @@ fn retention_statements(
         .collect();
     source_delete.push(crate::db::Value::from(1_000_i64));
     vec![
+        (
+            "publications",
+            pick(
+                statements::PUBLICATIONS_SQLITE,
+                statements::PUBLICATIONS_POSTGRES,
+            )
+            .to_string(),
+            cutoff(),
+        ),
         (
             "work",
             pick(statements::WORK_SQLITE, statements::WORK_POSTGRES).to_string(),
@@ -1781,6 +1792,37 @@ async fn retention_guards_are_index_lookups(fixture: IngressFixture) {
             ),
         };
         let plan = plan_lines(&fixture, explain, &sql, params).await;
+        if let Some((index, order_column)) = match name {
+            "publications" => Some(("extension_room_publications_settled", "settled_at_ms")),
+            "work" => Some(("extension_room_observation_work_settled", "settled_at_ms")),
+            "receipts" => Some((
+                "extension_room_observation_receipts_recorded",
+                "recorded_at_ms",
+            )),
+            _ => None,
+        } {
+            // Candidates come off the index already in ORDER BY order, so a
+            // whole expired cohort (V1023 stamps one instant) is never sorted
+            // to delete one LIMIT's worth.
+            assert!(
+                plan.iter().any(|line| line.contains(index)),
+                "{name} does not select candidates through {index}:\n{}",
+                plan.join("\n")
+            );
+            let sorts: Vec<&String> = plan
+                .iter()
+                .filter(|line| {
+                    line.contains("USE TEMP B-TREE FOR")
+                        || (line.contains("Sort Key:") && line.contains(order_column))
+                        || line.contains("Presorted Key:")
+                })
+                .collect();
+            assert!(
+                sorts.is_empty(),
+                "{name} sorts its candidates: {sorts:?}\nfull plan:\n{}",
+                plan.join("\n")
+            );
+        }
         if matches!(name, "revisions" | "source candidates") {
             // Live sources age past the horizon and are kept forever; only
             // the retracted-only partial index keeps them out of the walk.

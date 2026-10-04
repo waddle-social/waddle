@@ -45,11 +45,12 @@ impl ObserverRetentionBatch {
     }
 }
 
-const PUBLICATIONS_SQLITE: &str = "DELETE FROM extension_room_publications WHERE id IN (
+pub(super) const PUBLICATIONS_SQLITE: &str = "DELETE FROM extension_room_publications WHERE id IN (
     SELECT p.id FROM extension_room_publications p
     WHERE p.status IN ('published', 'stale') AND p.settled_at_ms <= ?
     ORDER BY p.settled_at_ms, p.id LIMIT ?)";
-const PUBLICATIONS_POSTGRES: &str = "DELETE FROM extension_room_publications WHERE id IN (
+pub(super) const PUBLICATIONS_POSTGRES: &str =
+    "DELETE FROM extension_room_publications WHERE id IN (
     SELECT p.id FROM extension_room_publications p
     WHERE p.status IN ('published', 'stale') AND p.settled_at_ms <= ?
     ORDER BY p.settled_at_ms, p.id LIMIT ? FOR UPDATE OF p SKIP LOCKED)";

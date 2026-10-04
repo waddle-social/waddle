@@ -1282,15 +1282,17 @@ WHERE status IN ('published', 'stale');
 UPDATE extension_room_observation_receipts SET recorded_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER);
 UPDATE extension_room_sources SET captured_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER);
 CREATE INDEX extension_room_observation_work_settled
-    ON extension_room_observation_work (status, settled_at_ms);
+    ON extension_room_observation_work (settled_at_ms, id)
+    WHERE status IN ('completed', 'terminal', 'stale');
 CREATE INDEX extension_room_observation_work_source
     ON extension_room_observation_work (source_key);
 CREATE INDEX extension_room_publications_settled
-    ON extension_room_publications (status, settled_at_ms);
+    ON extension_room_publications (settled_at_ms, id)
+    WHERE status IN ('published', 'stale');
 CREATE INDEX extension_room_publications_source
     ON extension_room_publications (source_key);
 CREATE INDEX extension_room_observation_receipts_recorded
-    ON extension_room_observation_receipts (recorded_at_ms);
+    ON extension_room_observation_receipts (recorded_at_ms, plugin_id, generation, room_jid, message_key);
 CREATE INDEX extension_room_sources_retracted_captured
     ON extension_room_sources (captured_at_ms, source_key)
     WHERE retracted = 1;
@@ -1363,15 +1365,17 @@ WHERE status IN ('published', 'stale');
 UPDATE extension_room_observation_receipts SET recorded_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT);
 UPDATE extension_room_sources SET captured_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT);
 CREATE INDEX extension_room_observation_work_settled
-    ON extension_room_observation_work (status, settled_at_ms);
+    ON extension_room_observation_work (settled_at_ms, id)
+    WHERE status IN ('completed', 'terminal', 'stale');
 CREATE INDEX extension_room_observation_work_source
     ON extension_room_observation_work (source_key);
 CREATE INDEX extension_room_publications_settled
-    ON extension_room_publications (status, settled_at_ms);
+    ON extension_room_publications (settled_at_ms, id)
+    WHERE status IN ('published', 'stale');
 CREATE INDEX extension_room_publications_source
     ON extension_room_publications (source_key);
 CREATE INDEX extension_room_observation_receipts_recorded
-    ON extension_room_observation_receipts (recorded_at_ms);
+    ON extension_room_observation_receipts (recorded_at_ms, plugin_id, generation, room_jid, message_key);
 CREATE INDEX extension_room_sources_retracted_captured
     ON extension_room_sources (captured_at_ms, source_key)
     WHERE retracted = 1;
