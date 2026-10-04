@@ -350,6 +350,11 @@ async fn muc_decline_recovery(
         .unwrap_or(0);
     authority.trigger_maintenance();
     wait_for_pass(&metrics, passes_before, &fixture, 2).await;
+    // The counter can be satisfied by a pass that was already in flight while
+    // the triggered pass has only terminalized the sentinel. Joining the
+    // maintenance task guarantees no recovery phase is still running when the
+    // second-pass assertions execute.
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
     assert!(rx.try_recv().is_err(), "second pass cannot resend decline");
     assert_eq!(
         list_invites(actor, &invite.room, &invite.invitee)
@@ -375,7 +380,6 @@ async fn muc_decline_recovery(
         "live inviter settles the recorded fallback without queueing"
     );
     assert_family_recovered(&fixture, key).await;
-    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
     drop(environment);
     drop(state);
     drop(authority);
