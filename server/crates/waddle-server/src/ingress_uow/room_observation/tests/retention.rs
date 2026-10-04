@@ -1598,3 +1598,208 @@ async fn postgres_disposition_dry_run_reads_one_snapshot() {
     pool.close().await;
     fixture.close().await;
 }
+
+/// Enough recent history, plus a little expired history, that a planner
+/// with statistics prefers indexes for the protective guards.
+async fn seed_planner_history(fixture: &IngressFixture) {
+    let now = crate::time::now_ms();
+    let mut tx = fixture.db.begin_immediate().await.expect("planner seed");
+    for index in 0..3_000_i64 {
+        // Settled history: mostly recent, 1% expired, plus a little active work.
+        let expired = index % 100 == 0;
+        let settled_at = if expired { 0 } else { now };
+        let status = if index % 100 == 1 {
+            "pending"
+        } else {
+            "completed"
+        };
+        let work_id = Uuid::now_v7().to_string();
+        let source_key = Uuid::now_v7().to_string();
+        let message_key = Uuid::now_v7().to_string();
+        tx.execute(
+            "INSERT INTO extension_room_observation_work (id, source_key, message_key, plugin_id, generation, identity, room_jid, revision, source_json, body, status, attempt, due_at_ms, terminal_category, settled_at_ms) VALUES (?, ?, ?, 'observer', 1, 'identity', 'room@conference.example.org', 0, '{}', '', ?, 1, 0, NULL, ?)",
+            crate::db_params![&work_id, &source_key, &message_key, status, (status != "pending").then_some(settled_at)],
+        )
+        .await
+        .expect("work");
+        tx.execute(
+            "INSERT INTO extension_room_publications (id, work_id, output_index, source_key, plugin_id, generation, identity, room_jid, revision, source_json, payload_json, status, settled_at_ms) VALUES (?, ?, 0, ?, 'observer', 1, 'identity', 'room@conference.example.org', 0, '{}', '{}', 'published', ?)",
+            crate::db_params![Uuid::now_v7().to_string(), &work_id, &source_key, settled_at],
+        )
+        .await
+        .expect("publication");
+        tx.execute(
+            "INSERT INTO extension_room_observation_receipts (plugin_id, generation, room_jid, message_key, category, recorded_at_ms) VALUES ('observer', 1, 'room@conference.example.org', ?, 'completed', ?)",
+            crate::db_params![&message_key, settled_at],
+        )
+        .await
+        .expect("receipt");
+        tx.execute(
+            "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted, captured_at_ms) VALUES (?, 'room@conference.example.org', 'author@example.org', ?, ?, NULL, 0, '{}', ?, ?)",
+            crate::db_params![&source_key, format!("stanza-{index}"), format!("stanza-{index}"), i64::from(expired), settled_at],
+        )
+        .await
+        .expect("source");
+        tx.execute(
+            "INSERT INTO extension_room_source_revisions (room_jid, room_stanza_id, source_key) VALUES ('room@conference.example.org', ?, ?)",
+            crate::db_params![format!("stanza-{index}"), &source_key],
+        )
+        .await
+        .expect("revision");
+    }
+    tx.execute("ANALYZE", ()).await.expect("analyze");
+    tx.commit().await.expect("planner seed commit");
+}
+
+/// Every retention statement, as the driver runs it, with representative
+/// parameters: a cutoff that selects the expired 1% and a full budget.
+fn retention_statements(
+    driver: DatabaseDriver,
+) -> Vec<(&'static str, String, Vec<crate::db::Value>)> {
+    use super::super::retention as statements;
+    let postgres = driver == DatabaseDriver::Postgres;
+    let pick = |sqlite: &'static str, pg: &'static str| if postgres { pg } else { sqlite };
+    let cutoff = || {
+        vec![
+            crate::db::Value::from(1_000_i64),
+            crate::db::Value::from(i64::from(BATCH)),
+        ]
+    };
+    let mut source_delete: Vec<crate::db::Value> = (0..3)
+        .map(|_| crate::db::Value::from(Uuid::now_v7().to_string()))
+        .collect();
+    source_delete.push(crate::db::Value::from(1_000_i64));
+    vec![
+        (
+            "work",
+            pick(statements::WORK_SQLITE, statements::WORK_POSTGRES).to_string(),
+            cutoff(),
+        ),
+        (
+            "receipts",
+            pick(statements::RECEIPTS_SQLITE, statements::RECEIPTS_POSTGRES).to_string(),
+            cutoff(),
+        ),
+        (
+            "revisions",
+            pick(statements::REVISIONS_SQLITE, statements::REVISIONS_POSTGRES).to_string(),
+            cutoff(),
+        ),
+        (
+            "source candidates",
+            pick(
+                statements::SOURCE_CANDIDATES_SQLITE,
+                statements::SOURCE_CANDIDATES_POSTGRES,
+            )
+            .to_string(),
+            cutoff(),
+        ),
+        (
+            "source delete",
+            statements::source_delete_sql(3),
+            source_delete,
+        ),
+    ]
+}
+
+async fn plan_lines(
+    fixture: &IngressFixture,
+    explain: &str,
+    sql: &str,
+    params: Vec<crate::db::Value>,
+) -> Vec<String> {
+    let column = if fixture.db.driver() == DatabaseDriver::Postgres {
+        0
+    } else {
+        3
+    };
+    let conn = fixture.db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(&format!("{explain} {sql}"), params)
+        .await
+        .unwrap_or_else(|error| panic!("{explain} {sql}: {error}"));
+    let mut lines = Vec::new();
+    while let Some(row) = rows.next().await.expect("plan row") {
+        lines.push(row.get::<String>(column).expect("plan text"));
+    }
+    lines
+}
+
+async fn retention_guards_are_index_lookups(fixture: IngressFixture) {
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    seed_planner_history(&fixture).await;
+    let driver = fixture.db.driver();
+    for (name, sql, params) in retention_statements(driver) {
+        let (explain, forbidden): (&str, Vec<String>) = match driver {
+            // A correlated guard must SEARCH its table, never SCAN it.
+            DatabaseDriver::Sqlite => (
+                "EXPLAIN QUERY PLAN",
+                [
+                    "w",
+                    "p",
+                    "v",
+                    "m",
+                    "extension_room_observation_work",
+                    "extension_room_publications",
+                    "extension_room_source_revisions",
+                ]
+                .iter()
+                .map(|alias| format!("SCAN {alias}"))
+                .collect(),
+            ),
+            // Guards are aliased; the unaliased DELETE target may be hash
+            // semi-joined to its locked candidates, which is not a guard.
+            DatabaseDriver::Postgres => (
+                "EXPLAIN",
+                [
+                    "extension_room_observation_work w",
+                    "extension_room_publications p",
+                    "extension_room_source_revisions v",
+                ]
+                .iter()
+                .map(|table| format!("Seq Scan on {table}"))
+                .collect(),
+            ),
+        };
+        let plan = plan_lines(&fixture, explain, &sql, params).await;
+        if name == "receipts" {
+            // The active-work guard has its own partial index (V1023); the
+            // generic status indexes would read every active row per receipt.
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains("extension_room_observation_work_active_guard")),
+                "receipts guard does not use the active-work index:\n{}",
+                plan.join("\n")
+            );
+        }
+        let scans: Vec<&String> = plan
+            .iter()
+            .filter(|line| {
+                forbidden.iter().any(|scan| {
+                    let line = line.trim_start().trim_start_matches("->").trim_start();
+                    line == scan.as_str() || line.starts_with(&format!("{scan} "))
+                })
+            })
+            .collect();
+        assert!(
+            scans.is_empty(),
+            "{name} scans a guarded table: {scans:?}\nfull plan:\n{}",
+            plan.join("\n")
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn retention_guards_are_index_lookups_sqlite() {
+    retention_guards_are_index_lookups(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn retention_guards_are_index_lookups_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("observer_retention_plans").await {
+        retention_guards_are_index_lookups(fixture).await;
+    }
+}

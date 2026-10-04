@@ -54,7 +54,7 @@ const PUBLICATIONS_POSTGRES: &str = "DELETE FROM extension_room_publications WHE
     WHERE p.status IN ('published', 'stale') AND p.settled_at_ms <= ?
     ORDER BY p.settled_at_ms, p.id LIMIT ? FOR UPDATE OF p SKIP LOCKED)";
 
-const WORK_SQLITE: &str = "DELETE FROM extension_room_observation_work WHERE id IN (
+pub(super) const WORK_SQLITE: &str = "DELETE FROM extension_room_observation_work WHERE id IN (
     SELECT w.id FROM extension_room_observation_work w
     WHERE w.status IN ('completed', 'terminal', 'stale') AND w.settled_at_ms <= ?
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
@@ -62,7 +62,7 @@ const WORK_SQLITE: &str = "DELETE FROM extension_room_observation_work WHERE id 
       AND NOT EXISTS (SELECT 1 FROM ingress_messages m
         WHERE m.message_key = w.message_key AND m.terminal_at IS NULL)
     ORDER BY w.settled_at_ms, w.id LIMIT ?)";
-const WORK_POSTGRES: &str = "DELETE FROM extension_room_observation_work WHERE id IN (
+pub(super) const WORK_POSTGRES: &str = "DELETE FROM extension_room_observation_work WHERE id IN (
     SELECT w.id FROM extension_room_observation_work w
     WHERE w.status IN ('completed', 'terminal', 'stale') AND w.settled_at_ms <= ?
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
@@ -71,7 +71,7 @@ const WORK_POSTGRES: &str = "DELETE FROM extension_room_observation_work WHERE i
         WHERE m.message_key = CAST(w.message_key AS UUID) AND m.terminal_at IS NULL)
     ORDER BY w.settled_at_ms, w.id LIMIT ? FOR UPDATE OF w SKIP LOCKED)";
 
-const RECEIPTS_SQLITE: &str = "DELETE FROM extension_room_observation_receipts
+pub(super) const RECEIPTS_SQLITE: &str = "DELETE FROM extension_room_observation_receipts
   WHERE (plugin_id, generation, room_jid, message_key) IN (
     SELECT r.plugin_id, r.generation, r.room_jid, r.message_key
     FROM extension_room_observation_receipts r
@@ -83,7 +83,7 @@ const RECEIPTS_SQLITE: &str = "DELETE FROM extension_room_observation_receipts
       AND NOT EXISTS (SELECT 1 FROM ingress_messages m
         WHERE m.message_key = r.message_key AND m.terminal_at IS NULL)
     ORDER BY r.recorded_at_ms, r.plugin_id, r.generation, r.room_jid, r.message_key LIMIT ?)";
-const RECEIPTS_POSTGRES: &str = "DELETE FROM extension_room_observation_receipts
+pub(super) const RECEIPTS_POSTGRES: &str = "DELETE FROM extension_room_observation_receipts
   WHERE (plugin_id, generation, room_jid, message_key) IN (
     SELECT r.plugin_id, r.generation, r.room_jid, r.message_key
     FROM extension_room_observation_receipts r
@@ -99,7 +99,7 @@ const RECEIPTS_POSTGRES: &str = "DELETE FROM extension_room_observation_receipts
 
 /// Revision mappings are drained before their source so an oversized chain
 /// spends the batch budget instead of one unbounded statement.
-const REVISIONS_SQLITE: &str = "DELETE FROM extension_room_source_revisions
+pub(super) const REVISIONS_SQLITE: &str = "DELETE FROM extension_room_source_revisions
   WHERE (room_jid, room_stanza_id) IN (
     SELECT v.room_jid, v.room_stanza_id
     FROM extension_room_source_revisions v
@@ -110,7 +110,7 @@ const REVISIONS_SQLITE: &str = "DELETE FROM extension_room_source_revisions
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
         WHERE p.source_key = s.source_key)
     ORDER BY s.captured_at_ms, v.source_key, v.room_jid, v.room_stanza_id LIMIT ?)";
-const REVISIONS_POSTGRES: &str = "DELETE FROM extension_room_source_revisions
+pub(super) const REVISIONS_POSTGRES: &str = "DELETE FROM extension_room_source_revisions
   WHERE (room_jid, room_stanza_id) IN (
     SELECT v.room_jid, v.room_stanza_id
     FROM extension_room_source_revisions v
@@ -129,7 +129,8 @@ const REVISIONS_POSTGRES: &str = "DELETE FROM extension_room_source_revisions
 /// delete is a fresh statement whose snapshot follows the lock, so it sees any
 /// reference committed before the lock was granted. One statement per batch
 /// keeps the transaction's round trips constant, whatever the candidate count.
-const SOURCE_CANDIDATES_SQLITE: &str = "SELECT s.source_key FROM extension_room_sources s
+pub(super) const SOURCE_CANDIDATES_SQLITE: &str =
+    "SELECT s.source_key FROM extension_room_sources s
     WHERE s.retracted = 1 AND s.captured_at_ms <= ?
       AND NOT EXISTS (SELECT 1 FROM extension_room_source_revisions v
         WHERE v.source_key = s.source_key)
@@ -138,7 +139,8 @@ const SOURCE_CANDIDATES_SQLITE: &str = "SELECT s.source_key FROM extension_room_
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
         WHERE p.source_key = s.source_key)
     ORDER BY s.captured_at_ms, s.source_key LIMIT ?";
-const SOURCE_CANDIDATES_POSTGRES: &str = "SELECT s.source_key FROM extension_room_sources s
+pub(super) const SOURCE_CANDIDATES_POSTGRES: &str =
+    "SELECT s.source_key FROM extension_room_sources s
     WHERE s.retracted = 1 AND s.captured_at_ms <= ?
       AND NOT EXISTS (SELECT 1 FROM extension_room_source_revisions v
         WHERE v.source_key = s.source_key)
@@ -157,7 +159,7 @@ const SOURCE_DELETE_SUFFIX: &str = ") AND retracted = 1 AND captured_at_ms <= ?
 
 /// `DELETE` of `count` locked candidates; only the bound-parameter count
 /// varies (at most the 256-row budget plus the cutoff, under SQLite's 999).
-fn source_delete_sql(count: usize) -> String {
+pub(super) fn source_delete_sql(count: usize) -> String {
     let placeholders = vec!["?"; count].join(", ");
     format!("DELETE FROM extension_room_sources WHERE source_key IN ({placeholders}{SOURCE_DELETE_SUFFIX}")
 }

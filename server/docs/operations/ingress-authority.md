@@ -465,6 +465,10 @@ JOIN ingress_messages message
   ON message.message_key = CAST(work.message_key AS uuid)
 WHERE work.status IN ('completed', 'terminal', 'stale')
   AND message.terminal_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM extension_room_publications publication
+    WHERE publication.work_id = work.id AND publication.status = 'pending'
+  )
   AND work.settled_at_ms <= CAST(FLOOR(EXTRACT(EPOCH FROM now()) * 1000) AS BIGINT) - 691200000
 ORDER BY work.settled_at_ms, work.id;
 

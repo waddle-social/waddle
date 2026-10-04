@@ -1295,6 +1295,9 @@ CREATE INDEX extension_room_sources_captured
     ON extension_room_sources (captured_at_ms);
 CREATE INDEX extension_room_source_revisions_source
     ON extension_room_source_revisions (source_key);
+CREATE INDEX extension_room_observation_work_active_guard
+    ON extension_room_observation_work (plugin_id, generation, room_jid, message_key)
+    WHERE status IN ('pending', 'leased', 'started');
 "#;
 
 /// Observer tables are not canonical ingress authority, so they carry no
@@ -1372,6 +1375,9 @@ CREATE INDEX extension_room_sources_captured
     ON extension_room_sources (captured_at_ms);
 CREATE INDEX extension_room_source_revisions_source
     ON extension_room_source_revisions (source_key);
+CREATE INDEX extension_room_observation_work_active_guard
+    ON extension_room_observation_work (plugin_id, generation, room_jid, message_key)
+    WHERE status IN ('pending', 'leased', 'started');
 GRANT SELECT ON TABLE extension_room_observers TO pg_monitor;
 GRANT SELECT ON TABLE extension_room_sources TO pg_monitor;
 GRANT SELECT ON TABLE extension_room_source_revisions TO pg_monitor;
