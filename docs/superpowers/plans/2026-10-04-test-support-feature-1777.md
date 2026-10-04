@@ -1,5 +1,7 @@
 # Feature-gated `test-support` state builder for public-API XEP suites (#1777) Implementation Plan
 
+> Post-implementation note: the self dev-dependency in §1 was dropped. It links the crate twice into the lib unit-test binary, and kameo's link-time remote-message registry then panics with duplicate registrations under `--features clustering`. The suite is gated with `#![cfg(feature = "test-support")]` instead and the feature is enabled by the `--all-features` lanes plus `waddle-server-xmpp-server-tests` (the `waddle-xmpp` `test-utils` precedent).
+
 **Goal:** Let `crates/waddle-server/tests/xep0045_*.rs` integration suites build the in-process `WebSocketState` (invite ledger actor, room registry) so XEP-0045 decline-recovery coverage can live in the public `tests/` tree like every other XEP suite, without the release image gaining test code.
 
 **Spec:** GitHub issue #1777 (follow-up to #1755 / PR #1775).

@@ -769,7 +769,7 @@
               doInstallCargoArtifacts = false;
               CARGO_PROFILE = "ci-test";
               cargoArtifacts = serverTestArtifacts;
-              cargoExtraArgs = "--locked --package waddle-server";
+              cargoExtraArgs = "--locked --package waddle-server --features test-support";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
               checkPhase = ''
                 runHook preCheck

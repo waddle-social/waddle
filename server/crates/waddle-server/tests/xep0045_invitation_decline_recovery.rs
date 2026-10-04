@@ -25,7 +25,7 @@ enum PartialDeclineReceipt {
     Fallback,
 }
 
-/// Wait until a full maintenance pass completed after `passes_before` and the
+/// Wait until a full maintenance pass finished with `outcome=complete` after `passes_before` and the
 /// expected number of canonical rows is terminal. Terminalization runs before
 /// recovery inside one pass, so the terminal count alone would not prove the
 /// pass's recovery phase finished.
@@ -38,7 +38,10 @@ async fn wait_for_pass(
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let passes = metrics
-                .counter_sum("ingress.maintenance.runs", &[("phase", "pass")])
+                .counter_sum(
+                    "ingress.maintenance.runs",
+                    &[("phase", "pass"), ("outcome", "complete")],
+                )
                 .unwrap_or(0);
             if passes > passes_before
                 && fixture
@@ -271,7 +274,10 @@ async fn muc_decline_recovery(
         ));
     }
     let passes_before = metrics
-        .counter_sum("ingress.maintenance.runs", &[("phase", "pass")])
+        .counter_sum(
+            "ingress.maintenance.runs",
+            &[("phase", "pass"), ("outcome", "complete")],
+        )
         .unwrap_or(0);
     authority.trigger_maintenance();
     wait_for_pass(&metrics, passes_before, &fixture, 1).await;
@@ -337,7 +343,10 @@ async fn muc_decline_recovery(
         .expect("commit sentinel");
     age_nonterminal_rows(&fixture).await;
     let passes_before = metrics
-        .counter_sum("ingress.maintenance.runs", &[("phase", "pass")])
+        .counter_sum(
+            "ingress.maintenance.runs",
+            &[("phase", "pass"), ("outcome", "complete")],
+        )
         .unwrap_or(0);
     authority.trigger_maintenance();
     wait_for_pass(&metrics, passes_before, &fixture, 2).await;
