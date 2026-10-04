@@ -353,8 +353,10 @@ async fn sqlite_unenrolled_database_stays_unready() {
     let database = sqlx::SqlitePool::connect(&database_url)
         .await
         .expect("open unattested SQLite database for inspection");
+    // V1023 owns the observer tables, so the startup-only index is the
+    // evidence that `initialize_room_observations` never ran.
     let observer_tables: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'extension_room_observers'",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'extension_room_publications_pending'",
     )
     .fetch_one(&database)
     .await
@@ -386,8 +388,10 @@ async fn unenrolled_database_stays_unready() {
     wait_for_lineage_failure(&server, "global", "missing_lineage").await;
     assert!(!server.wait_for_exit(Duration::from_secs(1)).await);
     assert_liveness(&server).await;
+    // V1023 owns the observer tables, so the startup-only index is the
+    // evidence that `initialize_room_observations` never ran.
     let observer_tables: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'extension_room_observers'",
+        "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'extension_room_publications_pending'",
     )
     .fetch_one(&fixture.primary_admin)
     .await
