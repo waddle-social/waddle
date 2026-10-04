@@ -194,11 +194,16 @@ impl SendAttemptRepository {
         Ok(delay.map(|delay| Duration::from_millis(u64::try_from(delay).unwrap_or(0))))
     }
 
-    pub(crate) async fn has_expired_started(
+    /// An expired start or an expired never-started reservation. Both leave the
+    /// resource without a sink owner and qualify for offline handoff.
+    pub(crate) async fn has_expired_attempt(
         tx: &mut IngressUowTransaction<'_>,
         obligation: &SendObligation,
     ) -> Result<bool, IngressUowError> {
-        Ok(Self::status(tx, obligation).await? == Some(SendAttemptStatus::ExpiredStarted))
+        Ok(matches!(
+            Self::status(tx, obligation).await?,
+            Some(SendAttemptStatus::ExpiredStarted | SendAttemptStatus::ExpiredLease)
+        ))
     }
 
     /// Revoke an expired reservation or started token only while committing its replacement
