@@ -18,7 +18,7 @@ use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::{
     commands::CommandRegistry, mam::MamStorage, muc::room_registry_actor::RoomRegistryActor,
     protocol::StanzaDispatcher, registry::ConnectionRegistry,
-    stream_management::InMemorySmSessionRegistry, xep::xep0421::OccupantIdSecret,
+    stream_management::InMemorySmSessionRegistry,
 };
 
 /// Optional fixture substitutions for one test websocket state; unset fields
@@ -33,6 +33,8 @@ pub(crate) struct TestStateOverrides {
     pub(crate) pending_delivery_storage:
         Option<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
     pub(crate) ingress: Option<Arc<crate::ingress::IngressAuthority>>,
+    pub(crate) notification_settings_projection:
+        Option<Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>>,
     /// Wire `deps.protocol.room_registry` to the app-state registry, as
     /// production does, for tests that drive admin commands and janitors
     /// against the same rooms.
@@ -66,6 +68,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         blocking_storage: blocking_storage_override,
         pending_delivery_storage: pending_delivery_storage_override,
         ingress: ingress_override,
+        notification_settings_projection: notification_settings_projection_override,
         share_app_room_registry,
     } = overrides;
     let db_pool = match db_pool_override {
@@ -144,11 +147,14 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
             .await
             .expect("pubsub storage"),
     );
-    let notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
-            pubsub_storage.database(),
-        ),
-    );
+    let notification_settings_projection = notification_settings_projection_override
+        .unwrap_or_else(|| {
+            Arc::new(
+                crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+                    pubsub_storage.database(),
+                ),
+            )
+        });
     let dnd_projection = Arc::new(crate::dnd_projection::DndProjectionStore::new(
         pubsub_storage.database(),
     ));
@@ -242,10 +248,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                         RoomRegistryActor::spawn(
                             RoomRegistryActor::new(
                                 "muc.example.com".to_string(),
-                                OccupantIdSecret::new(
-                                    b"test-occupant-id-secret-32-bytes-long".to_vec(),
-                                )
-                                .expect("test secret meets length floor"),
+                                crate::config::test_occupant_id_secret(),
                             )
                             .with_server_hats(app_state.server_hats.clone()),
                         )
@@ -344,10 +347,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     pending_dm_call_offers: Arc::new(dashmap::DashMap::new()),
                     sfu: call_sfu,
                 },
-                occupant_id_secret: OccupantIdSecret::new(
-                    b"test-occupant-id-secret-32-bytes-long".to_vec(),
-                )
-                .expect("test secret meets length floor"),
+                occupant_id_secret: crate::config::test_occupant_id_secret(),
                 link_preview: server_config.link_preview.clone(),
                 ws_keepalive: server_config.ws_keepalive,
                 shutdown: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
@@ -361,6 +361,12 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         })
 }
 
+/// Seed an OIDC-provisioned local account directly into the `users`
+/// table, the way the OIDC login flow does. Needed since #1246: a
+/// message routed to a local bare JID with no registered account is
+/// bounced with `<service-unavailable/>` (RFC 6121 §8.5.1) instead of
+/// being persisted, so tests that message an offline recipient must
+/// give that recipient an account first.
 pub async fn seed_local_account(state: &WebSocketState, localpart: &str) {
     use crate::db::actor::DbExecute;
     let sql = match state.deps.app_state.db_pool.global().driver() {

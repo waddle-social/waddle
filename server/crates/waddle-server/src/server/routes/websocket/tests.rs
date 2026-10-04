@@ -190,12 +190,6 @@ async fn handle_muc_leave_with_occupancy_session(
     .await
 }
 
-/// Seed an OIDC-provisioned local account directly into the `users`
-/// table, the way the OIDC login flow does. Needed since #1246: a
-/// message routed to a local bare JID with no registered account is
-/// bounced with `<service-unavailable/>` (RFC 6121 §8.5.1) instead of
-/// being persisted, so tests that message an offline recipient must
-/// give that recipient an account first.
 pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,

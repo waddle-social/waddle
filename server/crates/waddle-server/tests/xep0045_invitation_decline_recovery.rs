@@ -1,6 +1,6 @@
 //! XEP-0045 §7.8.2 decline recovery through the public server test-support API.
 
-mod ingress_support;
+pub mod ingress_support;
 
 use ingress_support::IngressFixture;
 use sha2::{Digest, Sha256};
@@ -23,26 +23,34 @@ enum PartialDeclineReceipt {
     Fallback,
 }
 
-async fn wait_for_terminal(fixture: &IngressFixture, expected: i64) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if fixture
-            .count("ingress_messages WHERE terminal_at IS NOT NULL")
-            .await
-            == expected
-        {
-            return;
+/// Wait until a full maintenance pass completed after `passes_before` and the
+/// expected number of canonical rows is terminal. Terminalization runs before
+/// recovery inside one pass, so the terminal count alone would not prove the
+/// pass's recovery phase finished.
+async fn wait_for_pass(
+    metrics: &waddle_xmpp::telemetry::test_support::MetricsTestGuard,
+    passes_before: u64,
+    fixture: &IngressFixture,
+    expected_terminal: i64,
+) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let passes = metrics
+                .counter_sum("ingress.maintenance.runs", &[("phase", "pass")])
+                .unwrap_or(0);
+            if passes > passes_before
+                && fixture
+                    .count("ingress_messages WHERE terminal_at IS NOT NULL")
+                    .await
+                    == expected_terminal
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        if tokio::time::Instant::now() >= deadline {
-            let rows = fixture
-                .optional_text(
-                    "SELECT group_concat(created_at || ' term=' || COALESCE(terminal_at,'null') || ' receipts=' || (SELECT COUNT(*) FROM ingress_effect_receipts r WHERE r.message_key = m.message_key) || ' intents=' || (SELECT COUNT(*) FROM ingress_effect_intents i WHERE i.message_key = m.message_key), ' | ') FROM ingress_messages m",
-                )
-                .await;
-            panic!("maintenance terminalizes recovered submission; rows: {rows:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    })
+    .await
+    .expect("maintenance pass terminalizes the recovered submission");
 }
 
 async fn age_nonterminal_rows(fixture: &IngressFixture) {
@@ -92,8 +100,6 @@ async fn muc_decline_recovery(
     partial: Option<PartialDeclineReceipt>,
     reinvited: bool,
 ) {
-    #[cfg(feature = "clustering")]
-    let _ = IngressFixture::room_fence;
     let pool = Arc::new(
         DatabasePool::new(
             DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
@@ -102,16 +108,11 @@ async fn muc_decline_recovery(
         .await
         .expect("shared database pool"),
     );
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let authority = Arc::new(fixture.authority().await);
     let state = websocket_state_with_ingress(pool, Arc::clone(&authority)).await;
     let environment: Arc<dyn RecoveryEnvironment> = state.clone();
     authority.bind_recovery_environment(Arc::downgrade(&environment));
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        fixture.count("ingress_messages WHERE terminal_at IS NOT NULL"),
-    )
-    .await
-    .expect("authority startup maintenance releases the fixture database");
     create_test_session(state.as_ref(), "romeo").await;
     create_test_session(state.as_ref(), "juliet").await;
 
@@ -258,14 +259,20 @@ async fn muc_decline_recovery(
             .await
             .expect("competing decline"));
         assert!(matches!(
+            // Created after canonical intake, but an app clock behind the database
+            // timestamps it before that receipt. Only the observed generation
+            // can prevent this old decline from consuming the replacement.
             record_invite_at(actor.clone(), &invite, replacement_created_at)
                 .await
                 .expect("new invitation"),
             RecordOutcome::New { .. }
         ));
     }
+    let passes_before = metrics
+        .counter_sum("ingress.maintenance.runs", &[("phase", "pass")])
+        .unwrap_or(0);
     authority.trigger_maintenance();
-    wait_for_terminal(&fixture, 1).await;
+    wait_for_pass(&metrics, passes_before, &fixture, 1).await;
     if reinvited {
         assert!(
             rx.try_recv().is_err(),
@@ -327,8 +334,11 @@ async fn muc_decline_recovery(
         .await
         .expect("commit sentinel");
     age_nonterminal_rows(&fixture).await;
+    let passes_before = metrics
+        .counter_sum("ingress.maintenance.runs", &[("phase", "pass")])
+        .unwrap_or(0);
     authority.trigger_maintenance();
-    wait_for_terminal(&fixture, 2).await;
+    wait_for_pass(&metrics, passes_before, &fixture, 2).await;
     assert!(rx.try_recv().is_err(), "second pass cannot resend decline");
     assert_eq!(
         list_invites(actor, &invite.room, &invite.invitee)
