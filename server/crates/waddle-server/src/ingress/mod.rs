@@ -280,7 +280,7 @@ impl IngressAuthority {
 
     /// Real database-backed fixture, enrolled through the production lineage repository.
     /// Fixtures share a fixed deployment UUID so reusing a test pool re-attests its row.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn for_test(database: Database) -> Self {
         let lineage = test_lineage_config();
         crate::db::lineage::enroll(&database, &lineage)
@@ -700,7 +700,7 @@ fn non_advancing(class: IngressDecisionClass) -> IngressDecision {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_lineage_config() -> LineageConfig {
     LineageConfig {
         deployment_uuid: Some(

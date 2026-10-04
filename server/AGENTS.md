@@ -34,6 +34,7 @@
 - Run `waddle-xmpp` integration tests: `cargo nextest run -p waddle-xmpp --tests`
 - Run doctests (nextest cannot): `cargo test --doc --workspace --all-features`
 - Dedicated tests may be inline unit tests in `crates/waddle-xmpp/src/xep/xepNNNN.rs` or `crates/waddle-xmpp-core/src/xepNNNN.rs` for parsing, building, or validation, integration tests in `crates/waddle-xmpp/tests/xepNNNN_*.rs`, WebSocket tests in `crates/waddle-server/tests/xepNNNN_*.rs`, or a combination. Each suite must assert the behavior of the XEP it covers.
+- In-process server state for `tests/xepNNNN_*.rs` comes from `waddle_server::test_support` (feature `test-support`, enabled for the crate's own tests via the self dev-dependency; never enabled in the release image).
 - The active C2S transport is WebSocket only; do not add TCP C2S or S2S harness tests.
 
 ## Graceful restart (Ecdysis)

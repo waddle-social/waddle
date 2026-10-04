@@ -101,7 +101,7 @@ impl AppState {
     /// and the filesystem blob storage from `WADDLE_UPLOAD_DIR`.
     /// Production code should call [`Self::new_with_deps`] so each
     /// dependency is explicit.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(db_pool: Arc<crate::db::DatabasePool>) -> Self {
         use kameo::actor::Spawn;
         use std::str::FromStr;

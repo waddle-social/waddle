@@ -2501,9 +2501,6 @@ async fn postgres_bulk_delivery_progress_matches_per_receipt_reads() {
     }
 }
 
-#[path = "xep0045_decline_recovery_tests.rs"]
-mod xep0045_decline_recovery;
-
 #[path = "recovery_muc_tests.rs"]
 mod muc;
 
