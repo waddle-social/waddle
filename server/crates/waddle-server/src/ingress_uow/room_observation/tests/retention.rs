@@ -6,6 +6,7 @@ use crate::ingress::gc::RetentionGcBudget;
 use crate::ingress::maintenance::{
     collect_observer_history, run_maintenance_pass, MaintenanceBudget, MaintenanceOutcome,
 };
+use crate::ingress::test_support::{runbook_sql_block, runbook_statements};
 use chrono::{DateTime, Duration};
 use uuid::Uuid;
 use waddle_extensions::ObservationFailure;
@@ -780,27 +781,6 @@ async fn apply_disposition(
     tx.commit().await.expect("disposition commit");
 }
 
-/// One SQL block of the runbook, delimited by `<!-- {marker}:begin|end -->`.
-/// Never skips on a missing file: the nix test lanes copy the runbook.
-fn runbook_sql_block(marker: &str) -> String {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/operations/ingress-authority.md");
-    let doc = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!(
-            "read ingress-authority runbook at {} (is the flake.nix postUnpack copy intact?): {error}",
-            path.display()
-        )
-    });
-    let begin = format!("<!-- {marker}:begin -->");
-    let end = format!("<!-- {marker}:end -->");
-    let start = doc.find(&begin).expect("runbook begin marker") + begin.len();
-    let stop = start + doc[start..].find(&end).expect("runbook end marker");
-    let block = &doc[start..stop];
-    let sql_start = block.find("```sql").expect("sql fence") + "```sql".len();
-    let sql_end = sql_start + block[sql_start..].find("```").expect("closed sql fence");
-    block[sql_start..sql_end].to_string()
-}
-
 /// One Class A row of a reviewed disposition manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReviewedWork {
@@ -831,32 +811,52 @@ fn sql_room_list(rooms: &[BareJid]) -> String {
         .join(", ")
 }
 
-/// PostgreSQL: run the runbook's dry-run block verbatim, with the reviewed
-/// permanently-lost rooms substituted, and decode its three manifests.
+/// PostgreSQL: run the runbook's dry-run block verbatim on one connection,
+/// inside its documented `REPEATABLE READ READ ONLY` transaction, with the
+/// reviewed permanently-lost rooms substituted, and decode its manifests.
 async fn documented_dry_run(pool: &sqlx::PgPool, lost_rooms: &[BareJid]) -> DispositionManifest {
+    documented_dry_run_observed(pool, lost_rooms, std::future::ready(())).await
+}
+
+/// [`documented_dry_run`], running `after_first_manifest` on another
+/// connection once the first manifest query has fixed the snapshot.
+async fn documented_dry_run_observed(
+    pool: &sqlx::PgPool,
+    lost_rooms: &[BareJid],
+    after_first_manifest: impl std::future::Future<Output = ()>,
+) -> DispositionManifest {
     use sqlx::Row as _;
     let dry_run = runbook_sql_block("observer-disposition-dry-run")
         .replace("'<permanently-lost-room>'", &sql_room_list(lost_rooms));
-    let statements: Vec<String> = dry_run
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("--"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| statement.starts_with("SELECT"))
-        .map(str::to_string)
-        .collect();
-    assert_eq!(statements.len(), 3, "dry run has three manifest queries");
+    let statements = runbook_statements(&dry_run);
+    assert_eq!(
+        statements.first().map(String::as_str),
+        Some("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"),
+        "the dry run reads one snapshot"
+    );
+    assert_eq!(statements.last().map(String::as_str), Some("COMMIT"));
+    let mut conn = pool.acquire().await.expect("dry-run connection");
     let mut reviewed = Vec::new();
+    let mut after_first_manifest = Some(after_first_manifest);
     for statement in &statements {
-        reviewed.push(
-            sqlx::query(statement)
-                .fetch_all(pool)
+        if statement.starts_with("SELECT") {
+            reviewed.push(
+                sqlx::query(statement)
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap_or_else(|error| panic!("dry run {statement}: {error}")),
+            );
+            if let Some(hook) = after_first_manifest.take() {
+                hook.await;
+            }
+        } else {
+            sqlx::raw_sql(statement)
+                .execute(&mut *conn)
                 .await
-                .unwrap_or_else(|error| panic!("dry run {statement}: {error}")),
-        );
+                .unwrap_or_else(|error| panic!("dry run {statement}: {error}"));
+        }
     }
+    assert_eq!(reviewed.len(), 3, "dry run has three manifest queries");
     DispositionManifest {
         work: reviewed[0]
             .iter()
@@ -1495,5 +1495,63 @@ async fn postgres_disposition_refuses_reconfigured_generation() {
             .await,
         1
     );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_disposition_dry_run_reads_one_snapshot() {
+    let Some(fixture) = IngressFixture::postgres("observer_dry_run_snapshot").await else {
+        return;
+    };
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    let observer = configured_observer(1, 'a');
+    let key = seed(&fixture, &observer, "snapshot", Utc::now()).await;
+    let work_id = work_id_for(&fixture, key).await;
+    let pool = runbook_pool(&fixture).await;
+    // Another connection settles the reviewed work, with its ingress
+    // receipt, after the first manifest query and before the third.
+    let settlement = async {
+        settle(
+            &fixture,
+            &subscription(&observer),
+            crate::time::now_ms(),
+            failed(),
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .count(&format!(
+                    "ingress_effect_receipts WHERE message_key = '{}'",
+                    key.to_storage()
+                ))
+                .await,
+            1,
+            "the settlement committed"
+        );
+    };
+    let manifest = documented_dry_run_observed(&pool, &[room()], settlement).await;
+    assert_eq!(
+        manifest
+            .work
+            .iter()
+            .map(|work| &work.id)
+            .collect::<Vec<_>>(),
+        vec![&work_id]
+    );
+    assert_eq!(
+        manifest
+            .pairs
+            .iter()
+            .map(|(work, _, _)| work)
+            .collect::<Vec<_>>(),
+        vec![&work_id],
+        "the pair query reads the snapshot the work query fixed"
+    );
+    // Outside that snapshot the settlement is visible: a fresh review is empty.
+    let fresh = documented_dry_run(&pool, &[room()]).await;
+    assert!(fresh.work.is_empty() && fresh.pairs.is_empty());
+    pool.close().await;
     fixture.close().await;
 }
