@@ -288,9 +288,6 @@ pub fn register_reliability_counters() {
     }
     add_ingress_maintenance_terminalized_messages(0);
     increment_ingress_maintenance_recovered_obligations(0);
-    for table in ObserverHistoryTable::ALL {
-        add_ingress_maintenance_reclaimed_observer_rows(0, table);
-    }
     for kind in IngressEffectKind::ALL {
         for reason in IngressUnrecoverableReason::ALL {
             increment_ingress_maintenance_unrecoverable_obligations(0, kind, reason);
@@ -573,8 +570,11 @@ pub fn increment_ingress_maintenance_recovered_obligations(count: u64) {
 }
 
 /// Settled room-observer history rows reclaimed by maintenance retention
-/// (#1901), by table family. Zero-registered so a reclamation stall reads as a
-/// flat series rather than an absent one.
+/// (#1901), by table family.
+///
+/// Not zero-registered — see [`register_reliability_counters`]: no alert reads
+/// it, so it is a "did this ever tick" progress series. Failures surface through
+/// `ingress.maintenance.runs{phase="observer_retention"}`, which is registered.
 pub fn add_ingress_maintenance_reclaimed_observer_rows(count: u64, table: ObserverHistoryTable) {
     crate::counter_add!(
         "ingress.maintenance.reclaimed_observer_rows",
@@ -1100,7 +1100,6 @@ mod tests {
         "ingress.maintenance.terminalized_messages",
         "ingress.maintenance.recovered_obligations",
         "ingress.maintenance.unrecoverable_obligations",
-        "ingress.maintenance.reclaimed_observer_rows",
         "ingress.effects.unresolved",
     ];
 
@@ -1214,17 +1213,6 @@ mod tests {
                     outcome.value()
                 );
             }
-        }
-        for table in ObserverHistoryTable::ALL {
-            assert_eq!(
-                guard.counter_sum(
-                    "ingress.maintenance.reclaimed_observer_rows",
-                    &[("table", table.value())]
-                ),
-                Some(0),
-                "observer history table {} not registered",
-                table.value()
-            );
         }
         for reason in PushRetryReason::ALL {
             assert_eq!(

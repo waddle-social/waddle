@@ -801,20 +801,42 @@ fn runbook_sql_block(marker: &str) -> String {
     block[sql_start..sql_end].to_string()
 }
 
-/// PostgreSQL: run the runbook's dry run and write transaction verbatim with
-/// the reviewed manifest substituted for the placeholders.
-async fn apply_documented_disposition(
-    fixture: &IngressFixture,
-    work_id: &str,
-    publication_id: &str,
-    unsupported: MessageKey,
-    expected_hash: &[u8; 32],
-) {
-    let pool = sqlx::PgPool::connect(fixture.db.database_url())
-        .await
-        .expect("runbook pool");
+/// One Class A row of a reviewed disposition manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewedWork {
+    id: String,
+    status: String,
+    attempt: i64,
+    reason: String,
+}
+
+/// The reviewed output of the runbook's dry run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DispositionManifest {
+    work: Vec<ReviewedWork>,
+    publications: Vec<String>,
+    /// `(work_id, message_key, hex semantic_identity_hash)`, kind 28.
+    pairs: Vec<(String, String, String)>,
+}
+
+fn sql_room_list(rooms: &[BareJid]) -> String {
+    if rooms.is_empty() {
+        // A list that matches nothing selects only retired generations.
+        return "''".to_string();
+    }
+    rooms
+        .iter()
+        .map(|room| format!("'{room}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// PostgreSQL: run the runbook's dry-run block verbatim, with the reviewed
+/// permanently-lost rooms substituted, and decode its three manifests.
+async fn documented_dry_run(pool: &sqlx::PgPool, lost_rooms: &[BareJid]) -> DispositionManifest {
+    use sqlx::Row as _;
     let dry_run = runbook_sql_block("observer-disposition-dry-run")
-        .replace("<permanently-lost-room>", &room().to_string());
+        .replace("'<permanently-lost-room>'", &sql_room_list(lost_rooms));
     let statements: Vec<String> = dry_run
         .lines()
         .filter(|line| !line.trim_start().starts_with("--"))
@@ -830,70 +852,96 @@ async fn apply_documented_disposition(
     for statement in &statements {
         reviewed.push(
             sqlx::query(statement)
-                .fetch_all(&pool)
+                .fetch_all(pool)
                 .await
                 .unwrap_or_else(|error| panic!("dry run {statement}: {error}")),
         );
     }
-    use sqlx::Row as _;
-    let work: Vec<(String, String, i64, String)> = reviewed[0]
-        .iter()
-        .map(|row| {
-            (
-                row.get::<String, _>("id"),
-                row.get::<String, _>("status"),
-                row.get::<i64, _>("attempt"),
-                row.get::<String, _>("reason"),
-            )
-        })
-        .collect();
-    assert_eq!(
-        work,
-        vec![(
-            work_id.to_string(),
-            "pending".to_string(),
-            0,
-            "room_lost".to_string()
-        )]
+    DispositionManifest {
+        work: reviewed[0]
+            .iter()
+            .map(|row| ReviewedWork {
+                id: row.get("id"),
+                status: row.get("status"),
+                attempt: row.get("attempt"),
+                reason: row.get("reason"),
+            })
+            .collect(),
+        publications: reviewed[1].iter().map(|row| row.get("id")).collect(),
+        pairs: reviewed[2]
+            .iter()
+            .map(|row| {
+                assert_eq!(row.get::<i32, _>("kind"), 28);
+                (
+                    row.get("work_id"),
+                    row.get::<Uuid, _>("message_key").to_string(),
+                    row.get("semantic_identity_hash"),
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Expand one single-row `VALUES` template into the reviewed rows, or drop
+/// the whole `INSERT` when the reviewed list is empty, as the runbook says.
+fn expand_values(sql: &str, header: &str, template: &str, rows: &[String]) -> String {
+    let block = format!("{header}\n{template}\n");
+    assert!(
+        sql.contains(&block),
+        "runbook keeps the template {template}"
     );
-    let publications: Vec<String> = reviewed[1]
-        .iter()
-        .map(|row| row.get::<String, _>("id"))
-        .collect();
-    assert_eq!(publications, vec![publication_id.to_string()]);
-    let pairs: Vec<(String, i32, String)> = reviewed[2]
-        .iter()
-        .map(|row| {
-            (
-                row.get::<String, _>("work_id"),
-                row.get::<i32, _>("kind"),
-                row.get::<String, _>("semantic_identity_hash"),
-            )
-        })
-        .collect();
-    assert_eq!(
-        pairs,
-        vec![(work_id.to_string(), 28, hex::encode(expected_hash))],
-        "the documented hash expression finds the exact kind-28 pair"
-    );
+    if rows.is_empty() {
+        return sql.replace(&block, "");
+    }
+    let rows: Vec<String> = rows.iter().map(|row| format!("  {row}")).collect();
+    sql.replace(&block, &format!("{header}\n{};\n", rows.join(",\n")))
+}
+
+/// PostgreSQL: the runbook's write transaction with the manifest filled in.
+async fn documented_write(pool: &sqlx::PgPool, manifest: &DispositionManifest) -> String {
     let epoch: String =
         sqlx::query_scalar("SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1")
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .expect("live epoch");
-    let write = runbook_sql_block("observer-disposition-write")
+    let mut write = runbook_sql_block("observer-disposition-write")
         .replace("\\set ON_ERROR_STOP on", "")
-        .replace("<current epoch>", &epoch)
-        .replace("<reviewed-work-id>", work_id)
-        .replace("<reviewed-status>", "pending")
-        .replace("<reviewed-attempt>", "0")
-        .replace("<generation_retired|room_lost>", "room_lost")
-        .replace("<reviewed-publication-id>", publication_id)
-        .replace(
-            "<reviewed-message-key>",
-            &unsupported.to_storage().to_string(),
-        )
-        .replace("<reviewed-hex-hash>", &hex::encode(expected_hash));
+        .replace("<current epoch>", &epoch);
+    write = expand_values(
+        &write,
+        "INSERT INTO reviewed_work (id, status, attempt, reason) VALUES",
+        "  ('<reviewed-work-id>', '<reviewed-status>', <reviewed-attempt>, '<generation_retired|room_lost>');",
+        &manifest
+            .work
+            .iter()
+            .map(|work| {
+                format!(
+                    "('{}', '{}', {}, '{}')",
+                    work.id, work.status, work.attempt, work.reason
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    write = expand_values(
+        &write,
+        "INSERT INTO reviewed_publications (id) VALUES",
+        "  ('<reviewed-publication-id>');",
+        &manifest
+            .publications
+            .iter()
+            .map(|id| format!("('{id}')"))
+            .collect::<Vec<_>>(),
+    );
+    write = expand_values(
+        &write,
+        "INSERT INTO reviewed_pending (work_id, message_key, kind, semantic_identity_hash) VALUES",
+        "  ('<reviewed-work-id>', '<reviewed-message-key>'::uuid, 28, decode('<reviewed-hex-hash>', 'hex'));",
+        &manifest
+            .pairs
+            .iter()
+            .map(|(work, key, hash)| format!("('{work}', '{key}'::uuid, 28, decode('{hash}', 'hex'))"))
+            .collect::<Vec<_>>(),
+    );
     assert!(
         !write
             .as_bytes()
@@ -901,8 +949,92 @@ async fn apply_documented_disposition(
             .any(|pair| pair[0] == b'<' && pair[1].is_ascii_lowercase()),
         "every placeholder is filled"
     );
-    sqlx::raw_sql(&write)
-        .execute(&pool)
+    write
+}
+
+/// Run the write transaction on a dedicated connection. A refusal leaves the
+/// session in an aborted transaction block, which is rolled back explicitly.
+async fn try_documented_write(
+    pool: &sqlx::PgPool,
+    manifest: &DispositionManifest,
+) -> Result<(), String> {
+    let write = documented_write(pool, manifest).await;
+    let mut conn = pool.acquire().await.expect("runbook connection");
+    match sqlx::raw_sql(&write).execute(&mut *conn).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            sqlx::raw_sql("ROLLBACK")
+                .execute(&mut *conn)
+                .await
+                .expect("roll back the refused disposition");
+            Err(error.to_string())
+        }
+    }
+}
+
+/// Everything a disposition could touch, rendered for equality checks.
+async fn disposition_snapshot(pool: &sqlx::PgPool) -> Vec<Vec<String>> {
+    let mut snapshot = Vec::new();
+    for sql in [
+        "SELECT concat_ws('|', id, status, attempt, terminal_category, settled_at_ms, lease_id, lease_until_ms, body) FROM extension_room_observation_work ORDER BY id",
+        "SELECT concat_ws('|', id, status, settled_at_ms) FROM extension_room_publications ORDER BY id",
+        "SELECT concat_ws('|', plugin_id, generation, room_jid, message_key, category, recorded_at_ms) FROM extension_room_observation_receipts ORDER BY 1",
+        "SELECT concat_ws('|', message_key, kind, encode(semantic_identity_hash, 'hex')) FROM ingress_effect_receipts ORDER BY 1",
+        "SELECT concat_ws('|', message_key, terminal_at) FROM ingress_messages ORDER BY 1",
+        "SELECT concat_ws('|', plugin_id, generation) FROM extension_room_observers ORDER BY 1",
+    ] {
+        snapshot.push(
+            sqlx::query_scalar::<_, String>(sql)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_else(|error| panic!("snapshot {sql}: {error}")),
+        );
+    }
+    snapshot
+}
+
+async fn work_id_for(fixture: &IngressFixture, key: MessageKey) -> String {
+    fixture
+        .optional_text(&format!(
+            "SELECT id FROM extension_room_observation_work WHERE message_key = '{}'",
+            key.to_storage()
+        ))
+        .await
+        .expect("work id")
+}
+
+/// PostgreSQL: run the runbook's dry run and write transaction verbatim with
+/// the reviewed manifest substituted for the placeholders.
+async fn apply_documented_disposition(
+    fixture: &IngressFixture,
+    work_id: &str,
+    publication_id: &str,
+    unsupported: MessageKey,
+    expected_hash: &[u8; 32],
+) {
+    let pool = sqlx::PgPool::connect(fixture.db.database_url())
+        .await
+        .expect("runbook pool");
+    let manifest = documented_dry_run(&pool, &[room()]).await;
+    assert_eq!(
+        manifest,
+        DispositionManifest {
+            work: vec![ReviewedWork {
+                id: work_id.to_string(),
+                status: "pending".to_string(),
+                attempt: 0,
+                reason: "room_lost".to_string(),
+            }],
+            publications: vec![publication_id.to_string()],
+            pairs: vec![(
+                work_id.to_string(),
+                unsupported.to_storage().to_string(),
+                hex::encode(expected_hash),
+            )],
+        },
+        "the documented hash expression finds the exact kind-28 pair"
+    );
+    try_documented_write(&pool, &manifest)
         .await
         .expect("documented disposition transaction");
     pool.close().await;
@@ -1023,4 +1155,345 @@ async fn operator_disposition_terminalizes_and_then_ages_out_postgres() {
     if let Some(fixture) = IngressFixture::postgres("observer_retention_disposition").await {
         operator_disposition_terminalizes_and_then_ages_out(fixture).await;
     }
+}
+
+fn healthy_room() -> BareJid {
+    "healthy@conference.example.org"
+        .parse()
+        .expect("healthy room")
+}
+
+/// The fixture observer, scoped to the lost fixture room and a healthy room.
+fn two_room_observer() -> ConfiguredRoomObserver {
+    let mut observer = configured_observer(1, 'a');
+    observer.scope = RoomObservationScope::Rooms(vec![room(), healthy_room()]);
+    observer
+}
+
+/// Capture one new message in `target`, with its canonical row and intent.
+async fn seed_in(
+    fixture: &IngressFixture,
+    observer: &ConfiguredRoomObserver,
+    target: &BareJid,
+    stanza: &str,
+    at: DateTime<Utc>,
+) -> MessageKey {
+    let mut frozen = intent(observer);
+    let IngressEffectIntent::RoomObserver {
+        room: intent_room,
+        sender: occupant,
+        ..
+    } = &mut frozen
+    else {
+        unreachable!("fixture intent is a room observer")
+    };
+    *intent_room = target.clone();
+    *occupant = format!("{target}/author").parse().expect("occupant");
+    let mut stanza_message = Message::new(Some(target.clone().into()));
+    stanza_message.from = Some(format!("{target}/author").parse().expect("occupant"));
+    stanza_message.type_ = MessageType::Groupchat;
+    stanza_message.id = Some(Id(format!("wire-{stanza}")));
+    stanza_message
+        .bodies
+        .insert(Lang::new(), "body".to_string());
+    add_stanza_id(
+        &mut stanza_message,
+        &StanzaId::new(stanza, target.clone().into()),
+    );
+    add_origin_id(&mut stanza_message, &format!("origin-{stanza}"));
+    let key = MessageKey::new();
+    let mut tx = fixture.uow.begin().await.expect("seed");
+    record_message(&mut tx, key).await;
+    Repo::sync_configured(&mut tx, std::slice::from_ref(observer), ms(at))
+        .await
+        .expect("sync");
+    capture(
+        &mut tx,
+        key,
+        target,
+        &stanza_message,
+        &sender(),
+        &[frozen],
+        at,
+    )
+    .await
+    .expect("capture");
+    tx.commit().await.expect("seed commit");
+    key
+}
+
+async fn runbook_pool(fixture: &IngressFixture) -> sqlx::PgPool {
+    sqlx::PgPool::connect(fixture.db.database_url())
+        .await
+        .expect("runbook pool")
+}
+
+#[tokio::test]
+async fn postgres_disposition_retires_only_the_unsupported_rooms() {
+    let Some(fixture) = IngressFixture::postgres("observer_disposition_mixed").await else {
+        return;
+    };
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    let observer = two_room_observer();
+    let mut lost = subscription(&observer);
+    lost.room = room();
+    let mut healthy = subscription(&observer);
+    healthy.room = healthy_room();
+    let t0 = Utc::now();
+    // Lost room: a stranded publication (Class B) and pending work (Class A).
+    seed_in(&fixture, &observer, &room(), "lost-stranded", t0).await;
+    settle(&fixture, &lost, ms(t0), completed(vec![payload()])).await;
+    let unsupported = seed_in(&fixture, &observer, &room(), "lost-pending", t0).await;
+    // Healthy room: a completed result awaiting publication and pending work.
+    let healthy_published = seed_in(&fixture, &observer, &healthy_room(), "ok-result", t0).await;
+    settle(&fixture, &healthy, ms(t0), completed(vec![payload()])).await;
+    let healthy_pending = seed_in(&fixture, &observer, &healthy_room(), "ok-pending", t0).await;
+
+    let pool = runbook_pool(&fixture).await;
+    let manifest = documented_dry_run(&pool, &[room()]).await;
+    let unsupported_work = work_id_for(&fixture, unsupported).await;
+    let stranded_publication = fixture
+        .optional_text(&format!(
+            "SELECT id FROM extension_room_publications WHERE room_jid = '{}'",
+            room()
+        ))
+        .await
+        .expect("stranded publication");
+    assert_eq!(
+        manifest
+            .work
+            .iter()
+            .map(|work| &work.id)
+            .collect::<Vec<_>>(),
+        vec![&unsupported_work]
+    );
+    assert_eq!(manifest.publications, vec![stranded_publication]);
+    assert_eq!(
+        manifest
+            .pairs
+            .iter()
+            .map(|(work, _, _)| work)
+            .collect::<Vec<_>>(),
+        vec![&unsupported_work],
+        "the pair manifest names exactly the Class A rows"
+    );
+    let healthy_work = work_id_for(&fixture, healthy_pending).await;
+    let healthy_before = fixture
+        .optional_text(&format!(
+            "SELECT concat_ws('|', status, attempt, body, settled_at_ms) FROM extension_room_observation_work WHERE id = '{healthy_work}'"
+        ))
+        .await;
+
+    try_documented_write(&pool, &manifest)
+        .await
+        .expect("disposition of the unsupported set");
+
+    assert_eq!(
+        fixture
+            .optional_text(&format!(
+                "SELECT concat_ws('|', status, attempt, body, settled_at_ms) FROM extension_room_observation_work WHERE id = '{healthy_work}'"
+            ))
+            .await,
+        healthy_before,
+        "healthy pending work is untouched"
+    );
+    assert_eq!(
+        fixture
+            .count(&format!(
+                "extension_room_publications WHERE room_jid = '{}' AND status = 'pending' AND settled_at_ms IS NULL",
+                healthy_room()
+            ))
+            .await,
+        1,
+        "the healthy room's result still awaits publication"
+    );
+    assert_eq!(
+        fixture
+            .count(&format!(
+                "ingress_effect_receipts WHERE message_key = '{}'",
+                healthy_pending.to_storage()
+            ))
+            .await,
+        0,
+        "healthy pending intents stay unreceipted"
+    );
+    assert_eq!(
+        fixture
+            .count(&format!(
+                "ingress_effect_intents WHERE message_key = '{}'",
+                healthy_pending.to_storage()
+            ))
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .count(&format!(
+                "ingress_effect_receipts WHERE message_key = '{}'",
+                healthy_published.to_storage()
+            ))
+            .await,
+        1,
+        "the healthy settlement receipt is unchanged"
+    );
+    assert_eq!(
+        fixture
+            .count(&format!(
+                "extension_room_observation_work WHERE id = '{unsupported_work}' AND status = 'terminal' AND terminal_category = 'operator_unsupported'"
+            ))
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .count(&format!(
+                "extension_room_publications WHERE room_jid = '{}' AND status = 'stale'",
+                room()
+            ))
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .count(&format!(
+                "ingress_effect_receipts WHERE message_key = '{}' AND kind = 28",
+                unsupported.to_storage()
+            ))
+            .await,
+        1
+    );
+    pool.close().await;
+    fixture.close().await;
+}
+
+/// Seed one Class A row and return its pool. The caller arranges the state
+/// the dry run reviews and the change that must make the write refuse.
+async fn refusal_fixture(
+    name: &str,
+) -> Option<(IngressFixture, ConfiguredRoomObserver, MessageKey)> {
+    let fixture = IngressFixture::postgres(name).await?;
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    let observer = configured_observer(1, 'a');
+    let key = seed(&fixture, &observer, "refused", Utc::now()).await;
+    Some((fixture, observer, key))
+}
+
+async fn assert_refused_without_change(
+    fixture: &IngressFixture,
+    manifest: &DispositionManifest,
+    reason: &str,
+) {
+    let pool = runbook_pool(fixture).await;
+    let before = disposition_snapshot(&pool).await;
+    let error = try_documented_write(&pool, manifest)
+        .await
+        .expect_err("the disposition must refuse");
+    assert!(error.contains(reason), "unexpected refusal: {error}");
+    assert_eq!(
+        disposition_snapshot(&pool).await,
+        before,
+        "a refused disposition changes nothing"
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_disposition_refuses_unexpired_lease() {
+    let Some((fixture, observer, _)) = refusal_fixture("observer_refuse_lease").await else {
+        return;
+    };
+    // The dry run reviews leased work whose lease is still live.
+    let mut tx = fixture.uow.begin().await.expect("claim");
+    Repo::claim(&mut tx, &subscription(&observer), crate::time::now_ms())
+        .await
+        .expect("claim")
+        .expect("work");
+    tx.commit().await.expect("lease");
+    let pool = runbook_pool(&fixture).await;
+    let manifest = documented_dry_run(&pool, &[room()]).await;
+    pool.close().await;
+    assert_eq!(manifest.work.len(), 1);
+    assert_eq!(manifest.work[0].status, "leased");
+    assert_refused_without_change(&fixture, &manifest, "unexpired lease").await;
+    assert_eq!(
+        fixture
+            .count("extension_room_observation_work WHERE status = 'leased'")
+            .await,
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_disposition_refuses_rows_changed_since_review() {
+    let Some((fixture, _, key)) = refusal_fixture("observer_refuse_changed").await else {
+        return;
+    };
+    let pool = runbook_pool(&fixture).await;
+    let manifest = documented_dry_run(&pool, &[room()]).await;
+    pool.close().await;
+    assert_eq!(manifest.work.len(), 1);
+    let work_id = work_id_for(&fixture, key).await;
+    // Attempt moved on while the status still reads pending.
+    fixture
+        .execute(
+            "UPDATE extension_room_observation_work SET attempt = attempt + 1 WHERE id = ?",
+            crate::db_params![&work_id],
+        )
+        .await;
+    assert_refused_without_change(&fixture, &manifest, "changed since review").await;
+    // Status moved on (to an expired lease) while the attempt is as reviewed.
+    fixture
+        .execute(
+            "UPDATE extension_room_observation_work SET attempt = attempt - 1, status = 'leased', lease_until_ms = 1 WHERE id = ?",
+            crate::db_params![&work_id],
+        )
+        .await;
+    assert_refused_without_change(&fixture, &manifest, "changed since review").await;
+    assert_eq!(
+        fixture
+            .count("extension_room_observation_work WHERE status = 'leased' AND attempt = 0")
+            .await,
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_disposition_refuses_reconfigured_generation() {
+    let Some((fixture, _, _)) = refusal_fixture("observer_refuse_generation").await else {
+        return;
+    };
+    // The plugin moved to generation 2 without staling generation 1 work.
+    fixture
+        .execute(
+            "UPDATE extension_room_observers SET generation = 2 WHERE plugin_id = 'observer-fixture'",
+            (),
+        )
+        .await;
+    let pool = runbook_pool(&fixture).await;
+    let manifest = documented_dry_run(&pool, &[]).await;
+    pool.close().await;
+    assert_eq!(manifest.work.len(), 1);
+    assert_eq!(manifest.work[0].reason, "generation_retired");
+    assert_eq!(manifest.pairs.len(), 1);
+    // Generation 1 is configured again before the write runs.
+    fixture
+        .execute(
+            "UPDATE extension_room_observers SET generation = 1 WHERE plugin_id = 'observer-fixture'",
+            (),
+        )
+        .await;
+    assert_refused_without_change(&fixture, &manifest, "configured again").await;
+    assert_eq!(
+        fixture
+            .count("extension_room_observation_work WHERE status = 'pending'")
+            .await,
+        1
+    );
+    fixture.close().await;
 }

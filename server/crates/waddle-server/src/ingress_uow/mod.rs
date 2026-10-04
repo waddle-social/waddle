@@ -17,10 +17,11 @@ mod durable_more;
 mod error;
 mod extension_grants;
 mod room_observation;
+pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{
     initialize_room_observations, CapturedRoomSource, RoomObservationRepository,
 };
-pub use room_observation::{ObservationError, ObserverRetentionBatch, RoomPublication};
+pub use room_observation::{ObservationError, RoomPublication};
 mod pending_receipts;
 mod recovery_receipts;
 pub(crate) use pending_receipts::PendingReceiptRepository;

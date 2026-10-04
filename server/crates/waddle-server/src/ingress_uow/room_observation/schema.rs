@@ -128,19 +128,6 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
         (),
     )
     .await?;
-    // Retention indexes match V1023; the tables always exist in their
-    // migrated shape by the time startup DDL runs.
-    for index in [
-        "CREATE INDEX IF NOT EXISTS extension_room_observation_work_settled ON extension_room_observation_work (status, settled_at_ms)",
-        "CREATE INDEX IF NOT EXISTS extension_room_observation_work_source ON extension_room_observation_work (source_key)",
-        "CREATE INDEX IF NOT EXISTS extension_room_publications_settled ON extension_room_publications (status, settled_at_ms)",
-        "CREATE INDEX IF NOT EXISTS extension_room_publications_source ON extension_room_publications (source_key)",
-        "CREATE INDEX IF NOT EXISTS extension_room_observation_receipts_recorded ON extension_room_observation_receipts (recorded_at_ms)",
-        "CREATE INDEX IF NOT EXISTS extension_room_sources_captured ON extension_room_sources (captured_at_ms)",
-        "CREATE INDEX IF NOT EXISTS extension_room_source_revisions_source ON extension_room_source_revisions (source_key)",
-    ] {
-        tx.execute(index, ()).await?;
-    }
     tx.commit().await?;
     Ok(())
 }

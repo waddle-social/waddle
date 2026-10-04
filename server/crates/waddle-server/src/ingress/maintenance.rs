@@ -80,7 +80,9 @@ impl MaintenanceBudget {
         recovery_stall_sample_interval: Duration::from_secs(60),
         recovery_stall_cooldown: Duration::from_secs(15 * 60),
         retention: RetentionGcBudget::DEFAULT,
-        hard_deadline: Duration::from_secs(13),
+        // terminalization 2 s + recovery 4 s + retention GC 6 s + observer
+        // retention 6 s, plus 1 s of slack.
+        hard_deadline: Duration::from_secs(19),
         page_size: 256,
         max_pages: 4,
         grace: chrono::Duration::seconds(60),

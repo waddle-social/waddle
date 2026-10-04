@@ -180,7 +180,7 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.maintenance.runs{phase,outcome}` (phases: `pass`, `terminalization`, `recovery`, `retention_gc`, `observer_retention`) | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
 | `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
 | `ingress.maintenance.recovered_obligations` | `ingress_maintenance_recovered_obligations_total` | Recovery progress |
-| `ingress.maintenance.reclaimed_observer_rows{table}` (tables: `work`, `publication`, `receipt`, `source`; `source` counts retracted sources and their revision mappings) | `ingress_maintenance_reclaimed_observer_rows_total` | Observer history reclamation progress (#1901); zero-registered |
+| `ingress.maintenance.reclaimed_observer_rows{table}` (tables: `work`, `publication`, `receipt`, `source`; `source` counts retracted sources and their revision mappings) | `ingress_maintenance_reclaimed_observer_rows_total` | Observer history reclamation progress (#1901); not zero-registered, so read it as "did this ever tick" |
 | `ingress.maintenance.unrecoverable_obligations{kind,reason}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported evaluations and stalled recovery classifications; read alongside `IngressNonTerminalBacklog` |
 | `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | Frozen groupchat copies settled for occupants the room no longer lists; not zero-registered, so read it as "did this ever tick" |
 | `muc.ghost_occupants.evicted` | `muc_ghost_occupants_evicted_total` | XEP-0045 ghost occupants removed from a room by a stalled groupchat obligation; not zero-registered, and every tick means a cleanup leak happened upstream |
@@ -273,7 +273,7 @@ observer retention (see "Observer history retention (#1901)").
 Terminalization has a 2 s budget; recovery has a 4 s phase budget and a 1 s
 absolute per-row deadline covering freeze, execute, delegate and recount.
 Recovery scans pages of 64 keys and attempts at most 64 rows per pass.
-Each phase has a timeout inside a hard 13 s pass deadline. Maintenance shares
+Each phase has a timeout inside a hard 19 s pass deadline. Maintenance shares
 the bounded ingress pool and holds at most one connection at a time.
 
 Recovery is skipped and not recorded until the websocket state binds its
@@ -409,7 +409,7 @@ attestation gate covers it.
 
 ### V1023
 
-V1023 creates the four startup-owned observer tables in their prior shape if
+V1023 creates the five startup-owned observer tables in their prior shape if
 they are absent, adds `settled_at_ms` (work, publications), `recorded_at_ms`
 (receipts) and `captured_at_ms` (sources), and adds the retention and
 `source_key` indexes. Existing final work, settled publications, receipts and
@@ -532,20 +532,25 @@ WHERE work.status IN ('pending', 'leased', 'started')
        OR work.room_jid IN ('<permanently-lost-room>'))
 ORDER BY work.room_jid, work.id;
 
--- Class A dependants and Class B publications.
+-- Class A dependants and Class B publications. The Class A predicate is
+-- repeated verbatim so every manifest names the same work rows.
 SELECT publication.id, publication.work_id, publication.room_jid,
        publication.plugin_id, publication.generation, work.status AS work_status
 FROM extension_room_publications publication
 LEFT JOIN extension_room_observation_work work ON work.id = publication.work_id
+LEFT JOIN extension_room_observers observer ON observer.plugin_id = work.plugin_id
 WHERE publication.status = 'pending'
   AND (publication.room_jid IN ('<permanently-lost-room>')
-       OR work.status IN ('pending', 'leased', 'started'))
+       OR (work.status IN ('pending', 'leased', 'started')
+           AND (observer.generation IS DISTINCT FROM work.generation
+                OR work.room_jid IN ('<permanently-lost-room>'))))
 ORDER BY publication.room_jid, publication.id;
 
 -- Exact pending ingress pair of each Class A row.
 SELECT work.id AS work_id, intent.message_key, intent.kind,
        encode(intent.semantic_identity_hash, 'hex') AS semantic_identity_hash
 FROM extension_room_observation_work work
+LEFT JOIN extension_room_observers observer USING (plugin_id)
 JOIN ingress_effect_intents intent
   ON intent.message_key = CAST(work.message_key AS uuid)
  AND intent.kind = 28
@@ -553,6 +558,8 @@ JOIN ingress_effect_intents intent
        work.room_jid || '|' || work.plugin_id || '|' || work.generation::text
        || '|' || work.identity, 'UTF8'))
 WHERE work.status IN ('pending', 'leased', 'started')
+  AND (observer.generation IS DISTINCT FROM work.generation
+       OR work.room_jid IN ('<permanently-lost-room>'))
   AND NOT EXISTS (
     SELECT 1 FROM ingress_effect_receipts receipt
     WHERE receipt.message_key = intent.message_key

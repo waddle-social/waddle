@@ -21,7 +21,7 @@ use waddle_extensions::{
 };
 use waddle_xmpp::ingress::MessageKey;
 
-pub use retention::ObserverRetentionBatch;
+pub(crate) use retention::ObserverRetentionBatch;
 pub use schema::initialize_room_observations;
 
 /// No provider body, message text, key, JID, or raw SQL diagnostic is exposed

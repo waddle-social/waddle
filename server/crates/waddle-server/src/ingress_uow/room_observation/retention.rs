@@ -28,7 +28,7 @@ pub const OBSERVER_HISTORY_RETENTION: chrono::Duration = chrono::Duration::days(
 
 /// Rows one [`collect_expired`] batch deleted, per table.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ObserverRetentionBatch {
+pub(crate) struct ObserverRetentionBatch {
     pub publications: u64,
     pub work: u64,
     pub receipts: u64,
@@ -173,13 +173,12 @@ async fn delete_batch(
     tx: &mut Transaction<'_>,
     sql: &'static str,
     cutoff_ms: i64,
-    remaining: u64,
+    remaining: u32,
 ) -> Result<u64, ObservationError> {
     if remaining == 0 {
         return Ok(0);
     }
-    let limit = i64::try_from(remaining).map_err(|_| ObservationError::Codec)?;
-    tx.execute(sql, crate::db_params![cutoff_ms, limit])
+    tx.execute(sql, crate::db_params![cutoff_ms, i64::from(remaining)])
         .await
         .map_err(retention_error)
 }
@@ -191,44 +190,45 @@ pub(super) async fn collect_expired(
 ) -> Result<ObserverRetentionBatch, ObservationError> {
     let cutoff_ms = now_ms.saturating_sub(OBSERVER_HISTORY_RETENTION.num_milliseconds());
     let driver = tx.driver();
-    let budget = u64::from(limit);
     let mut batch = ObserverRetentionBatch::default();
+    let remaining = |batch: &ObserverRetentionBatch| {
+        u32::try_from(u64::from(limit).saturating_sub(batch.total())).unwrap_or(0)
+    };
     // Publications first: a settled publication no longer protects its work.
     batch.publications = delete_batch(
         tx,
         dialect(driver, PUBLICATIONS_SQLITE, PUBLICATIONS_POSTGRES),
         cutoff_ms,
-        budget,
+        limit,
     )
     .await?;
     batch.work = delete_batch(
         tx,
         dialect(driver, WORK_SQLITE, WORK_POSTGRES),
         cutoff_ms,
-        budget.saturating_sub(batch.total()),
+        remaining(&batch),
     )
     .await?;
     batch.receipts = delete_batch(
         tx,
         dialect(driver, RECEIPTS_SQLITE, RECEIPTS_POSTGRES),
         cutoff_ms,
-        budget.saturating_sub(batch.total()),
+        remaining(&batch),
     )
     .await?;
     batch.revisions = delete_batch(
         tx,
         dialect(driver, REVISIONS_SQLITE, REVISIONS_POSTGRES),
         cutoff_ms,
-        budget.saturating_sub(batch.total()),
+        remaining(&batch),
     )
     .await?;
-    let remaining = budget.saturating_sub(batch.total());
+    let remaining = remaining(&batch);
     if remaining > 0 {
-        let limit = i64::try_from(remaining).map_err(|_| ObservationError::Codec)?;
         let mut rows = tx
             .query(
                 dialect(driver, SOURCE_CANDIDATES_SQLITE, SOURCE_CANDIDATES_POSTGRES),
-                crate::db_params![cutoff_ms, limit],
+                crate::db_params![cutoff_ms, i64::from(remaining)],
             )
             .await
             .map_err(retention_error)?;
@@ -245,6 +245,6 @@ pub(super) async fn collect_expired(
                 .map_err(retention_error)?;
         }
     }
-    batch.exhausted = batch.total() >= budget;
+    batch.exhausted = batch.total() >= u64::from(limit);
     Ok(batch)
 }
