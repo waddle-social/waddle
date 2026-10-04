@@ -73,27 +73,43 @@ async fn exclusion(fixture: IngressFixture) {
         .await
         .expect("start"));
     tx.commit().await.expect("commit start");
-    // A restart or arbitrary elapsed lease time cannot prove no enqueue.
-    expire(&fixture).await;
     assert_eq!(
         claim(&fixture, &obligation, "replacement").await,
         SendClaim::Ambiguous
     );
+    let mut tx = fixture.uow.begin().await.expect("deadline");
+    let delay = SendAttemptRepository::next_retry_delay(&mut tx, obligation.message)
+        .await
+        .expect("deadline")
+        .expect("active lease");
+    assert!(delay <= Duration::from_secs(60) && delay > Duration::from_secs(50));
+    tx.commit().await.expect("deadline commit");
+    expire(&fixture).await;
+    let replacement = acquired(claim(&fixture, &obligation, "replacement").await);
+    assert_ne!(replacement.token, lease.token);
     let mut tx = fixture.uow.begin().await.expect("begin finish");
-    assert!(!SendAttemptRepository::start(&mut tx, &lease)
+    assert!(!SendAttemptRepository::complete(&mut tx, &lease)
         .await
-        .expect("repeat start"));
-    assert!(SendAttemptRepository::complete(&mut tx, &lease)
+        .expect("old token fenced"));
+    assert!(
+        !SendAttemptRepository::release_proven_not_enqueued(&mut tx, &lease)
+            .await
+            .expect("old release fenced")
+    );
+    assert!(SendAttemptRepository::start(&mut tx, &replacement)
         .await
-        .expect("finish"));
+        .expect("new start"));
+    assert!(SendAttemptRepository::complete(&mut tx, &replacement)
+        .await
+        .expect("new finish"));
     tx.commit().await.expect("commit finish");
     assert_eq!(
         claim(&fixture, &obligation, "replacement").await,
         SendClaim::Completed
     );
-    let mut tx = fixture.uow.begin().await.expect("begin completed release");
+    let mut tx = fixture.uow.begin().await.expect("completed release");
     assert!(
-        !SendAttemptRepository::release_proven_not_enqueued(&mut tx, &lease)
+        !SendAttemptRepository::release_proven_not_enqueued(&mut tx, &replacement)
             .await
             .expect("completed immutable")
     );

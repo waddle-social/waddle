@@ -159,6 +159,14 @@ fn locked_reread_does_not_exhaust_a_live_final_attempt() {
     assert!(eligible_for_claim("pending", 1_000, None, 1_000));
     assert!(!eligible_for_claim("leased", 1_000, Some(181_000), 1_001));
     assert!(eligible_for_claim("leased", 1_000, Some(181_000), 181_000));
+    assert!(!eligible_for_claim(
+        "started",
+        1_000,
+        Some(181_000),
+        180_999
+    ));
+    assert!(eligible_for_claim("started", 1_000, Some(181_000), 181_000));
+    assert!(!eligible_for_claim("started", 1_000, None, 181_000));
 }
 
 async fn capture_rollback_duplicate_and_monotonic_generation(fixture: IngressFixture) {

@@ -28,9 +28,10 @@ resources and families lacking reconstructible payloads (including room pin
 chains without a recorded pinner nick) remain pending. Recorded live sends use
 per-obligation/resource leases and durable attempt state (#1776); observer work
 commits a started state before guest invocation. Completed outcomes repair lost
-receipts without repeating the sink. Ambiguous started attempts stay unresolved,
-including after a crash before the side effect, so these guarantees can trade
-lost delivery for duplicate suppression;
+receipts without repeating the sink. Unknown live starts wait 60 seconds before
+proof-first retry or permitted offline custody/push handoff. Observer starts can
+retry after their three-minute lease, up to 20 attempts. Recovery accepts a
+possible duplicate rather than permanently suppressing delivery after a crash;
 (ii) repaired duplicates retry unfinished recorded direct resources (§3.3a)
 and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger
@@ -635,7 +636,8 @@ attempted rows per pass; the hard pass deadline is 13 s. It is skipped and
 unrecorded until the websocket state binds `RecoveryEnvironment`. Receipts
 remain idempotent. Recorded live sends and observer invocations use the durable
 attempt gates described in (i): successful outcomes repair receipts, while
-ambiguous starts suppress automatic repetition without claiming delivery.
+ambiguous starts suppress repetition only until their bounded recovery deadline,
+then permit retry or policy-checked offline handoff without claiming socket delivery.
 
 ### 3.7 Archive and dispatch order (#1770)
 

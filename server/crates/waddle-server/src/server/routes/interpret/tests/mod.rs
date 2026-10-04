@@ -27,6 +27,7 @@ mod room_subject;
 mod routing_detached_delivery;
 mod routing_fanout_pass;
 mod routing_full_jid_fallback;
+mod routing_keyed_register_race;
 mod routing_local_account;
 mod routing_negative_priority;
 mod routing_route_to_connection;

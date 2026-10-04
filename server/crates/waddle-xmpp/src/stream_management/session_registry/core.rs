@@ -45,13 +45,6 @@ const STREAM_LOCK_SHARDS: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReclaimedClaimReservation(u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReclaimedClaimAdmissionError {
-    BusySameStream,
-    Exhausted,
-    LockPoisoned,
-}
-
 impl ReclaimedClaimReservation {
     /// Construct a deterministic token for adapters that model reservation
     /// ownership in tests. Production tokens are issued by the registry.
@@ -289,7 +282,7 @@ impl InMemorySmSessionRegistry {
         if entity.entity_type != EntityType::SmSession {
             return None;
         }
-        self.reserve_reclaimed_claim_fence_capacity(&entity.id).ok()
+        self.reserve_reclaimed_claim_fence_capacity(&entity.id)
     }
 
     pub fn cancel_reclaimed_claim_capacity(
@@ -408,36 +401,34 @@ impl InMemorySmSessionRegistry {
         self.reserve_claim_fence_capacity_up_to(stream_id, self.max_sessions)
     }
 
-    pub(super) fn reserve_reclaimed_claim_fence_capacity(
+    fn reserve_reclaimed_claim_fence_capacity(
         &self,
         stream_id: &str,
-    ) -> Result<ReclaimedClaimReservation, ReclaimedClaimAdmissionError> {
+    ) -> Option<ReclaimedClaimReservation> {
         let (Ok(reservations), Ok(mut reclaimed), Ok(pending), Ok(fences)) = (
             self.claim_fence_reservations.read(),
             self.reclaimed_claim_reservations.write(),
             self.pending_claim_releases.read(),
             self.claim_fences.read(),
         ) else {
-            return Err(ReclaimedClaimAdmissionError::LockPoisoned);
+            return None;
         };
-        // Classify same-stream contention under the admission locks, before
-        // counting capacity: another operation already owns this transition.
         if reservations.contains(stream_id) || reclaimed.contains_key(stream_id) {
-            return Err(ReclaimedClaimAdmissionError::BusySameStream);
+            return None;
         }
         let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
         let active_nonterminal = fences
             .get(stream_id)
             .is_some_and(|fence| !pending.contains(&(stream_id.to_string(), fence.clone())));
         if !active_nonterminal && occupied >= self.max_sessions {
-            return Err(ReclaimedClaimAdmissionError::Exhausted);
+            return None;
         }
         let token = ReclaimedClaimReservation(
             self.next_reclaimed_claim_reservation
                 .fetch_add(1, Ordering::Relaxed),
         );
         reclaimed.insert(stream_id.to_string(), token);
-        Ok(token)
+        Some(token)
     }
 
     fn cancel_reclaimed_claim_fence_reservation(

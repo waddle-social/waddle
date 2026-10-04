@@ -1152,6 +1152,71 @@ INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_send_atte
 GRANT SELECT ON TABLE ingress_send_attempts TO pg_monitor;
 "#;
 
+/// Move the legacy startup-owned observer schema into an append-only upgrade.
+/// Old writers must be stopped before this migration. Unknown legacy attempts
+/// receive a bounded retry window rather than permanent quarantine.
+pub const V1022_BOUNDED_RECOVERY: &str = r#"
+ALTER TABLE ingress_send_attempts ADD COLUMN recovered INTEGER NOT NULL DEFAULT 0 CHECK (recovered IN (0, 1));
+CREATE TABLE IF NOT EXISTS extension_room_observation_work (
+    id TEXT PRIMARY KEY,
+    source_key TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    identity TEXT NOT NULL,
+    room_jid TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    source_json TEXT NOT NULL,
+    body TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt BIGINT NOT NULL DEFAULT 0,
+    due_at_ms BIGINT NOT NULL,
+    lease_id TEXT,
+    lease_until_ms BIGINT,
+    terminal_category TEXT,
+    usage_json TEXT,
+    UNIQUE (plugin_id, generation, room_jid, source_key, revision)
+);
+ALTER TABLE extension_room_observation_work ADD COLUMN lease_node_id TEXT;
+ALTER TABLE extension_room_observation_work ADD COLUMN lease_node_incarnation TEXT;
+UPDATE extension_room_observation_work
+SET status = 'started', terminal_category = 'legacy_unknown_attempt',
+    lease_until_ms = COALESCE(lease_until_ms, CAST(unixepoch('subsec') * 1000 AS INTEGER) + 180000)
+WHERE (lease_node_id IS NULL OR lease_node_incarnation IS NULL)
+  AND (status IN ('leased', 'started') OR (status = 'pending' AND attempt > 0));
+"#;
+
+pub const V1022_BOUNDED_RECOVERY_POSTGRES: &str = r#"
+ALTER TABLE ingress_send_attempts ADD COLUMN recovered INTEGER NOT NULL DEFAULT 0 CHECK (recovered IN (0, 1));
+CREATE TABLE IF NOT EXISTS extension_room_observation_work (
+    id TEXT PRIMARY KEY,
+    source_key TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    identity TEXT NOT NULL,
+    room_jid TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    source_json TEXT NOT NULL,
+    body TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt BIGINT NOT NULL DEFAULT 0,
+    due_at_ms BIGINT NOT NULL,
+    lease_id TEXT,
+    lease_until_ms BIGINT,
+    terminal_category TEXT,
+    usage_json TEXT,
+    UNIQUE (plugin_id, generation, room_jid, source_key, revision)
+);
+ALTER TABLE extension_room_observation_work ADD COLUMN IF NOT EXISTS lease_node_id TEXT;
+ALTER TABLE extension_room_observation_work ADD COLUMN IF NOT EXISTS lease_node_incarnation TEXT;
+UPDATE extension_room_observation_work
+SET status = 'started', terminal_category = 'legacy_unknown_attempt',
+    lease_until_ms = COALESCE(lease_until_ms, CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT) + 180000)
+WHERE (lease_node_id IS NULL OR lease_node_incarnation IS NULL)
+  AND (status IN ('leased', 'started') OR (status = 'pending' AND attempt > 0));
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1280,6 +1345,12 @@ pub fn all() -> Vec<Migration> {
             description: "Persist exclusive per-resource queue attempts".to_string(),
             sql_sqlite: V1021_SEND_ATTEMPTS,
             sql_postgres: V1021_SEND_ATTEMPTS_POSTGRES,
+        },
+        Migration {
+            version: 1022,
+            description: "Fence observer attempts and bound legacy ambiguity".to_string(),
+            sql_sqlite: V1022_BOUNDED_RECOVERY,
+            sql_postgres: V1022_BOUNDED_RECOVERY_POSTGRES,
         },
     ]
 }

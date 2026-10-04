@@ -117,7 +117,7 @@ mod tests {
     use crate::types::{ExtensionPayload, ExtensionResponse, PayloadNamespace, XmlElement};
 
     #[test]
-    fn only_pre_invocation_admission_failure_can_retry() {
+    fn only_pre_invocation_admission_failure_can_retry_without_waiting_for_lease() {
         use crate::actor::ObservationInvocationError;
         assert_eq!(
             invocation_failure(ObservationInvocationError::NotInvoked),

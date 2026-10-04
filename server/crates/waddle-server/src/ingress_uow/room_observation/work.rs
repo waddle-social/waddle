@@ -27,7 +27,7 @@ pub(super) fn eligible_for_claim(
 ) -> bool {
     match status {
         "pending" => due_at_ms <= now_ms,
-        "leased" => lease_until_ms.is_some_and(|until| until <= now_ms),
+        "leased" | "started" => lease_until_ms.is_some_and(|until| until <= now_ms),
         _ => false,
     }
 }
@@ -72,7 +72,7 @@ pub(super) async fn claim(
     // work row. The per-room actor applies the configured concurrency cap;
     // distinct source jobs may have independent active leases.
     let mut rows = tx.transaction_mut().query(
-        "SELECT id, source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?)) ORDER BY due_at_ms, id LIMIT 32",
+        "SELECT id, source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) ORDER BY due_at_ms, id LIMIT 32",
         crate::db_params![subscription.plugin.as_str(), generation, subscription.identity.as_str(), subscription.room.to_string(), now_ms, now_ms],
     ).await?;
     let mut candidates = Vec::new();
@@ -120,7 +120,7 @@ pub(super) async fn claim(
         });
         if !current {
             tx.transaction_mut().execute(
-                "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'source_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased')",
+                "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'source_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased', 'started')",
                 crate::db_params![&id],
             ).await?;
             let message_key = MessageKey::from_storage(
@@ -134,7 +134,7 @@ pub(super) async fn claim(
             .is_none_or(|attempt| attempt >= MAX_ATTEMPTS)
         {
             tx.transaction_mut().execute(
-                "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased')",
+                "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased', 'started')",
                 crate::db_params![&id],
             ).await?;
             let mut rows = tx
@@ -157,7 +157,7 @@ pub(super) async fn claim(
         }
         let lease = Uuid::now_v7();
         let changed = tx.transaction_mut().execute(
-            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, lease_node_id = ?, lease_node_incarnation = ?, attempt = attempt + 1 WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?))",
+            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, lease_node_id = ?, lease_node_incarnation = ?, attempt = attempt + 1 WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?))",
             crate::db_params![lease.to_string(), now_ms.saturating_add(LEASE_MS), owner.node_id.clone(), owner.node_epoch.clone(), &id, now_ms, now_ms],
         ).await?;
         if changed == 1 {
@@ -376,7 +376,8 @@ pub(super) async fn finish(
         }
         RoomObservationOutcome::NotInvoked => ("terminal", "retry_exhausted", now_ms, None),
         // An error after runtime entry is not evidence that the callback had
-        // no effects. Leave the started row and do not synthesize a receipt.
+        // no effects. Retain its token until lease expiry; recovery then uses
+        // a new token, accepting a possible repeated guest effect.
         RoomObservationOutcome::UnresolvedFailure(_) => return Ok(false),
         RoomObservationOutcome::PermanentFailure(failure) => {
             ("terminal", failure_category(*failure), now_ms, None)
@@ -463,7 +464,7 @@ async fn room_due(
     let generation = i64::try_from(observer.generation.get())
         .map_err(|_| ObservationError::GenerationOutOfRange)?;
     let mut rows = tx.transaction_mut().query(
-        "SELECT 1 FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?)) LIMIT 1",
+        "SELECT 1 FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) LIMIT 1",
         crate::db_params![observer.plugin.as_str(), generation, observer.identity.as_str(), room.to_string(), now_ms, now_ms],
     ).await?;
     if rows.next().await?.is_some() {
@@ -488,7 +489,7 @@ async fn all_rooms_page(
         .map_err(|_| ObservationError::GenerationOutOfRange)?;
     let cursor = after.map(ToString::to_string).unwrap_or_default();
     let mut rows = tx.transaction_mut().query(
-        "SELECT room_jid FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?)) UNION SELECT room_jid FROM extension_room_publications WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND status = 'pending' ORDER BY room_jid LIMIT ?",
+        "SELECT room_jid FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) UNION SELECT room_jid FROM extension_room_publications WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND status = 'pending' ORDER BY room_jid LIMIT ?",
         crate::db_params![observer.plugin.as_str(), generation, observer.identity.as_str(), &cursor, now_ms, now_ms, observer.plugin.as_str(), generation, observer.identity.as_str(), &cursor, i64::from(limit)],
     ).await?;
     let mut rooms = Vec::new();

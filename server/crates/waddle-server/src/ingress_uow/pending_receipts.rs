@@ -15,6 +15,44 @@ impl PendingReceiptRepository {
         database::contains_in_transaction(tx.transaction_mut(), id).await
     }
 
+    /// Reuse custody for the same recipient archive copy across resource
+    /// handoffs. Hold the pending row through ingress settlement so a consumer
+    /// cannot delete it between proving custody and recording route progress.
+    pub(crate) async fn has_archived_custody(
+        tx: &mut IngressUowTransaction<'_>,
+        recipient: &jid::BareJid,
+        stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    ) -> Result<bool, super::IngressUowError> {
+        let postgres = tx.transaction_mut().driver() == crate::db::DatabaseDriver::Postgres;
+        if postgres {
+            // Same recipient lock as insert_in_transaction, including the
+            // absent-row case and competing canonical message transactions.
+            tx.transaction_mut()
+                .execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    crate::db_params![recipient.to_string()],
+                )
+                .await?;
+        }
+        let sql = if postgres {
+            "SELECT 1 FROM pending_delivery WHERE recipient_jid = ? AND payload_kind = 'archived' AND archive_stanza_by = ? AND archive_stanza_id = ? FOR UPDATE"
+        } else {
+            "SELECT 1 FROM pending_delivery WHERE recipient_jid = ? AND payload_kind = 'archived' AND archive_stanza_by = ? AND archive_stanza_id = ?"
+        };
+        let mut rows = tx
+            .transaction_mut()
+            .query(
+                sql,
+                crate::db_params![
+                    recipient.to_string(),
+                    stanza_id.by.to_bare().to_string(),
+                    stanza_id.id.clone()
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
     pub(crate) async fn insert(
         tx: &mut IngressUowTransaction<'_>,
         row: &PendingRow,

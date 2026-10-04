@@ -29,6 +29,7 @@ mod repositories;
 mod retry;
 pub(crate) use recovery_receipts::{RecoveryCompletion, RecoveryReceiptRepository};
 mod send_attempts;
+pub(crate) use send_attempts::{send_attempt_blocks_delivery, SendAttemptStatus};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
 mod settlement;
 pub(crate) use settlement::settle_recorded;

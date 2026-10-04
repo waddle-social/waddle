@@ -10,7 +10,7 @@ use waddle_extensions::{
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, SemanticDigest};
 
-async fn callback_is_not_replayed_after_cancel(fixture: IngressFixture) {
+async fn callback_retries_after_cancel_and_lease_expiry(fixture: IngressFixture) {
     initialize_room_observations(&fixture.db)
         .await
         .expect("schema");
@@ -135,12 +135,12 @@ async fn callback_is_not_replayed_after_cancel(fixture: IngressFixture) {
             result = &mut invocation => panic!("blocked callback ended: {result:?}"),
             _ = entered.notified() => {}
         }
-        // A concurrent scheduler cannot steal even an expired started lease.
+        // The active lease excludes a concurrent scheduler.
         let mut tx = fixture.uow.begin().await.expect("concurrent recovery");
         assert!(RoomObservationRepository::claim(
             &mut tx,
             &subscription,
-            now.timestamp_millis() + 1_000_000
+            now.timestamp_millis() + 179_999
         )
         .await
         .expect("claim")
@@ -148,39 +148,55 @@ async fn callback_is_not_replayed_after_cancel(fixture: IngressFixture) {
         tx.commit().await.expect("recovery commit");
     } // Cancels the callback, modelling actor shutdown after invocation.
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let retry_at = now.timestamp_millis() + 180_000;
     let mut tx = fixture.uow.begin().await.expect("restart recovery");
-    assert!(RoomObservationRepository::claim(
-        &mut tx,
-        &subscription,
-        now.timestamp_millis() + 2_000_000
-    )
+    assert_eq!(
+        RoomObservationRepository::due_rooms(&mut tx, &observer, None, retry_at, 10)
+            .await
+            .expect("due"),
+        vec![room]
+    );
+    let retry = RoomObservationRepository::claim(&mut tx, &subscription, retry_at)
+        .await
+        .expect("claim")
+        .expect("retry");
+    assert_ne!(retry.lease, work.lease);
+    let started = RoomObservationRepository::start(&mut tx, &retry, retry_at)
+        .await
+        .expect("retry start");
+    let outcome = invoke_after_commit(tx, started, async || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        RoomObservationOutcome::NotInvoked
+    })
     .await
-    .expect("claim")
-    .is_none());
-    assert!(RoomObservationRepository::due_rooms(
-        &mut tx,
-        &observer,
-        None,
-        now.timestamp_millis() + 2_000_000,
-        10
-    )
-    .await
-    .expect("due")
-    .is_empty());
-    tx.commit().await.expect("recovery commit");
+    .expect("retry invoke")
+    .expect("outcome");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let mut tx = fixture.uow.begin().await.expect("finish retry");
+    assert!(
+        !RoomObservationRepository::finish(&mut tx, &work, &outcome, retry_at)
+            .await
+            .expect("old result fenced")
+    );
+    assert!(
+        RoomObservationRepository::finish(&mut tx, &retry, &outcome, retry_at)
+            .await
+            .expect("retry result")
+    );
+    tx.commit().await.expect("finish commit");
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert_eq!(fixture.count("extension_room_publications").await, 0);
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn callback_is_not_replayed_after_cancel_sqlite() {
-    callback_is_not_replayed_after_cancel(IngressFixture::sqlite().await).await;
+async fn callback_retries_after_cancel_and_lease_expiry_sqlite() {
+    callback_retries_after_cancel_and_lease_expiry(IngressFixture::sqlite().await).await;
 }
 
 #[tokio::test]
-async fn callback_is_not_replayed_after_cancel_postgres() {
+async fn callback_retries_after_cancel_and_lease_expiry_postgres() {
     if let Some(fixture) = IngressFixture::postgres("observer_callback_cancel").await {
-        callback_is_not_replayed_after_cancel(fixture).await;
+        callback_retries_after_cancel_and_lease_expiry(fixture).await;
     }
 }

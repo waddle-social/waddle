@@ -1114,7 +1114,7 @@ async fn live_attempt_interlock(
         fixture
             .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
             .await;
-        if state == 0 {
+        if state < 2 {
             assert_eq!(
                 storage
                     .store_session_atomic_with_ingress_delivery(
@@ -1123,7 +1123,7 @@ async fn live_attempt_interlock(
                         append.clone()
                     )
                     .await
-                    .expect("expired unstarted permits custody"),
+                    .expect("expired unfinished attempt permits custody"),
                 KeyedSnapshotOutcome::Committed
             );
             // The old lease cannot start after the detached path took custody.

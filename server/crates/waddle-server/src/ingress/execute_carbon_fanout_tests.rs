@@ -507,6 +507,43 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
             i64::from(!ambiguous)
         );
     }
+    if ambiguous {
+        fixture
+            .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+            .await;
+        let completed = send_carbons_to_registry_with_capture(
+            &registry,
+            CarbonRegistryDeps {
+                ingress_delivery: Some(&delivery),
+                ingress_effect_capture: None,
+                sm_session_registry: Some(&sm),
+                web_socket_state: None,
+            },
+            owner.clone(),
+            Box::new(submission.plan.sanitized_message.clone()),
+            kind,
+            vec![source],
+        )
+        .await
+        .expect("expired vanished resource no longer blocks fanout");
+        assert!(
+            completed.carbon_recipients.is_empty(),
+            "no resource delivery may be fabricated"
+        );
+        carbon_progress::persist(
+            &fixture.uow,
+            decision.message_key.expect("key"),
+            &effect,
+            &EffectOutcome::CarbonFanout {
+                outcome: crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                recipients: vec![],
+            },
+        )
+        .await
+        .expect("terminal no-resource fanout settlement");
+        assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+        assert_eq!(fixture.count("ingress_carbon_receipts").await, 0);
+    }
     fixture.close().await;
 }
 

@@ -319,7 +319,7 @@ async fn sqlite_invite_partial_live_fanout_retries_only_missing_resource() {
 }
 
 #[tokio::test]
-async fn sqlite_invite_uncertain_live_send_never_falls_back_after_disconnect() {
+async fn sqlite_invite_uncertain_live_send_falls_back_only_after_its_deadline() {
     let fixture = IngressFixture::sqlite().await;
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
@@ -349,6 +349,18 @@ async fn sqlite_invite_uncertain_live_send_never_falls_back_after_disconnect() {
     );
     assert_eq!(first.outcomes[0].1, ExternalOutcome::Uncertain);
     registry.unregister(&target);
+    let waiting = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(waiting.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     fixture
         .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
         .await;
@@ -361,13 +373,13 @@ async fn sqlite_invite_uncertain_live_send_never_falls_back_after_disconnect() {
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(retry.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(retry.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(
         fixture.count("pending_delivery").await,
-        0,
-        "unknown live acceptance cannot fall back to an offline copy"
+        1,
+        "expired unknown acceptance hands off to durable offline custody"
     );
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
     fixture.close().await;
 }
 
@@ -995,3 +1007,121 @@ async fn remote_carbons_planning_requires_owner_inventory_before_commit() {
 
 #[path = "pending_exclusion_tests.rs"]
 mod pending_exclusion;
+
+#[tokio::test]
+async fn sqlite_invite_expired_partial_start_hands_off_without_repeating_live_sibling() {
+    use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
+    let fixture = IngressFixture::sqlite().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    let registry = ConnectionRegistry::new();
+    let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first");
+    let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    registry.register(first.clone(), sender);
+    let mut submission = invite_submission(&fixture, &first);
+    let route_intent = submission
+        .plan
+        .intents
+        .iter_mut()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteDirect { .. }))
+        .expect("route");
+    if let IngressEffectIntent::RouteDirect { fanout, .. } = route_intent {
+        fanout.push(second.clone());
+    }
+    let receipt = crate::ingress::receipt_key(route_intent).expect("receipt");
+    let Effect::External(ExternalEffect::RouteToPeer(route)) = &mut submission.plan.plan[0].effect
+    else {
+        panic!("invitation")
+    };
+    route.resources.push(second.clone());
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("canonical");
+    let key = decision.message_key.expect("key");
+    let mut tx = fixture.uow.begin().await.expect("start");
+    let SendClaim::Acquired(lease) = SendAttemptRepository::claim(
+        &mut tx,
+        &SendObligation {
+            message: key,
+            receipt,
+            recipient: second,
+        },
+        &waddle_xmpp::ownership::NodeIdentity::local(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("claim") else {
+        panic!("fresh")
+    };
+    assert!(SendAttemptRepository::start(&mut tx, &lease)
+        .await
+        .expect("started"));
+    tx.commit().await.expect("commit");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.pending_delivery_storage = Some(&storage);
+    let before = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_ne!(before.outcomes[0].1, ExternalOutcome::Done);
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    fixture
+        .execute(
+            "UPDATE ingress_send_attempts SET expires_at_ms = 0 WHERE state = 1",
+            (),
+        )
+        .await;
+    let denied = invite_pending_storage(&fixture, QuotaPolicy::CountCap { max_rows: 0 }).await;
+    deps.pending_delivery_storage = Some(&denied);
+    let quota = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(quota.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(
+        fixture.count("ingress_effect_receipts").await,
+        0,
+        "quota cannot terminally refuse possibly delivered invitation"
+    );
+    deps.pending_delivery_storage = Some(&storage);
+    let after = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(after.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(fixture.count("pending_delivery").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert!(
+        receiver.try_recv().is_err(),
+        "accepted sibling is not directly sent twice"
+    );
+    fixture.execute("DELETE FROM pending_delivery", ()).await;
+    let replay = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(replay.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    fixture.close().await;
+}

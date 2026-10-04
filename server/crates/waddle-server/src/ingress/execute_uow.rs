@@ -33,6 +33,9 @@ mod invite;
 #[cfg(test)]
 pub(crate) use invite::PAUSE_BEFORE_INVITATION_SETTLEMENT;
 
+#[path = "execute_ambiguous_offline.rs"]
+mod ambiguous_offline;
+
 #[path = "execute_detached.rs"]
 mod detached;
 pub(in crate::ingress) use detached::record_delivery_progress;

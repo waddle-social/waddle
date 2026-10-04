@@ -43,7 +43,7 @@ pub(super) async fn run(
                         (id, false)
                     }
                     Err(error) => {
-                        tracing::warn!(plugin = %observer.plugin, cancelled = error.is_cancelled(), "room observation task ended unexpectedly; started callbacks will not replay");
+                        tracing::warn!(plugin = %observer.plugin, cancelled = error.is_cancelled(), "room observation task ended unexpectedly; started callbacks retry after lease expiry");
                         (error.id(), false)
                     }
                 };
@@ -168,7 +168,7 @@ async fn process_room(
 
 /// The callback must not even be constructed until the started marker commits.
 /// Cancellation on either side of this await leaves safe durable evidence:
-/// a reclaimable reservation before commit, an unresolved start afterwards.
+/// a reclaimable reservation before commit, a bounded unresolved start afterwards.
 async fn invoke_after_commit(
     tx: crate::ingress_uow::IngressUowTransaction<'_>,
     may_invoke: bool,

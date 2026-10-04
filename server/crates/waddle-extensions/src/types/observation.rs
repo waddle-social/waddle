@@ -120,7 +120,7 @@ pub enum RoomObservationOutcome {
     Completed(RoomObservationResult),
     /// Admission rejected before entering the guest; retry is safe.
     NotInvoked,
-    /// The guest may have produced external effects; automatic replay is forbidden.
+    /// The guest may have produced effects; wait for lease expiry before a fenced retry.
     UnresolvedFailure(ObservationFailure),
     PermanentFailure(ObservationFailure),
     NotApplicable(ObservationSkip),

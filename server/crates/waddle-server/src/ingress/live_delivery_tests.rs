@@ -122,9 +122,6 @@ async fn definite_queue_failure_releases_but_failed_completion_never_retries() {
             .await,
         FullJidDeliveryOutcome::MaybeCommitted
     );
-    fixture
-        .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
-        .await;
     assert_eq!(
         authority
             .live_delivery_status(&context, &target)
@@ -141,6 +138,26 @@ async fn definite_queue_failure_releases_but_failed_completion_never_retries() {
         FullJidDeliveryOutcome::MaybeCommitted
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    fixture
+        .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+        .await;
+    fixture
+        .execute("DROP TRIGGER fail_send_completion", ())
+        .await;
+    assert_eq!(
+        authority
+            .accept_live_delivery(&context, &target, &stanza, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                BroadcastOutcome::Delivered
+            })
+            .await,
+        FullJidDeliveryOutcome::Delivered
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "bounded retry accepts a possible duplicate"
+    );
     authority.drain_and_join(Duration::from_secs(1)).await;
 }
 
@@ -270,7 +287,7 @@ async fn shutdown_authority_does_not_claim_or_touch_sink() {
 }
 
 #[tokio::test]
-async fn cancellation_before_start_can_expire_but_after_start_remains_ambiguous() {
+async fn cancellation_before_and_after_start_eventually_permits_recovery() {
     let fixture = IngressFixture::sqlite().await;
     let authority = fixture.authority().await;
     let (context, target, stanza) = recorded(&fixture).await;
@@ -318,11 +335,9 @@ async fn cancellation_before_start_can_expire_but_after_start_remains_ambiguous(
         .await;
     assert_eq!(
         authority
-            .accept_live_delivery(&context, &target, &stanza, || panic!(
-                "started cancellation cannot retry"
-            ))
+            .accept_live_delivery(&context, &target, &stanza, || BroadcastOutcome::Delivered)
             .await,
-        FullJidDeliveryOutcome::MaybeCommitted
+        FullJidDeliveryOutcome::Delivered
     );
     authority.drain_and_join(Duration::from_secs(1)).await;
 }

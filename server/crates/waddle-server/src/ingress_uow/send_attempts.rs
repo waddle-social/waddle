@@ -1,5 +1,6 @@
 //! Durable exclusion at the resource queue boundary. A started attempt is
-//! deliberately never stolen: expiry alone cannot prove whether enqueue ran.
+//! retried only after a bounded ambiguity window; lost acknowledgements can
+//! then duplicate delivery, but cannot suppress offline delivery forever.
 use std::time::Duration;
 
 use jid::FullJid;
@@ -26,6 +27,7 @@ pub struct SendLease {
     obligation: SendObligation,
     owner: NodeIdentity,
     token: Uuid,
+    recovered: bool,
 }
 
 /// Whether this obligation can begin a new queue attempt.
@@ -41,6 +43,33 @@ pub enum SendClaim {
     Completed,
 }
 
+/// Durable state observed without minting a claim capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendAttemptStatus {
+    Leased,
+    Started,
+    ExpiredStarted,
+    Completed,
+}
+
+/// Bound uncertainty independently of the short pre-invocation reservation.
+const STARTED_GRACE_MS: i64 = 60_000;
+
+/// SQL shared by custody and fanout boundaries. Completion never expires;
+/// either in-flight phase excludes competing sinks only until its deadline.
+pub(crate) fn send_attempt_blocks_delivery(driver: DatabaseDriver) -> String {
+    let clock = database_clock(driver);
+    format!("(state = 2 OR expires_at_ms > {clock})")
+}
+
+pub(crate) fn database_clock(driver: DatabaseDriver) -> &'static str {
+    if driver == DatabaseDriver::Postgres {
+        "(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint"
+    } else {
+        "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+    }
+}
+
 /// Transaction-scoped queue exclusion, independent of delivery authorization.
 ///
 /// Like the other ingress repositories, mutations take a caller-owned unit of
@@ -53,7 +82,8 @@ pub struct SendAttemptRepository;
 
 impl SendAttemptRepository {
     /// Serialize claims on the canonical message, including the absent-row
-    /// case. Only an expired, not-yet-started lease can be reclaimed.
+    /// case. Expired starts may also be reclaimed: availability wins over
+    /// suppressing every duplicate after an unknown outcome.
     pub async fn claim(
         tx: &mut IngressUowTransaction<'_>,
         obligation: &SendObligation,
@@ -67,16 +97,21 @@ impl SendAttemptRepository {
         if !owner.is_active() {
             return Err(IngressUowError::AuthorityStopped);
         }
-        if let Some(status) = Self::status(tx, obligation).await? {
-            return Ok(status);
-        }
+        let recovered = match Self::status(tx, obligation).await? {
+            Some(SendAttemptStatus::Leased) => return Ok(SendClaim::Busy),
+            Some(SendAttemptStatus::Started) => return Ok(SendClaim::Ambiguous),
+            Some(SendAttemptStatus::Completed) => return Ok(SendClaim::Completed),
+            Some(SendAttemptStatus::ExpiredStarted) => true,
+            None => false,
+        };
         let (key, clock) = dialect(tx);
         let lease = SendLease {
             obligation: obligation.clone(),
             owner: owner.clone(),
             token: Uuid::new_v4(),
+            recovered,
         };
-        let sql = format!("INSERT INTO ingress_send_attempts (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0");
+        let sql = format!("INSERT INTO ingress_send_attempts (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered");
         tx.transaction_mut()
             .execute(
                 &sql,
@@ -88,7 +123,8 @@ impl SendAttemptRepository {
                     owner.node_id.clone(),
                     owner.node_epoch.clone(),
                     lease.token.to_string(),
-                    ttl
+                    ttl,
+                    i64::from(recovered)
                 ],
             )
             .await?;
@@ -100,10 +136,10 @@ impl SendAttemptRepository {
     pub(crate) async fn status(
         tx: &mut IngressUowTransaction<'_>,
         obligation: &SendObligation,
-    ) -> Result<Option<SendClaim>, IngressUowError> {
+    ) -> Result<Option<SendAttemptStatus>, IngressUowError> {
         lock(tx, obligation).await?;
         let (key, clock) = dialect(tx);
-        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
         let mut rows = tx
             .transaction_mut()
             .query(
@@ -121,13 +157,67 @@ impl SendAttemptRepository {
         };
         let state: i64 = row.get(0)?;
         let expired: i64 = row.get(1)?;
+        let recovered: i64 = row.get(2)?;
         match state {
+            0 if expired == 1 && recovered == 1 => Ok(Some(SendAttemptStatus::ExpiredStarted)),
             0 if expired == 1 => Ok(None),
-            0 => Ok(Some(SendClaim::Busy)),
-            1 => Ok(Some(SendClaim::Ambiguous)),
-            2 => Ok(Some(SendClaim::Completed)),
+            0 => Ok(Some(SendAttemptStatus::Leased)),
+            1 if expired == 1 => Ok(Some(SendAttemptStatus::ExpiredStarted)),
+            1 => Ok(Some(SendAttemptStatus::Started)),
+            2 => Ok(Some(SendAttemptStatus::Completed)),
             _ => Err(IngressUowError::InvalidStoredSendAttempt),
         }
+    }
+
+    /// Earliest active delivery deadline, measured using the database clock.
+    /// Maintenance can sleep until this bound without treating the row as
+    /// permanently unsupported. Expired attempts remain immediately runnable.
+    pub(crate) async fn next_retry_delay(
+        tx: &mut IngressUowTransaction<'_>,
+        message: MessageKey,
+    ) -> Result<Option<Duration>, IngressUowError> {
+        let (key, clock) = dialect(tx);
+        let sql = format!("SELECT MIN(expires_at_ms - {clock}) FROM ingress_send_attempts WHERE message_key = {key} AND state IN (0, 1)");
+        let mut rows = tx
+            .transaction_mut()
+            .query(&sql, crate::db_params![message.to_storage().to_string()])
+            .await?;
+        let delay: Option<i64> = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::InvalidStoredSendAttempt)?
+            .get(0)?;
+        Ok(delay.map(|delay| Duration::from_millis(u64::try_from(delay).unwrap_or(0))))
+    }
+
+    pub(crate) async fn has_expired_started(
+        tx: &mut IngressUowTransaction<'_>,
+        obligation: &SendObligation,
+    ) -> Result<bool, IngressUowError> {
+        Ok(Self::status(tx, obligation).await? == Some(SendAttemptStatus::ExpiredStarted))
+    }
+
+    /// Revoke an expired token only while atomically committing its replacement
+    /// custody/settlement. This is not evidence that the old socket never sent.
+    pub(crate) async fn retire_expired_started(
+        tx: &mut IngressUowTransaction<'_>,
+        obligation: &SendObligation,
+    ) -> Result<(), IngressUowError> {
+        lock(tx, obligation).await?;
+        let (key, clock) = dialect(tx);
+        let sql = format!("DELETE FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND (state = 1 OR (state = 0 AND recovered = 1)) AND expires_at_ms <= {clock}");
+        tx.transaction_mut()
+            .execute(
+                &sql,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await?;
+        Ok(())
     }
 
     /// An SM append keeps custody even after its accepting socket disappears.
@@ -176,14 +266,14 @@ impl SendAttemptRepository {
         transition(
             tx,
             lease,
-            "UPDATE ingress_send_attempts SET state = 1",
+            &format!("UPDATE ingress_send_attempts SET state = 1, expires_at_ms = {clock} + {STARTED_GRACE_MS}"),
             &format!("state = 0 AND expires_at_ms > {clock}"),
         )
         .await
     }
 
-    /// Record observed enqueue success. Expiry after start does not revoke
-    /// the token, since a started attempt can never be stolen.
+    /// Record observed enqueue success while this token still owns the row.
+    /// A takeover or offline handoff revokes it, including late completions.
     pub async fn complete(
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
@@ -206,7 +296,14 @@ impl SendAttemptRepository {
         transition(
             tx,
             lease,
-            "DELETE FROM ingress_send_attempts",
+            if lease.recovered {
+                // A definite failure of THIS retry does not prove the older
+                // unknown attempt failed. Preserve its eligibility for durable
+                // offline handoff, including quota/database failure retries.
+                "UPDATE ingress_send_attempts SET state = 1, expires_at_ms = 0"
+            } else {
+                "DELETE FROM ingress_send_attempts"
+            },
             "state IN (0, 1)",
         )
         .await

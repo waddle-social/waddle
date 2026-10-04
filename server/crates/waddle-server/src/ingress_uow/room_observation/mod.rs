@@ -120,7 +120,8 @@ impl RoomObservationRepository {
     }
 
     /// Commit a successful start before invoking the callback. Started work
-    /// is never reclaimed, even after lease expiry or process death.
+    /// may be reclaimed after lease expiry with a fresh token. A repeated
+    /// guest effect is possible; stale tokens cannot publish results.
     pub async fn start(
         tx: &mut super::IngressUowTransaction<'_>,
         work: &ObservationWork,

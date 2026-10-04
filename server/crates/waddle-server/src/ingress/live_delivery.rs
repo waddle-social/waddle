@@ -1,6 +1,6 @@
 //! Durable exclusion immediately before a captured socket owner's synchronous enqueue.
 //!
-//! A started attempt is never retried after an unknown outcome. The completion
+//! Unknown starts suppress retry for a bounded grace interval. The completion
 //! row is delivery evidence even when the subsequent effect receipt is lost.
 use std::{future::Future, time::Duration};
 
@@ -15,7 +15,8 @@ use crate::{
     ingress_uow::{
         ArchiveDispatchRepository, CanonicalMessageRepository, DeliveryProgressRepository,
         EffectIntentRepository, EffectReceiptRepository, IngressFencing, IngressUnitOfWork,
-        IngressUowError, IngressUowTransaction, SendAttemptRepository, SendClaim, SendObligation,
+        IngressUowError, IngressUowTransaction, SendAttemptRepository, SendAttemptStatus,
+        SendClaim, SendObligation,
     },
     server::routes::interpret::{FullJidDeliveryOutcome, SmIngressAppendContext},
 };
@@ -237,7 +238,7 @@ async fn accept_live_delivery_inner(
     check_admission()?;
     let outcome = enqueue();
     // No transaction or canonical lock is held while touching the sink.
-    // Failed completion leaves Started, which suppresses duplicate sends.
+    // Failed completion leaves Started, excluding retry until its recovery deadline.
     let mut tx = transaction(uow).await?;
     let changed = if outcome == BroadcastOutcome::Delivered {
         SendAttemptRepository::complete(&mut tx, &lease).await?
@@ -449,12 +450,11 @@ pub(super) async fn delivery_status(
         return Ok(Some(status));
     }
     Ok(match SendAttemptRepository::status(tx, obligation).await? {
-        Some(SendClaim::Completed) => Some(FullJidDeliveryOutcome::Delivered),
-        Some(SendClaim::Busy | SendClaim::Ambiguous) => {
+        Some(SendAttemptStatus::Completed) => Some(FullJidDeliveryOutcome::Delivered),
+        Some(SendAttemptStatus::Leased | SendAttemptStatus::Started) => {
             Some(FullJidDeliveryOutcome::MaybeCommitted)
         }
-        None => None,
-        Some(SendClaim::Acquired(_)) => unreachable!("status never acquires a lease"),
+        None | Some(SendAttemptStatus::ExpiredStarted) => None,
     })
 }
 

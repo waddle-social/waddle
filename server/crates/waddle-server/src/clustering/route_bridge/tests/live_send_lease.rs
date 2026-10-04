@@ -259,7 +259,7 @@ async fn postgres_remote_socket_forged_obligation_without_archive_cannot_send() 
 }
 
 #[tokio::test]
-async fn remote_socket_ambiguous_send_blocks_retry_and_missing_socket_fallback() {
+async fn remote_socket_ambiguous_send_blocks_only_until_its_recovery_deadline() {
     let fixture = IngressFixture::sqlite().await;
     let mut socket = SocketFixture::new(&fixture).await;
     fixture.execute("CREATE TRIGGER fail_socket_send_completion BEFORE UPDATE ON ingress_send_attempts WHEN NEW.state = 2 BEGIN SELECT RAISE(ABORT, 'lost completion'); END", ()).await;
@@ -271,6 +271,14 @@ async fn remote_socket_ambiguous_send_blocks_retry_and_missing_socket_fallback()
         .receiver
         .try_recv()
         .expect("send occurred before completion failure");
+    assert_eq!(
+        socket.deliver().await,
+        RelayRemoteResourceFrameStatus::Backpressure
+    );
+    assert!(
+        socket.receiver.try_recv().is_err(),
+        "unexpired start excludes retry"
+    );
     fixture
         .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
         .await;
@@ -278,10 +286,10 @@ async fn remote_socket_ambiguous_send_blocks_retry_and_missing_socket_fallback()
         socket.deliver().await,
         RelayRemoteResourceFrameStatus::Backpressure
     );
-    assert!(
-        socket.receiver.try_recv().is_err(),
-        "expired started attempt never resends"
-    );
+    socket
+        .receiver
+        .try_recv()
+        .expect("expired uncertainty permits a bounded retry");
     socket
         .bridge
         .remote_socket_resources

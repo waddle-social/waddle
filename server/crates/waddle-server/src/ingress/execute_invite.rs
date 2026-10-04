@@ -12,7 +12,7 @@ use crate::{
     ingress_uow::{
         settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
         EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
-        IngressUowTransaction, PendingReceiptRepository, SendObligation,
+        IngressUowTransaction, PendingReceiptRepository, SendAttemptRepository, SendObligation,
     },
     server::routes::{
         interpret::{
@@ -259,7 +259,17 @@ async fn finish(
     }
     let mut accepted = 0;
     let mut blocked = false;
+    let mut expired_ambiguity = false;
     for recipient in &route.resources {
+        expired_ambiguity |= SendAttemptRepository::has_expired_started(
+            &mut tx,
+            &SendObligation {
+                message: invitation.key,
+                receipt: invitation.context.receipt.clone(),
+                recipient: recipient.clone(),
+            },
+        )
+        .await?;
         match live_delivery::delivery_status(
             &mut tx,
             &SendObligation {
@@ -282,19 +292,36 @@ async fn finish(
         tx.commit().await?;
         return Ok(Finished::Settled(persisted));
     }
-    // One accepted resource already rules out sending the whole invitation
-    // again through pending delivery. Unknown outcomes also rule out both
-    // fallback and compensation, even if the current socket disappeared.
-    if accepted > 0 || blocked || uncertain {
+    // Bound unknown outcomes before whole-invitation fallback. Once an old
+    // start expires, pending custody may duplicate an already accepted sibling;
+    // it must not leave the missing resource unresolved indefinitely.
+    if (accepted > 0 && !expired_ambiguity) || blocked || uncertain {
         tx.commit().await?;
         return Ok(Finished::Uncertain);
     }
     let inserted = PendingReceiptRepository::insert(&mut tx, &route.fallback, quota).await?;
+    if inserted == InsertOutcome::QuotaExceeded && (expired_ambiguity || accepted > 0) {
+        // Unknown or proven earlier acceptance cannot authorize membership
+        // compensation. Keep the expired marker and retry when quota is freed.
+        tx.commit().await?;
+        return Ok(Finished::Uncertain);
+    }
     if inserted == InsertOutcome::QuotaExceeded && route.failure.is_none() {
         // A decline keeps its claimed invitation and may retry after quota is
         // freed. There is no compensation or accepted effect to exclude.
         tx.commit().await?;
         return Ok(Finished::QuotaExceeded);
+    }
+    for recipient in &route.resources {
+        SendAttemptRepository::retire_expired_started(
+            &mut tx,
+            &SendObligation {
+                message: invitation.key,
+                receipt: invitation.context.receipt.clone(),
+                recipient: recipient.clone(),
+            },
+        )
+        .await?;
     }
     let persisted = settle_pair(&mut tx, invitation).await?;
     tx.commit().await?;

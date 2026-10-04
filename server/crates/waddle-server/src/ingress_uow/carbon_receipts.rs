@@ -27,7 +27,7 @@ impl CarbonReceiptRepository {
                 "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)",
             )
         };
-        let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state IN (1, 2) OR expires_at_ms > {clock}) UNION SELECT resource FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? UNION SELECT recipient FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ?");
+        let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state = 2 OR expires_at_ms > {clock}) UNION SELECT resource FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? UNION SELECT recipient FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ?");
         let mut rows = tx
             .query(
                 &sql,
@@ -192,7 +192,7 @@ impl CarbonReceiptRepository {
                     "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)",
                 )
             };
-            let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state = 1 OR (state = 0 AND expires_at_ms > {clock}))");
+            let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state IN (0, 1) AND expires_at_ms > {clock})");
             let mut rows = tx
                 .transaction_mut()
                 .query(

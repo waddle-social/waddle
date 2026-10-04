@@ -427,8 +427,8 @@ abandon those durable records. If SIGTERM interrupts post-commit Phase C, the
 canonical row and its intents survive without a receipt. The maintenance
 recovery phase (#1755) now re-executes the recoverable families described under
 "What recovery handles" without requiring a same-origin retry. Deferred and
-unrecoverable families remain pending. Recorded live sends now retain ambiguous
-attempts under the #1776 gate; unrecorded keyless frames can still repeat after a
+unrecoverable families remain pending. Recorded live sends now bound ambiguous
+attempts and recover them under the #1776 gate; unrecorded keyless frames can still repeat after a
 send-before-receipt failure. Inspect unresolved effects after this cutover
 rather than assuming the additive migration left none.
 
@@ -916,7 +916,7 @@ fail-closed before rebuilding routes.
 | --- | --- |
 | `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Maintenance delivers only to locally hosted live sockets or locally detached SM sessions; remote-hosted resources stay pending. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
 | `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
-| `room_observer` | Recovery wakes the durable per-plugin observation worker. Its frozen source/generation/revision identifies the work. A leased job must commit `started` before invoking the plugin; started jobs are never automatically reclaimed. Saved results, publications and terminal receipts commit together. Only an explicit pre-invocation admission rejection permits retry; a guest failure or timeout with an uncertain result stays unresolved. Missing observer envelopes remain unrecoverable. |
+| `room_observer` | Recovery wakes the durable per-plugin observation worker. Its frozen source/generation/revision identifies the work. A leased job commits `started` before invoking the plugin. Unknown outcomes wait for the three-minute lease before a fresh-token retry; 20 attempts settle as terminal `retry_exhausted`, not callback success. Saved results, publications and receipts commit together. Pre-invocation admission rejection can retry sooner. Missing observer envelopes remain unrecoverable. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
 | `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
 | `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key and the observed invitation generation timestamp (falling back to canonical receipt time for older recorded declines). A newer invitation remains available and the recovered decline is not forwarded. A decline whose canonical row is older than the 30-day invitation TTL is not rebuilt (its invitation expired and a newer one for the same tuple could otherwise be consumed); it is metered and stays pending. |
@@ -966,86 +966,125 @@ Remote-hosted resources stay pending: maintenance only uses locally hosted live
 sockets and locally detached SM sessions. It never sends a registered-remote
 relay frame; those attempts return `Unavailable` without writing progress.
 
-Receipts are exactly-once: arms re-lock the canonical row and re-check receipts
-before settlement; generic receipt inserts are idempotent. Pending rows,
-notification candidates, detached SM allocations and recovery completion retain
-their durable idempotency keys. Recorded live recipient copies through
-`DirectFrame`, `PeerStanza` and `RegistryFrame` now use `ingress_send_attempts`, keyed by canonical message, receipt identity and full
-recipient JID. Live execution and maintenance share this gate at the receiving
-socket, including registered-remote sockets. An expired unstarted reservation may
-be reclaimed; a started attempt cannot. A completed enqueue repairs missing
-progress or receipts without enqueuing again. Positive evidence that the queue
-rejected a frame permits a new attempt.
+Receipts remain idempotent: arms re-lock canonical authority and re-check durable
+proof before settlement. Pending rows, notification candidates, detached SM
+allocations and recovery completion keep their idempotency keys. Recorded live
+recipient copies use `ingress_send_attempts`, keyed by canonical message, receipt
+identity and full recipient JID, at both local and registered-remote sockets.
 
-Recorded invitation and decline routes use the same per-resource gate. Their
-whole-invitation offline fallback rechecks every frozen resource under the
-canonical lock and commits the pending row with both route and fallback receipts.
-Partial live acceptance or an uncertain attempt suppresses that fallback and its
-delivery-failure compensation. Legacy relay-carbon fanout carries its original
-receipt identity through the remote owner to each live or detached resource.
-For invitations requiring ledger/membership compensation, quota refusal resolves
-the receipt pair before that existing best-effort cleanup. A crash or cleanup
-failure can leave compensation unfinished; the receipt pair must not be cleared
-to retry delivery. Declines without compensation remain retryable after a proven
-quota refusal. This gate does not make compensation a durable recovery workflow.
+An unstarted reservation has a five-second lease. Committing `started` establishes
+a **60-second ambiguity window**, measured by the database clock. During that
+window other executors suppress both retry and fallback. Completed enqueue,
+receipt/progress, carbon-resource or SM-custody evidence repairs the obligation
+without sending another copy. Positive queue rejection can retry immediately.
 
-New detached allocations check the same gate under the canonical row lock and
-commit their SM snapshot and custody proof before releasing it. Thus a retry
-cannot bypass an uncertain live attempt merely because its socket disappeared.
-Frames already accepted by a socket can still gain durable custody during detach
-and use normal XEP-0198 replay. Deduplication of ingress attempts does not suppress
-protocol-required retransmission of unacknowledged stanzas.
+After the ambiguity deadline, recovery prefers existing proof, then may reclaim
+with a fresh token or transfer responsibility to offline storage. The durable
+`recovered` flag preserves the earlier uncertainty even if a reclaimed executor
+dies before starting. Late completion or release with a replaced token cannot
+remove replacement authority. An expired lease is permission for bounded
+recovery, **not proof that the old send never happened**: a suspended old writer
+may still resume, so a duplicate is possible. The policy favors eventual delivery
+and notification over permanent suppression after a crash.
 
-Observer work uses its existing durable identity and a separate `started` state.
-Only proven rejection before guest invocation re-arms it. Plugin-returned temporary
-failure, timeout, cancellation or uncertain runtime failure does not authorize
-another invocation. A known result and its publication/receipt settle atomically.
-These gates prevent repeated guest invocation and repeated successful queue
-acceptance for a recorded obligation. Definitive pre-effect rejection can retry;
-ambiguous attempts cannot. They do not promise exactly-once client delivery or
-external plugin effects. A crash
-between that commit and the side effect can lose delivery; a crash after the side
-effect but before its completion record leaves an unresolved row. Recovery never
-invents successful delivery for either case.
-Quota-refusal bounces are at-most-once: the refusal receipts commit before the
-keyless sender frame, so a crash between commit and send can lose the bounce.
-The bounce is routed through the owner-aware direct-frame path, so under
-clustering a sender attached to another replica still receives it.
-These guarantees apply to recorded ingress obligations after every writer has
-upgraded. Drain old replicas before relying on them: an already-running older
-binary does not honor the new live-send gate or observer start transition.
-Startup quarantines legacy observer leases and previously attempted pending
-jobs lacking node/incarnation evidence as `started` with
-`terminal_category = 'legacy_unknown_attempt'`. Those old states could already
-have invoked a plugin; expiry is not permission to invoke again. Untouched
-pending work (`attempt = 0`) remains eligible, and no completion receipt is
-fabricated for quarantined work.
-Best-effort `InboxPush` projection refreshes retain their terminal-on-attempt
-behavior described above; they are not recipient message-delivery copies and do
-not acquire a send lease. Unrecorded frames, sender response/host frames and the
-existing authorization-degraded detach fallback retain their separate guarantees.
+For an eligible ordinary direct route whose live/detached retry cannot accept the
+copy, the executor rechecks canonical authority and current block policy, then
+atomically inserts stable pending custody, records resource progress, and retires
+the expired attempt. Recipient archive evidence produces an unoutboxed archived
+pending row. The existing XEP-0357 notification sweep reconstructs its MAM source,
+applies normal notification policy, inserts the candidate, and marks it outboxed.
+Thus a crash before enqueue can still wake an offline mobile client. The durable
+progress proof prevents recreation after that pending row has been consumed.
+Quota or storage failure leaves the obligation retryable. Existing storage hints
+still apply: forbidden offline storage is not introduced, and transient
+`no-permanent-store` delivery does not acquire an unsupported archived push path.
 
-To diagnose an unresolved attempt, inspect its durable state without resetting it:
+Recorded invitation/decline fallback uses its frozen pending identity and the
+same canonical lock. An unexpired unknown attempt suppresses fallback. After the
+bound, whole-invitation pending delivery can duplicate a previously accepted
+sibling. Quota refusal after ambiguous or proven delivery must not revoke
+membership or remove the invitation ledger; that case stays retryable. Only a
+proven unsent invitation may commit terminal refusal before its existing
+best-effort compensation. Declines without compensation retain quota retry.
+
+Fresh detached allocations check the same deadline and proof under canonical
+authority. Already-accepted frames can still gain durable custody during detach
+and use normal XEP-0198 retransmission. Legacy relay-carbon fanout carries its
+original receipt identity to every resource and retains prior attempt evidence
+when inventory shrinks. After expiry, a vanished carbon resource follows the
+normal no-resource policy; it gains no fabricated per-resource delivery proof.
+
+Observer work similarly uses a three-minute lease with fresh token/node fencing
+on takeover. Proven pre-invocation rejection can retry earlier; unknown callback
+outcomes wait for lease expiry. Current source, revision and subscription
+generation must still match. Stale callbacks cannot publish results after a
+replacement claim. Invocation may repeat after an unknown result, so this is not
+exactly-once execution of guest external effects. The existing 20-attempt limit
+settles exhausted work as failure; valid result/publication/receipt writes remain
+atomic and publication output indices remain idempotent.
+
+**Deployment:** this PR ships the production HelmRelease as `Recreate`. Old
+writers must stop before new writers apply V1022 or use the v4 side-effect relay;
+a v3 compatibility shim alone would not protect the old observer state machine.
+Expect a brief reconnect window. Restore RollingUpdate only in a separate change
+through the fleet-verification procedure in
+[`relay-cutovers.md`](../../../docs/operations/relay-cutovers.md).
+
+V1022 adds the durable send-recovery marker and performs the legacy observer
+upgrade once through the migration ledger. V1021 retains its original checksum.
+Ownerless attempted work becomes `started` without losing its body, token or
+attempt count. Missing deadlines receive database-now plus three minutes;
+existing deadlines remain intact. Pristine pending work remains eligible.
+Ordinary startup only creates missing tables/indexes and never quarantines work
+again. Legacy ambiguity can therefore retry after its deadline instead of staying
+quarantined forever.
+
+Maintenance caches a known lease wait only when **every unfinished supported
+frozen audience** is covered by an unexpired attempt. The cache expires at the
+earliest database deadline even if `(intents, receipts, progress)` is unchanged;
+new receipt/progress evidence invalidates it sooner. Uncovered siblings, dynamic
+obligations, repairable proofs, expired attempts and failed reads are not cached
+as known waits. Delayed stall accounting cannot extend the wait. The existing
+forward cursor still advances past an attempted row, so more than 64 blocked
+rows do not starve later work; initial budget-limited passes can remain `Partial`.
+Ordinary `NoSession`-only rows use the existing timed stall cooldown, not indefinite
+unsupported caching: future socket availability is not part of the evidence
+counts. This answers the issue's cache question without hiding new recipients
+forever behind unchanged receipt counts.
+
+The send ledger already has an `ON DELETE CASCADE` relationship to its canonical
+intent. Once delivery, offline custody, or an explicit policy disposition settles
+the obligation and canonical retention expires, GC removes its send attempts.
+Unresolved evidence is never blindly age-deleted. Observer history deliberately
+has no such FK while publications can remain pending; bounded retention of its
+terminal history is tracked separately in
+[#1901](https://github.com/waddle-social/waddle/issues/1901).
+
+Best-effort `InboxPush` projection refreshes remain terminal-on-attempt and are
+not recipient message copies. Sender response/host frames and authorization-
+degraded detach drains retain their documented guarantees. Quota-refusal sender
+bounces remain at-most-once because refusal commits before that keyless frame.
+
+To inspect unresolved attempts and their recovery deadlines:
 
 ```sql
 SELECT message_key, kind, recipient, node_id, node_incarnation,
-       state, expires_at_ms
+       state, recovered, expires_at_ms
 FROM ingress_send_attempts
 WHERE state <> 2;
 
 SELECT id, message_key, plugin_id, generation, room_jid, status,
-       terminal_category, lease_node_id, lease_node_incarnation, lease_until_ms
+       attempt, terminal_category, lease_node_id, lease_node_incarnation,
+       lease_until_ms
 FROM extension_room_observation_work
-WHERE status = 'started';
+WHERE status IN ('leased', 'started');
 ```
 
-For live attempts, `state = 0` is an unstarted lease, `1` is started/uncertain,
-and `2` records successful queue acceptance. Lease expiry alone is never evidence
-that a started attempt did not execute. Do not delete such rows to force retry:
-that removes the duplicate-suppression proof. Observer source retraction,
-correction or generation invalidation follows its existing lifecycle; ordinary
-maintenance leaves unresolved started work intact. Inspect the client archive,
-SM custody and plugin result evidence before choosing any manual disposition.
+Live states are `0` (reserved), `1` (started/uncertain), and `2` (successful queue
+acceptance); a reserved row with `recovered = 1` also carries an earlier unknown
+attempt. Do not clear rows manually to force retry: use bounded recovery so
+canonical, custody, token and storage-policy checks remain atomic. Source
+retraction, correction and generation invalidation retain their existing lifecycle.
 
 Read `ingress.maintenance.unrecoverable_obligations{kind,reason}` (Prometheus:
 `ingress_maintenance_unrecoverable_obligations_total`) next to the CNPG backlog
@@ -1187,8 +1226,8 @@ Two properties bound the settlement, because it permanently drops a copy:
   transient failure is retried. Rows with no `route_muc` route, or none with an
   owed occupant, are cached exactly as before. One consequence to expect: a
   retried row re-evaluates every rebuildable arm on it. A `room_observer`
-  arm only wakes its durable worker; the worker's started/result ledger prevents
-  callback repetition after an uncertain invocation. These wake hints do not
+  arm only wakes its durable worker; its lease/result ledger bounds callback
+  retries and fences stale results. These wake hints do not
   turn an unresolved observer into a completed receipt. For
   `ingress.maintenance.unrecoverable_obligations{reason="unsupported"}`, a
   per-evaluation counter: such a row ticks it once per attempt. For EVALUABLE

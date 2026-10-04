@@ -36,14 +36,12 @@ pub(crate) async fn authorize_new_delivery(
         ));
     }
     drop(rows);
-    let sql = if postgres {
-        "SELECT 1 FROM ingress_send_attempts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND (state <> 0 OR expires_at_ms > (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint)"
-    } else {
-        "SELECT 1 FROM ingress_send_attempts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND (state <> 0 OR expires_at_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))"
-    };
+    let key_placeholder = if postgres { "?::uuid" } else { "?" };
+    let blocks = crate::ingress_uow::send_attempt_blocks_delivery(tx.driver());
+    let sql = format!("SELECT 1 FROM ingress_send_attempts WHERE message_key = {key_placeholder} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND {blocks}");
     let mut rows = tx
         .query(
-            sql,
+            &sql,
             crate::db_params![
                 key.message_key.to_storage().to_string(),
                 i64::from(key.kind.to_storage()),
