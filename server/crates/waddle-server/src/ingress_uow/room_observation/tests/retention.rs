@@ -1636,7 +1636,9 @@ async fn seed_planner_history(fixture: &IngressFixture) {
         .expect("receipt");
         tx.execute(
             "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted, captured_at_ms) VALUES (?, 'room@conference.example.org', 'author@example.org', ?, ?, NULL, 0, '{}', ?, ?)",
-            crate::db_params![&source_key, format!("stanza-{index}"), format!("stanza-{index}"), i64::from(expired), settled_at],
+            // Every source is aged: live identity outlives the horizon by
+            // design, so only the 1% retracted ones may be GC candidates.
+            crate::db_params![&source_key, format!("stanza-{index}"), format!("stanza-{index}"), i64::from(expired), 0_i64],
         )
         .await
         .expect("source");
@@ -1713,8 +1715,17 @@ async fn plan_lines(
     } else {
         3
     };
-    let conn = fixture.db.guard().await.expect("guard");
-    let mut rows = conn
+    let mut tx = fixture.db.begin().await.expect("plan transaction");
+    if fixture.db.driver() == DatabaseDriver::Postgres {
+        // At fixture scale a hash join over a sequential scan can cost less
+        // than the index lookups it replaces at production scale. Disabling
+        // sequential scans makes the check size-independent: a `Seq Scan`
+        // that survives means no index can serve that access at all.
+        tx.execute("SET LOCAL enable_seqscan = off", ())
+            .await
+            .expect("prefer indexes");
+    }
+    let mut rows = tx
         .query(&format!("{explain} {sql}"), params)
         .await
         .unwrap_or_else(|error| panic!("{explain} {sql}: {error}"));
@@ -1722,6 +1733,8 @@ async fn plan_lines(
     while let Some(row) = rows.next().await.expect("plan row") {
         lines.push(row.get::<String>(column).expect("plan text"));
     }
+    drop(rows);
+    tx.rollback().await.expect("discard plan transaction");
     lines
 }
 
@@ -1741,9 +1754,11 @@ async fn retention_guards_are_index_lookups(fixture: IngressFixture) {
                     "p",
                     "v",
                     "m",
+                    "s",
                     "extension_room_observation_work",
                     "extension_room_publications",
                     "extension_room_source_revisions",
+                    "extension_room_sources",
                 ]
                 .iter()
                 .map(|alias| format!("SCAN {alias}"))
@@ -1757,6 +1772,8 @@ async fn retention_guards_are_index_lookups(fixture: IngressFixture) {
                     "extension_room_observation_work w",
                     "extension_room_publications p",
                     "extension_room_source_revisions v",
+                    // Aliased or not: aged live sources must never be walked.
+                    "extension_room_sources",
                 ]
                 .iter()
                 .map(|table| format!("Seq Scan on {table}"))
@@ -1764,6 +1781,16 @@ async fn retention_guards_are_index_lookups(fixture: IngressFixture) {
             ),
         };
         let plan = plan_lines(&fixture, explain, &sql, params).await;
+        if matches!(name, "revisions" | "source candidates") {
+            // Live sources age past the horizon and are kept forever; only
+            // the retracted-only partial index keeps them out of the walk.
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains("extension_room_sources_retracted_captured")),
+                "{name} does not use the retracted-source index:\n{}",
+                plan.join("\n")
+            );
+        }
         if name == "receipts" {
             // The active-work guard has its own partial index (V1023); the
             // generic status indexes would read every active row per receipt.

@@ -227,7 +227,7 @@ async fn revert_v1023(fixture: &IngressFixture) {
         "extension_room_publications_settled",
         "extension_room_publications_source",
         "extension_room_observation_receipts_recorded",
-        "extension_room_sources_captured",
+        "extension_room_sources_retracted_captured",
         "extension_room_source_revisions_source",
         "extension_room_observation_work_active_guard",
     ] {
