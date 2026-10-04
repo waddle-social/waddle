@@ -194,8 +194,9 @@ impl SendAttemptRepository {
         Ok(delay.map(|delay| Duration::from_millis(u64::try_from(delay).unwrap_or(0))))
     }
 
-    /// An expired start or an expired never-started reservation. Both leave the
-    /// resource without a sink owner and qualify for offline handoff.
+    /// An expired start or an expired never-started reservation. Both have
+    /// expired send authority: eligible for offline handoff subject to the
+    /// custody and active-sibling checks, not proof that nothing was sent.
     pub(crate) async fn has_expired_attempt(
         tx: &mut IngressUowTransaction<'_>,
         obligation: &SendObligation,
