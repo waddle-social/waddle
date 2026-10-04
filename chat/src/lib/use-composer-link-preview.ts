@@ -1,4 +1,4 @@
-import { computed, ref, watch, type Ref } from "vue";
+import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   composerLinkPreviewUrl,
   linkPreviewStateFromLookup,
@@ -13,16 +13,30 @@ import {
 // and fail open without a preview rather than block on a slow origin.
 export const SEND_LOOKUP_GRACE_MS = 2_250;
 
+// Quiet period after the draft's link changes before the server lookup runs,
+// so editing a link character by character issues one lookup, not one per key.
+export const LOOKUP_DEBOUNCE_MS = 400;
+
 export function useComposerLinkPreview(
   draft: Ref<string>,
   lookup: Ref<ComposerLinkPreviewLookup | null | undefined>,
   scopeKey: Ref<string | null | undefined>,
+  debounceMs = LOOKUP_DEBOUNCE_MS,
 ) {
   const state = ref<ComposerLinkPreviewState>({ kind: "idle" });
   let lookupEpoch = 0;
   let activeKey: string | null = null;
   let activeLookup: ComposerLinkPreviewLookup | null = null;
   let activeLookupSettled: Promise<ComposerLinkPreviewState> | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingStart: (() => void) | null = null;
+
+  function cancelPendingLookup() {
+    if (debounceTimer !== undefined) clearTimeout(debounceTimer);
+    debounceTimer = undefined;
+    pendingStart = null;
+  }
+  onScopeDispose(cancelPendingLookup);
 
   const showCard = computed(() => state.value.kind !== "idle");
   const host = computed(() => {
@@ -54,6 +68,7 @@ export function useComposerLinkPreview(
   function dismiss() {
     if (!("url" in state.value)) return;
     lookupEpoch++;
+    cancelPendingLookup();
     activeKey = stateKey(scopeKey.value, state.value.url);
     activeLookup = null;
     activeLookupSettled = null;
@@ -66,6 +81,8 @@ export function useComposerLinkPreview(
     if (!key) return undefined;
 
     if (key !== activeKey) return undefined;
+    // Sending ends the typing pause: start a still-debounced lookup now.
+    pendingStart?.();
 
     const pending = state.value.kind === "loading" ? activeLookupSettled : null;
     if (pending) {
@@ -83,6 +100,7 @@ export function useComposerLinkPreview(
       const key = stateKey(scope, url);
       if (!url || !lookupFn || !key) {
         lookupEpoch++;
+        cancelPendingLookup();
         activeKey = null;
         activeLookup = null;
         activeLookupSettled = null;
@@ -98,37 +116,48 @@ export function useComposerLinkPreview(
       }
 
       const epoch = ++lookupEpoch;
+      cancelPendingLookup();
       activeKey = key;
       activeLookup = lookupFn;
       state.value = { kind: "loading", url };
-      let rawLookup: ReturnType<ComposerLinkPreviewLookup>;
-      try {
-        rawLookup = lookupFn(body);
-      } catch {
-        rawLookup = Promise.reject();
+      if (debounceMs <= 0) {
+        startLookup(epoch, url, body, lookupFn);
+        return;
       }
-      const lookupSettled = rawLookup.then((result) => {
-        const nextState = linkPreviewStateFromLookup(url, result);
-        if (epoch === lookupEpoch) {
-          state.value = nextState;
-        }
-        return nextState;
-      }).catch(() => {
-        const nextState: ComposerLinkPreviewState = { kind: "failed", url };
-        if (epoch === lookupEpoch) {
-          state.value = nextState;
-        }
-        return nextState;
-      });
-      activeLookupSettled = lookupSettled;
-      void lookupSettled.finally(() => {
-        if (epoch === lookupEpoch && activeLookupSettled === lookupSettled) {
-          activeLookupSettled = null;
-        }
-      });
+      pendingStart = () => startLookup(epoch, url, body, lookupFn);
+      debounceTimer = setTimeout(() => pendingStart?.(), debounceMs);
     },
     { immediate: true },
   );
+
+  function startLookup(epoch: number, url: string, body: string, lookupFn: ComposerLinkPreviewLookup) {
+    cancelPendingLookup();
+    let rawLookup: ReturnType<ComposerLinkPreviewLookup>;
+    try {
+      rawLookup = lookupFn(body);
+    } catch {
+      rawLookup = Promise.reject();
+    }
+    const lookupSettled = rawLookup.then((result) => {
+      const nextState = linkPreviewStateFromLookup(url, result);
+      if (epoch === lookupEpoch) {
+        state.value = nextState;
+      }
+      return nextState;
+    }).catch(() => {
+      const nextState: ComposerLinkPreviewState = { kind: "failed", url };
+      if (epoch === lookupEpoch) {
+        state.value = nextState;
+      }
+      return nextState;
+    });
+    activeLookupSettled = lookupSettled;
+    void lookupSettled.finally(() => {
+      if (epoch === lookupEpoch && activeLookupSettled === lookupSettled) {
+        activeLookupSettled = null;
+      }
+    });
+  }
 
   return {
     state,

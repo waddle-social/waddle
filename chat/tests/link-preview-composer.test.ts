@@ -7,7 +7,7 @@ import {
   sendPayloadFromState,
 } from "../src/lib/link-preview-composer";
 import { prepareComposerSendEvent } from "../src/lib/composer-send-preparation";
-import { SEND_LOOKUP_GRACE_MS, useComposerLinkPreview } from "../src/lib/use-composer-link-preview";
+import { LOOKUP_DEBOUNCE_MS, SEND_LOOKUP_GRACE_MS, useComposerLinkPreview } from "../src/lib/use-composer-link-preview";
 import type { LinkPreviewLookupResult } from "../src/lib/xmpp/link-preview";
 
 describe("composer link preview state", () => {
@@ -327,6 +327,57 @@ describe("composer link preview state", () => {
     }
   });
 
+  test("debounces lookups while the link is being edited", async () => {
+    const timers = installFakeTimeouts();
+    const lookups: string[] = [];
+    const h = setupComposerPreviewHarness(async (body) => {
+      lookups.push(body);
+      return readyLookup("token-final", "https://example.com/abc");
+    }, LOOKUP_DEBOUNCE_MS);
+
+    try {
+      for (const body of ["read https://example.com/ab", "read https://example.com/abc"]) {
+        h.draft.value = body;
+        await nextTick();
+      }
+
+      expect(lookups).toEqual([]);
+      expect(h.preview.state.value).toEqual({ kind: "loading", url: "https://example.com/abc" });
+      expect(timers.delays).toEqual([LOOKUP_DEBOUNCE_MS, LOOKUP_DEBOUNCE_MS, LOOKUP_DEBOUNCE_MS]);
+
+      timers.runNext();
+      await flushComposerPreview();
+
+      expect(lookups).toEqual(["read https://example.com/abc"]);
+      expect(h.preview.sendPayload.value?.token).toBe("token-final");
+    } finally {
+      timers.restore();
+      h.stop();
+    }
+  });
+
+  test("sendPayloadFor starts a still-debounced lookup immediately", async () => {
+    const timers = installFakeTimeouts();
+    const lookups: string[] = [];
+    const h = setupComposerPreviewHarness(async (body) => {
+      lookups.push(body);
+      return readyLookup("token-a");
+    }, LOOKUP_DEBOUNCE_MS);
+
+    try {
+      await nextTick();
+      expect(lookups).toEqual([]);
+
+      const payload = await h.preview.sendPayloadFor("read https://example.com/a");
+
+      expect(lookups).toEqual(["read https://example.com/a"]);
+      expect(payload?.token).toBe("token-a");
+    } finally {
+      timers.restore();
+      h.stop();
+    }
+  });
+
   test("prepareComposerSendEvent forwards the awaited preview payload with the send body", async () => {
     let resolvePreview: (payload: LinkPreviewLookupResult) => void = () => {};
     const bodies: string[] = [];
@@ -413,6 +464,7 @@ describe("composer link preview state", () => {
 
 function setupComposerPreviewHarness(
   lookupImpl: (body: string, scope: string) => Promise<LinkPreviewLookupResult | null>,
+  debounceMs = 0,
 ) {
   const draft = ref("read https://example.com/a");
   const scope = ref("room-a@muc.example.com");
@@ -420,7 +472,7 @@ function setupComposerPreviewHarness(
   const scopeHandle = effectScope();
   let preview!: ReturnType<typeof useComposerLinkPreview>;
   scopeHandle.run(() => {
-    preview = useComposerLinkPreview(draft, lookup, scope);
+    preview = useComposerLinkPreview(draft, lookup, scope, debounceMs);
   });
   return {
     draft,
