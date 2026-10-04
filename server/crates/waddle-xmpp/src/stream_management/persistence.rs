@@ -72,6 +72,11 @@ pub enum SmPersistenceError {
     #[error("SM persistence error: {0}")]
     Other(String),
 
+    /// A live queue attempt already owns this new delivery. No snapshot or
+    /// custody proof was written; callers must not interpret this as acceptance.
+    #[error("live ingress delivery prevents a new detached allocation")]
+    IngressDeliveryBlocked,
+
     /// A row for an exact typed stream id exists but cannot be decoded into
     /// the typed persistence model. Recovery may quarantine that stream's
     /// durable session and unacked queue; ordinary backend errors must never
@@ -502,6 +507,21 @@ pub trait SmPersistenceStorage: Send + Sync {
         unacked: Vec<PersistedUnackedStanza>,
         append: PersistedIngressAppend,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError>;
+
+    /// Allocate a new detached delivery only if no live attempt owns it.
+    /// Database backends serialize this check with live claims on the canonical
+    /// ingress row and retain that lock through snapshot/custody commit. Already
+    /// accepted frames and detach drains use the ordinary append method instead.
+    /// In-memory adapters have no live-attempt repository and delegate by default.
+    async fn store_session_atomic_with_ingress_delivery(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        self.store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
 
     /// Atomically persist a detached snapshot, its principal, its complete unacked queue,
     /// and the ledger proof for every drained entry that discharges an ingress obligation

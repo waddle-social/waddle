@@ -20,6 +20,10 @@ use super::maintenance::{
 
 use super::recovery_environment::RecoveryBinding;
 
+#[cfg(test)]
+#[path = "gc_send_attempt_tests.rs"]
+mod send_attempt_tests;
+
 const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
 /// Last-resort envelope around one GC run, sized from the longest path the
 /// per-operation bounds allow after the final cooperative check: one scan

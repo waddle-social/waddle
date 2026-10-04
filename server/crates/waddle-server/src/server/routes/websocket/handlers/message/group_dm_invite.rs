@@ -286,15 +286,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
         _ => return Some(vec![]),
     }
 
-    let mut invite = incoming.clone();
-    invite.from = Some(jid::Jid::from(room_jid.clone()));
-    invite.to = Some(jid::Jid::from(invitee.clone()));
-    invite.payloads = vec![build_server_mediated_invite_payload(
-        &bound_jid.to_bare(),
-        &invitee,
-        &inbound_invite,
-        access,
-    )];
+    let invite = recorded_invite_message(incoming, &grant, &inbound_invite);
     let delivery_sink = crate::server::routes::interpret::effects::ScopedInviteSink {
         inner: deps.effects,
         invite: ledger.clone(),
@@ -525,23 +517,7 @@ pub(crate) fn restore_recorded_group_dm_invite(
                 _ => None,
             })
             .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
-        let access = match grant.history_visibility {
-            GroupDmHistoryVisibility::Full => {
-                waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
-            }
-            GroupDmHistoryVisibility::FromJoin { .. } => {
-                waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin
-            }
-        };
-        let mut message = incoming;
-        message.from = Some(grant.room.clone().into());
-        message.to = Some(grant.invitee.clone().into());
-        message.payloads = vec![build_server_mediated_invite_payload(
-            &grant.inviter,
-            &grant.invitee,
-            &inbound_invite,
-            access,
-        )];
+        let message = recorded_invite_message(&incoming, grant, &inbound_invite);
         let route = MucUserRoute {
             route_identity: Some(route_identity.clone()),
             recipient: grant.invitee.clone(),
@@ -1625,6 +1601,31 @@ async fn delete_group_dm_archive_boundary(
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+pub(crate) fn recorded_invite_message(
+    incoming: &xmpp_parsers::message::Message,
+    grant: &GroupDmMembershipGrant,
+    inbound_invite: &minidom::Element,
+) -> xmpp_parsers::message::Message {
+    let access = match grant.history_visibility {
+        GroupDmHistoryVisibility::Full => {
+            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
+        }
+        GroupDmHistoryVisibility::FromJoin { .. } => {
+            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin
+        }
+    };
+    let mut message = incoming.clone();
+    message.from = Some(grant.room.clone().into());
+    message.to = Some(grant.invitee.clone().into());
+    message.payloads = vec![build_server_mediated_invite_payload(
+        &grant.inviter,
+        &grant.invitee,
+        inbound_invite,
+        access,
+    )];
+    message
 }
 
 fn build_server_mediated_invite_payload(

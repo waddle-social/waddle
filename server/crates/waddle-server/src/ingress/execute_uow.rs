@@ -28,6 +28,14 @@ pub(crate) use recovery::fail_after_recovery_update;
 #[path = "execute_relay_copy.rs"]
 mod relay_copy;
 
+#[path = "execute_invite.rs"]
+mod invite;
+#[cfg(test)]
+pub(crate) use invite::PAUSE_BEFORE_INVITATION_SETTLEMENT;
+
+#[path = "execute_ambiguous_offline.rs"]
+mod ambiguous_offline;
+
 #[path = "execute_detached.rs"]
 mod detached;
 pub(in crate::ingress) use detached::record_delivery_progress;
@@ -62,7 +70,8 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
     }
 }
 
-/// Specialized invitation routes always remain generic.
+/// Specialized invitations retain their generic receipt mapping, but their
+/// mutually exclusive live and pending sinks share the canonical transaction.
 /// The caller wraps this entire future in its existing timeout_at(deadline).
 pub(super) async fn execute_with_uow(
     uow: &IngressUnitOfWork,
@@ -74,6 +83,9 @@ pub(super) async fn execute_with_uow(
     _deadline: tokio::time::Instant,
 ) -> Option<EffectOutcome> {
     match effect {
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
+            Some(Box::pin(invite::execute(uow, decision, index, route, deps)).await)
+        }
         ExternalEffect::Delivery(
             delivery @ ExternalDeliveryEffect::QueueOfflineDelivery { .. },
         ) => Some(offline::execute(uow, decision, index, delivery, deps).await),

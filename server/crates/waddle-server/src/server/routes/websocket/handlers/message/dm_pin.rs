@@ -687,7 +687,6 @@ pub(crate) fn restore_recorded_dm_pin_effects(
     recorded: &[IngressEffectIntent],
     envelope: &crate::ingress_substrate::MessageEnvelope,
 ) -> Result<bool, crate::ingress_uow::IngressUowError> {
-    use waddle_xmpp::ingress::DmPinMutationAction;
     let mutations: Vec<_> = recorded
         .iter()
         .filter_map(|intent| {
@@ -736,17 +735,6 @@ pub(crate) fn restore_recorded_dm_pin_effects(
             plan.intents.push(intent.clone());
         }
     }
-    let message = envelope.message();
-    let sender = message
-        .from
-        .as_ref()
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?
-        .to_bare();
-    let peer = message
-        .to
-        .as_ref()
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?
-        .to_bare();
     plan.plan.retain(|effect| {
         !matches!(
             &effect.effect,
@@ -757,35 +745,12 @@ pub(crate) fn restore_recorded_dm_pin_effects(
             .any(|dependency| matches!(dependency, PlanEffectDependency::AfterDmPinMutation { .. }))
     });
     for mutation in mutations {
-        if mutation.pair
-            != crate::server::routes::websocket::DmPairKey::new(sender.clone(), peer.clone())
-        {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
-        }
+        recorded_pin_participants(envelope, &mutation)?;
         let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::DmPinMutation(
             mutation.clone(),
         )));
         preserve_retraction_cascade(&mut effect, &mutation);
         plan.plan.push(effect);
-        let (action, by, preview) = match &mutation.action {
-            DmPinMutationAction::Pin { entry } => {
-                (DmPinAction::Pinned, &entry.pinner_jid, Some(&entry.preview))
-            }
-            DmPinMutationAction::Unpin | DmPinMutationAction::RetractionCascadeUnpin => {
-                (DmPinAction::Unpinned, &sender, None)
-            }
-        };
-        let mut event = build_dm_pin_event_message(
-            &sender,
-            &peer,
-            action,
-            &mutation.target_stanza_id,
-            by,
-            preview,
-        );
-        if matches!(mutation.action, DmPinMutationAction::RetractionCascadeUnpin) {
-            mark_retraction_cascade(&mut event);
-        }
         for intent in recorded {
             let IngressEffectIntent::RouteDirect {
                 fanout,
@@ -798,8 +763,7 @@ pub(crate) fn restore_recorded_dm_pin_effects(
             let EffectMessageIdentity::StanzaId(stanza_id) = route_identity else {
                 continue;
             };
-            let mut routed_event = event.clone();
-            waddle_xmpp_core::xep0359::add_stanza_id(&mut routed_event, stanza_id);
+            let routed_event = recorded_pin_message(envelope, &mutation, stanza_id)?;
             for resource in fanout {
                 let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
                     ExternalDeliveryEffect::RouteToPeer {
@@ -820,6 +784,63 @@ pub(crate) fn restore_recorded_dm_pin_effects(
         }
     }
     Ok(true)
+}
+
+/// Reconstruct the exact committed participant notification. Both participants
+/// receive the peer-addressed message, including the sender's own resources.
+/// Live authorization and recovery must use the same frozen payload semantics.
+pub(crate) fn recorded_pin_message(
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+    mutation: &DmPinMutation,
+    stanza_id: &StanzaId,
+) -> Result<xmpp_parsers::message::Message, crate::ingress_uow::IngressUowError> {
+    use waddle_xmpp::ingress::DmPinMutationAction;
+    let (sender, peer) = recorded_pin_participants(envelope, mutation)?;
+    let (action, by, preview) = match &mutation.action {
+        DmPinMutationAction::Pin { entry } => {
+            (DmPinAction::Pinned, &entry.pinner_jid, Some(&entry.preview))
+        }
+        DmPinMutationAction::Unpin | DmPinMutationAction::RetractionCascadeUnpin => {
+            (DmPinAction::Unpinned, &sender, None)
+        }
+    };
+    let mut event = build_dm_pin_event_message(
+        &sender,
+        &peer,
+        action,
+        &mutation.target_stanza_id,
+        by,
+        preview,
+    );
+    if matches!(mutation.action, DmPinMutationAction::RetractionCascadeUnpin) {
+        mark_retraction_cascade(&mut event);
+    }
+    waddle_xmpp_core::xep0359::add_stanza_id(&mut event, stanza_id);
+    Ok(event)
+}
+
+fn recorded_pin_participants(
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+    mutation: &DmPinMutation,
+) -> Result<(jid::BareJid, jid::BareJid), crate::ingress_uow::IngressUowError> {
+    use crate::ingress_uow::IngressUowError;
+    let message = envelope.message();
+    let sender = message
+        .from
+        .as_ref()
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?
+        .to_bare();
+    let peer = message
+        .to
+        .as_ref()
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?
+        .to_bare();
+    if mutation.pair
+        != crate::server::routes::websocket::DmPairKey::new(sender.clone(), peer.clone())
+    {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    Ok((sender, peer))
 }
 
 fn mark_retraction_cascade(event: &mut xmpp_parsers::message::Message) {

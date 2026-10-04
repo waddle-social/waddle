@@ -33,7 +33,7 @@ impl OrderedRelayDeliveryBridge {
                     obligation,
                 )
                 .await;
-                if super::ingress_append::requires_ordering_authority(obligation)
+                if super::ingress_append::requires_ingress_authority(obligation)
                     && ingress_append_context.is_none()
                 {
                     return Err(OrderedRelayNackReason::TargetUnavailable);

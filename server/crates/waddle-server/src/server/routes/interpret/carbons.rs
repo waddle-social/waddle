@@ -2,6 +2,8 @@ use super::*;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(crate) struct CarbonRegistryDeps<'a> {
+    /// Preserve the execution-owned authority for keyed owner fanout.
+    pub ingress_delivery: Option<&'a Deps<'a>>,
     pub ingress_effect_capture: Option<&'a crate::ingress::IngressEffectCapture>,
     pub sm_session_registry: Option<&'a Arc<InMemorySmSessionRegistry>>,
     pub web_socket_state: Option<&'a WebSocketState>,
@@ -80,6 +82,7 @@ pub(super) async fn send_carbons(
     send_carbons_to_registry(
         registry,
         CarbonRegistryDeps {
+            ingress_delivery: Some(deps),
             ingress_effect_capture: deps.ingress_effect_capture.as_ref(),
             sm_session_registry: deps.sm_session_registry,
             web_socket_state: deps.web_socket_state,
@@ -145,6 +148,19 @@ pub(super) async fn relay_carbons_only(
             .ordered_relay_delivery_bridge
             .as_ref()
         {
+            let ingress_append = match deps.ingress_append_context.as_ref() {
+                Some(context) => {
+                    let Some(sender) = message.from.as_ref().map(jid::Jid::to_bare) else {
+                        return Some(super::effects::EffectOutcome::Unavailable);
+                    };
+                    Some(
+                        crate::ingress::identity::IngressAppendObligationRef::from_context(
+                            context, sender,
+                        ),
+                    )
+                }
+                None => None,
+            };
             for source_jid in exclude {
                 if let Some(outcome) = bridge
                     .try_fanout_remote_user_carbons(
@@ -153,6 +169,7 @@ pub(super) async fn relay_carbons_only(
                         message,
                         kind,
                         exclude.to_vec(),
+                        ingress_append.as_ref(),
                     )
                     .await
                 {
@@ -281,6 +298,62 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
         },
         None => Vec::new(),
     };
+    if let Some(delivery) = deps
+        .ingress_delivery
+        .filter(|delivery| delivery.ingress_append_context.is_some())
+    {
+        // One durable obligation per resource, regardless of the resource's
+        // current transport. The shared gateway preserves live proof, remote
+        // authority, and keyed detached custody across a lost fanout reply.
+        let database = delivery
+            .ingress_delivery_uow
+            .as_ref()
+            .map(|uow| uow.database())
+            .or_else(|| {
+                delivery
+                    .web_socket_state
+                    .map(|state| state.deps.app_state.db_pool.global())
+            });
+        if let (Some(database), Some(context)) =
+            (database, delivery.ingress_append_context.as_ref())
+        {
+            match crate::ingress_uow::CarbonReceiptRepository::attempted_resources(
+                database,
+                context.message_key,
+                &context.receipt,
+            )
+            .await
+            {
+                Ok(previous) => live_targets.extend(previous),
+                Err(_) => {
+                    failure.get_or_insert(CarbonFanoutFailure::Delivery);
+                }
+            }
+        } else {
+            failure.get_or_insert(CarbonFanoutFailure::Delivery);
+        }
+        live_targets.extend(detached_targets);
+        live_targets.sort();
+        live_targets.dedup();
+        let mut carbon_recipients = Vec::new();
+        for target in live_targets {
+            match send_carbon_to_resource(delivery, &owner, &target, &message, kind).await {
+                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                    carbon_recipients.push(target);
+                }
+                FullJidDeliveryOutcome::Unavailable
+                | FullJidDeliveryOutcome::Dropped
+                | FullJidDeliveryOutcome::MaybeCommitted => {
+                    failure.get_or_insert(CarbonFanoutFailure::Delivery);
+                }
+            }
+        }
+        let completed = CarbonRegistryFanoutOutcome { carbon_recipients };
+        return match failure {
+            Some(reason) => Err(CarbonFanoutIncomplete { reason, completed }),
+            None => Ok(completed),
+        };
+    }
     if live_targets.is_empty() && detached_targets.is_empty() && failure.is_none() {
         debug!(
             owner = %owner,

@@ -207,6 +207,10 @@ pub struct Deps<'a> {
     pub(crate) delivery_execution_context: DeliveryExecutionContext,
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
+    /// Canonical authority of the current post-commit execution.
+    pub(crate) ingress_delivery_uow: Option<crate::ingress_uow::IngressUnitOfWork>,
+    /// Forced shutdown fence retained from the execution admission.
+    pub(crate) ingress_delivery_stop: Option<tokio_util::sync::CancellationToken>,
     /// Resources whose planned frames are consumed by an extension host.
     pub host_sender: Option<HostOwnedResources>,
     /// Identity scoped to the current direct-routing invocation.
@@ -360,6 +364,8 @@ impl<'a> Deps<'a> {
             direct_route_identity: None,
             host_sender: None,
             ingress_append_context: None,
+            ingress_delivery_uow: None,
+            ingress_delivery_stop: None,
         }
     }
 
@@ -403,6 +409,8 @@ impl<'a> Deps<'a> {
             direct_route_identity: None,
             host_sender: None,
             ingress_append_context: None,
+            ingress_delivery_uow: None,
+            ingress_delivery_stop: None,
         }
     }
 
@@ -438,6 +446,8 @@ impl<'a> Deps<'a> {
             direct_route_identity: None,
             host_sender: None,
             ingress_append_context: None,
+            ingress_delivery_uow: None,
+            ingress_delivery_stop: None,
         }
     }
 
@@ -471,6 +481,8 @@ impl<'a> Deps<'a> {
             direct_route_identity: None,
             host_sender: None,
             ingress_append_context: None,
+            ingress_delivery_uow: None,
+            ingress_delivery_stop: None,
         }
     }
 }

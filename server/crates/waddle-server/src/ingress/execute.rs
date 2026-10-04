@@ -374,6 +374,12 @@ pub async fn execute_effects(
     budget: Duration,
 ) -> ExecutionReport {
     let mut scoped_deps = deps.clone();
+    scoped_deps.ingress_delivery_uow = Some(uow.clone());
+    if scoped_deps.ingress_delivery_stop.is_none() {
+        scoped_deps.ingress_delivery_stop = scoped_deps
+            .web_socket_state
+            .map(|state| state.deps.protocol.ingress.delivery_stop_token());
+    }
     let probe_budget = scoped_deps
         .dispatch_probe_budget
         .get_or_insert_with(Default::default)
@@ -536,7 +542,14 @@ pub async fn execute_effects(
                             });
                         }
                     };
-                    if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, effect, deps, deadline).await {
+                    // Membership outcomes resolve compensation on the planned
+                    // invitation. Preserve that decision when its delivery is
+                    // executed transactionally rather than by the generic sink.
+                    let resolved_effect = match &planned[index].effect {
+                        Effect::External(resolved @ (ExternalEffect::RouteToPeer(_) | ExternalEffect::QueueOfflineDelivery(_))) => resolved,
+                        _ => effect,
+                    };
+                    if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, resolved_effect, deps, deadline).await {
                         result
                     } else {
                         let mut execution = planned[index].clone();
@@ -549,9 +562,8 @@ pub async fn execute_effects(
                                 }
                             }
                         }
-                        // A remote plan may become local before execution. Carry
-                        // only its exact recorded direct receipt into that fallback;
-                        // unrelated effects (including MUC) get no append context.
+                        // Carry the recorded receipt into every live sink, including
+                        // a remote plan that becomes local before execution.
                         let mut effect_deps = deps.clone();
                         effect_deps.ingress_append_context = None;
                         if let Some(message_key) = decision.message_key {
@@ -566,11 +578,10 @@ pub async fn execute_effects(
                                 }
                             }
                         }
-                        if let ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) = effect {
+                        if let ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. } | ExternalDeliveryEffect::RouteToPeer { jid: target, .. }) = effect {
                             if let Some(message_key) = decision.message_key {
                                 if let Some(progress) = decision.route_progress.iter().find(|progress| {
-                                    progress.is_direct() && progress.matches(effect)
-                                        && progress.fanout.contains(target)
+                                    progress.matches(effect) && progress.fanout.contains(target)
                                         && decision.external_receipts[index].contains(&progress.receipt)
                                 }) {
                                     let archive_positions = match super::archive_dispatch::positions(uow, message_key, &progress.receipt).await {

@@ -31,6 +31,8 @@ pub(super) struct RecoveryAttempt {
 pub(super) enum Suppression {
     Unsupported,
     StalledUntil(Instant),
+    /// Every unfinished frozen copy is reserved until this bounded deadline.
+    WaitingUntil(Instant),
 }
 
 /// FIFO bounds memory; evidence changes always invalidate a suppression.
@@ -48,7 +50,7 @@ impl UnsupportedRows {
     ) -> Option<Suppression> {
         let (stored, suppression) = *self.evidence.get(&key)?;
         if stored != evidence
-            || matches!(suppression, Suppression::StalledUntil(until) if until <= Instant::now())
+            || matches!(suppression, Suppression::StalledUntil(until) | Suppression::WaitingUntil(until) if until <= Instant::now())
         {
             self.remove(key);
             return None;
@@ -196,6 +198,14 @@ impl StalledRows {
         budget: MaintenanceBudget,
         suppressed: &mut UnsupportedRows,
     ) {
+        // Accounting can finish after a newer attempt discovered a bounded
+        // lease wait. Do not replace that deadline with the longer stall cooldown.
+        if matches!(
+            suppressed.evidence.get(&attempt.key),
+            Some((_, Suppression::WaitingUntil(until))) if *until > Instant::now()
+        ) {
+            return;
+        }
         suppressed.insert(
             attempt.key,
             fresh,

@@ -340,7 +340,7 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
 fn incomplete_carbons_reply_has_new_remote_message_id() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayRemoteUserSideEffect>>::REMOTE_ID,
-        "waddle.clustering.relay.remote_user_side_effect.v3"
+        "waddle.clustering.relay.remote_user_side_effect.v4"
     );
     let status = RelayRemoteUserSideEffectStatus::Incomplete {
         reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure::DetachedAppend,
@@ -618,3 +618,39 @@ fn spawn_test_relay_actor() -> kameo::actor::ActorRef<RelayActor> {
 mod dispatch;
 mod dispatch_span;
 mod error_classification;
+
+#[test]
+fn keyed_carbon_side_effect_retains_original_obligation_on_wire() {
+    use crate::ingress::identity::IngressAppendObligationRef;
+    use crate::server::routes::interpret::SmIngressAppendContext;
+    use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+    let sender: jid::BareJid = "alice@example.org".parse().expect("sender");
+    let context = SmIngressAppendContext {
+        message_key: MessageKey::new(),
+        receipt: crate::ingress::EffectReceiptKey {
+            kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+                IngressEffectKind::RelayCarbons.storage_tag(),
+            ),
+            semantic_identity_hash: [7; 32],
+        },
+        received_at: Some(chrono::Utc::now()),
+        archive_positions: Vec::new(),
+        dispatch_stream: None,
+    };
+    let obligation = IngressAppendObligationRef::from_context(&context, sender.clone());
+    let mut message = xmpp_parsers::message::Message::new(Some(sender.clone().into()));
+    message.from = Some(sender.clone().into());
+    let effect = RemoteUserSideEffect::Carbons {
+        ingress_append: Some(Box::new(obligation.clone())),
+        owner: sender.clone(),
+        message: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Message(message)),
+        kind: crate::clustering::route_bridge::RemoteCarbonKind::Sent,
+        exclude: vec![sender.with_resource_str("source").expect("source")],
+    };
+    let encoded = serde_json::to_vec(&effect).expect("encode");
+    let decoded: RemoteUserSideEffect = serde_json::from_slice(&encoded).expect("decode");
+    let RemoteUserSideEffect::Carbons { ingress_append, .. } = decoded else {
+        panic!("carbon side effect");
+    };
+    assert_eq!(ingress_append.as_deref(), Some(&obligation));
+}

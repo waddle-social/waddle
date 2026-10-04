@@ -114,8 +114,9 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
     detached_progress_support::attach(&sm, &target).await;
     for attempt in 0..2 {
         let result = sm
-            .record_keyed_stanza_for_detached_bound_resource(
-                &target,
+            .record_keyed_outbound_for_detached_stream_at(
+                &target.to_string(),
+                1,
                 &queued.stanza,
                 obligation.received_at.expect("canonical receive time"),
                 obligation.key.clone(),

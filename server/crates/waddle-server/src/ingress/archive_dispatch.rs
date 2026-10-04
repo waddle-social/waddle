@@ -56,16 +56,26 @@ impl super::IngressAuthority {
         stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
         budget: Option<&DispatchProbeBudget>,
     ) -> Result<DispatchReadiness, IngressUowError> {
-        resource_ready_with_rechecks(
-            &self.uow,
-            context.message_key,
-            &context.receipt,
-            Some(resource),
-            stream,
-            budget,
-        )
-        .await
+        socket_delivery_readiness(&self.uow, context, resource, stream, budget).await
     }
+}
+
+pub(crate) async fn socket_delivery_readiness(
+    uow: &IngressUnitOfWork,
+    context: &crate::server::routes::interpret::SmIngressAppendContext,
+    resource: &FullJid,
+    stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
+    budget: Option<&DispatchProbeBudget>,
+) -> Result<DispatchReadiness, IngressUowError> {
+    resource_ready_with_rechecks(
+        uow,
+        context.message_key,
+        &context.receipt,
+        Some(resource),
+        stream,
+        budget,
+    )
+    .await
 }
 
 pub(super) async fn record(

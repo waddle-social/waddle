@@ -24,6 +24,17 @@ async fn room_authority(fixture: IngressFixture, archived: bool) {
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
     message.from = Some(room.with_resource_str("sender").expect("nick").into());
     message.to = Some(target.clone().into());
+    message.thread = Some(xmpp_parsers::message::Thread {
+        id: "child-thread".into(),
+        parent: None,
+    });
+    waddle_xmpp_core::parser_utils::reattach_thread_parent(
+        &mut message,
+        "parent-thread".into(),
+        waddle_xmpp_core::xep0201::CLIENT_STANZA_NS,
+    );
+    // Room metadata is appended after the parent's raw thread payload. The
+    // canonical storage parser reattaches that thread after these extensions.
     waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
     waddle_xmpp::xep::xep0421::set_occupant_id_on_message(
         &mut message,
@@ -76,6 +87,37 @@ async fn room_authority(fixture: IngressFixture, archived: bool) {
         check_canonical_obligation(&fixture.db, &stanza, &obligation)
             .await
             .expect("frozen occupant and original-reflection payloads remain authorized");
+        let mut changed_parent = copy.clone();
+        let thread = changed_parent
+            .payloads
+            .iter_mut()
+            .find(|payload| {
+                waddle_xmpp_core::xep0201::is_thread_element_for_stanza(
+                    payload,
+                    waddle_xmpp_core::xep0201::CLIENT_STANZA_NS,
+                )
+            })
+            .expect("parent-bearing thread");
+        thread.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("parent").to_owned(),
+            "forged-parent",
+        );
+        assert!(
+            check_canonical_obligation(&fixture.db, &Stanza::Message(changed_parent), &obligation)
+                .await
+                .is_err(),
+            "thread parent remains bound to the canonical payload"
+        );
+        let mut reordered = copy.clone();
+        let last = reordered.payloads.len() - 1;
+        reordered.payloads.swap(last - 1, last);
+        assert!(
+            check_canonical_obligation(&fixture.db, &Stanza::Message(reordered), &obligation)
+                .await
+                .is_err(),
+            "nonthread extension order remains frozen"
+        );
         let mut sibling = copy.clone();
         sibling.to = Some(
             recipient

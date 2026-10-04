@@ -4,7 +4,7 @@ use waddle_extensions::{
     ConfiguredRoomObserver, DisplayText, ObservationFailure, ObservationSkip, RoomMessageSource,
     RoomObservationOutcome, RoomObservationScope, RoomObservationSubscription,
 };
-use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::{ingress::MessageKey, ownership::NodeIdentity};
 
 use crate::db::Row;
 use crate::ingress_uow::IngressUowTransaction;
@@ -27,7 +27,7 @@ pub(super) fn eligible_for_claim(
 ) -> bool {
     match status {
         "pending" => due_at_ms <= now_ms,
-        "leased" => lease_until_ms.is_some_and(|until| until <= now_ms),
+        "leased" | "started" => lease_until_ms.is_some_and(|until| until <= now_ms),
         _ => false,
     }
 }
@@ -36,6 +36,7 @@ fn decode_work(
     row: &Row,
     subscription: &RoomObservationSubscription,
     lease: Uuid,
+    owner: NodeIdentity,
 ) -> Result<ObservationWork, ObservationError> {
     let id: String = row.get(0)?;
     let message_key: String = row.get(1)?;
@@ -45,6 +46,7 @@ fn decode_work(
     Ok(ObservationWork {
         id: Uuid::parse_str(&id).map_err(|_| ObservationError::Codec)?,
         lease,
+        owner,
         message_key: MessageKey::from_storage(
             Uuid::parse_str(&message_key).map_err(|_| ObservationError::Codec)?,
         ),
@@ -63,13 +65,14 @@ pub(super) async fn claim(
     if !active_subscription(tx, subscription).await? {
         return Ok(None);
     }
+    let owner = current_owner(tx).await?;
     let generation = i64::try_from(subscription.generation.get())
         .map_err(|_| ObservationError::GenerationOutOfRange)?;
     // Query candidates without a row lock, then lock the source before the
     // work row. The per-room actor applies the configured concurrency cap;
     // distinct source jobs may have independent active leases.
     let mut rows = tx.transaction_mut().query(
-        "SELECT id, source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?)) ORDER BY due_at_ms, id LIMIT 32",
+        "SELECT id, source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) ORDER BY due_at_ms, id LIMIT 32",
         crate::db_params![subscription.plugin.as_str(), generation, subscription.identity.as_str(), subscription.room.to_string(), now_ms, now_ms],
     ).await?;
     let mut candidates = Vec::new();
@@ -117,7 +120,7 @@ pub(super) async fn claim(
         });
         if !current {
             tx.transaction_mut().execute(
-                "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'source_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased')",
+                "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'source_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased', 'started')",
                 crate::db_params![&id],
             ).await?;
             let message_key = MessageKey::from_storage(
@@ -131,7 +134,7 @@ pub(super) async fn claim(
             .is_none_or(|attempt| attempt >= MAX_ATTEMPTS)
         {
             tx.transaction_mut().execute(
-                "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased')",
+                "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased', 'started')",
                 crate::db_params![&id],
             ).await?;
             let mut rows = tx
@@ -154,8 +157,8 @@ pub(super) async fn claim(
         }
         let lease = Uuid::now_v7();
         let changed = tx.transaction_mut().execute(
-            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, attempt = attempt + 1 WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?))",
-            crate::db_params![lease.to_string(), now_ms.saturating_add(LEASE_MS), &id, now_ms, now_ms],
+            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, lease_node_id = ?, lease_node_incarnation = ?, attempt = attempt + 1 WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?))",
+            crate::db_params![lease.to_string(), now_ms.saturating_add(LEASE_MS), owner.node_id.clone(), owner.node_epoch.clone(), &id, now_ms, now_ms],
         ).await?;
         if changed == 1 {
             let mut rows = tx.transaction_mut().query(
@@ -163,7 +166,7 @@ pub(super) async fn claim(
                 crate::db_params![&id],
             ).await?;
             let row = rows.next().await?.ok_or(ObservationError::Database)?;
-            return decode_work(&row, subscription, lease).map(Some);
+            return decode_work(&row, subscription, lease, owner).map(Some);
         }
     }
     Ok(None)
@@ -191,14 +194,17 @@ fn skip_category(skip: ObservationSkip) -> &'static str {
     }
 }
 
-pub(super) async fn finish(
+async fn current_work(
     tx: &mut IngressUowTransaction<'_>,
     work: &ObservationWork,
-    outcome: &RoomObservationOutcome,
-    now_ms: i64,
-) -> Result<bool, ObservationError> {
+    expected_status: &str,
+    start_at_ms: Option<i64>,
+) -> Result<Option<CurrentWork>, ObservationError> {
+    if current_owner(tx).await? != work.owner {
+        return Ok(None);
+    }
     if !active_subscription(tx, &work.subscription).await? {
-        return Ok(false);
+        return Ok(None);
     }
     let mut rows = tx
         .transaction_mut()
@@ -208,7 +214,7 @@ pub(super) async fn finish(
         )
         .await?;
     let Some(row) = rows.next().await? else {
-        return Ok(false);
+        return Ok(None);
     };
     let source_key: String = row.get(0)?;
     drop(rows);
@@ -216,13 +222,13 @@ pub(super) async fn finish(
         Uuid::parse_str(&source_key).map_err(|_| ObservationError::Codec)?,
     );
     let Some(source) = load_source(tx, key).await? else {
-        return Ok(false);
+        return Ok(None);
     };
     if source.retracted || source.source != work.source {
-        return Ok(false);
+        return Ok(None);
     }
     let sql = locked(
-        "SELECT lease_id, status, source_json, attempt, message_key, generation, identity, room_jid FROM extension_room_observation_work WHERE id = ?",
+        "SELECT lease_id, status, source_json, attempt, message_key, generation, identity, room_jid, plugin_id, lease_until_ms, lease_node_id, lease_node_incarnation FROM extension_room_observation_work WHERE id = ?",
         tx.transaction_mut().driver(),
     );
     let mut rows = tx
@@ -230,7 +236,7 @@ pub(super) async fn finish(
         .query(&sql, crate::db_params![work.id.to_string()])
         .await?;
     let Some(row) = rows.next().await? else {
-        return Ok(false);
+        return Ok(None);
     };
     let lease_id: Option<String> = row.get(0)?;
     let status: String = row.get(1)?;
@@ -240,17 +246,101 @@ pub(super) async fn finish(
     let generation: i64 = row.get(5)?;
     let identity: String = row.get(6)?;
     let room: String = row.get(7)?;
+    let plugin: String = row.get(8)?;
+    let expires: Option<i64> = row.get(9)?;
+    let node: Option<String> = row.get(10)?;
+    let incarnation: Option<String> = row.get(11)?;
     drop(rows);
     if lease_id.as_deref() != Some(work.lease.to_string().as_str())
-        || status != "leased"
+        || status != expected_status
+        || start_at_ms.is_some_and(|now| expires.is_none_or(|until| until <= now))
+        || plugin != work.subscription.plugin.as_str()
+        || node.as_deref() != Some(work.owner.node_id.as_str())
+        || incarnation.as_deref() != Some(work.owner.node_epoch.as_str())
         || serde_json::from_str::<RoomMessageSource>(&source_json)? != work.source
         || message_key != work.message_key.to_storage().to_string()
         || u64::try_from(generation).ok() != Some(work.subscription.generation.get())
         || identity != work.subscription.identity.as_str()
         || room != work.subscription.room.to_string()
     {
+        return Ok(None);
+    }
+    Ok(Some(CurrentWork {
+        source_key,
+        source_json,
+        attempt,
+        generation,
+    }))
+}
+
+struct CurrentWork {
+    source_key: String,
+    source_json: String,
+    attempt: i64,
+    generation: i64,
+}
+
+/// Retain node authority through commit, matching the UOW's other fenced
+/// repositories. In single-node mode the random lease token fences processes.
+async fn current_owner(
+    tx: &mut IngressUowTransaction<'_>,
+) -> Result<NodeIdentity, ObservationError> {
+    #[cfg(feature = "clustering")]
+    if let Some(identity) = tx.bound_node_identity().cloned() {
+        // Reuse this transaction's guard: acquiring another read guard behind
+        // a queued rotation writer would deadlock against our first guard.
+        if let Some(authority) = tx
+            .authority_guards
+            .iter()
+            .find(|guard| identity.owns_guard(guard))
+        {
+            return Ok(authority.identity().clone());
+        }
+        let owner = identity.current();
+        let authority = identity
+            .guard_if_current(&owner)
+            .await
+            .ok_or(ObservationError::AuthorityStopped)?;
+        tx.retain_authority(authority);
+        return Ok(owner);
+    }
+    // The transaction is only used above in clustering builds.
+    let _ = tx;
+    Ok(NodeIdentity::local())
+}
+
+pub(super) async fn start(
+    tx: &mut IngressUowTransaction<'_>,
+    work: &ObservationWork,
+    now_ms: i64,
+) -> Result<bool, ObservationError> {
+    if current_work(tx, work, "leased", Some(now_ms))
+        .await?
+        .is_none()
+    {
         return Ok(false);
     }
+    Ok(tx.transaction_mut().execute(
+        "UPDATE extension_room_observation_work SET status = 'started' WHERE id = ? AND lease_id = ? AND status = 'leased' AND lease_until_ms > ?",
+        crate::db_params![work.id.to_string(), work.lease.to_string(), now_ms],
+    ).await? == 1)
+}
+
+pub(super) async fn finish(
+    tx: &mut IngressUowTransaction<'_>,
+    work: &ObservationWork,
+    outcome: &RoomObservationOutcome,
+    now_ms: i64,
+) -> Result<bool, ObservationError> {
+    let Some(CurrentWork {
+        source_key,
+        source_json,
+        attempt,
+        generation,
+    }) = current_work(tx, work, "started", None).await?
+    else {
+        return Ok(false);
+    };
     let (status, category, due_at_ms, usage) = match outcome {
         RoomObservationOutcome::Completed(result) => {
             for (index, payload) in result.payloads.iter().enumerate() {
@@ -270,23 +360,25 @@ pub(super) async fn finish(
                     .transpose()?,
             )
         }
-        RoomObservationOutcome::RetryableFailure(failure)
+        RoomObservationOutcome::NotInvoked
             if u32::try_from(attempt)
                 .ok()
                 .is_some_and(|n| n < MAX_ATTEMPTS) =>
         {
             (
                 "pending",
-                failure_category(*failure),
+                "not_invoked",
                 now_ms.saturating_add(retry_delay_ms(
                     u32::try_from(attempt).map_err(|_| ObservationError::Codec)?,
                 )),
                 None,
             )
         }
-        RoomObservationOutcome::RetryableFailure(_) => {
-            ("terminal", "retry_exhausted", now_ms, None)
-        }
+        RoomObservationOutcome::NotInvoked => ("terminal", "retry_exhausted", now_ms, None),
+        // An error after runtime entry is not evidence that the callback had
+        // no effects. Retain its token until lease expiry; recovery then uses
+        // a new token, accepting a possible repeated guest effect.
+        RoomObservationOutcome::UnresolvedFailure(_) => return Ok(false),
         RoomObservationOutcome::PermanentFailure(failure) => {
             ("terminal", failure_category(*failure), now_ms, None)
         }
@@ -295,7 +387,7 @@ pub(super) async fn finish(
         }
     };
     tx.transaction_mut().execute(
-        "UPDATE extension_room_observation_work SET status = ?, terminal_category = ?, due_at_ms = ?, body = CASE WHEN ? = 'pending' THEN body ELSE '' END, lease_id = NULL, lease_until_ms = NULL, usage_json = ? WHERE id = ? AND lease_id = ? AND status = 'leased'",
+        "UPDATE extension_room_observation_work SET status = ?, terminal_category = ?, due_at_ms = ?, body = CASE WHEN ? = 'pending' THEN body ELSE '' END, lease_id = NULL, lease_until_ms = NULL, usage_json = ? WHERE id = ? AND lease_id = ? AND status = 'started'",
         crate::db_params![status, category, due_at_ms, status, usage, work.id.to_string(), work.lease.to_string()],
     ).await?;
     if status != "pending" {
@@ -372,7 +464,7 @@ async fn room_due(
     let generation = i64::try_from(observer.generation.get())
         .map_err(|_| ObservationError::GenerationOutOfRange)?;
     let mut rows = tx.transaction_mut().query(
-        "SELECT 1 FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?)) LIMIT 1",
+        "SELECT 1 FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) LIMIT 1",
         crate::db_params![observer.plugin.as_str(), generation, observer.identity.as_str(), room.to_string(), now_ms, now_ms],
     ).await?;
     if rows.next().await?.is_some() {
@@ -397,7 +489,7 @@ async fn all_rooms_page(
         .map_err(|_| ObservationError::GenerationOutOfRange)?;
     let cursor = after.map(ToString::to_string).unwrap_or_default();
     let mut rows = tx.transaction_mut().query(
-        "SELECT room_jid FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?)) UNION SELECT room_jid FROM extension_room_publications WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND status = 'pending' ORDER BY room_jid LIMIT ?",
+        "SELECT room_jid FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) UNION SELECT room_jid FROM extension_room_publications WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid > ? AND status = 'pending' ORDER BY room_jid LIMIT ?",
         crate::db_params![observer.plugin.as_str(), generation, observer.identity.as_str(), &cursor, now_ms, now_ms, observer.plugin.as_str(), generation, observer.identity.as_str(), &cursor, i64::from(limit)],
     ).await?;
     let mut rooms = Vec::new();

@@ -1167,7 +1167,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
-        self.store_snapshot(session, unacked, None)
+        self.store_snapshot(session, unacked, None, false)
             .await
             .map(|_| ())
     }
@@ -1178,7 +1178,18 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
         append: PersistedIngressAppend,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
-        self.store_snapshot(session, unacked, Some(append)).await
+        self.store_snapshot(session, unacked, Some(append), false)
+            .await
+    }
+
+    async fn store_session_atomic_with_ingress_delivery(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        self.store_snapshot(session, unacked, Some(append), true)
+            .await
     }
 
     async fn get_ingress_append(

@@ -26,6 +26,9 @@ use waddle_xmpp::{
     Stanza,
 };
 
+#[path = "maintenance_waits_tests.rs"]
+mod lease_waits;
+
 fn immediate_budget() -> MaintenanceBudget {
     MaintenanceBudget {
         grace: chrono::Duration::zero(),
@@ -118,8 +121,12 @@ async fn terminal_count(fixture: &IngressFixture) -> i64 {
 
 async fn backdate_created(fixture: &IngressFixture, key: MessageKey, seconds: i64) {
     let sql = match fixture.db.driver() {
-        DatabaseDriver::Postgres => "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE message_key = ?::uuid",
-        DatabaseDriver::Sqlite => "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE message_key = ?",
+        DatabaseDriver::Postgres => {
+            "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE message_key = ?::uuid"
+        }
+        DatabaseDriver::Sqlite => {
+            "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE message_key = ?"
+        }
     };
     fixture
         .execute(
@@ -328,8 +335,12 @@ async fn backlog_and_retention(fixture: IngressFixture) {
 
 async fn epoch_one_repair(fixture: IngressFixture) {
     let sql = match fixture.db.driver() {
-        DatabaseDriver::Postgres => "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = ?::timestamptz, lineage_uuid = ?::uuid WHERE id = 1",
-        DatabaseDriver::Sqlite => "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = ?, lineage_uuid = ? WHERE id = 1",
+        DatabaseDriver::Postgres => {
+            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = ?::timestamptz, lineage_uuid = ?::uuid WHERE id = 1"
+        }
+        DatabaseDriver::Sqlite => {
+            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = ?, lineage_uuid = ? WHERE id = 1"
+        }
     };
     fixture
         .execute(

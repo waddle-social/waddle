@@ -283,6 +283,36 @@ pub(crate) async fn create_test_websocket_state_with_db_pool_and_ingress(
     .await
 }
 
+/// Exercise ingress invitation settlement against the same database as its pending queue.
+pub(crate) async fn create_test_websocket_state_with_durable_ingress(
+    fixture: &crate::ingress::test_support::IngressFixture,
+) -> Arc<WebSocketState> {
+    let db_pool = Arc::new(
+        DatabasePool::new(
+            DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            PoolConfig,
+        )
+        .await
+        .expect("shared ingress pool"),
+    );
+    let pending = crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+        fixture.db.clone(),
+        waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+    )
+    .await
+    .expect("canonical pending storage");
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            ingress: Some(Arc::new(fixture.authority().await)),
+            pending_delivery_storage: Some(Arc::new(pending)),
+            ..TestStateOverrides::default()
+        },
+    )
+    .await
+}
+
 pub(crate) async fn create_test_websocket_state_with_sm_registry(
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
 ) -> Arc<WebSocketState> {

@@ -72,6 +72,8 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
     due_at_ms BIGINT NOT NULL,
     lease_id TEXT,
     lease_until_ms BIGINT,
+    lease_node_id TEXT,
+    lease_node_incarnation TEXT,
     terminal_category TEXT,
     usage_json TEXT,
     UNIQUE (plugin_id, generation, room_jid, source_key, revision)

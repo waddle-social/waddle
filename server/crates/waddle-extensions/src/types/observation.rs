@@ -118,7 +118,10 @@ pub enum ObservationSkip {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RoomObservationOutcome {
     Completed(RoomObservationResult),
-    RetryableFailure(ObservationFailure),
+    /// Admission rejected before entering the guest; retry is safe.
+    NotInvoked,
+    /// The guest may have produced effects; wait for lease expiry before a fenced retry.
+    UnresolvedFailure(ObservationFailure),
     PermanentFailure(ObservationFailure),
     NotApplicable(ObservationSkip),
 }

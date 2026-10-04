@@ -69,8 +69,15 @@ pub(super) async fn execute(
     };
     let mut immediate = deps.clone();
     immediate.effects = &ImmediateSink;
+    immediate.ingress_delivery_uow = Some(uow.clone());
+    if immediate.ingress_delivery_stop.is_none() {
+        immediate.ingress_delivery_stop = immediate
+            .web_socket_state
+            .map(|state| state.deps.protocol.ingress.delivery_stop_token());
+    }
     let mut destinations = Vec::with_capacity(resources.len());
     let mut persisted = Vec::new();
+    let mut handed_off = Vec::new();
     let mut completion = SettledCompletion::Incomplete;
     for resource in resources.iter().filter(|resource| {
         progress.fanout.contains(resource) && !progress.completed.contains(resource)
@@ -150,8 +157,31 @@ pub(super) async fn execute(
             archive_positions,
             dispatch_stream,
         });
+        let expired_ambiguity = match expired_start(uow, key, progress, resource).await {
+            Ok(expired) => expired,
+            Err(_) => {
+                completion = SettledCompletion::Uncertain;
+                continue;
+            }
+        };
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;
+        if expired_ambiguity && outcome == FullJidDeliveryOutcome::Unavailable {
+            match super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await {
+                Ok(Some(settled)) => {
+                    handed_off.push(resource.clone());
+                    if !settled.is_empty() {
+                        persisted = settled;
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "ambiguous delivery offline handoff failed");
+                    completion = SettledCompletion::Uncertain;
+                }
+            }
+        }
         destinations.push((resource.clone(), outcome));
         if certainty == DeliveryCertainty::Uncertain {
             completion = SettledCompletion::Uncertain;
@@ -185,7 +215,7 @@ pub(super) async fn execute(
     // Each effect completes its own resources; another effect may still own
     // the remaining fanout. Only `persisted` proves the aggregate receipt.
     if completion != SettledCompletion::Uncertain
-        && !destinations.is_empty()
+        && (!destinations.is_empty() || !handed_off.is_empty())
         && destinations.iter().all(|(_, outcome)| accepted(*outcome))
     {
         completion = SettledCompletion::Complete;
@@ -198,6 +228,31 @@ pub(super) async fn execute(
         completion,
         detached: Some(destinations),
     })
+}
+
+async fn expired_start(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    progress: &RouteProgress,
+    resource: &FullJid,
+) -> Result<bool, IngressUowError> {
+    let mut tx = uow
+        .begin_with_timeouts(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(250),
+        )
+        .await?;
+    let expired = crate::ingress_uow::SendAttemptRepository::has_expired_started(
+        &mut tx,
+        &crate::ingress_uow::SendObligation {
+            message: key,
+            receipt: progress.receipt.clone(),
+            recipient: resource.clone(),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(expired)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -216,6 +271,47 @@ async fn append_resource(
     effect: &ExternalDeliveryEffect,
     resource: &FullJid,
 ) -> ResourceDelivery {
+    if let Some(context) = deps.ingress_append_context.as_ref() {
+        let status = match (&deps.ingress_delivery_uow, deps.web_socket_state) {
+            (Some(uow), _) => {
+                crate::ingress::live_delivery::live_delivery_status(
+                    uow,
+                    deps.ingress_delivery_stop.as_ref(),
+                    context,
+                    resource,
+                )
+                .await
+            }
+            (None, Some(state)) => {
+                state
+                    .deps
+                    .protocol
+                    .ingress
+                    .live_delivery_status(context, resource)
+                    .await
+            }
+            (None, None) => Err(IngressUowError::EffectIntentConflict),
+        };
+        match status {
+            Ok(Some(outcome)) => {
+                return ResourceDelivery {
+                    outcome,
+                    certainty: if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+                        DeliveryCertainty::Uncertain
+                    } else {
+                        DeliveryCertainty::Proven
+                    },
+                }
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return ResourceDelivery {
+                    outcome: FullJidDeliveryOutcome::MaybeCommitted,
+                    certainty: DeliveryCertainty::Uncertain,
+                }
+            }
+        }
+    }
     if let Some(outcome) = crate::server::routes::interpret::existing_ingress_delivery(
         deps.sm_session_registry,
         deps.ingress_append_context.as_ref(),
@@ -259,15 +355,7 @@ async fn append_resource(
         }
         ExternalDeliveryEffect::RouteToPeer { stanza, kind, .. } => match kind {
             PeerDeliveryKind::RegistryFrame => {
-                if deps
-                    .connection_registry
-                    .try_send_to(resource, *stanza.clone())
-                    == waddle_xmpp::registry::BroadcastOutcome::Delivered
-                {
-                    FullJidDeliveryOutcome::Delivered
-                } else {
-                    FullJidDeliveryOutcome::Unavailable
-                }
+                deliver_direct_to_full_locally(deps, resource, stanza).await
             }
             PeerDeliveryKind::PeerStanza => {
                 deliver_peer_to_full_with_registered_remote(deps, resource, stanza).await

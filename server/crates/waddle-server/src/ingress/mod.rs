@@ -3,7 +3,7 @@ use crate::server::routes::interpret::DeliveryExecutionContext;
 pub(crate) mod append_authority;
 mod archive_authority;
 mod archive_dispatch;
-pub(crate) use archive_dispatch::DispatchProbeBudget;
+pub(crate) use archive_dispatch::{socket_delivery_readiness, DispatchProbeBudget};
 mod capture;
 mod pending_dispatch;
 mod reflection_dispatch;
@@ -21,6 +21,8 @@ mod execute_uow;
 mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;
+mod invitation_authority;
+pub(crate) mod live_delivery;
 pub mod nested;
 pub mod principal;
 pub use principal::{ExtensionPrincipal, IngressPrincipal};
@@ -561,12 +563,14 @@ impl IngressAuthority {
         if self.cancellation.is_cancelled() || !*admission {
             return ExecutionReport::new(deps.delivery_execution_context.into());
         }
+        let mut execution_deps = deps.clone();
+        execution_deps.ingress_delivery_stop = Some(self.force_stop.clone());
         execute::execute_effects(
             &self.uow,
             &self.database,
             decision,
             sink,
-            deps,
+            &execution_deps,
             Duration::from_secs(5),
         )
         .await

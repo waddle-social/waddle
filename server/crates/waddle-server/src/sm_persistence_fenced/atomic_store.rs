@@ -8,6 +8,7 @@ impl PostgresFencedSmPersistence {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
         append: Option<PersistedIngressAppend>,
+        new_delivery: bool,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
         let stream_id = session.stream_id.clone();
         let fence = self.claim_fence_for(&stream_id).await?;
@@ -22,6 +23,14 @@ impl PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+
+        if new_delivery {
+            let append = append.as_ref().ok_or_else(|| {
+                SmPersistenceError::Other("new delivery requires an ingress append".into())
+            })?;
+            crate::sm_persistence::ingress_append::authorize_new_delivery(&mut tx, &append.key)
+                .await?;
+        }
 
         // Drop any pre-existing unacked rows first (see the portable
         // impl's identical comment on this statement's ordering

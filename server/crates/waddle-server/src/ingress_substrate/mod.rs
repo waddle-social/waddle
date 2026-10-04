@@ -62,7 +62,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 10] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 11] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -73,6 +73,7 @@ pub const EPOCH_GUARDED_TABLES: [&str; 10] = [
     "ingress_carbon_receipts",
     "ingress_delivery_receipts",
     "ingress_archive_dispatch",
+    "ingress_send_attempts",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
