@@ -15,7 +15,8 @@
 //! (two real processes, real swarm) is `clustering_cluster_e2e.rs`'s own
 //! scenario.
 //!
-//! Postgres-gated on `WADDLE_TEST_POSTGRES_URL` (skips cleanly otherwise).
+//! Postgres cases require `WADDLE_TEST_POSTGRES_URL` (skip cleanly otherwise).
+//! The deterministic local admission race also runs without Postgres.
 
 #![cfg(feature = "clustering")]
 
@@ -32,17 +33,18 @@ use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
 use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, NodeIdentity,
-    ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
+    ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore,
+    NodeIdentity, ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
 };
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 use waddle_xmpp::stream_management::{
-    CrossNodeResumeOutcome, DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry,
-    RemoteResumeAskOutcome, RemoteResumeAsker, SmClaimCompletion, SmResumed, SmSessionRegistry,
+    CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedSession, DetachedUnackedStanza,
+    InMemorySmSessionRegistry, RemoteResumeAskOutcome, RemoteResumeAsker, SmClaimCompletion,
+    SmResumed, SmSessionRegistry,
 };
 
-/// Serializes every test in this file: they share the mutable control-plane
+/// Serializes the Postgres tests: they share the mutable control-plane
 /// tables (`clustering_claims`/`clustering_nodes`) plus `sm_sessions`/
 /// `sm_unacked` in one Postgres and each starts by DELETE-resetting them.
 fn serial_lock() -> &'static tokio::sync::Mutex<()> {
@@ -1058,6 +1060,74 @@ async fn owner_lease_expired_past_the_handshake_window_fails_with_not_found() {
         "owner's lease has expired: must report NotFound (item-not-found), not \
          OwnerUnreachable (resource-constraint)"
     );
+}
+
+/// A retransmit that overlaps the first resume's exact-capacity reservation
+/// loses cleanly without preventing the original prepared resume from winning.
+#[tokio::test]
+async fn resume_retransmit_during_admission_preserves_the_original_resume() {
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+
+    for foreign_claim in [true, false] {
+        let (bare, full) = alice_jid();
+        let entity = Entity::new(EntityType::SmSession, "stream-admission-race".to_string());
+        let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let persistence = Arc::new(InMemorySmPersistence::new());
+        let registry_a = InMemorySmSessionRegistry::new()
+            .with_persistence(persistence.clone())
+            .with_claim_store(claims.clone(), SharedNodeIdentity::new(node_identity()));
+        registry_a
+            .store_session(detached_session(&entity.id, &full))
+            .await
+            .expect("persist original detached session");
+        if !foreign_claim {
+            let original = claims.current_claim(&entity).await.unwrap().unwrap();
+            claims
+                .release(&entity, &original.owner, original.claim_epoch)
+                .await
+                .unwrap();
+        }
+        let registry_b = InMemorySmSessionRegistry::with_capacity(1)
+            .with_persistence(persistence)
+            .with_claim_store(claims.clone(), SharedNodeIdentity::new(node_identity()));
+        let CrossNodeResumeStage::ReadyToSteal(original_ticket) = registry_b
+            .prepare_cross_node_resume(&entity.id, &bare, HANDSHAKE_BUDGET)
+            .await
+            .expect("prepare original resume")
+        else {
+            panic!("original resume must prepare a ticket");
+        };
+        let reservation = registry_b
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("model first resume paused before its ownership CAS");
+        let before = claims.current_claim(&entity).await.unwrap();
+
+        let outcome = registry_b
+            .attempt_cross_node_resume(&entity.id, &bare, HANDSHAKE_BUDGET)
+            .await
+            .expect("overlapping retransmit must not return internal-server-error");
+        assert!(matches!(outcome, CrossNodeResumeOutcome::NotFound));
+        assert_eq!(claims.current_claim(&entity).await.unwrap(), before);
+        assert!(registry_b
+            .reserve_reclaimed_claim_capacity(&entity)
+            .is_none());
+
+        registry_b.cancel_reclaimed_claim_capacity(&entity, reservation);
+        let outcome = registry_b
+            .finish_cross_node_steal(original_ticket)
+            .await
+            .expect("original resume can still win");
+        let CrossNodeResumeOutcome::Claimed(session) = outcome else {
+            panic!("original resume must win: {outcome:?}");
+        };
+        assert_eq!(session.jid, full);
+        assert_eq!(session.unacked_stanzas.len(), 2);
+        assert!(registry_b
+            .claim_session(&entity.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
 
 /// FIX 8(a) (council-adjudicated): the cross-node resume-RETRANSMIT race —
