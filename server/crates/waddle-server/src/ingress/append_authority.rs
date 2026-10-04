@@ -83,7 +83,10 @@ pub(crate) enum AppendAuthority {
     Verified,
     /// A relayed claim that passed the synchronous checks only (sender claim and
     /// stanza binding). The canonical read runs on the first
-    /// [`AppendAuthority::ensure_verified`], once per context clone-tree.
+    /// [`AppendAuthority::ensure_verified`], once per context clone-tree that
+    /// completes it: a caller cancelled inside the read leaves the cell
+    /// uninitialized, so a later caller reads again. The failure counter cannot
+    /// double-count, because recording and caching a result share no await.
     #[cfg(feature = "clustering")]
     Deferred(std::sync::Arc<DeferredAppendAuthority>),
 }
@@ -101,6 +104,9 @@ impl std::fmt::Debug for AppendAuthority {
     }
 }
 
+/// The relayed claim and the database it is verified against. The cached
+/// result is shared by every clone of the context; see
+/// [`AppendAuthority::Deferred`] for why a cancelled read can repeat.
 #[cfg(feature = "clustering")]
 pub(crate) struct DeferredAppendAuthority {
     db: crate::db::Database,
@@ -124,7 +130,8 @@ impl DeferredAppendAuthority {
 
 impl AppendAuthority {
     /// Resolve the canonical authority before the first action that trusts it.
-    /// A deferred claim is read once; its failure is recorded once and cached.
+    /// A deferred claim's completed read is cached, and its failure recorded
+    /// once (see [`AppendAuthority::Deferred`] for cancellation).
     pub(crate) async fn ensure_verified(
         &self,
         stanza: &Stanza,

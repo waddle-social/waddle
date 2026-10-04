@@ -13,6 +13,8 @@ use waddle_xmpp::{
 };
 use waddle_xmpp_core::xep0359::OriginId;
 
+use super::append_authority::AppendAuthority;
+
 #[derive(Clone, Debug)]
 pub enum IngressStreamIdentity {
     RoomResult {
@@ -94,14 +96,16 @@ impl IngressAppendObligationRef {
         Some(Self::from_context(context, sender)).filter(Self::kind_is_append_eligible)
     }
 
-    pub fn into_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {
+    /// A context whose authority this node has already established: minted by
+    /// its own ingress commit or verified against the canonical row.
+    pub fn into_verified_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {
         crate::server::routes::interpret::SmIngressAppendContext {
             message_key: self.message_key,
             receipt: self.receipt,
             received_at: self.received_at,
             archive_positions: self.archive_positions,
             dispatch_stream: self.dispatch_stream,
-            authority: super::append_authority::AppendAuthority::Verified,
+            authority: AppendAuthority::Verified,
         }
     }
 
@@ -112,12 +116,16 @@ impl IngressAppendObligationRef {
         self,
         db: crate::db::Database,
     ) -> crate::server::routes::interpret::SmIngressAppendContext {
-        let mut context = self.clone().into_context();
-        context.authority =
-            super::append_authority::AppendAuthority::Deferred(std::sync::Arc::new(
+        crate::server::routes::interpret::SmIngressAppendContext {
+            message_key: self.message_key,
+            receipt: self.receipt.clone(),
+            received_at: self.received_at,
+            archive_positions: self.archive_positions.clone(),
+            dispatch_stream: self.dispatch_stream.clone(),
+            authority: AppendAuthority::Deferred(std::sync::Arc::new(
                 super::append_authority::DeferredAppendAuthority::new(db, self),
-            ));
-        context
+            )),
+        }
     }
 
     /// Only recorded direct and MUC groupchat routes allocate keyed SM appends.

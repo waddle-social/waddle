@@ -313,7 +313,7 @@ impl OrderedRelayDeliveryBridge {
                             }
                             if let Some(delivery) = delivery.as_mut() {
                                 delivery.ingress_append_context =
-                                    Some((*obligation).into_context());
+                                    Some((*obligation).into_verified_context());
                             }
                         }
                         let outcome =

@@ -541,9 +541,8 @@ async fn remote_socket_xep0313_rechecks_retain_the_original_connection_owner() {
 /// Issue #1789: the frame to a registered remote socket carries the executor's
 /// ingress obligation, bound to the stanza's sender, so the socket node can key a
 /// later detach drain. Only an append-eligible message obligation crosses the wire.
-/// A relayed claim crosses the owner hop unread: the socket node authorizes it (#1790).
-#[tokio::test]
-async fn registered_remote_frame_carries_the_executors_ingress_obligation() {
+#[test]
+fn registered_remote_frame_carries_the_executors_ingress_obligation() {
     use super::super::delivery::remote_socket::remote_resource_frame;
     use crate::ingress::EffectReceiptKey;
     use crate::ingress_substrate::EffectReceiptKind;
@@ -580,23 +579,6 @@ async fn registered_remote_frame_carries_the_executors_ingress_obligation() {
     assert_eq!(obligation.receipt, direct.receipt);
     assert_eq!(obligation.received_at, direct.received_at);
     assert_eq!(obligation.sender_bare, sender_full().to_bare());
-
-    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
-    let relayed = obligation.clone().into_deferred_context(fixture.db.clone());
-    let frame = remote_resource_frame(
-        &target,
-        registration_id,
-        &message,
-        DeliveryKind::PeerStanza,
-        Some(&relayed),
-    );
-    assert_eq!(frame.ingress_append.as_ref(), Some(&obligation));
-    assert_eq!(
-        crate::ingress::append_authority::canonical_reads::count(),
-        0,
-        "the owner hop never reads canonical state for a registered remote socket"
-    );
-    fixture.close().await;
 
     let unkeyed = |stanza: &Stanza, context: Option<&SmIngressAppendContext>| {
         remote_resource_frame(

@@ -12,9 +12,9 @@ use crate::server::routes::interpret::SmIngressAppendContext;
 /// validation fails instead of falling back to an unkeyed append.
 ///
 /// Only the synchronous checks run here. The canonical-row read is deferred to
-/// the first consumer that trusts the context (#1790): the local socket
-/// boundary and the detached append verify it; a forwarding hop and a
-/// registered remote socket frame never read, because their receiver does.
+/// the first consumer that trusts the context (#1790): the ordered local-copy
+/// boundary, the detached append, and a frame bound for a registered remote
+/// socket verify it; a forwarding hop never reads, because its receiver does.
 pub(super) fn authorize_ingress_append(
     services: &OrderedRelayDeliveryServices,
     validated_sender: &Entity,

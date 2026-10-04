@@ -1,5 +1,6 @@
 //! Retain completed remote carbon targets independently of the final fanout ACK.
 use super::*;
+use crate::ingress::append_authority::AppendAuthority;
 use crate::ingress_uow::CarbonReceiptRepository;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
@@ -62,7 +63,7 @@ pub(super) async fn append_context(
         received_at: Some(received_at),
         archive_positions,
         dispatch_stream: None,
-        authority: crate::ingress::append_authority::AppendAuthority::Verified,
+        authority: AppendAuthority::Verified,
     }))
 }
 

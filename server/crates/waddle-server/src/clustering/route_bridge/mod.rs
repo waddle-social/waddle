@@ -356,3 +356,9 @@ pub(crate) use delivery::RelayFrameCompletion;
 tokio::task_local! {
     pub(crate) static TEST_CANCELLED_ENVELOPES: std::cell::RefCell<Vec<RemoteStanzaEnvelope>>;
 }
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Registered-socket frames offered at the real ask boundary of a stopped bridge.
+    pub(crate) static TEST_CANCELLED_REMOTE_FRAMES: std::cell::RefCell<Vec<RemoteResourceOutboundFrame>>;
+}

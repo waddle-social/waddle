@@ -822,3 +822,332 @@ async fn origin_preparation_signs_direct_and_muc_ingress_append_obligations() {
         ));
     }
 }
+
+/// The owner node of a recipient whose live socket is registered on another node.
+/// The bridge is stopped, so a frame is captured at the real ask boundary and the
+/// socket hop is replayed explicitly (#1790).
+struct RegisteredRemoteOwner {
+    fixture: IngressFixture,
+    /// Services hold only a weak reference; the fixture keeps the node alive.
+    _state: Arc<crate::server::routes::websocket::WebSocketState>,
+    services: Arc<OrderedRelayDeliveryServices>,
+    bridge: Arc<OrderedRelayDeliveryBridge>,
+    keypair: Keypair,
+    source: jid::FullJid,
+    sender_claim: OrderedRelayClaim,
+    source_registration: (RemoteResourceRegistrationId, RemoteResourceSocketGeneration),
+    obligation: IngressAppendObligationRef,
+    message: Message,
+}
+
+impl RegisteredRemoteOwner {
+    async fn new(fixture: IngressFixture) -> Self {
+        let pool = crate::db::DatabasePool::new(
+            crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            crate::db::PoolConfig,
+        )
+        .await
+        .expect("shared database");
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress(
+            Arc::new(pool),
+            Arc::new(fixture.authority().await),
+        )
+        .await;
+        let keypair = Keypair::generate_ed25519();
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            keypair.public().to_peer_id().to_string(),
+        )
+        .await;
+        services.web_socket_state = Arc::downgrade(&state);
+        let recipient = target_full();
+        let mut submission = fixture.submission(None, "registered remote recipient");
+        let source = submission.sender.clone();
+        let source_entity = user_entity(&source.to_bare());
+        let epoch = services
+            .claim_store
+            .acquire(&source_entity, &origin_identity())
+            .await
+            .expect("sender claim");
+        let intent = IngressEffectIntent::RouteDirect {
+            recipient: recipient.to_bare(),
+            fanout: vec![recipient.clone()],
+            route_identity: EffectMessageIdentity::capture_ordinal(0),
+        };
+        let receipt = crate::ingress::receipt_key(&intent).expect("receipt");
+        submission.plan.intents = vec![intent];
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("canonical row naming the sender");
+        let obligation = IngressAppendObligationRef {
+            archive_positions: Vec::new(),
+            dispatch_stream: None,
+            message_key: decision.message_key.expect("canonical key"),
+            sender_bare: source.to_bare(),
+            receipt,
+            received_at: None,
+        };
+        let mut message = submission.plan.sanitized_message.clone();
+        message.to = Some(recipient.clone().into());
+        let (tx, _rx) = mpsc::channel(1);
+        let entry = ConnectionEntry::new(tx);
+        let owner = entry.carbons_handle();
+        services
+            .connection_registry
+            .register_entry(source.clone(), entry.clone());
+        services
+            .user_registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: source.clone(),
+                entry,
+            })
+            .await
+            .expect("source registration");
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        let bridge =
+            OrderedRelayDeliveryBridge::new(stopped, &ClusteringMessagingConfig::default());
+        let services = Arc::new(services);
+        bridge.wire(services.clone());
+        let source_registration = (
+            RemoteResourceRegistrationId::fresh(),
+            RemoteResourceSocketGeneration::next(None),
+        );
+        bridge.remote_owner_resources.lock().await.insert(
+            source.clone(),
+            RemoteOwnerRegistration {
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+                unregister_pending: false,
+                registration_id: source_registration.0,
+                socket_generation: source_registration.1,
+                socket_node: NodeId::new("source-socket-node".to_owned()),
+                owner,
+            },
+        );
+        bridge
+            .test_insert_remote_owner_registration(
+                recipient,
+                NodeId::new("recipient-socket-node".to_owned()),
+            )
+            .await;
+        Self {
+            fixture,
+            _state: state,
+            services,
+            bridge,
+            keypair,
+            source,
+            sender_claim: OrderedRelayClaim {
+                entity: source_entity,
+                epoch,
+            },
+            source_registration,
+            obligation,
+            message,
+        }
+    }
+
+    fn absent_obligation(&self) -> IngressAppendObligationRef {
+        let mut absent = self.obligation.clone();
+        absent.message_key = waddle_xmpp::ingress::MessageKey::new();
+        absent
+    }
+
+    async fn ordered(
+        &self,
+        processed: bool,
+        obligation: IngressAppendObligationRef,
+    ) -> (
+        Result<Vec<RemoteStanza>, OrderedRelayNackReason>,
+        Vec<RemoteResourceOutboundFrame>,
+    ) {
+        let recipient = target_full();
+        let stanza = RemoteStanza(Stanza::Message(self.message.clone()));
+        let mut envelope = envelope_for_services(&self.services).await;
+        envelope.sender_claim = self.sender_claim.clone();
+        envelope.channel.recipient =
+            crate::clustering::ordered_relay::OrderedRelayRecipient::FullJid(recipient.clone());
+        envelope.payload = if processed {
+            OrderedRelayPayload::ProcessedDirectMessage {
+                recipient: recipient.into(),
+                stanza,
+                ingress_append: Some(obligation),
+            }
+        } else {
+            OrderedRelayPayload::Message {
+                recipient: recipient.into(),
+                stanza,
+                ingress_append: Some(obligation),
+            }
+        };
+        let envelope = sign_envelope(envelope, &self.keypair);
+        crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
+            .scope(std::cell::RefCell::new(Vec::new()), async {
+                let result = self.bridge.deliver_reserved(&envelope, &mut None).await;
+                let frames = crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
+                    .with(|frames| frames.take());
+                (result, frames)
+            })
+            .await
+    }
+
+    async fn owner_route(
+        &self,
+        obligation: IngressAppendObligationRef,
+    ) -> (
+        RelayRouteRemoteResourceStanzaReply,
+        Vec<RemoteResourceOutboundFrame>,
+    ) {
+        crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
+            .scope(std::cell::RefCell::new(Vec::new()), async {
+                let reply = self
+                    .bridge
+                    .route_remote_resource_stanza_on_owner(
+                        RelayRouteRemoteResourceStanza {
+                            source_jid: self.source.clone(),
+                            registration_id: self.source_registration.0,
+                            socket_generation: self.source_registration.1,
+                            target: RemoteResourceRouteTarget::FullJid {
+                                target: target_full(),
+                                stanza: RemoteStanza(Stanza::Message(self.message.clone())),
+                                ingress_append: Some(obligation),
+                            },
+                            trace: RelayTraceContext::default(),
+                        },
+                        &mut None,
+                    )
+                    .await;
+                let frames = crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
+                    .with(|frames| frames.take());
+                (reply, frames)
+            })
+            .await
+    }
+
+    /// Replay the captured frame on the socket node's receiver.
+    async fn socket_hop(
+        &self,
+        frame: RemoteResourceOutboundFrame,
+    ) -> RelayRemoteResourceFrameStatus {
+        self.bridge
+            .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
+                frame,
+                trace: RelayTraceContext::default(),
+            })
+            .await
+            .status
+    }
+
+    async fn recipient_still_registered(&self) -> bool {
+        self.bridge
+            .remote_owner_resources
+            .lock()
+            .await
+            .contains_key(&target_full())
+    }
+}
+
+const AUTHORIZATION_FAILED: &str = "waddle.clustering.ingress_append.authorization_failed";
+
+/// Ordered relay to a recipient whose socket is registered on another node. The
+/// owner verifies before durable status (R1-1) and the socket node fences again,
+/// so the hop pays one read on each node; a rejection never leaves the owner.
+async fn ordered_relay_to_registered_remote_socket(fixture: IngressFixture, processed: bool) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let owner = RegisteredRemoteOwner::new(fixture).await;
+
+    let (result, frames) = owner.ordered(processed, owner.obligation.clone()).await;
+    assert!(
+        matches!(result, Err(OrderedRelayNackReason::MaybeCommitted)),
+        "a stopped ask is uncertain, never a rejection: {result:?}"
+    );
+    assert_eq!(canonical_reads::count(), 1, "one read on the owner");
+    let [frame] = <[_; 1]>::try_from(frames).expect("exactly one frame offered");
+    assert_eq!(frame.jid, target_full());
+    assert_eq!(frame.ingress_append.as_ref(), Some(&owner.obligation));
+    assert_ne!(
+        owner.socket_hop(frame).await,
+        RelayRemoteResourceFrameStatus::Backpressure
+    );
+    assert_eq!(canonical_reads::count(), 2, "and one on the socket node");
+
+    let (result, frames) = owner.ordered(processed, owner.absent_obligation()).await;
+    assert!(
+        matches!(result, Err(OrderedRelayNackReason::TargetUnavailable)),
+        "{result:?}"
+    );
+    assert_eq!(canonical_reads::count(), 3, "a rejection is read once");
+    assert!(frames.is_empty(), "a rejected claim never leaves the owner");
+    assert!(owner.recipient_still_registered().await);
+    assert_eq!(metrics.counter_sum(AUTHORIZATION_FAILED, &[]), Some(1));
+    owner.fixture.close().await;
+}
+
+/// Second hop of a remote-socket sender to a registered remote recipient: the
+/// owner resolves the deferred claim before forwarding, so a rejection is a
+/// definitive `Unavailable`, recorded once, and keeps the registration.
+async fn owner_route_to_registered_remote_socket(fixture: IngressFixture) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let owner = RegisteredRemoteOwner::new(fixture).await;
+
+    let (reply, frames) = owner.owner_route(owner.absent_obligation()).await;
+    assert_eq!(reply.outcome, RemoteResourceRouteOutcome::Unavailable);
+    assert!(frames.is_empty(), "a rejected claim never leaves the owner");
+    assert!(owner.recipient_still_registered().await);
+    assert_eq!(canonical_reads::count(), 1);
+    assert_eq!(metrics.counter_sum(AUTHORIZATION_FAILED, &[]), Some(1));
+
+    let (_, frames) = owner.owner_route(owner.obligation.clone()).await;
+    assert_eq!(
+        canonical_reads::count(),
+        2,
+        "one owner read before forwarding"
+    );
+    let [frame] = <[_; 1]>::try_from(frames).expect("exactly one frame offered");
+    assert_eq!(frame.ingress_append.as_ref(), Some(&owner.obligation));
+
+    // The socket node's own fence records its rejection too, and stays retryable.
+    let mut forged = frame;
+    forged.ingress_append = Some(owner.absent_obligation());
+    assert_eq!(
+        owner.socket_hop(forged).await,
+        RelayRemoteResourceFrameStatus::Backpressure
+    );
+    assert_eq!(canonical_reads::count(), 3);
+    assert_eq!(metrics.counter_sum(AUTHORIZATION_FAILED, &[]), Some(2));
+    owner.fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_ordered_message_to_registered_remote_socket_reads_once_per_node() {
+    ordered_relay_to_registered_remote_socket(IngressFixture::sqlite().await, false).await;
+}
+#[tokio::test]
+async fn postgres_ordered_message_to_registered_remote_socket_reads_once_per_node() {
+    if let Some(fixture) = IngressFixture::postgres("registered_remote_message").await {
+        ordered_relay_to_registered_remote_socket(fixture, false).await;
+    }
+}
+#[tokio::test]
+async fn sqlite_ordered_processed_message_to_registered_remote_socket_reads_once_per_node() {
+    ordered_relay_to_registered_remote_socket(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn postgres_ordered_processed_message_to_registered_remote_socket_reads_once_per_node() {
+    if let Some(fixture) = IngressFixture::postgres("registered_remote_processed").await {
+        ordered_relay_to_registered_remote_socket(fixture, true).await;
+    }
+}
+#[tokio::test]
+async fn sqlite_owner_route_rejects_relayed_claim_before_registered_remote_socket() {
+    owner_route_to_registered_remote_socket(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_owner_route_rejects_relayed_claim_before_registered_remote_socket() {
+    if let Some(fixture) = IngressFixture::postgres("registered_remote_owner_route").await {
+        owner_route_to_registered_remote_socket(fixture).await;
+    }
+}

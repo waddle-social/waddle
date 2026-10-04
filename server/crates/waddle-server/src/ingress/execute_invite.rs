@@ -7,6 +7,7 @@ use waddle_xmpp::{
     Stanza,
 };
 
+use crate::ingress::append_authority::AppendAuthority;
 use crate::{
     ingress::{decision::IngressDecision, live_delivery},
     ingress_uow::{
@@ -214,7 +215,7 @@ async fn prepare(
             received_at: Some(route.fallback.original_receipt_at),
             archive_positions,
             dispatch_stream: None,
-            authority: crate::ingress::append_authority::AppendAuthority::Verified,
+            authority: AppendAuthority::Verified,
         },
     };
     if already_resolved(&mut tx, &invitation, route).await? {
