@@ -31,8 +31,9 @@ pub(super) enum HandoffError {
     Pending(#[from] waddle_xmpp::pending_delivery::storage::PendingStorageError),
 }
 
-/// `Some` means this resource's obligation was durably discharged. The returned
-/// intents prove aggregate settlement only when every frozen resource is done.
+/// `Some` proves the recipient-wide route was settled. The aggregate receipt
+/// survives pending-row consumption and prevents a sibling from inserting a
+/// second bare-JID offline copy. It does not assert a successful socket send.
 pub(super) async fn handoff(
     uow: &IngressUnitOfWork,
     deps: &Deps<'_>,
@@ -99,86 +100,93 @@ pub(super) async fn handoff(
         receipt: progress.receipt.clone(),
         recipient: resource.clone(),
     };
-    // Preserve the expired lineage through a failed reclaimed attempt, then
-    // recheck it under the lock before replacing uncertainty with custody.
-    if SendAttemptRepository::status(&mut tx, &obligation).await?
-        != Some(SendAttemptStatus::ExpiredStarted)
-        || SendAttemptRepository::has_custody(&mut tx, &obligation).await?
+    if !matches!(
+        SendAttemptRepository::status(&mut tx, &obligation).await?,
+        Some(SendAttemptStatus::ExpiredStarted | SendAttemptStatus::ExpiredLease)
+    ) || SendAttemptRepository::has_custody(&mut tx, &obligation).await?
     {
         return Ok(None);
     }
-    let mut completed = DeliveryProgressRepository::load(&mut tx, key, &progress.receipt).await?;
-    if !completed.contains(resource) {
-        let routing = classify_dm_intake(envelope.message(), &OnlineResources::empty(), &blocklist);
-        let payload = match routing.pending {
-            PendingDecision::Archived => {
-                let Some(stanza_id) = intents.iter().find_map(|intent| match intent {
-                    IngressEffectIntent::ArchiveAuthoritative {
-                        archive, stanza_id, ..
-                    } if archive == &recipient => Some(stanza_id.clone()),
-                    _ => None,
-                }) else {
-                    return Ok(None);
-                };
-                Some(PendingPayload::Archived(stanza_id))
-            }
-            PendingDecision::Transient => Some(PendingPayload::Transient(Box::new(
-                crate::ingress::recorded::delivery_message(&envelope, &recipient, &intents),
-            ))),
-            // The normal offline classifier forbids storage (including a
-            // newly blocked sender or no-store). Resolve by that policy; do
-            // not retain the message indefinitely or fabricate an enqueue.
-            PendingDecision::None => None,
+    if DeliveryProgressRepository::load(&mut tx, key, &progress.receipt)
+        .await?
+        .contains(resource)
+        || SendAttemptRepository::has_resource_receipt(&mut tx, &obligation).await?
+    {
+        return Ok(None);
+    }
+    // Offline storage is recipient-wide. Do not hand off while any sibling
+    // holds active sink authority, even if this resource's own lease expired.
+    // The canonical lock protects this entire scan and the final settlement.
+    for sibling in &progress.fanout {
+        let sibling_obligation = SendObligation {
+            recipient: sibling.clone(),
+            ..obligation.clone()
         };
-        if let Some(payload) = payload {
-            let row = PendingRow {
-                id: pending_id(key, &progress.receipt, resource),
-                recipient,
-                original_receipt_at: CanonicalMessageRepository::created_at(&mut tx, key).await?,
-                payload,
-                flushed_in_session: None,
-                outbound_sequence: None,
-            };
-            let existing_custody = match &row.payload {
-                PendingPayload::Archived(stanza_id) => {
-                    PendingReceiptRepository::has_archived_custody(
-                        &mut tx,
-                        &row.recipient,
-                        stanza_id,
-                    )
-                    .await?
-                }
-                PendingPayload::Transient(_) => false,
-            };
-            if !existing_custody
-                && PendingReceiptRepository::insert(&mut tx, &row, storage.quota_policy()).await?
-                    == InsertOutcome::QuotaExceeded
-            {
-                // Preserve authority for retry; there is no durable custody.
-                return Ok(None);
-            }
-            // Archived rows remain unoutboxed. The existing pending-delivery
-            // notification janitor applies normal push policy and retries.
+        if matches!(
+            SendAttemptRepository::status(&mut tx, &sibling_obligation).await?,
+            Some(SendAttemptStatus::Leased | SendAttemptStatus::Started)
+        ) {
+            return Ok(None);
         }
-        DeliveryProgressRepository::record(
+    }
+    let routing = classify_dm_intake(envelope.message(), &OnlineResources::empty(), &blocklist);
+    let payload = match routing.pending {
+        PendingDecision::Archived => {
+            let Some(stanza_id) = intents.iter().find_map(|intent| match intent {
+                IngressEffectIntent::ArchiveAuthoritative {
+                    archive, stanza_id, ..
+                } if archive == &recipient => Some(stanza_id.clone()),
+                _ => None,
+            }) else {
+                return Ok(None);
+            };
+            Some(PendingPayload::Archived(stanza_id))
+        }
+        PendingDecision::Transient => Some(PendingPayload::Transient(Box::new(
+            crate::ingress::recorded::delivery_message(&envelope, &recipient, &intents),
+        ))),
+        // The normal offline classifier forbids storage (including a
+        // newly blocked sender or no-store). Resolve by that policy; do
+        // not retain the message indefinitely or fabricate an enqueue.
+        PendingDecision::None => None,
+    };
+    if let Some(payload) = payload {
+        let row = PendingRow {
+            id: pending_id(key, &progress.receipt),
+            recipient,
+            original_receipt_at: CanonicalMessageRepository::created_at(&mut tx, key).await?,
+            payload,
+            flushed_in_session: None,
+            outbound_sequence: None,
+        };
+        let existing_custody = match &row.payload {
+            PendingPayload::Archived(stanza_id) => {
+                PendingReceiptRepository::has_archived_custody(&mut tx, &row.recipient, stanza_id)
+                    .await?
+            }
+            PendingPayload::Transient(_) => false,
+        };
+        if !existing_custody
+            && PendingReceiptRepository::insert(&mut tx, &row, storage.quota_policy()).await?
+                == InsertOutcome::QuotaExceeded
+        {
+            // Preserve authority for retry; there is no durable custody.
+            return Ok(None);
+        }
+        // Archived rows remain unoutboxed. The existing pending-delivery
+        // notification janitor applies normal push policy and retries.
+    }
+    for sibling in &progress.fanout {
+        SendAttemptRepository::retire_expired_attempt(
             &mut tx,
-            key,
-            &progress.receipt,
-            std::slice::from_ref(resource),
+            &SendObligation {
+                recipient: sibling.clone(),
+                ..obligation.clone()
+            },
         )
         .await?;
-        completed.push(resource.clone());
     }
-    SendAttemptRepository::retire_expired_started(&mut tx, &obligation).await?;
-    let settled = if progress
-        .fanout
-        .iter()
-        .all(|target| completed.contains(target))
-    {
-        settle_recorded(&mut tx, key, &[intent]).await?
-    } else {
-        Vec::new()
-    };
+    let settled = settle_recorded(&mut tx, key, &[intent]).await?;
     tx.commit().await?;
     Ok(Some(settled))
 }
@@ -186,14 +194,12 @@ pub(super) async fn handoff(
 fn pending_id(
     key: MessageKey,
     receipt: &crate::ingress::decision::EffectReceiptKey,
-    resource: &FullJid,
 ) -> PendingRowId {
     let mut hash = Sha256::new();
     hash.update(b"waddle-ingress-ambiguous-offline-v1");
     hash.update(key.to_storage().as_bytes());
     hash.update(receipt.kind.to_storage().to_be_bytes());
     hash.update(receipt.semantic_identity_hash);
-    hash.update(resource.to_string().as_bytes());
     PendingRowId::new(hex::encode(hash.finalize()))
 }
 

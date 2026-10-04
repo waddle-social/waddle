@@ -383,7 +383,7 @@ async fn sqlite_invite_uncertain_live_send_falls_back_only_after_its_deadline() 
     fixture.close().await;
 }
 
-async fn invite_quota_refusal_requires_receipts_before_compensation(fixture: IngressFixture) {
+async fn invite_quota_preserves_authorization_until_delivery(fixture: IngressFixture) {
     use crate::server::routes::{
         interpret::effects::invite::InviteDeliveryFailure,
         websocket::muc_invites::{self, OutstandingInvite},
@@ -415,6 +415,36 @@ async fn invite_quota_refusal_requires_receipts_before_compensation(fixture: Ing
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
+    let quota = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(quota.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        0
+    );
+    assert_eq!(
+        muc_invites::list_invites(ledger.clone(), &invite.room, &invite.invitee)
+            .await
+            .expect("preserved ledger")
+            .len(),
+        1
+    );
+
+    // Quota relief permits delivery, but an interrupted receipt transaction
+    // must preserve both the authorization and the original retry obligation.
+    let unlimited = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    deps.pending_delivery_storage = Some(&unlimited);
     let postgres = fixture.db.driver() == crate::db::DatabaseDriver::Postgres;
     if postgres {
         fixture.execute("CREATE FUNCTION fail_invite_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'lost receipt'; END $$", ()).await;
@@ -437,10 +467,9 @@ async fn invite_quota_refusal_requires_receipts_before_compensation(fixture: Ing
     assert_eq!(
         muc_invites::list_invites(ledger.clone(), &invite.room, &invite.invitee)
             .await
-            .expect("preserved ledger")
+            .expect("preserved ledger after failed commit")
             .len(),
-        1,
-        "a failed refusal commit must not compensate the invitation"
+        1
     );
     fixture
         .execute(
@@ -452,7 +481,7 @@ async fn invite_quota_refusal_requires_receipts_before_compensation(fixture: Ing
             (),
         )
         .await;
-    let refused = execute_effects(
+    let recovered = execute_effects(
         &fixture.uow,
         &fixture.db,
         &decision,
@@ -461,17 +490,28 @@ async fn invite_quota_refusal_requires_receipts_before_compensation(fixture: Ing
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(refused.outcomes[0].1, ExternalOutcome::Failed);
+    assert_eq!(recovered.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
-    assert_eq!(fixture.count("pending_delivery").await, 0);
-    assert!(
+    assert_eq!(fixture.count("pending_delivery").await, 1);
+    assert_eq!(
         muc_invites::list_invites(ledger, &invite.room, &invite.invitee)
             .await
-            .expect("compensated ledger")
-            .is_empty()
+            .expect("delivered invitation remains declinable")
+            .len(),
+        1
     );
-    let unlimited = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
-    deps.pending_delivery_storage = Some(&unlimited);
+    let pending = unlimited
+        .list(&target.to_bare())
+        .await
+        .expect("pending invitation");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        unlimited
+            .delete_row(&pending[0].id)
+            .await
+            .expect("consume invitation"),
+        1
+    );
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     registry.register(target, tx);
     let stale = execute_effects(
@@ -486,22 +526,21 @@ async fn invite_quota_refusal_requires_receipts_before_compensation(fixture: Ing
     assert_eq!(stale.outcomes[0].1, ExternalOutcome::Done);
     assert!(
         rx.try_recv().is_err(),
-        "terminal quota refusal cannot later send the rolled-back invitation"
+        "settled invitation cannot be sent again after pending consumption"
     );
     assert_eq!(fixture.count("pending_delivery").await, 0);
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn sqlite_invite_quota_refusal_requires_receipts_before_compensation() {
-    invite_quota_refusal_requires_receipts_before_compensation(IngressFixture::sqlite().await)
-        .await;
+async fn sqlite_invite_quota_preserves_authorization_until_delivery() {
+    invite_quota_preserves_authorization_until_delivery(IngressFixture::sqlite().await).await;
 }
 
 #[tokio::test]
-async fn postgres_invite_quota_refusal_requires_receipts_before_compensation() {
+async fn postgres_invite_quota_preserves_authorization_until_delivery() {
     if let Some(fixture) = IngressFixture::postgres("invite_quota_compensation").await {
-        invite_quota_refusal_requires_receipts_before_compensation(fixture).await;
+        invite_quota_preserves_authorization_until_delivery(fixture).await;
     }
 }
 
@@ -588,8 +627,10 @@ async fn postgres_invite_live_acceptance_after_offline_probe_prevents_pending_fa
     }
 }
 
-#[tokio::test]
-async fn sqlite_invite_quota_compensation_uses_resolved_membership_outcome() {
+async fn invite_quota_recovers_generated_notification(
+    fixture: IngressFixture,
+    affiliation: waddle_xmpp::Affiliation,
+) {
     use crate::server::routes::{
         interpret::effects::{
             early::RoomMembershipMutation, invite::InviteDeliveryFailure, PlanEffectDependency,
@@ -609,158 +650,280 @@ async fn sqlite_invite_quota_compensation_uses_resolved_membership_outcome() {
         xep::xep0421::OccupantIdSecret,
         Affiliation,
     };
-    for affiliation in [Affiliation::Member, Affiliation::None] {
-        let fixture = IngressFixture::sqlite().await;
-        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-        let storage = invite_pending_storage(&fixture, QuotaPolicy::CountCap { max_rows: 0 }).await;
-        let registry = ConnectionRegistry::new();
-        let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
-        let invite = OutstandingInvite {
-            room: "room@conference.example.com".parse().expect("room"),
-            invitee: target.to_bare(),
-            inviter: fixture.principal.bare_jid().clone(),
-        };
-        let mut room = MucRoom::new(
-            invite.room.clone(),
-            "test".into(),
-            "room".into(),
-            RoomConfig {
-                members_only: true,
-                ..RoomConfig::default()
-            },
-        );
-        room.set_affiliation(invite.invitee.clone(), affiliation);
-        let actor = RoomActor::spawn(RoomActor::new(
-            room,
-            OccupantIdSecret::new(vec![b'x'; 32]).expect("secret"),
-        ));
-        let grant = MucMembershipMutation {
-            room: invite.room.clone(),
-            invitee: invite.invitee.clone(),
-            actor: actor.clone(),
-            // Planning observed a different affiliation from the execution-time room.
-            previous_affiliation: Affiliation::Outcast,
-        };
-        let membership = PlanEffectDependency::AfterRoomMembership {
-            room: invite.room.clone(),
-            member: invite.invitee.clone(),
-        };
-        let recorded_at = chrono::Utc::now();
-        let mut submission = invite_submission(&fixture, &target);
-        let inbound_invite =
-            minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
-                .attr(
-                    minidom::rxml::xml_ncname!("to").to_owned(),
-                    invite.invitee.to_string(),
-                )
-                .build();
-        submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(invite.room.clone());
-        let incoming = &mut submission.plan.sanitized_message;
-        incoming.to = Some(invite.room.clone().into());
-        incoming.type_ = xmpp_parsers::message::MessageType::Normal;
-        incoming.bodies.clear();
-        incoming.payloads.push(
-            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
-                .append(inbound_invite.clone())
-                .build(),
-        );
-        submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
-            incoming,
-            &waddle_xmpp::ingress::DigestContext {
-                target: submission.target.clone(),
-                server_authorities: vec![invite.inviter.clone()],
-                stanza_lang: None,
-            },
-        )
-        .expect("mediated invitation digest");
-        let outgoing = crate::server::routes::websocket::handlers::message::muc_invite::mediated_invite_message(
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let storage = invite_pending_storage(&fixture, QuotaPolicy::CountCap { max_rows: 0 }).await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+    let invite = OutstandingInvite {
+        room: "room@conference.example.com".parse().expect("room"),
+        invitee: target.to_bare(),
+        inviter: fixture.principal.bare_jid().clone(),
+    };
+    let mut room = MucRoom::new(
+        invite.room.clone(),
+        "test".into(),
+        "room".into(),
+        RoomConfig {
+            members_only: true,
+            ..RoomConfig::default()
+        },
+    );
+    room.set_affiliation(invite.invitee.clone(), affiliation);
+    let actor = RoomActor::spawn(RoomActor::new(
+        room,
+        OccupantIdSecret::new(vec![b'x'; 32]).expect("secret"),
+    ));
+    let grant = MucMembershipMutation {
+        room: invite.room.clone(),
+        invitee: invite.invitee.clone(),
+        actor: actor.clone(),
+        // Planning observed a different affiliation from the execution-time room.
+        previous_affiliation: Affiliation::Outcast,
+    };
+    let membership = PlanEffectDependency::AfterRoomMembership {
+        room: invite.room.clone(),
+        member: invite.invitee.clone(),
+    };
+    let recorded_at = chrono::Utc::now();
+    let mut submission = invite_submission(&fixture, &target);
+    let inbound_invite =
+        minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                invite.invitee.to_string(),
+            )
+            .build();
+    submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(invite.room.clone());
+    let incoming = &mut submission.plan.sanitized_message;
+    incoming.to = Some(invite.room.clone().into());
+    incoming.type_ = xmpp_parsers::message::MessageType::Normal;
+    incoming.bodies.clear();
+    incoming.payloads.push(
+        minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .append(inbound_invite.clone())
+            .build(),
+    );
+    submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
+        incoming,
+        &waddle_xmpp::ingress::DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![invite.inviter.clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("mediated invitation digest");
+    let outgoing =
+        crate::server::routes::websocket::handlers::message::muc_invite::mediated_invite_message(
             incoming,
             &invite.room,
             &invite.inviter,
             &invite.invitee,
             &inbound_invite,
         );
-        let Effect::External(ExternalEffect::RouteToPeer(route)) =
-            &mut submission.plan.plan[0].effect
-        else {
-            panic!("invitation route");
-        };
-        *route.message = outgoing.clone();
-        route.fallback.payload = PendingPayload::Transient(Box::new(outgoing));
-        route.failure = Some(Box::new(InviteDeliveryFailure::RollbackMucMembership(
-            Box::new(grant.clone()),
+    let Effect::External(ExternalEffect::RouteToPeer(route)) = &mut submission.plan.plan[0].effect
+    else {
+        panic!("invitation route");
+    };
+    *route.message = outgoing.clone();
+    route.fallback.payload = PendingPayload::Transient(Box::new(outgoing));
+    route.failure = Some(Box::new(InviteDeliveryFailure::RollbackMucMembership(
+        Box::new(grant.clone()),
+    )));
+    submission.plan.plan[0].dependencies = vec![
+        membership.clone(),
+        PlanEffectDependency::AfterInviteLedger {
+            invite: invite.clone(),
+        },
+    ];
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::External(
+            ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::Muc(Box::new(grant))),
         )));
-        submission.plan.plan[0].dependencies = vec![
-            membership.clone(),
-            PlanEffectDependency::AfterInviteLedger {
+    submission.plan.plan.push(
+        PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
+            InviteLedgerMutation::Record {
                 invite: invite.clone(),
+                recorded_at,
+                failure: None,
             },
-        ];
-        submission
-            .plan
-            .plan
-            .push(PlannedEffect::new(Effect::External(
-                ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::Muc(Box::new(
-                    grant,
-                ))),
-            )));
-        submission.plan.plan.push(
-            PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
-                InviteLedgerMutation::Record {
-                    invite: invite.clone(),
-                    recorded_at,
-                    failure: None,
-                },
-            )))
-            .with_dependency(membership),
-        );
-        submission.plan.intents.extend([
-            IngressEffectIntent::MucInviteMembershipGrant {
-                grant: MucInviteMembershipGrant {
-                    room: invite.room.clone(),
-                    invitee: invite.invitee.clone(),
-                    inviter: invite.inviter.clone(),
-                },
+        )))
+        .with_dependency(membership),
+    );
+    submission.plan.intents.extend([
+        IngressEffectIntent::MucInviteMembershipGrant {
+            grant: MucInviteMembershipGrant {
+                room: invite.room.clone(),
+                invitee: invite.invitee.clone(),
+                inviter: invite.inviter.clone(),
             },
-            IngressEffectIntent::MucInviteLedger {
-                mutation: MucInviteLedgerMutation {
-                    room: invite.room.clone(),
-                    invitee: invite.invitee.clone(),
-                    inviter: invite.inviter.clone(),
-                    action: MucInviteLedgerAction::Recorded,
-                    recorded_at: Some(recorded_at),
-                },
+        },
+        IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: invite.room.clone(),
+                invitee: invite.invitee.clone(),
+                inviter: invite.inviter.clone(),
+                action: MucInviteLedgerAction::Recorded,
+                recorded_at: Some(recorded_at),
             },
-        ]);
-        let decision = commit_submission(&fixture.uow, &submission, 1)
+        },
+    ]);
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit invitation grant");
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&state);
+    deps.pending_delivery_storage = Some(&storage);
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        report.outcomes.iter().any(|(effect, outcome)| matches!(
+            effect,
+            ExternalEffect::RouteToPeer(_)
+        ) && *outcome == ExternalOutcome::Uncertain),
+        "quota exhaustion preserves the invitation for retry"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert_eq!(
+        snapshot.room.get_affiliation(&invite.invitee),
+        Affiliation::Member,
+        "canonical quota exhaustion preserves both existing and newly granted membership"
+    );
+    assert_eq!(fixture.count("pending_delivery").await, 0);
+    let key = decision.message_key.expect("canonical invitation");
+    drop(decision);
+    drop(submission);
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("durable recovery snapshot");
+    let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("recorded intents");
+    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("envelope")
+        .expect("canonical envelope");
+    let receipts = EffectReceiptRepository::keys(&mut tx, key)
+        .await
+        .expect("durable prerequisites");
+    let pending: Vec<_> = recorded
+        .iter()
+        .filter(|intent| !receipts.contains(&crate::ingress::receipt_key(intent).expect("receipt")))
+        .cloned()
+        .collect();
+    tx.commit().await.expect("snapshot committed");
+    assert_eq!(pending.len(), 2, "only route and fallback need recovery");
+    let rebuild = |recorded: &[IngressEffectIntent],
+                   pending: &[IngressEffectIntent],
+                   blocked: &[jid::BareJid]| {
+        crate::ingress::recovery_rebuild::rebuild(crate::ingress::recovery_rebuild::RecoveryInput {
+            key,
+            envelope: &envelope,
+            created_at: recorded_at,
+            recorded,
+            unreceipted: pending,
+            route_progress: pending
+                .iter()
+                .filter_map(|intent| {
+                    crate::ingress::recorded::RouteProgress::from_intent(intent, None, vec![])
+                        .expect("progress")
+                })
+                .collect(),
+            host_owned_resources: vec![],
+            departed_occupants: vec![],
+            blocked_recipients: blocked,
+        })
+        .expect("rebuild generated invitation")
+    };
+    let missing_prerequisite = rebuild(&recorded, &recorded, &[]);
+    assert!(
+        missing_prerequisite.decision.external.is_empty(),
+        "recovery cannot grant membership or send before durable prerequisites"
+    );
+    let blocked = rebuild(&recorded, &pending, std::slice::from_ref(&invite.invitee));
+    assert!(blocked.decision.external.is_empty());
+    assert_eq!(
+        blocked.discarded_receipts.len(),
+        2,
+        "blocking resolves both route and fallback without delivery"
+    );
+    let mut expired = recorded.clone();
+    for intent in &mut expired {
+        if let IngressEffectIntent::MucInviteLedger { mutation } = intent {
+            mutation.recorded_at = Some(
+                chrono::Utc::now()
+                    - crate::server::routes::websocket::muc_invites::INVITE_TTL
+                    - chrono::Duration::seconds(1),
+            );
+        }
+    }
+    let expired = rebuild(&expired, &pending, &[]);
+    assert!(expired.decision.external.is_empty());
+    assert_eq!(
+        expired.discarded_receipts.len(),
+        2,
+        "expired notification resolves both delivery obligations"
+    );
+    let rebuilt = rebuild(&recorded, &pending, &[]);
+    assert_eq!(rebuilt.decision.external.len(), 1);
+    assert!(rebuilt.unsupported_receipts.is_empty());
+    assert!(
+        matches!(&rebuilt.decision.external[0], ExternalEffect::RouteToPeer(route) if route.failure.is_none()),
+        "recovery reconstructs notification only, without compensation or grants"
+    );
+    let unlimited = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
+    deps.pending_delivery_storage = Some(&unlimited);
+    deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    let recovered = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &rebuilt.decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(recovered.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(fixture.count("pending_delivery").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 4);
+    assert_eq!(
+        actor
+            .ask(GetSnapshot)
             .await
-            .expect("commit invitation grant");
-        let mut deps = Deps::new(&registry, "example.com");
-        deps.web_socket_state = Some(&state);
-        deps.pending_delivery_storage = Some(&storage);
-        let report = execute_effects(
-            &fixture.uow,
-            &fixture.db,
-            &decision,
-            &ImmediateSink,
-            &deps,
-            Duration::from_secs(5),
-        )
-        .await;
-        assert!(
-            report.outcomes.iter().any(|(effect, outcome)| matches!(
-                effect,
-                ExternalEffect::RouteToPeer(_)
-            ) && *outcome
-                == ExternalOutcome::Failed),
-            "invitation was refused by quota"
-        );
-        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
-        assert_eq!(snapshot.room.get_affiliation(&invite.invitee), affiliation,
-            "quota compensation must preserve existing membership or restore the actual pre-grant affiliation");
-        assert_eq!(fixture.count("pending_delivery").await, 0);
-        actor.kill();
-        fixture.close().await;
+            .expect("membership preserved")
+            .room
+            .get_affiliation(&invite.invitee),
+        Affiliation::Member
+    );
+    actor.kill();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_invite_quota_recovers_generated_notification_after_restart() {
+    for affiliation in [
+        waddle_xmpp::Affiliation::Member,
+        waddle_xmpp::Affiliation::None,
+    ] {
+        invite_quota_recovers_generated_notification(IngressFixture::sqlite().await, affiliation)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_invite_quota_recovers_generated_notification_after_restart() {
+    if let Some(fixture) = IngressFixture::postgres("invite_quota_restart").await {
+        invite_quota_recovers_generated_notification(fixture, waddle_xmpp::Affiliation::None).await;
     }
 }
 

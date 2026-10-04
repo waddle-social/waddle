@@ -122,6 +122,13 @@ async fn expiry_and_stale_tokens(fixture: IngressFixture) {
     let stale = acquired(claim(&fixture, &obligation, "old").await);
     expire(&fixture).await;
     let mut tx = fixture.uow.begin().await.expect("begin expired start");
+    assert_eq!(
+        SendAttemptRepository::status(&mut tx, &obligation)
+            .await
+            .expect("expired initial reservation"),
+        Some(SendAttemptStatus::ExpiredLease)
+    );
+
     assert!(!SendAttemptRepository::start(&mut tx, &stale)
         .await
         .expect("expired cannot start"));
@@ -158,6 +165,12 @@ async fn expiry_and_stale_tokens(fixture: IngressFixture) {
         SendAttemptRepository::release_proven_not_enqueued(&mut tx, &replacement)
             .await
             .expect("release on positive evidence")
+    );
+    assert_eq!(
+        SendAttemptRepository::status(&mut tx, &obligation)
+            .await
+            .expect("preserved retry lineage"),
+        Some(SendAttemptStatus::ExpiredLease)
     );
     tx.commit().await.expect("commit");
     let retry = acquired(claim(&fixture, &obligation, "new").await);

@@ -31,7 +31,17 @@ commits a started state before guest invocation. Completed outcomes repair lost
 receipts without repeating the sink. Unknown live starts wait 60 seconds before
 proof-first retry or permitted offline custody/push handoff. Observer starts can
 retry after their three-minute lease, up to 20 attempts. Recovery accepts a
-possible duplicate rather than permanently suppressing delivery after a crash;
+possible duplicate rather than permanently suppressing delivery after a crash.
+This is the explicit residual to #1776's “recognised on retry instead of repeated”:
+completed/custodied effects are recognized; an unknown started effect may execute
+again after its deadline. Observer publication fencing does not deduplicate an
+external provider call or charge (for example Jev without a provider idempotency
+key). See the [operational policy](../operations/ingress-authority.md) for the
+bounds and recovery procedure. Ordinary offline recovery settles recipient-wide
+route evidence with one pending copy, so sibling retries cannot recreate it after
+consumption. Expired initial reservations also qualify when no sink is available.
+Canonical invitation quota refusal remains retryable without revoking membership
+or settling terminal receipts before a nontransactional rollback;
 (ii) repaired duplicates retry unfinished recorded direct resources (§3.3a)
 and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger

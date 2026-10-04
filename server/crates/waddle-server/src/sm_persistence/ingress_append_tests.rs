@@ -1243,3 +1243,282 @@ async fn postgres_fenced_live_attempt_blocks_new_detached_delivery() {
         live_attempt_interlock(fixture, Box::new(storage)).await;
     }
 }
+
+/// A stale executor has passed its status read before another transaction hands
+/// the obligation to offline custody and retires its expired send attempt.
+async fn completed_handoff_blocks_stale_detached_append(
+    fixture: crate::ingress::test_support::IngressFixture,
+    storage: Box<dyn SmPersistenceStorage>,
+) {
+    use crate::ingress::{commit::commit_submission, receipt_key};
+    use crate::ingress_uow::{
+        CanonicalMessageRepository, DeliveryProgressRepository, EffectReceiptRepository,
+        PendingReceiptRepository, SendAttemptRepository, SendClaim, SendObligation,
+    };
+    use waddle_xmpp::{
+        ingress::{EffectMessageIdentity, IngressEffectIntent},
+        ownership::NodeIdentity,
+        pending_delivery::{
+            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
+        },
+    };
+    let snapshot_storage = DatabaseSmPersistence::from_database(fixture.db.clone())
+        .await
+        .expect("snapshot storage");
+    let pending = crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+        fixture.db.clone(),
+        QuotaPolicy::Unlimited,
+    )
+    .await
+    .expect("pending storage");
+    for aggregate in [false, true] {
+        let mut session = fixture_session(&format!("settled-handoff-{aggregate}"));
+        session.jid = "juliet@example.com/phone".parse().expect("target");
+        let sibling = "juliet@example.com/laptop"
+            .parse::<jid::FullJid>()
+            .expect("sibling");
+        storage
+            .store_session_atomic(
+                session.clone(),
+                vec![fixture_unacked(session.stream_id.as_str(), 11)],
+            )
+            .await
+            .expect("prior snapshot");
+        let before = snapshot(&snapshot_storage, &session.stream_id).await;
+        let intent = IngressEffectIntent::RouteDirect {
+            recipient: session.jid.to_bare(),
+            fanout: vec![session.jid.clone(), sibling.clone()],
+            route_identity: EffectMessageIdentity::capture_ordinal(1),
+        };
+        let mut submission = fixture.submission(None, "handoff replaces unknown send");
+        waddle_xmpp::xep::xep0334::add_hint(
+            &mut submission.plan.sanitized_message,
+            waddle_xmpp::xep::xep0334::Hint::NoPermanentStore,
+        );
+        submission.plan.intents = vec![intent.clone()];
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("canonical authority");
+        let obligation = SendObligation {
+            message: decision.message_key.expect("key"),
+            receipt: receipt_key(&intent).expect("receipt"),
+            recipient: session.jid.clone(),
+        };
+        let mut claim = fixture.uow.begin().await.expect("claim transaction");
+        let SendClaim::Acquired(lease) = SendAttemptRepository::claim(
+            &mut claim,
+            &obligation,
+            &NodeIdentity::new("sender", "before-crash"),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("claim") else {
+            panic!("fresh claim");
+        };
+        assert!(SendAttemptRepository::start(&mut claim, &lease)
+            .await
+            .expect("start"));
+        claim.commit().await.expect("start commit");
+        fixture
+            .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+            .await;
+        let mut append = append_for(&session);
+        append.key = SmIngressAppendKey {
+            message_key: obligation.message,
+            kind: SmIngressReceiptKind::from_storage(obligation.receipt.kind.to_storage()),
+            semantic_identity_hash: obligation.receipt.semantic_identity_hash,
+            resource: session.jid.clone(),
+        };
+        let context = crate::server::routes::interpret::SmIngressAppendContext {
+            message_key: obligation.message,
+            receipt: obligation.receipt.clone(),
+            received_at: None,
+            archive_positions: vec![],
+            dispatch_stream: None,
+        };
+        assert_eq!(
+            crate::ingress::live_delivery::live_delivery_status(
+                &fixture.uow,
+                None,
+                &context,
+                &session.jid
+            )
+            .await
+            .expect("stale executor status"),
+            None
+        );
+        let mut handoff = fixture.uow.begin().await.expect("handoff transaction");
+        assert!(
+            CanonicalMessageRepository::lock(&mut handoff, obligation.message)
+                .await
+                .expect("handoff canonical lock")
+        );
+        let pending_row = PendingRow {
+            id: PendingRowId::new(obligation.message.to_storage().to_string()),
+            recipient: session.jid.to_bare(),
+            original_receipt_at: fixed_time(),
+            payload: PendingPayload::Transient(Box::new(submission.plan.sanitized_message.clone())),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        };
+        PendingReceiptRepository::insert(&mut handoff, &pending_row, QuotaPolicy::Unlimited)
+            .await
+            .expect("offline custody");
+        if aggregate {
+            // An aggregate settlement is independently authoritative even if
+            // individual progress is absent (e.g. a route policy discard).
+            EffectReceiptRepository::record_receipt(
+                &mut handoff,
+                obligation.message,
+                obligation.receipt.kind,
+                &obligation.receipt.semantic_identity_hash,
+            )
+            .await
+            .expect("aggregate settlement");
+        } else {
+            DeliveryProgressRepository::record(
+                &mut handoff,
+                obligation.message,
+                &obligation.receipt,
+                std::slice::from_ref(&session.jid),
+            )
+            .await
+            .expect("handoff progress");
+        }
+        SendAttemptRepository::retire_expired_attempt(&mut handoff, &obligation)
+            .await
+            .expect("retire handed-off attempt");
+        session.outbound_count = 13;
+        let attempted = storage.store_session_atomic_with_ingress_delivery(
+            session.clone(),
+            vec![fixture_unacked(session.stream_id.as_str(), 13)],
+            append.clone(),
+        );
+        tokio::pin!(attempted);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut attempted)
+                .await
+                .is_err(),
+            "stale append must wait for the handoff canonical transaction"
+        );
+        handoff.commit().await.expect("handoff commit");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), &mut attempted)
+                .await
+                .expect("stale append resolves")
+                .expect("settlement is not an outage"),
+            KeyedSnapshotOutcome::ObligationAlreadyResolved
+        );
+        assert_eq!(
+            snapshot(&snapshot_storage, &session.stream_id).await,
+            before,
+            "rejected speculative clone cannot replace prior queue/counters"
+        );
+        assert!(storage
+            .get_ingress_append(&append.key)
+            .await
+            .expect("ledger")
+            .is_none());
+        assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+        assert_eq!(
+            pending
+                .list(&session.jid.to_bare())
+                .await
+                .expect("offline custody list")
+                .iter()
+                .filter(|row| row.id == pending_row.id)
+                .count(),
+            1
+        );
+        // A per-resource proof must not suppress a different frozen resource;
+        // an aggregate proof does suppress every resource of the obligation.
+        let mut sibling_session = fixture_session(&format!("settled-handoff-sibling-{aggregate}"));
+        sibling_session.jid = sibling;
+        let mut sibling_append = append_for(&sibling_session);
+        sibling_append.key = SmIngressAppendKey {
+            resource: sibling_session.jid.clone(),
+            ..append.key.clone()
+        };
+        assert_eq!(
+            storage
+                .store_session_atomic_with_ingress_delivery(sibling_session, vec![], sibling_append)
+                .await
+                .expect("sibling outcome"),
+            if aggregate {
+                KeyedSnapshotOutcome::ObligationAlreadyResolved
+            } else {
+                KeyedSnapshotOutcome::Committed
+            }
+        );
+        // Already counted live frames still retain their independent custody
+        // path; this check only suppresses NEW delivery allocations.
+        assert_eq!(
+            storage
+                .store_session_atomic_with_ingress_append(
+                    session.clone(),
+                    vec![fixture_unacked(session.stream_id.as_str(), 13)],
+                    append
+                )
+                .await
+                .expect("accepted frame custody"),
+            KeyedSnapshotOutcome::Committed
+        );
+    }
+    drop(pending);
+    drop(snapshot_storage);
+    drop(storage);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_completed_handoff_blocks_stale_detached_append() {
+    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
+    let storage = DatabaseSmPersistence::from_database(fixture.db.clone())
+        .await
+        .expect("storage");
+    completed_handoff_blocks_stale_detached_append(fixture, Box::new(storage)).await;
+}
+
+#[tokio::test]
+async fn postgres_completed_handoff_blocks_stale_detached_append() {
+    if let Some(fixture) =
+        crate::ingress::test_support::IngressFixture::postgres("sm_completed_handoff").await
+    {
+        let storage = DatabaseSmPersistence::from_database(fixture.db.clone())
+            .await
+            .expect("storage");
+        completed_handoff_blocks_stale_detached_append(fixture, Box::new(storage)).await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_fenced_completed_handoff_blocks_stale_detached_append() {
+    use crate::clustering::claims::PostgresClaimStore;
+    use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, SharedNodeIdentity};
+    if let Some(fixture) =
+        crate::ingress::test_support::IngressFixture::postgres("sm_fenced_handoff").await
+    {
+        let fenced_db = Database::from_config(
+            "sm-fenced-handoff",
+            &DatabaseConfig::new(
+                DatabaseDriver::Postgres,
+                fixture.db.database_url().to_owned(),
+            )
+            .with_control_plane_pool(crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("fenced db");
+        let claims = Arc::new(PostgresClaimStore::new(fenced_db.clone()));
+        claims.ensure_schema().await.expect("claims");
+        let storage = PostgresFencedSmPersistence::open(
+            fenced_db,
+            claims,
+            SharedNodeIdentity::new(NodeIdentity::new("handoff", "fenced-owner")),
+        )
+        .await
+        .expect("fenced storage");
+        completed_handoff_blocks_stale_detached_append(fixture, Box::new(storage)).await;
+    }
+}

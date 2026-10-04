@@ -454,7 +454,7 @@ pub(super) async fn delivery_status(
         Some(SendAttemptStatus::Leased | SendAttemptStatus::Started) => {
             Some(FullJidDeliveryOutcome::MaybeCommitted)
         }
-        None | Some(SendAttemptStatus::ExpiredStarted) => None,
+        None | Some(SendAttemptStatus::ExpiredStarted | SendAttemptStatus::ExpiredLease) => None,
     })
 }
 

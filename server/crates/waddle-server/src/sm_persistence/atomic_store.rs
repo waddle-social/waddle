@@ -45,7 +45,8 @@ pub(super) async fn store_session_atomic_with_principal_and_ingress_appends(
     .await?
     {
         StoreOutcome::Committed { withheld } => Ok(withheld),
-        StoreOutcome::ObligationAlreadyAllocated { .. } => Err(SmPersistenceError::Other(
+        StoreOutcome::ObligationAlreadyAllocated { .. }
+        | StoreOutcome::ObligationAlreadyResolved => Err(SmPersistenceError::Other(
             "a drained batch never aborts on a ledger conflict".into(),
         )),
     }
@@ -68,6 +69,9 @@ pub(super) async fn store_session_atomic_with_ingress_append(
         .await?
         {
             StoreOutcome::Committed { .. } => KeyedSnapshotOutcome::Committed,
+            StoreOutcome::ObligationAlreadyResolved => {
+                KeyedSnapshotOutcome::ObligationAlreadyResolved
+            }
             StoreOutcome::ObligationAlreadyAllocated { accepting_stream } => {
                 KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream }
             }
@@ -92,6 +96,9 @@ pub(super) async fn store_session_atomic_with_ingress_delivery(
         .await?
         {
             StoreOutcome::Committed { .. } => KeyedSnapshotOutcome::Committed,
+            StoreOutcome::ObligationAlreadyResolved => {
+                KeyedSnapshotOutcome::ObligationAlreadyResolved
+            }
             StoreOutcome::ObligationAlreadyAllocated { accepting_stream } => {
                 KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream }
             }
@@ -111,6 +118,7 @@ enum Ledger {
 }
 
 enum StoreOutcome {
+    ObligationAlreadyResolved,
     Committed {
         withheld: Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
     },
@@ -143,7 +151,11 @@ async fn store_session_atomic_inner(
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     if let Ledger::NewDelivery(append) = &ledger {
-        ingress_append::authorize_new_delivery(&mut tx, &append.key).await?;
+        if ingress_append::authorize_new_delivery(&mut tx, &append.key).await?
+            == ingress_append::NewDeliveryAuthorization::AlreadyResolved
+        {
+            return Ok(StoreOutcome::ObligationAlreadyResolved);
+        }
     }
 
     // Drop any pre-existing unacked rows for this stream_id

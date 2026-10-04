@@ -28,6 +28,7 @@ pub struct SendLease {
     owner: NodeIdentity,
     token: Uuid,
     recovered: bool,
+    previously_started: bool,
 }
 
 /// Whether this obligation can begin a new queue attempt.
@@ -49,6 +50,7 @@ pub(crate) enum SendAttemptStatus {
     Leased,
     Started,
     ExpiredStarted,
+    ExpiredLease,
     Completed,
 }
 
@@ -97,12 +99,13 @@ impl SendAttemptRepository {
         if !owner.is_active() {
             return Err(IngressUowError::AuthorityStopped);
         }
-        let recovered = match Self::status(tx, obligation).await? {
+        let (recovered, previously_started) = match Self::status(tx, obligation).await? {
             Some(SendAttemptStatus::Leased) => return Ok(SendClaim::Busy),
             Some(SendAttemptStatus::Started) => return Ok(SendClaim::Ambiguous),
             Some(SendAttemptStatus::Completed) => return Ok(SendClaim::Completed),
-            Some(SendAttemptStatus::ExpiredStarted) => true,
-            None => false,
+            Some(SendAttemptStatus::ExpiredStarted) => (true, true),
+            Some(SendAttemptStatus::ExpiredLease) => (true, false),
+            None => (false, false),
         };
         let (key, clock) = dialect(tx);
         let lease = SendLease {
@@ -110,6 +113,7 @@ impl SendAttemptRepository {
             owner: owner.clone(),
             token: Uuid::new_v4(),
             recovered,
+            previously_started,
         };
         let sql = format!("INSERT INTO ingress_send_attempts (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered");
         tx.transaction_mut()
@@ -124,7 +128,7 @@ impl SendAttemptRepository {
                     owner.node_epoch.clone(),
                     lease.token.to_string(),
                     ttl,
-                    i64::from(recovered)
+                    i64::from(previously_started)
                 ],
             )
             .await?;
@@ -160,7 +164,7 @@ impl SendAttemptRepository {
         let recovered: i64 = row.get(2)?;
         match state {
             0 if expired == 1 && recovered == 1 => Ok(Some(SendAttemptStatus::ExpiredStarted)),
-            0 if expired == 1 => Ok(None),
+            0 if expired == 1 => Ok(Some(SendAttemptStatus::ExpiredLease)),
             0 => Ok(Some(SendAttemptStatus::Leased)),
             1 if expired == 1 => Ok(Some(SendAttemptStatus::ExpiredStarted)),
             1 => Ok(Some(SendAttemptStatus::Started)),
@@ -197,15 +201,15 @@ impl SendAttemptRepository {
         Ok(Self::status(tx, obligation).await? == Some(SendAttemptStatus::ExpiredStarted))
     }
 
-    /// Revoke an expired token only while atomically committing its replacement
+    /// Revoke an expired reservation or started token only while committing its replacement
     /// custody/settlement. This is not evidence that the old socket never sent.
-    pub(crate) async fn retire_expired_started(
+    pub(crate) async fn retire_expired_attempt(
         tx: &mut IngressUowTransaction<'_>,
         obligation: &SendObligation,
     ) -> Result<(), IngressUowError> {
         lock(tx, obligation).await?;
         let (key, clock) = dialect(tx);
-        let sql = format!("DELETE FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND (state = 1 OR (state = 0 AND recovered = 1)) AND expires_at_ms <= {clock}");
+        let sql = format!("DELETE FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND state IN (0, 1) AND expires_at_ms <= {clock}");
         tx.transaction_mut()
             .execute(
                 &sql,
@@ -296,11 +300,14 @@ impl SendAttemptRepository {
         transition(
             tx,
             lease,
-            if lease.recovered {
+            if lease.recovered && lease.previously_started {
                 // A definite failure of THIS retry does not prove the older
-                // unknown attempt failed. Preserve its eligibility for durable
-                // offline handoff, including quota/database failure retries.
+                // unknown attempt failed. Retain the earlier start evidence.
                 "UPDATE ingress_send_attempts SET state = 1, expires_at_ms = 0"
+            } else if lease.recovered {
+                // Even a known uninvoked reservation must remain eligible for
+                // offline handoff if its socket disappeared before the retry.
+                "UPDATE ingress_send_attempts SET state = 0, expires_at_ms = 0"
             } else {
                 "DELETE FROM ingress_send_attempts"
             },

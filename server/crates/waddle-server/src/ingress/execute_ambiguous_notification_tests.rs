@@ -31,7 +31,21 @@ enum RecipientPolicy {
     NoPermanentStore,
 }
 
+#[derive(Clone, Copy)]
+enum CrashPhase {
+    ClaimOnly,
+    Started,
+}
+
 async fn recovered_start_notification(fixture: IngressFixture, policy: RecipientPolicy) {
+    recovered_attempt_notification(fixture, policy, CrashPhase::Started).await;
+}
+
+async fn recovered_attempt_notification(
+    fixture: IngressFixture,
+    policy: RecipientPolicy,
+    crash_phase: CrashPhase,
+) {
     let state = socket_tests::create_test_websocket_state_with_durable_ingress(&fixture).await;
     let recipient: FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let blocking = Arc::new(InMemoryBlockingStorage::new());
@@ -113,12 +127,23 @@ async fn recovered_start_notification(fixture: IngressFixture, policy: Recipient
     .expect("claim send") else {
         panic!("fresh send lease")
     };
-    assert!(SendAttemptRepository::start(&mut tx, &lease)
-        .await
-        .expect("start send"));
+    if matches!(crash_phase, CrashPhase::Started) {
+        assert!(SendAttemptRepository::start(&mut tx, &lease)
+            .await
+            .expect("start send"));
+    }
     tx.commit()
         .await
-        .expect("persist start without socket enqueue");
+        .expect("persist attempt before the simulated process crash");
+    if matches!(crash_phase, CrashPhase::ClaimOnly) {
+        assert_eq!(
+            fixture
+                .count("ingress_send_attempts WHERE state = 0 AND recovered = 0")
+                .await,
+            1,
+            "exercise the initial reservation, not a started or reclaimed send"
+        );
+    }
     if matches!(policy, RecipientPolicy::BlockSender) {
         blocking.set_blocklist(recipient.to_bare(), vec![submission.sender.to_bare()]);
     }
@@ -257,6 +282,24 @@ async fn sqlite_ambiguous_recovery_creates_one_push_candidate_after_pending_cons
 async fn postgres_ambiguous_recovery_creates_one_push_candidate_after_pending_consumption() {
     if let Some(fixture) = IngressFixture::postgres("ambiguous_push_candidate").await {
         recovered_start_notification(fixture, RecipientPolicy::Notify).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_expired_initial_claim_recovers_one_push_candidate_without_a_sink() {
+    recovered_attempt_notification(
+        IngressFixture::sqlite().await,
+        RecipientPolicy::Notify,
+        CrashPhase::ClaimOnly,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_expired_initial_claim_recovers_one_push_candidate_without_a_sink() {
+    if let Some(fixture) = IngressFixture::postgres("expired_initial_claim_push").await {
+        recovered_attempt_notification(fixture, RecipientPolicy::Notify, CrashPhase::ClaimOnly)
+            .await;
     }
 }
 

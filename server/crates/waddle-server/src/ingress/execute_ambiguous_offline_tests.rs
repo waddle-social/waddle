@@ -21,6 +21,7 @@ async fn run_handoff(
     hint: Option<Hint>,
     settled_first: bool,
     siblings: bool,
+    initial_reservation: bool,
 ) {
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(
         crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
@@ -100,10 +101,12 @@ async fn run_handoff(
     .expect("claim") else {
         panic!("fresh lease")
     };
-    assert!(SendAttemptRepository::start(&mut tx, &lease)
-        .await
-        .expect("start"));
-    if siblings {
+    if !initial_reservation {
+        assert!(SendAttemptRepository::start(&mut tx, &lease)
+            .await
+            .expect("start"));
+    }
+    let sibling_lease = if siblings {
         let sibling = SendObligation {
             recipient: resources[1].clone(),
             ..obligation.clone()
@@ -118,10 +121,15 @@ async fn run_handoff(
         .expect("sibling claim") else {
             panic!("fresh sibling")
         };
-        assert!(SendAttemptRepository::start(&mut tx, &other)
-            .await
-            .expect("sibling start"));
-    }
+        if !initial_reservation {
+            assert!(SendAttemptRepository::start(&mut tx, &other)
+                .await
+                .expect("sibling start"));
+        }
+        Some(other)
+    } else {
+        None
+    };
     tx.commit().await.expect("commit start");
     assert!(handoff(&fixture.uow, &deps, key, &progress, &resource)
         .await
@@ -130,6 +138,33 @@ async fn run_handoff(
     fixture
         .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
         .await;
+    if settled_first && siblings {
+        let mut tx = fixture
+            .uow
+            .begin()
+            .await
+            .expect("concurrent resource settlement");
+        crate::ingress_uow::DeliveryProgressRepository::record(
+            &mut tx,
+            key,
+            &progress.receipt,
+            std::slice::from_ref(&resource),
+        )
+        .await
+        .expect("resource proof");
+        tx.commit().await.expect("resource proof commit");
+        assert!(handoff(&fixture.uow, &deps, key, &progress, &resource)
+            .await
+            .expect("resource proof first")
+            .is_none());
+        assert_eq!(
+            fixture.count("pending_delivery").await,
+            0,
+            "stale expired marker cannot replace proven resource acceptance"
+        );
+        fixture.close().await;
+        return;
+    }
     if settled_first {
         let mut tx = fixture
             .uow
@@ -159,37 +194,96 @@ async fn run_handoff(
         fixture.close().await;
         return;
     }
-    // Crash after reclaim committed but before its start. The persisted
-    // lineage must still authorize bounded fallback after this lease expires.
-    let mut reclaimed_tx = fixture.uow.begin().await.expect("reclaim");
-    assert!(matches!(
-        SendAttemptRepository::claim(
-            &mut reclaimed_tx,
-            &obligation,
+    if !initial_reservation {
+        // Crash after reclaim committed but before its start. The persisted
+        // lineage must still authorize bounded fallback after this lease expires.
+        let mut reclaimed_tx = fixture.uow.begin().await.expect("reclaim");
+        assert!(matches!(
+            SendAttemptRepository::claim(
+                &mut reclaimed_tx,
+                &obligation,
+                &NodeIdentity::local(),
+                Duration::from_secs(5)
+            )
+            .await
+            .expect("reclaim"),
+            SendClaim::Acquired(_)
+        ));
+        reclaimed_tx.commit().await.expect("reclaim commit");
+        fixture
+            .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+            .await;
+    }
+    if siblings {
+        // A newly reclaimed sibling may not be displaced while its sink
+        // authority is still current, either before or after start.
+        let sibling = SendObligation {
+            recipient: resources[1].clone(),
+            ..obligation.clone()
+        };
+        let mut tx = fixture.uow.begin().await.expect("active sibling");
+        let SendClaim::Acquired(active) = SendAttemptRepository::claim(
+            &mut tx,
+            &sibling,
             &NodeIdentity::local(),
-            Duration::from_secs(5)
+            Duration::from_secs(5),
         )
         .await
-        .expect("reclaim"),
-        SendClaim::Acquired(_)
-    ));
-    reclaimed_tx.commit().await.expect("reclaim commit");
-    fixture
-        .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+        .expect("active sibling claim") else {
+            panic!("expired sibling")
+        };
+        tx.commit().await.expect("active sibling commit");
+        assert!(handoff(&fixture.uow, &deps, key, &progress, &resource)
+            .await
+            .expect("leased sibling")
+            .is_none());
+        let mut tx = fixture.uow.begin().await.expect("active sibling start");
+        assert!(SendAttemptRepository::start(&mut tx, &active)
+            .await
+            .expect("active sibling start"));
+        tx.commit().await.expect("active sibling start commit");
+        assert!(handoff(&fixture.uow, &deps, key, &progress, &resource)
+            .await
+            .expect("started sibling")
+            .is_none());
+        fixture
+            .execute("UPDATE ingress_send_attempts SET expires_at_ms = 0", ())
+            .await;
+        assert_eq!(
+            handoff(&fixture.uow, &deps, key, &progress, &resource)
+                .await
+                .expect("first sibling handoff"),
+            Some(vec![canonical_intent.clone()])
+        );
+        let mut tx = fixture
+            .uow
+            .begin()
+            .await
+            .expect("retired current sibling token");
+        assert!(!SendAttemptRepository::complete(&mut tx, &active)
+            .await
+            .expect("current sibling token retired"));
+        assert!(
+            !SendAttemptRepository::release_proven_not_enqueued(&mut tx, &active)
+                .await
+                .expect("current sibling release fenced")
+        );
+        tx.commit().await.expect("retirement check");
+    } else {
+        let report = crate::ingress::execute::execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        )
         .await;
-    let report = crate::ingress::execute::execute_effects(
-        &fixture.uow,
-        &fixture.db,
-        &decision,
-        &ImmediateSink,
-        &deps,
-        Duration::from_secs(5),
-    )
-    .await;
-    assert!(
-        report.receipt_failures.is_empty(),
-        "offline handoff must settle without fabricating socket acceptance"
-    );
+        assert!(
+            report.receipt_failures.is_empty(),
+            "offline handoff must settle without fabricating socket acceptance"
+        );
+    }
     let rows = storage
         .list_unoutboxed_archived(10)
         .await
@@ -201,7 +295,7 @@ async fn run_handoff(
             "existing notification janitor must discover recovered delivery"
         );
         assert!(matches!(&rows[0].payload, PendingPayload::Archived(_)));
-        assert_eq!(rows[0].id, pending_id(key, &progress.receipt, &resource));
+        assert_eq!(rows[0].id, pending_id(key, &progress.receipt));
     } else {
         assert!(
             rows.is_empty(),
@@ -213,10 +307,14 @@ async fn run_handoff(
         if hint == Some(Hint::NoStore) { 0 } else { 1 }
     );
     let mut tx = fixture.uow.begin().await.expect("proof");
-    let completed = DeliveryProgressRepository::load(&mut tx, key, &progress.receipt)
-        .await
-        .expect("custody progress");
-    assert!(resources.iter().all(|resource| completed.contains(resource)), "all expired siblings must settle through existing archived custody without uniqueness churn");
+    let completed =
+        crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, &progress.receipt)
+            .await
+            .expect("resource proof");
+    assert!(
+        completed.is_empty(),
+        "recipient-wide offline custody is not individual socket delivery evidence"
+    );
     assert!(EffectReceiptRepository::contains(
         &mut tx,
         key,
@@ -233,12 +331,28 @@ async fn run_handoff(
             .await
             .expect("old release revoked")
     );
+    if let Some(other) = sibling_lease {
+        assert!(!SendAttemptRepository::complete(&mut tx, &other)
+            .await
+            .expect("old sibling token revoked"));
+        assert!(
+            !SendAttemptRepository::release_proven_not_enqueued(&mut tx, &other)
+                .await
+                .expect("old sibling cannot delete")
+        );
+    }
     tx.commit().await.expect("proof commit");
     fixture.execute("DELETE FROM pending_delivery", ()).await;
     assert_eq!(
-        handoff(&fixture.uow, &deps, key, &progress, &resource)
-            .await
-            .expect("consumed retry"),
+        handoff(
+            &fixture.uow,
+            &deps,
+            key,
+            &progress,
+            resources.last().expect("last sibling")
+        )
+        .await
+        .expect("consumed retry"),
         Some(vec![canonical_intent])
     );
     assert_eq!(
@@ -251,7 +365,7 @@ async fn run_handoff(
 
 #[tokio::test]
 async fn sqlite_expired_start_hands_off_to_pending_notification_recovery() {
-    run_handoff(IngressFixture::sqlite().await, None, false, false).await;
+    run_handoff(IngressFixture::sqlite().await, None, false, false, false).await;
 }
 
 #[tokio::test]
@@ -259,6 +373,7 @@ async fn sqlite_ambiguous_fallback_respects_no_store() {
     run_handoff(
         IngressFixture::sqlite().await,
         Some(Hint::NoStore),
+        false,
         false,
         false,
     )
@@ -272,6 +387,7 @@ async fn sqlite_ambiguous_fallback_preserves_transient_storage_policy() {
         Some(Hint::NoPermanentStore),
         false,
         false,
+        false,
     )
     .await;
 }
@@ -279,23 +395,66 @@ async fn sqlite_ambiguous_fallback_preserves_transient_storage_policy() {
 #[tokio::test]
 async fn postgres_expired_start_hands_off_to_pending_notification_recovery() {
     if let Some(fixture) = IngressFixture::postgres("ambiguous_offline").await {
-        run_handoff(fixture, None, false, false).await;
+        run_handoff(fixture, None, false, false, false).await;
     }
 }
 
 #[tokio::test]
 async fn sqlite_settled_route_with_expired_start_cannot_recreate_pending_delivery() {
-    run_handoff(IngressFixture::sqlite().await, None, true, false).await;
+    run_handoff(IngressFixture::sqlite().await, None, true, false, false).await;
 }
 
 #[tokio::test]
 async fn sqlite_expired_siblings_share_archived_pending_custody() {
-    run_handoff(IngressFixture::sqlite().await, None, false, true).await;
+    run_handoff(IngressFixture::sqlite().await, None, false, true, false).await;
 }
 
 #[tokio::test]
 async fn postgres_expired_siblings_share_archived_pending_custody() {
     if let Some(fixture) = IngressFixture::postgres("ambiguous_siblings").await {
-        run_handoff(fixture, None, false, true).await;
+        run_handoff(fixture, None, false, true, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_transient_sibling_handoff_survives_consumption() {
+    run_handoff(
+        IngressFixture::sqlite().await,
+        Some(Hint::NoPermanentStore),
+        false,
+        true,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_transient_sibling_handoff_survives_consumption() {
+    if let Some(fixture) = IngressFixture::postgres("transient_sibling_handoff").await {
+        run_handoff(fixture, Some(Hint::NoPermanentStore), false, true, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_expired_initial_reservation_hands_off_offline() {
+    run_handoff(IngressFixture::sqlite().await, None, false, false, true).await;
+}
+
+#[tokio::test]
+async fn postgres_expired_initial_reservation_hands_off_offline() {
+    if let Some(fixture) = IngressFixture::postgres("initial_reservation_handoff").await {
+        run_handoff(fixture, None, false, false, true).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_accepted_resource_with_expired_marker_cannot_handoff() {
+    run_handoff(IngressFixture::sqlite().await, None, true, true, false).await;
+}
+
+#[tokio::test]
+async fn postgres_accepted_resource_with_expired_marker_cannot_handoff() {
+    if let Some(fixture) = IngressFixture::postgres("resource_proof_before_handoff").await {
+        run_handoff(fixture, None, true, true, false).await;
     }
 }

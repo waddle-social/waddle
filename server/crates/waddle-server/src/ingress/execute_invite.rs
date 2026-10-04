@@ -14,16 +14,10 @@ use crate::{
         EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
         IngressUowTransaction, PendingReceiptRepository, SendAttemptRepository, SendObligation,
     },
-    server::routes::{
-        interpret::{
-            deliver_direct_to_full_locally, deliver_registered_remote_resource,
-            effects::{
-                invite::{self, MucUserRoute},
-                EffectOutcome, SettledCompletion, SettledOutcome,
-            },
-            Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
-        },
-        websocket::handlers::message::muc_invite::MucUserDeliveryError,
+    server::routes::interpret::{
+        deliver_direct_to_full_locally, deliver_registered_remote_resource,
+        effects::{invite::MucUserRoute, EffectOutcome, SettledCompletion, SettledOutcome},
+        Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
     },
 };
 
@@ -49,7 +43,6 @@ enum Prepared {
 enum Finished {
     Settled(Vec<IngressEffectIntent>),
     Uncertain,
-    QuotaExceeded,
 }
 
 #[cfg(test)]
@@ -77,14 +70,6 @@ pub(super) async fn execute(
     match result {
         Ok(Finished::Settled(persisted)) => settled(persisted, SettledCompletion::Complete),
         Ok(Finished::Uncertain) => settled(Vec::new(), SettledCompletion::Uncertain),
-        Ok(Finished::QuotaExceeded) => {
-            if let Some(failure) = &route.failure {
-                // The terminal pair committed before compensation. A competing
-                // executor can no longer enqueue while membership is rolled back.
-                invite::compensate((**failure).clone(), deps).await;
-            }
-            EffectOutcome::MucUserDelivery(Err(MucUserDeliveryError::QuotaExceeded))
-        }
         Err(error) => {
             // A failed/unknown database outcome cannot prove delivery failed,
             // so it must never revoke membership or remove the invitation.
@@ -300,20 +285,18 @@ async fn finish(
         return Ok(Finished::Uncertain);
     }
     let inserted = PendingReceiptRepository::insert(&mut tx, &route.fallback, quota).await?;
-    if inserted == InsertOutcome::QuotaExceeded && (expired_ambiguity || accepted > 0) {
-        // Unknown or proven earlier acceptance cannot authorize membership
-        // compensation. Keep the expired marker and retry when quota is freed.
+    if inserted == InsertOutcome::QuotaExceeded {
+        // Canonical acceptance already authorized the membership and ledger.
+        // Their best-effort rollback is neither durable nor generation-fenced:
+        // terminal receipts followed by compensation can strand authorization
+        // on a crash, while replaying compensation can revoke a newer grant.
+        // Keep delivery retryable until quota is available, just as for an
+        // uncertain send. Do not report a terminal refusal or roll back grants.
         tx.commit().await?;
         return Ok(Finished::Uncertain);
     }
-    if inserted == InsertOutcome::QuotaExceeded && route.failure.is_none() {
-        // A decline keeps its claimed invitation and may retry after quota is
-        // freed. There is no compensation or accepted effect to exclude.
-        tx.commit().await?;
-        return Ok(Finished::QuotaExceeded);
-    }
     for recipient in &route.resources {
-        SendAttemptRepository::retire_expired_started(
+        SendAttemptRepository::retire_expired_attempt(
             &mut tx,
             &SendObligation {
                 message: invitation.key,
@@ -325,12 +308,7 @@ async fn finish(
     }
     let persisted = settle_pair(&mut tx, invitation).await?;
     tx.commit().await?;
-    Ok(match inserted {
-        InsertOutcome::Inserted => Finished::Settled(persisted),
-        // Refusal, like the ordinary offline arm, is a terminal resolution.
-        // Commit that decision before any nontransactional compensation.
-        InsertOutcome::QuotaExceeded => Finished::QuotaExceeded,
-    })
+    Ok(Finished::Settled(persisted))
 }
 
 async fn already_resolved(

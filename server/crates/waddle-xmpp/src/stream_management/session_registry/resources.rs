@@ -634,6 +634,11 @@ impl InMemorySmSessionRegistry {
             }
             .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
             match outcome {
+                KeyedSnapshotOutcome::ObligationAlreadyResolved => {
+                    // Discard the speculative clone: another sink or policy
+                    // already settled this obligation without SM allocation.
+                    Ok(SmKeyedAppendOutcome::Suppressed)
+                }
                 KeyedSnapshotOutcome::Committed => {
                     // Publication may report displacement, but the transaction still
                     // allocated the entry. Promotion reconciles the captured queue.

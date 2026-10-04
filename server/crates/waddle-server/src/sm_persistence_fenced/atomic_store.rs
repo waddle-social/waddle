@@ -28,8 +28,12 @@ impl PostgresFencedSmPersistence {
             let append = append.as_ref().ok_or_else(|| {
                 SmPersistenceError::Other("new delivery requires an ingress append".into())
             })?;
-            crate::sm_persistence::ingress_append::authorize_new_delivery(&mut tx, &append.key)
-                .await?;
+            if crate::sm_persistence::ingress_append::authorize_new_delivery(&mut tx, &append.key)
+                .await?
+                == crate::sm_persistence::ingress_append::NewDeliveryAuthorization::AlreadyResolved
+            {
+                return Ok(KeyedSnapshotOutcome::ObligationAlreadyResolved);
+            }
         }
 
         // Drop any pre-existing unacked rows first (see the portable

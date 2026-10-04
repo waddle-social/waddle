@@ -254,6 +254,9 @@ pub enum IngressCustodyDisposition {
 /// Result of a snapshot write that also claims an ingress obligation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyedSnapshotOutcome {
+    /// Durable ingress completion superseded this new-delivery request. No SM
+    /// queue allocation or snapshot mutation occurred and no stream owns it.
+    ObligationAlreadyResolved,
     /// The snapshot and the ledger proof committed together.
     Committed,
     /// The obligation was already allocated, so nothing committed: neither the queue nor
@@ -508,7 +511,10 @@ pub trait SmPersistenceStorage: Send + Sync {
         append: PersistedIngressAppend,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError>;
 
-    /// Allocate a new detached delivery only if no live attempt owns it.
+    /// Allocate a new detached delivery only if no live attempt or durable
+    /// completion owns it. Prior completion returns
+    /// [`KeyedSnapshotOutcome::ObligationAlreadyResolved`] without changing the
+    /// snapshot, queue, or allocation ledger.
     /// Database backends serialize this check with live claims on the canonical
     /// ingress row and retain that lock through snapshot/custody commit. Already
     /// accepted frames and detach drains use the ordinary append method instead.

@@ -157,21 +157,19 @@ pub(super) async fn execute(
             archive_positions,
             dispatch_stream,
         });
-        let expired_ambiguity = match expired_start(uow, key, progress, resource).await {
-            Ok(expired) => expired,
-            Err(_) => {
-                completion = SettledCompletion::Uncertain;
-                continue;
-            }
-        };
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;
-        if expired_ambiguity && outcome == FullJidDeliveryOutcome::Unavailable {
+        if outcome == FullJidDeliveryOutcome::Unavailable {
             match super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await {
                 Ok(Some(settled)) => {
                     handed_off.push(resource.clone());
                     if !settled.is_empty() {
+                        // Recipient-wide custody settled the entire route.
+                        // Do not turn its aggregate proof into fabricated
+                        // per-sibling socket successes on the next iteration.
                         persisted = settled;
+                        completion = SettledCompletion::Complete;
+                        break;
                     }
                     continue;
                 }
@@ -228,31 +226,6 @@ pub(super) async fn execute(
         completion,
         detached: Some(destinations),
     })
-}
-
-async fn expired_start(
-    uow: &IngressUnitOfWork,
-    key: MessageKey,
-    progress: &RouteProgress,
-    resource: &FullJid,
-) -> Result<bool, IngressUowError> {
-    let mut tx = uow
-        .begin_with_timeouts(
-            std::time::Duration::from_millis(100),
-            std::time::Duration::from_millis(250),
-        )
-        .await?;
-    let expired = crate::ingress_uow::SendAttemptRepository::has_expired_started(
-        &mut tx,
-        &crate::ingress_uow::SendObligation {
-            message: key,
-            receipt: progress.receipt.clone(),
-            recipient: resource.clone(),
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(expired)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

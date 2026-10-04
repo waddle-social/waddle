@@ -972,7 +972,9 @@ allocations and recovery completion keep their idempotency keys. Recorded live
 recipient copies use `ingress_send_attempts`, keyed by canonical message, receipt
 identity and full recipient JID, at both local and registered-remote sockets.
 
-An unstarted reservation has a five-second lease. Committing `started` establishes
+An unstarted reservation has a five-second lease. An expired reservation with no
+available sink can transfer to offline custody, even if no send ever started.
+Committing `started` establishes
 a **60-second ambiguity window**, measured by the database clock. During that
 window other executors suppress both retry and fallback. Completed enqueue,
 receipt/progress, carbon-resource or SM-custody evidence repairs the obligation
@@ -981,7 +983,8 @@ without sending another copy. Positive queue rejection can retry immediately.
 After the ambiguity deadline, recovery prefers existing proof, then may reclaim
 with a fresh token or transfer responsibility to offline storage. The durable
 `recovered` flag preserves the earlier uncertainty even if a reclaimed executor
-dies before starting. Late completion or release with a replaced token cannot
+dies before starting. Expired initial reservations remain distinguishable from
+unknown starts and retain their own recovery eligibility. Late completion or release with a replaced token cannot
 remove replacement authority. An expired lease is permission for bounded
 recovery, **not proof that the old send never happened**: a suspended old writer
 may still resume, so a duplicate is possible. The policy favors eventual delivery
@@ -989,12 +992,16 @@ and notification over permanent suppression after a crash.
 
 For an eligible ordinary direct route whose live/detached retry cannot accept the
 copy, the executor rechecks canonical authority and current block policy, then
-atomically inserts stable pending custody, records resource progress, and retires
-the expired attempt. Recipient archive evidence produces an unoutboxed archived
+atomically inserts one recipient-wide pending copy, retires expired sibling
+attempts, and settles the exact aggregate direct-route receipt. A fresh sibling
+reservation or started attempt blocks this handoff until its outcome or deadline
+is known. The receipt records offline disposition, not successful socket delivery.
+Recipient archive evidence produces an unoutboxed archived
 pending row. The existing XEP-0357 notification sweep reconstructs its MAM source,
 applies normal notification policy, inserts the candidate, and marks it outboxed.
 Thus a crash before enqueue can still wake an offline mobile client. The durable
-progress proof prevents recreation after that pending row has been consumed.
+aggregate receipt prevents any sibling from recreating custody after the pending
+row has been consumed, including transient payloads.
 Quota or storage failure leaves the obligation retryable. Existing storage hints
 still apply: forbidden offline storage is not introduced, and transient
 `no-permanent-store` delivery does not acquire an unsupported archived push path.
@@ -1003,12 +1010,24 @@ Recorded invitation/decline fallback uses its frozen pending identity and the
 same canonical lock. An unexpired unknown attempt suppresses fallback. After the
 bound, whole-invitation pending delivery can duplicate a previously accepted
 sibling. Quota refusal after ambiguous or proven delivery must not revoke
-membership or remove the invitation ledger; that case stays retryable. Only a
-proven unsent invitation may commit terminal refusal before its existing
-best-effort compensation. Declines without compensation retain quota retry.
+membership or remove the invitation ledger. All canonical invitation and decline
+quota refusals stay retryable, including proven-unsent copies: neither terminal
+receipts nor membership/ledger compensation occur on quota refusal. Recovery or a
+client retry can finish delivery once quota is available. Restart recovery rebuilds
+only the frozen notification after the matching ledger and grant obligations have
+receipts; it never repeats those mutations. The original invitation TTL and
+current block policy still apply: expired or blocked notifications settle both
+delivery obligations without sending. Missing prerequisite evidence remains
+unresolved. The granted membership
+remains authorized while delivery waits. This avoids a terminal-before-rollback
+crash gap without attempting to serialize actor references or replay an old
+rollback against a newer membership grant. The legacy unkeyed invitation path
+retains its existing best-effort compensation behavior.
 
-Fresh detached allocations check the same deadline and proof under canonical
-authority. Already-accepted frames can still gain durable custody during detach
+Fresh detached allocations check the same deadline, aggregate receipt and
+per-resource delivery/carbon proof under the canonical lock. An already resolved
+obligation discards the speculative append without advancing the SM counter or
+creating another custody allocation. Already-accepted frames can still gain durable custody during detach
 and use normal XEP-0198 retransmission. Legacy relay-carbon fanout carries its
 original receipt identity to every resource and retains prior attempt evidence
 when inventory shrinks. After expiry, a vanished carbon resource follows the
@@ -1022,6 +1041,19 @@ replacement claim. Invocation may repeat after an unknown result, so this is not
 exactly-once execution of guest external effects. The existing 20-attempt limit
 settles exhausted work as failure; valid result/publication/receipt writes remain
 atomic and publication output indices remain idempotent.
+
+**Accepted residual for #1776:** “recognised on retry instead of repeated” holds
+when durable completion, receipt or custody evidence exists. A committed start
+alone proves only that execution might have begun. After its bounded deadline,
+recovery deliberately permits another attempt rather than silently losing the
+message or notification. A live socket can therefore receive a duplicate, and a
+guest can repeat an external provider request. For example, Jev without a provider
+idempotency key can incur a second request and charge after a lost callback
+result. Token fencing prevents stale result publication; it cannot undo or
+deduplicate provider side effects. This is the implemented availability policy,
+not an exactly-once or at-most-once external-effect guarantee. Providers requiring
+stronger guarantees need their own durable idempotency/result lookup before
+performing the effect.
 
 **Deployment:** this PR ships the production HelmRelease as `Recreate`. Old
 writers must stop before new writers apply V1022 or use the v4 side-effect relay;
