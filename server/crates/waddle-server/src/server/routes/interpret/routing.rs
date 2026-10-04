@@ -785,6 +785,13 @@ pub(crate) async fn deliver_peer_to_full(
     stanza: &Stanza,
     ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
+    // Keyed live copies are accepted only by the owning socket boundary.
+    // A socket appearing after that check must not bypass its durable fence.
+    if ingress_append_context.is_some() {
+        return deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
+            .await
+            .into();
+    }
     match user_registry {
         Some(user_registry) => {
             deliver_one_via_actor(
@@ -817,6 +824,13 @@ pub(crate) async fn deliver_direct_to_full(
     stanza: &Stanza,
     ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
+    // Keyed live copies are accepted only by the owning socket boundary.
+    // A socket appearing after that check must not bypass its durable fence.
+    if ingress_append_context.is_some() {
+        return deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
+            .await
+            .into();
+    }
     match user_registry {
         Some(user_registry) => {
             deliver_one_via_actor(

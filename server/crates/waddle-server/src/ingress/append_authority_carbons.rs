@@ -30,13 +30,37 @@ pub(super) fn parse(message: &Message) -> Result<CarbonEnvelope, AppendAuthority
     let [payload] = message.payloads.as_slice() else {
         return Err(invalid());
     };
-    let (kind, inner) = if let Ok(sent) = Sent::try_from(payload.clone()) {
+    let (kind, mut inner) = if let Ok(sent) = Sent::try_from(payload.clone()) {
         (CarbonKind::Sent, sent.forwarded.message)
     } else if let Ok(received) = Received::try_from(payload.clone()) {
         (CarbonKind::Received, received.forwarded.message)
     } else {
         return Err(invalid());
     };
+    if let Some(thread) = &inner.thread {
+        if let Some(parent) = &thread.parent {
+            waddle_xmpp_core::mam::ThreadId::new(thread.id.clone()).ok_or_else(invalid)?;
+            waddle_xmpp_core::mam::ThreadId::new(parent.clone()).ok_or_else(invalid)?;
+            if parent.trim() != parent {
+                return Err(invalid());
+            }
+        }
+    }
+    // Reject degenerate threads before reattachment: that helper deliberately
+    // drops malformed metadata and must not erase an unauthorized wire payload.
+    // The forwarded parser uses the typed thread field; canonical envelopes
+    // retain parent-bearing threads as payloads at the ingress parse boundary.
+    if let Some(parent) = inner
+        .thread
+        .as_ref()
+        .and_then(|thread| thread.parent.clone())
+    {
+        waddle_xmpp_core::parser_utils::reattach_thread_parent(
+            &mut inner,
+            parent,
+            waddle_xmpp_core::xep0201::CLIENT_STANZA_NS,
+        );
+    }
     let resource = message
         .to
         .clone()
@@ -112,17 +136,25 @@ pub(super) async fn authorize(
         return Err(AppendAuthorityRejection::CarbonObligationMismatch);
     }
     let mut expected = envelope.message().clone();
+    let mut archived_owner = false;
     for intent in &intents {
         if let IngressEffectIntent::ArchiveAuthoritative {
             archive, stanza_id, ..
         } = intent
         {
             if archive == &carbon.owner {
+                archived_owner = true;
                 waddle_xmpp_core::xep0359::add_stanza_id(&mut expected, stanza_id);
             }
         }
     }
-    if expected != carbon.inner {
+    let matches = match carbon.kind {
+        CarbonKind::Sent => super::same_message_content(&expected, &carbon.inner),
+        CarbonKind::Received => {
+            super::recipient_copy_matches(&expected, &carbon.inner, &carbon.owner, archived_owner)
+        }
+    };
+    if !matches {
         return Err(AppendAuthorityRejection::CarbonObligationMismatch);
     }
     Ok(())

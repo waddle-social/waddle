@@ -618,6 +618,16 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         atomic_store::store_session_atomic_with_ingress_append(self, session, unacked, append).await
     }
 
+    async fn store_session_atomic_with_ingress_delivery(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        atomic_store::store_session_atomic_with_ingress_delivery(self, session, unacked, append)
+            .await
+    }
+
     async fn get_ingress_append(
         &self,
         key: &waddle_xmpp::stream_management::SmIngressAppendKey,

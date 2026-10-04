@@ -9,7 +9,7 @@ use crate::ingress::identity::IngressAppendObligationRef;
 use crate::server::routes::interpret::SmIngressAppendContext;
 
 /// Call only after authenticating the sender claim or resource registration.
-/// Archive-ordered copies must retain this authority; callers reject them when
+/// Every keyed copy must retain this authority; callers reject it when
 /// validation fails instead of falling back to an unkeyed append.
 pub(super) async fn authorize_ingress_append(
     services: &OrderedRelayDeliveryServices,
@@ -27,8 +27,8 @@ pub(super) async fn authorize_ingress_append(
     }
 }
 
-pub(super) fn requires_ordering_authority(obligation: Option<&IngressAppendObligationRef>) -> bool {
-    obligation.is_some_and(|obligation| !obligation.archive_positions.is_empty())
+pub(super) fn requires_ingress_authority(obligation: Option<&IngressAppendObligationRef>) -> bool {
+    obligation.is_some()
 }
 
 async fn check_authority(

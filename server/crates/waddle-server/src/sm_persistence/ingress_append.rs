@@ -9,6 +9,88 @@ use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
 
 use crate::db::{Database, DatabaseError, Row, Transaction};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewDeliveryAuthorization {
+    Proceed,
+    AlreadyResolved,
+}
+
+/// Serialize new detached allocation with live claims and transitions. This
+/// canonical row lock must stay held until the snapshot and custody commit.
+/// SQLite callers begin IMMEDIATE before reaching this read, avoiding deferred
+/// read-to-write upgrades while competing with a live sender.
+pub(crate) async fn authorize_new_delivery(
+    tx: &mut Transaction<'_>,
+    key: &SmIngressAppendKey,
+) -> Result<NewDeliveryAuthorization, SmPersistenceError> {
+    let postgres = tx.driver() == crate::db::DatabaseDriver::Postgres;
+    let lock_sql = if postgres {
+        "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE"
+    } else {
+        "SELECT 1 FROM ingress_messages WHERE message_key = ?"
+    };
+    let mut rows = tx
+        .query(
+            lock_sql,
+            crate::db_params![key.message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(storage_error)?;
+    if rows.next().await.map_err(storage_error)?.is_none() {
+        return Err(SmPersistenceError::Other(
+            "canonical ingress message missing for detached delivery".into(),
+        ));
+    }
+    drop(rows);
+    let key_placeholder = if postgres { "?::uuid" } else { "?" };
+    // A completed offline handoff retires its live attempt. Absence of that
+    // lease is therefore not permission to allocate another replay copy. All
+    // completion proofs must be rechecked under the same canonical lock, before
+    // touching the speculative SM snapshot (including unrelated queue rows).
+    let resolved_sql = format!("SELECT 1 WHERE EXISTS (SELECT 1 FROM ingress_effect_receipts WHERE message_key = {key_placeholder} AND kind = ? AND semantic_identity_hash = ?) OR EXISTS (SELECT 1 FROM ingress_delivery_receipts WHERE message_key = {key_placeholder} AND kind = ? AND semantic_identity_hash = ? AND resource = ?) OR EXISTS (SELECT 1 FROM ingress_carbon_receipts WHERE message_key = {key_placeholder} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?)");
+    let mut rows = tx
+        .query(
+            &resolved_sql,
+            crate::db_params![
+                key.message_key.to_storage().to_string(),
+                i64::from(key.kind.to_storage()),
+                key.semantic_identity_hash.to_vec(),
+                key.message_key.to_storage().to_string(),
+                i64::from(key.kind.to_storage()),
+                key.semantic_identity_hash.to_vec(),
+                key.resource.to_string(),
+                key.message_key.to_storage().to_string(),
+                i64::from(key.kind.to_storage()),
+                key.semantic_identity_hash.to_vec(),
+                key.resource.to_string(),
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+    if rows.next().await.map_err(storage_error)?.is_some() {
+        return Ok(NewDeliveryAuthorization::AlreadyResolved);
+    }
+    drop(rows);
+    let blocks = crate::ingress_uow::send_attempt_blocks_delivery(tx.driver());
+    let sql = format!("SELECT 1 FROM ingress_send_attempts WHERE message_key = {key_placeholder} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND {blocks}");
+    let mut rows = tx
+        .query(
+            &sql,
+            crate::db_params![
+                key.message_key.to_storage().to_string(),
+                i64::from(key.kind.to_storage()),
+                key.semantic_identity_hash.to_vec(),
+                key.resource.to_string()
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+    if rows.next().await.map_err(storage_error)?.is_some() {
+        return Err(SmPersistenceError::IngressDeliveryBlocked);
+    }
+    Ok(NewDeliveryAuthorization::Proceed)
+}
+
 /// Allocate once; a duplicate primary key is handled by the snapshot caller.
 pub(crate) async fn insert(
     tx: &mut Transaction<'_>,

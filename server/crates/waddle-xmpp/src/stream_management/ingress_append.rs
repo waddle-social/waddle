@@ -119,8 +119,8 @@ pub enum SmKeyedAppendOutcome {
     /// stream than the one currently bound for the resource. That is still valid proof:
     /// the obligation was allocated once, which is exactly what must not happen twice.
     AlreadyAppended { accepting_stream: SmSessionId },
-    /// The current detached session disabled this carbon obligation. The
-    /// obligation is satisfied without allocating custody or advancing SM.
+    /// Policy suppressed this copy, or durable ingress completion already
+    /// satisfied it. No custody is allocated and no SM counter advances.
     Suppressed,
     /// No unexpired session for the resource. Nothing was appended and the obligation
     /// remains unresolved for its recorded route to retry or degrade.

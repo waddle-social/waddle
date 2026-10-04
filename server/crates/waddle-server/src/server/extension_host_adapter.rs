@@ -147,6 +147,8 @@ impl ExtensionHostAdapter {
     fn interpret_deps<'a>(&'a self, session: Option<&'a Session>) -> Deps<'a> {
         Deps {
             dispatch_probe_budget: None,
+            ingress_delivery_uow: None,
+            ingress_delivery_stop: None,
             delivery_execution_context:
                 crate::server::routes::interpret::DeliveryExecutionContext::Live,
             effects: &crate::server::routes::interpret::effects::ImmediateSink,

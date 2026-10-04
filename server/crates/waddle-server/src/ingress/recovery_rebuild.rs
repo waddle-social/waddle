@@ -124,7 +124,12 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
             Err(error) => return Err(error),
         }
     }
-    let mut discarded_receipts = restore_direct_routes(&mut plan, &input)?;
+    let mut discarded_receipts = invitation::restore(&mut plan, &input)?;
+    for receipt in restore_direct_routes(&mut plan, &input)? {
+        if !discarded_receipts.contains(&receipt) {
+            discarded_receipts.push(receipt);
+        }
+    }
     discarded_receipts.extend(carbons::restore(&mut plan, &input)?);
     muc::restore_muc_routes(&mut plan, &input)?;
     let delegated = delegated_recoveries(&input);
@@ -471,3 +476,6 @@ mod muc;
 
 #[path = "recovery_rebuild_carbons.rs"]
 mod carbons;
+
+#[path = "recovery_invitation.rs"]
+mod invitation;

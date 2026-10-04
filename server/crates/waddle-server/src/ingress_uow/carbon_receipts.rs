@@ -8,6 +8,56 @@ use crate::{db::DatabaseDriver, ingress::decision::EffectReceiptKey};
 pub(crate) struct CarbonReceiptRepository;
 
 impl CarbonReceiptRepository {
+    /// A lost owner reply must not erase a resource merely because its socket
+    /// disappeared. Include unresolved starts and durable acceptance evidence.
+    pub(crate) async fn attempted_resources(
+        db: &crate::db::Database,
+        message: MessageKey,
+        receipt: &EffectReceiptKey,
+    ) -> Result<Vec<FullJid>, IngressUowError> {
+        let mut tx = db.begin().await?;
+        let (key, clock) = if tx.driver() == DatabaseDriver::Postgres {
+            (
+                "?::uuid",
+                "(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint",
+            )
+        } else {
+            (
+                "?",
+                "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)",
+            )
+        };
+        let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state = 2 OR expires_at_ms > {clock}) UNION SELECT resource FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? UNION SELECT recipient FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ?");
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![
+                    message.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec(),
+                    message.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec(),
+                    message.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec()
+                ],
+            )
+            .await?;
+        let mut recipients = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let recipient: String = row.get(0)?;
+            recipients.push(
+                recipient
+                    .parse()
+                    .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
+            );
+        }
+        drop(rows);
+        tx.commit().await?;
+        Ok(recipients)
+    }
+
     /// Read immutable canonical carbon authority without taking a writer lock.
     pub(crate) async fn load_authority(
         db: &crate::db::Database,
@@ -94,9 +144,19 @@ impl CarbonReceiptRepository {
         receipt: &EffectReceiptKey,
         recipients: &[FullJid],
     ) -> Result<(), IngressUowError> {
-        if recipients.is_empty() {
-            return Ok(());
-        }
+        Self::record_progress(uow, message, receipt, recipients, false).await?;
+        Ok(())
+    }
+
+    /// Serialize aggregate completion with every resource's start transition.
+    /// A concurrent or vanished ambiguous target must keep the fanout pending.
+    pub(crate) async fn record_progress(
+        uow: &IngressUnitOfWork,
+        message: MessageKey,
+        receipt: &EffectReceiptKey,
+        recipients: &[FullJid],
+        complete: bool,
+    ) -> Result<bool, IngressUowError> {
         let mut tx = uow.begin().await?;
         if !CanonicalMessageRepository::lock(&mut tx, message).await? {
             return Err(IngressUowError::EffectIntentMessageMissing);
@@ -119,7 +179,67 @@ impl CarbonReceiptRepository {
                 )
                 .await?;
         }
+        let mut settled = !complete;
+        if complete {
+            let (key, clock) = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
+                (
+                    "?::uuid",
+                    "(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint",
+                )
+            } else {
+                (
+                    "?",
+                    "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)",
+                )
+            };
+            let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state IN (0, 1) AND expires_at_ms > {clock})");
+            let mut rows = tx
+                .transaction_mut()
+                .query(
+                    &sql,
+                    crate::db_params![
+                        message.to_storage().to_string(),
+                        receipt.kind.to_storage(),
+                        receipt.semantic_identity_hash.to_vec()
+                    ],
+                )
+                .await?;
+            let mut pending = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let recipient: String = row.get(0)?;
+                pending.push(
+                    recipient
+                        .parse()
+                        .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
+                );
+            }
+            drop(rows);
+            settled = true;
+            for recipient in pending {
+                let obligation = super::SendObligation {
+                    message,
+                    receipt: receipt.clone(),
+                    recipient,
+                };
+                if !super::SendAttemptRepository::has_custody(&mut tx, &obligation).await?
+                    && !super::SendAttemptRepository::has_resource_receipt(&mut tx, &obligation)
+                        .await?
+                {
+                    settled = false;
+                    break;
+                }
+            }
+            if settled {
+                super::EffectReceiptRepository::record_receipt(
+                    &mut tx,
+                    message,
+                    receipt.kind,
+                    &receipt.semantic_identity_hash,
+                )
+                .await?;
+            }
+        }
         tx.commit().await?;
-        Ok(())
+        Ok(settled)
     }
 }

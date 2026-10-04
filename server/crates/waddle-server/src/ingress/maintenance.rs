@@ -30,6 +30,9 @@ use super::RecoveryEnvironment;
 mod stalls;
 use stalls::{RecoveryAttempt, StalledRows, Suppression, UnsupportedRows};
 
+#[path = "maintenance_waits.rs"]
+mod waits;
+
 type MaintenancePosition = (DateTime<Utc>, MessageKey);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,6 +493,34 @@ async fn recover_candidates(
                 {
                     attempt.classification = *classification;
                     attempt.pending.clone_from(pending);
+                }
+            }
+            if matches!(
+                &result,
+                Ok(Ok(super::recovery_executor::RowRecovery::Executed {
+                    classification: AttemptClassification::Inconclusive,
+                    unsupported: false,
+                    ..
+                }))
+            ) {
+                match tokio::time::timeout(
+                    RECOVERY_ACCOUNTING_BUDGET,
+                    waits::known_wait(uow, candidate.key),
+                )
+                .await
+                {
+                    Ok(Ok(Some((evidence, until)))) => cursor
+                        .recovery_unsupported
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(candidate.key, evidence, Suppression::WaitingUntil(until)),
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, key = ?candidate.key, "ingress lease wait remains uncached");
+                    }
+                    Err(_) => {
+                        tracing::debug!(key = ?candidate.key, "ingress lease wait inspection timed out");
+                    }
                 }
             }
             match record_recovery_result(candidate, result) {

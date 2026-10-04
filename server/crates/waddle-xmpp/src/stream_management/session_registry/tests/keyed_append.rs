@@ -1128,3 +1128,52 @@ async fn acknowledged_custody_is_never_reopened_by_a_later_gap() {
         "an acknowledged allocation stays discharged: {outcome:?}"
     );
 }
+
+#[tokio::test]
+async fn live_attempt_blocks_new_allocation_but_allows_accepted_frame_custody() {
+    let stream = "live-attempt-interlock";
+    let storage = Arc::new(GatedSnapshotPersistence::new(stream));
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+    registry
+        .store_session(realistic_test_session(stream))
+        .await
+        .expect("detached session");
+    let before = snapshot(&registry, stream);
+    let key = obligation(&before.jid);
+    storage.block_new_delivery.store(true, Ordering::SeqCst);
+    assert!(registry
+        .record_keyed_stanza_for_detached_bound_resource(
+            &before.jid,
+            &stanza(),
+            Utc::now(),
+            key.clone()
+        )
+        .await
+        .is_err());
+    assert_snapshot_unchanged(&before, &snapshot(&registry, stream));
+    assert!(storage
+        .get_ingress_append(&key)
+        .await
+        .expect("no custody")
+        .is_none());
+    let outcome = registry
+        .record_keyed_outbound_for_detached_stream_at(
+            stream,
+            before.outbound_count.wrapping_add(1),
+            &stanza(),
+            Utc::now(),
+            key.clone(),
+        )
+        .await
+        .expect("accepted frame custody bypasses new delivery guard");
+    assert!(matches!(outcome, SmKeyedAppendOutcome::Appended { .. }));
+    assert_eq!(
+        snapshot(&registry, stream).outbound_count,
+        before.outbound_count.wrapping_add(1)
+    );
+    assert!(storage
+        .get_ingress_append(&key)
+        .await
+        .expect("accepted custody")
+        .is_some());
+}

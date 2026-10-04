@@ -27,6 +27,7 @@ mod room_subject;
 mod routing_detached_delivery;
 mod routing_fanout_pass;
 mod routing_full_jid_fallback;
+mod routing_keyed_register_race;
 mod routing_local_account;
 mod routing_negative_priority;
 mod routing_route_to_connection;
@@ -211,6 +212,8 @@ fn offline_pass_deps<'a>(
 ) -> Deps<'a> {
     Deps {
         dispatch_probe_budget: None,
+        ingress_delivery_uow: None,
+        ingress_delivery_stop: None,
         delivery_execution_context: super::DeliveryExecutionContext::Live,
         connection_registry: registry,
         user_registry: None,

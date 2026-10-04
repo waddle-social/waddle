@@ -23,6 +23,8 @@ pub(crate) fn build_interpret_deps<'a>(
 ) -> crate::server::routes::interpret::Deps<'a> {
     crate::server::routes::interpret::Deps {
         dispatch_probe_budget: None,
+        ingress_delivery_uow: None,
+        ingress_delivery_stop: None,
         delivery_execution_context:
             crate::server::routes::interpret::DeliveryExecutionContext::Live,
         connection_registry: &state.deps.protocol.connection_registry,

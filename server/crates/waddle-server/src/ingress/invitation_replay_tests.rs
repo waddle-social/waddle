@@ -23,7 +23,11 @@ use waddle_xmpp::{
 };
 
 async fn invitation_plan_commit_execute(fixture: IngressFixture) {
-    let state = create_test_websocket_state().await;
+    let state =
+        crate::server::routes::websocket::tests::create_test_websocket_state_with_durable_ingress(
+            &fixture,
+        )
+        .await;
     let session = create_test_session(state.as_ref(), "romeo").await;
     create_test_session(state.as_ref(), "juliet").await;
     let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");

@@ -1,4 +1,4 @@
-//! A successful append does not prove durable progress when its transaction stalls.
+//! Canonical contention prevents queue admission until durable send authority is available.
 use super::*;
 use std::time::Duration;
 use waddle_server::ingress::{
@@ -75,27 +75,17 @@ async fn progress_lock_contention(fixture: IngressFixture) {
             ExternalOutcome::Failed | ExternalOutcome::Uncertain
         )
     }));
-    match fixture.db.driver() {
-        waddle_server::db::DatabaseDriver::Sqlite => {
-            // Readiness uses BEGIN IMMEDIATE, so the competing writer blocks
-            // the ordering probe before either resource can be appended.
-            for receiver in &mut receivers {
-                assert!(matches!(
-                    receiver.try_recv(),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                ));
-            }
-        }
-        waddle_server::db::DatabaseDriver::Postgres => {
-            receivers[0]
-                .try_recv()
-                .expect("append precedes progress lock");
-            // The second resource may append before its progress write also
-            // times out. Neither append has durable progress.
-            while receivers[1].try_recv().is_ok() {}
-        }
+    // Both backends must acquire canonical authority before queue admission.
+    // A timeout while that lock is held cannot leave an unrecorded enqueue
+    // behind for the retry to duplicate.
+    for receiver in &mut receivers {
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
     blocker.commit().await.expect("release competing lock");
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
     assert_eq!(
         fixture
@@ -120,7 +110,7 @@ async fn progress_lock_contention(fixture: IngressFixture) {
     assert!(report.receipt_failures.is_empty());
     assert!(report.terminalization_failure.is_none());
     for receiver in &mut receivers {
-        receiver.try_recv().expect("unrecorded append retried");
+        receiver.try_recv().expect("deferred admission retried");
         assert!(receiver.try_recv().is_err(), "one retry per resource");
     }
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 2);

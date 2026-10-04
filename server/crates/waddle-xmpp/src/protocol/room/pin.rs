@@ -241,7 +241,11 @@ fn build_preview_element(preview: &PinPreview) -> Element {
     elem.append_child(author);
 
     let mut text = Element::builder("text", NS_WADDLE_PIN_V0).build();
-    text.append_text_node(&preview.text);
+    // Empty text has no XML node after storage decoding; keep the live typed
+    // payload identical to the frozen system message used for authorization.
+    if !preview.text.is_empty() {
+        text.append_text_node(&preview.text);
+    }
     elem.append_child(text);
 
     let mut ts = Element::builder("ts", NS_WADDLE_PIN_V0).build();
@@ -294,6 +298,33 @@ mod tests {
     use crate::xep::xep_waddle_pin::{build_pinned_element, build_unpinned_element};
     use jid::{BareJid, FullJid};
     use std::str::FromStr;
+
+    #[test]
+    fn empty_pin_preview_preserves_exact_system_message_through_storage() {
+        let room = bare("room@conf.example");
+        let pinner = bare("alice@example.com");
+        let preview = PinPreview::new(pinner.clone(), None, "", chrono::Utc::now());
+        let message = build_pinned_system_message(
+            &room,
+            &pinner,
+            "alice",
+            &room_stanza_id("original"),
+            Some(&preview),
+            None,
+        );
+        let encoded = crate::parser::message_to_string(&message).expect("stored XML");
+        let restored = crate::parser::message_from_string(&encoded).expect("restored message");
+        assert_eq!(
+            restored, message,
+            "empty preview cannot change exact payload authority"
+        );
+        let text = message.payloads[0]
+            .get_child("preview", NS_WADDLE_PIN_V0)
+            .expect("preview")
+            .get_child("text", NS_WADDLE_PIN_V0)
+            .expect("empty text element retained");
+        assert_eq!(text.nodes().count(), 0);
+    }
 
     fn bare(s: &str) -> BareJid {
         BareJid::from_str(s).expect("valid bare jid")

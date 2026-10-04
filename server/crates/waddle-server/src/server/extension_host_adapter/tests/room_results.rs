@@ -164,6 +164,11 @@ async fn saved_publication(
             .await
             .expect("claim")
             .expect("work");
+    assert!(
+        RoomObservationRepository::start(&mut tx, &work, Utc::now().timestamp_millis())
+            .await
+            .expect("start")
+    );
     tx.commit().await.expect("claim commit");
     let mut tx = f.uow.begin().await.expect("finish transaction");
     let outcome = RoomObservationOutcome::Completed(RoomObservationResult {
@@ -429,6 +434,11 @@ async fn real_client_room_archive_captures_observer_source(f: IngressFixture) {
         Some("client-source-origin")
     );
     assert_eq!(work.body.as_str(), "real source body");
+    assert!(
+        RoomObservationRepository::start(&mut tx, &work, Utc::now().timestamp_millis())
+            .await
+            .expect("start")
+    );
     tx.commit().await.expect("claim commit");
     fixture.close(f).await;
 }

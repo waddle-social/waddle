@@ -110,10 +110,28 @@ pub(super) async fn persist(
     effect: &ExternalEffect,
     result: &EffectOutcome,
 ) -> Result<(), IngressUowError> {
-    if let (Some(receipt), EffectOutcome::CarbonFanout { recipients, .. }) =
-        (obligation(effect)?, result)
+    if let (
+        Some(receipt),
+        EffectOutcome::CarbonFanout {
+            recipients,
+            outcome,
+        },
+    ) = (obligation(effect)?, result)
     {
-        CarbonReceiptRepository::record(uow, message, &receipt, recipients).await?;
+        let complete = matches!(
+            outcome,
+            crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
+        );
+        if !complete {
+            CarbonReceiptRepository::record(uow, message, &receipt, recipients).await?;
+        } else if !CarbonReceiptRepository::record_progress(
+            uow, message, &receipt, recipients, true,
+        )
+        .await?
+        {
+            return Err(IngressUowError::UnresolvedCarbonSend);
+        }
     }
     Ok(())
 }

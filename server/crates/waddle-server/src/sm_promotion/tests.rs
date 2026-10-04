@@ -2824,9 +2824,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
     use waddle_xmpp::stream_management::persistence::{
         IngressCustodyDisposition, SmPersistenceStorage,
     };
-    use waddle_xmpp::stream_management::{
-        InMemorySmSessionRegistry, SmIngressAppendKey, SmIngressReceiptKind, SmSessionRegistry,
-    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
     let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
     let persistence = Arc::new(
         crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
@@ -2851,12 +2849,7 @@ async fn ingress_custody_recovers_after_session_deletion_and_restart() {
         xmpp_parsers::message::Lang(String::new()),
         "durable custody".to_owned(),
     );
-    let key = SmIngressAppendKey {
-        message_key: waddle_xmpp::ingress::MessageKey::new(),
-        kind: SmIngressReceiptKind::from_storage(3),
-        semantic_identity_hash: [42; 32],
-        resource,
-    };
+    let key = committed_custody_key(&fixture, resource).await;
     let received_at = Utc::now() - chrono::Duration::minutes(5);
     original
         .record_keyed_stanza_for_detached_bound_resource(
@@ -3005,9 +2998,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
     use waddle_xmpp::stream_management::persistence::{
         IngressCustodyDisposition, SmPersistenceStorage,
     };
-    use waddle_xmpp::stream_management::{
-        InMemorySmSessionRegistry, SmIngressAppendKey, SmIngressReceiptKind, SmSessionRegistry,
-    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
     let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
     let persistence = Arc::new(
         crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
@@ -3025,12 +3016,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         ))
         .await
         .expect("store detached promotion session");
-    let key = SmIngressAppendKey {
-        message_key: waddle_xmpp::ingress::MessageKey::new(),
-        kind: SmIngressReceiptKind::from_storage(3),
-        semantic_identity_hash: [43; 32],
-        resource,
-    };
+    let key = committed_custody_key(&fixture, resource).await;
     let stanza = parse_stanza(&dm_xml(
         "bob@example.com/offline",
         "alice@example.com",
@@ -3264,4 +3250,43 @@ async fn clustered_shutdown_defers_no_store_message_without_a_direct_send() {
     assert!(summary.promoted_sequences.is_empty());
     assert!(receiver.try_recv().is_err());
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+}
+
+async fn committed_custody_key(
+    fixture: &crate::ingress::test_support::IngressFixture,
+    resource: jid::FullJid,
+) -> waddle_xmpp::stream_management::SmIngressAppendKey {
+    use waddle_xmpp::ingress::{
+        DigestContext, DigestInput, EffectMessageIdentity, IngressEffectIntent, NormalizedTarget,
+    };
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: resource.to_bare(),
+        fanout: vec![resource.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    };
+    let mut submission = fixture.submission(None, "durable custody");
+    submission.target = NormalizedTarget::Bare(resource.to_bare());
+    submission.plan.sanitized_message.to = Some(resource.to_bare().into());
+    submission.digest_input = DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![fixture.principal.bare_jid().clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("canonical custody digest");
+    submission.plan.intents = vec![intent.clone()];
+    let decision = crate::ingress::commit::commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("canonical custody message");
+    let receipt = crate::ingress::receipt_key(&intent).expect("custody receipt");
+    waddle_xmpp::stream_management::SmIngressAppendKey {
+        message_key: decision.message_key.expect("canonical custody key"),
+        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+            receipt.kind.to_storage(),
+        ),
+        semantic_identity_hash: receipt.semantic_identity_hash,
+        resource,
+    }
 }

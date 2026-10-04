@@ -574,12 +574,13 @@ async fn handle_muc_mediated_decline(
         }
     }
 
-    let x = build_mediated_decline_payload(&bound_jid.to_bare(), inbound_decline);
-    let mut mediated = Message::new(Some(jid::Jid::from(invite.inviter.clone())));
-    mediated.id = incoming.id.clone();
-    mediated.from = Some(jid::Jid::from(room_jid.clone()));
-    mediated.type_ = MessageType::Normal;
-    mediated.payloads.push(x);
+    let mediated = mediated_decline_message(
+        incoming,
+        &room_jid,
+        &bound_jid.to_bare(),
+        &invite.inviter,
+        inbound_decline,
+    );
     let delivery_sink = crate::server::routes::interpret::effects::ScopedInviteSink {
         inner: deps.effects,
         invite: invite.clone(),
@@ -692,13 +693,13 @@ pub(crate) fn restore_recorded_muc_decline(
             return Err(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing);
         };
         // A completed fallback is reconciled into the route receipt before this hook.
-        let mut message = Message::new(Some(invite.inviter.clone().into()));
-        message.id = incoming.id.clone();
-        message.from = Some(invite.room.clone().into());
-        message.type_ = MessageType::Normal;
-        message
-            .payloads
-            .push(build_mediated_decline_payload(&invite.invitee, decline));
+        let message = mediated_decline_message(
+            incoming,
+            &invite.room,
+            &invite.invitee,
+            &invite.inviter,
+            decline,
+        );
         let route = MucUserRoute {
             route_identity: Some(route_identity.clone()),
             recipient: recipient.clone(),
@@ -751,12 +752,29 @@ fn capture_muc_private_routes(
     }
 }
 
-fn mediated_decline(message: &Message) -> Option<&minidom::Element> {
+pub(crate) fn mediated_decline(message: &Message) -> Option<&minidom::Element> {
     message
         .payloads
         .iter()
         .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))
         .and_then(|x| x.get_child("decline", waddle_xmpp::muc::presence::NS_MUC_USER))
+}
+
+pub(crate) fn mediated_decline_message(
+    incoming: &Message,
+    room: &jid::BareJid,
+    decliner: &jid::BareJid,
+    inviter: &jid::BareJid,
+    inbound_decline: &minidom::Element,
+) -> Message {
+    let mut message = Message::new(Some(inviter.clone().into()));
+    message.id = incoming.id.clone();
+    message.from = Some(room.clone().into());
+    message.type_ = MessageType::Normal;
+    message
+        .payloads
+        .push(build_mediated_decline_payload(decliner, inbound_decline));
+    message
 }
 
 fn build_mediated_decline_payload(

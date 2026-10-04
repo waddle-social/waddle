@@ -129,3 +129,51 @@ The authority table currently retains one row per full JID. Garbage collection
 is a separate follow-up: deleting a row on disconnect would invalidate valid
 resumes. Safe reclamation must prove terminal cleanup and absence of resumable
 state or in-flight work, then delete only the unchanged generation.
+
+
+## Ingress send and observer cutover (#1776, PR #1899)
+
+This release commits a one-shot `Recreate` in the production HelmRelease.
+The remote-user side-effect endpoint changes from
+`waddle.clustering.relay.remote_user_side_effect.v3` to v4 to carry the
+recorded carbon obligation. The previous endpoint has no compatible receiver.
+Roster pushes, blocklist pushes, and carbons therefore cannot cross an old/new
+replica boundary. Existing resource-route/frame compatibility does not cover
+this endpoint. Stop every old replica before starting the new fleet; expect a
+brief connection interruption and client reconnects.
+
+The same boundary protects observer work. V1022 moves the ownership-column
+upgrade and legacy-attempt handling into the append-only migration ledger.
+Startup initialization no longer rewrites existing work. Previously attempted
+ownerless work becomes `started`, preserving its body, attempt counter, token,
+and existing lease expiry. A missing expiry gets the database time plus three
+minutes. Pristine pending work remains eligible. The upgrade runs once, after
+old callback workers have stopped.
+
+A started observer attempt can be claimed with a new token after its lease
+expires. This prioritizes eventual processing over at-most-once guest effects:
+a callback may repeat, but a displaced token cannot publish results or settle
+receipts. After twenty attempts the work settles as `retry_exhausted` rather
+than remaining indefinitely ambiguous. Live-delivery recovery and its possible
+duplicate notification tradeoff are documented in the
+[ingress authority runbook](../../server/docs/operations/ingress-authority.md).
+
+1. Publish the image and Flux artifact containing V1021/V1022, the v4 endpoint,
+   and the committed `Recreate` strategy together. Keep the deployment UUID.
+2. Wait for every old replica to stop and every new replica to become ready on
+   the digest-pinned cutover image. Check `WADDLE_GIT_SHA` and ledger versions
+   1021 and 1022 explicitly.
+3. Verify cross-node roster/blocklist pushes and carbons, client reconnects,
+   and observer processing. Expired legacy attempts must become retryable;
+   repeated startup must not quarantine work again. Verify a completed observer
+   result is published once even when an older token returns late.
+4. Restore `RollingUpdate` only in a separate follow-up after fleet verification,
+   with no server/build changes in that flip-back commit. The existing publisher
+   and live Helm guard must verify the completed cutover.
+
+Roll forward on failure. Pre-cutover binaries cannot restart against the
+advanced migration ledger; do not delete ledger entries to permit rollback.
+The SQLite migration targets released databases without the new ownership
+columns. An unreleased PR database that already has those columns but lacks
+V1022 fails closed and requires deliberate development-database repair; the
+migration does not silently discard its ownership evidence.

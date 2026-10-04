@@ -22,7 +22,8 @@ pub(super) fn finished(
 ) {
     let category = match outcome {
         RoomObservationOutcome::Completed(_) => "completed",
-        RoomObservationOutcome::RetryableFailure(_) => "retryable_failure",
+        RoomObservationOutcome::NotInvoked => "not_invoked",
+        RoomObservationOutcome::UnresolvedFailure(_) => "unresolved_failure",
         RoomObservationOutcome::PermanentFailure(_) => "permanent_failure",
         RoomObservationOutcome::NotApplicable(_) => "skipped",
     };

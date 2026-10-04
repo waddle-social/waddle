@@ -699,7 +699,7 @@ pub struct RelayRemoteUserSideEffectReply {
     pub carbon_recipients: Vec<jid::FullJid>,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v3")]
+#[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v4")]
 impl Message<RelayRemoteUserSideEffect> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteUserSideEffectReply>;
 

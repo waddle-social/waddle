@@ -100,6 +100,10 @@ async fn inbox_push_receipt(fixture: IngressFixture, disconnect: bool) {
         &deps,
     )
     .await;
+    // Match finish_plan: retain the authoritative room payload before take()
+    // clears the local-room execution provenance needed by live acceptance.
+    submission.plan.room_canonical_message = sink.room_canonical_message();
+    assert!(submission.plan.room_canonical_message.is_some());
     let (plan, execution) = sink.take();
     submission.plan.plan = plan;
     submission.plan.room_execution = execution;

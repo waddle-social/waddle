@@ -459,7 +459,7 @@ impl InMemorySmSessionRegistry {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
         let stanza_xml = Self::stanza_to_replay_xml(stanza);
-        self.commit_keyed_detached_entry(stream_id, key, move |session| {
+        self.commit_keyed_detached_entry(stream_id, key, true, move |session| {
             session.record_detached_outbound(stanza_xml, original_receipt_at);
             session.unacked_stanzas.last().map(|entry| entry.sequence)
         })
@@ -491,7 +491,7 @@ impl InMemorySmSessionRegistry {
             }
             LedgerDecision::Unallocated => {}
         };
-        self.commit_keyed_detached_entry(stream_id.to_owned(), key, move |session| {
+        self.commit_keyed_detached_entry(stream_id.to_owned(), key, false, move |session| {
             session
                 .record_detached_outbound_at(sequence, stanza_xml, original_receipt_at)
                 .then_some(sequence)
@@ -548,6 +548,7 @@ impl InMemorySmSessionRegistry {
         self: &Arc<Self>,
         stream_id: String,
         key: crate::stream_management::SmIngressAppendKey,
+        new_delivery: bool,
         record: impl FnOnce(&mut super::super::DetachedSession) -> Option<u32>,
     ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::{
@@ -622,11 +623,22 @@ impl InMemorySmSessionRegistry {
         // resolves, even if this future is dropped first.
         let settle = tokio::spawn(async move {
             let _guard = guard;
-            let outcome = storage
-                .store_session_atomic_with_ingress_append(persisted, rows, append)
-                .await
-                .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+            let outcome = if new_delivery {
+                storage
+                    .store_session_atomic_with_ingress_delivery(persisted, rows, append)
+                    .await
+            } else {
+                storage
+                    .store_session_atomic_with_ingress_append(persisted, rows, append)
+                    .await
+            }
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
             match outcome {
+                KeyedSnapshotOutcome::ObligationAlreadyResolved => {
+                    // Discard the speculative clone: another sink or policy
+                    // already settled this obligation without SM allocation.
+                    Ok(SmKeyedAppendOutcome::Suppressed)
+                }
                 KeyedSnapshotOutcome::Committed => {
                     // Publication may report displacement, but the transaction still
                     // allocated the entry. Promotion reconciles the captured queue.

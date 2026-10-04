@@ -21,11 +21,27 @@ previews, observers with recorded envelopes, delegated groupchat notification
 recovery, routes of receipted DM pin mutations, and MUC ledger declines.
 Delegated live full-JID routes (including detached full-target no-store routes
 without archive evidence), headline routes, unreceipted DM pin mutations and
-their routes, carbons and DM call state remain deferred. Remote-owner-only
+their routes, and DM call state remain deferred. Carbon recovery rebuilds the
+recorded local audience or legacy relay owner/exclusions with keyed delivery.
+Remote-owner-only
 resources and families lacking reconstructible payloads (including room pin
-chains without a recorded pinner nick) remain pending. Keyless live sends and
-observer invocations are at-least-once, including after send-before-receipt
-failures and against concurrent client retransmission;
+chains without a recorded pinner nick) remain pending. Recorded live sends use
+per-obligation/resource leases and durable attempt state (#1776); observer work
+commits a started state before guest invocation. Completed outcomes repair lost
+receipts without repeating the sink. Unknown live starts wait 60 seconds before
+proof-first retry or permitted offline custody/push handoff. Observer starts can
+retry after their three-minute lease, up to 20 attempts. Recovery accepts a
+possible duplicate rather than permanently suppressing delivery after a crash.
+This is the explicit residual to #1776's “recognised on retry instead of repeated”:
+completed/custodied effects are recognized; an unknown started effect may execute
+again after its deadline. Observer publication fencing does not deduplicate an
+external provider call or charge (for example Jev without a provider idempotency
+key). See the [operational policy](../operations/ingress-authority.md) for the
+bounds and recovery procedure. Ordinary offline recovery settles recipient-wide
+route evidence with one pending copy, so sibling retries cannot recreate it after
+consumption. Expired initial reservations also qualify when no sink is available.
+Canonical invitation quota refusal remains retryable without revoking membership
+or settling terminal receipts before a nontransactional rollback;
 (ii) repaired duplicates retry unfinished recorded direct resources (§3.3a)
 and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger
@@ -34,8 +50,10 @@ routes and recorded MUC occupant copies, and on the registered-remote-socket
 and local UserActor detach drains (#1789, #1805). The authorization-failure
 fallback remains unkeyed and at-least-once;
 #1760 now retains immutable proof and replay payload as one durable custody
-unit, with atomic pending-delivery handoff and independent recovery (§3.3a). Live sends remain at-least-once, and maintenance never relays
-remote-hosted resources;
+unit, with atomic pending-delivery handoff and independent recovery (§3.3a).
+New detached allocations and live attempts interlock under canonical authority;
+already-accepted frames retain normal detach custody and XEP-0198 replay.
+Maintenance never relays remote-hosted resources;
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
 connection-generation fence (follow-up issue); (vi) ~~extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.~~ Resolved by #1753: typed extension ingress covers direct and local-room bot sends (§3.1).
@@ -626,8 +644,10 @@ Recovery has a 4 s phase budget, a 1 s absolute per-row deadline covering
 freeze, execution, delegation and recount, 64-key scan pages and at most 64
 attempted rows per pass; the hard pass deadline is 13 s. It is skipped and
 unrecorded until the websocket state binds `RecoveryEnvironment`. Receipts
-and durably keyed sinks are exactly-once; keyless live sends and observers
-retain the at-least-once limitation in (i).
+remain idempotent. Recorded live sends and observer invocations use the durable
+attempt gates described in (i): successful outcomes repair receipts, while
+ambiguous starts suppress repetition only until their bounded recovery deadline,
+then permit retry or policy-checked offline handoff without claiming socket delivery.
 
 ### 3.7 Archive and dispatch order (#1770)
 

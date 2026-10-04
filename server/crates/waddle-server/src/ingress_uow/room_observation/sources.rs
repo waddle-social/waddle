@@ -247,7 +247,7 @@ pub(super) async fn stale_source_work(
         .transpose()
         .map_err(|_| ObservationError::Codec)?;
     let mut rows = tx.transaction_mut().query(
-        "SELECT plugin_id, generation, identity, room_jid, message_key FROM extension_room_observation_work WHERE source_key = ? AND status IN ('pending', 'leased') AND (? IS NULL OR revision < ?)",
+        "SELECT plugin_id, generation, identity, room_jid, message_key FROM extension_room_observation_work WHERE source_key = ? AND status IN ('pending', 'leased', 'started') AND (? IS NULL OR revision < ?)",
         crate::db_params![&key, revision, revision],
     ).await?;
     let mut pending = Vec::new();
@@ -261,7 +261,7 @@ pub(super) async fn stale_source_work(
     }
     drop(rows);
     tx.transaction_mut().execute(
-        "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = ?, body = '', lease_id = NULL, lease_until_ms = NULL WHERE source_key = ? AND status IN ('pending', 'leased') AND (? IS NULL OR revision < ?)",
+        "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = ?, body = '', lease_id = NULL, lease_until_ms = NULL WHERE source_key = ? AND status IN ('pending', 'leased', 'started') AND (? IS NULL OR revision < ?)",
         crate::db_params![category, &key, revision, revision],
     ).await?;
     tx.transaction_mut().execute(
@@ -292,7 +292,7 @@ async fn stale_generation(
     generation: i64,
 ) -> Result<(), ObservationError> {
     let mut rows = tx.transaction_mut().query(
-        "SELECT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ? AND status IN ('pending', 'leased') UNION SELECT source_key FROM extension_room_publications WHERE plugin_id = ? AND generation < ? AND status = 'pending' ORDER BY source_key",
+        "SELECT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started') UNION SELECT source_key FROM extension_room_publications WHERE plugin_id = ? AND generation < ? AND status = 'pending' ORDER BY source_key",
         crate::db_params![plugin.as_str(), generation, plugin.as_str(), generation],
     ).await?;
     let mut source_keys = Vec::new();
@@ -309,7 +309,7 @@ async fn stale_generation(
             continue;
         };
         let mut rows = tx.transaction_mut().query(
-            "SELECT generation, identity, room_jid, message_key FROM extension_room_observation_work WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased')",
+            "SELECT generation, identity, room_jid, message_key FROM extension_room_observation_work WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started')",
             crate::db_params![&source_key, plugin.as_str(), generation],
         ).await?;
         let mut pending = Vec::new();
@@ -322,7 +322,7 @@ async fn stale_generation(
         }
         drop(rows);
         tx.transaction_mut().execute(
-            "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'generation_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased')",
+            "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'generation_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started')",
             crate::db_params![&source_key, plugin.as_str(), generation],
         ).await?;
         tx.transaction_mut().execute(
