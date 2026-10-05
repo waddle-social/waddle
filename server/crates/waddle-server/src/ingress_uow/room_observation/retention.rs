@@ -98,31 +98,48 @@ pub(super) const RECEIPTS_POSTGRES: &str = "DELETE FROM extension_room_observati
     ORDER BY r.recorded_at_ms, r.plugin_id, r.generation, r.room_jid, r.message_key
     LIMIT ? FOR UPDATE OF r SKIP LOCKED)";
 
+/// Retracted sources drained per batch. The row budget bounds the deleted
+/// mappings; this bounds the `IN` list of the drain statement.
+const REVISION_DRAIN_SOURCES: i64 = 16;
+
 /// Revision mappings are drained before their source so an oversized chain
-/// spends the batch budget instead of one unbounded statement.
-pub(super) const REVISIONS_SQLITE: &str = "DELETE FROM extension_room_source_revisions
-  WHERE (room_jid, room_stanza_id) IN (
-    SELECT v.room_jid, v.room_stanza_id
-    FROM extension_room_source_revisions v
-    JOIN extension_room_sources s ON s.source_key = v.source_key
+/// spends the batch budget instead of one unbounded statement. First lock a
+/// few drainable retracted sources in `extension_room_sources_retracted_captured`
+/// order. Every writer that adds a reference to a source (capture, correction,
+/// claim, finish) holds that source's row lock while doing so, so the locked
+/// sources stay unreferenced for the rest of this transaction and their
+/// mappings can be deleted without re-checking each one.
+pub(super) const DRAIN_CANDIDATES_SQLITE: &str = "SELECT s.source_key FROM extension_room_sources s
     WHERE s.retracted = 1 AND s.captured_at_ms <= ?
+      AND EXISTS (SELECT 1 FROM extension_room_source_revisions v
+        WHERE v.source_key = s.source_key)
       AND NOT EXISTS (SELECT 1 FROM extension_room_observation_work w
         WHERE w.source_key = s.source_key)
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
         WHERE p.source_key = s.source_key)
-    ORDER BY s.captured_at_ms, v.source_key, v.room_jid, v.room_stanza_id LIMIT ?)";
-pub(super) const REVISIONS_POSTGRES: &str = "DELETE FROM extension_room_source_revisions
-  WHERE (room_jid, room_stanza_id) IN (
-    SELECT v.room_jid, v.room_stanza_id
-    FROM extension_room_source_revisions v
-    JOIN extension_room_sources s ON s.source_key = v.source_key
+    ORDER BY s.captured_at_ms, s.source_key LIMIT ?";
+pub(super) const DRAIN_CANDIDATES_POSTGRES: &str =
+    "SELECT s.source_key FROM extension_room_sources s
     WHERE s.retracted = 1 AND s.captured_at_ms <= ?
+      AND EXISTS (SELECT 1 FROM extension_room_source_revisions v
+        WHERE v.source_key = s.source_key)
       AND NOT EXISTS (SELECT 1 FROM extension_room_observation_work w
         WHERE w.source_key = s.source_key)
       AND NOT EXISTS (SELECT 1 FROM extension_room_publications p
         WHERE p.source_key = s.source_key)
-    ORDER BY s.captured_at_ms, v.source_key, v.room_jid, v.room_stanza_id
-    LIMIT ? FOR UPDATE OF v SKIP LOCKED)";
+    ORDER BY s.captured_at_ms, s.source_key LIMIT ? FOR UPDATE OF s SKIP LOCKED";
+
+/// Delete up to the remaining budget of the locked sources' mappings, read in
+/// `extension_room_source_revisions_source` order so no chain is sorted.
+pub(super) fn revision_drain_sql(count: usize) -> String {
+    let placeholders = vec!["?"; count].join(", ");
+    format!(
+        "DELETE FROM extension_room_source_revisions WHERE (room_jid, room_stanza_id) IN (
+    SELECT v.room_jid, v.room_stanza_id FROM extension_room_source_revisions v
+    WHERE v.source_key IN ({placeholders})
+    ORDER BY v.source_key, v.room_jid, v.room_stanza_id LIMIT ?)"
+    )
+}
 
 /// Lock first, then delete the whole locked set with one statement that
 /// re-checks every predicate. Every writer that references a source (capture,
@@ -194,6 +211,25 @@ async fn delete_batch(
         .map_err(retention_error)
 }
 
+/// Run a source-candidate `SELECT` (cutoff, limit) and collect its keys.
+async fn locked_source_keys(
+    tx: &mut Transaction<'_>,
+    sql: &'static str,
+    cutoff_ms: i64,
+    limit: i64,
+) -> Result<Vec<String>, ObservationError> {
+    let mut rows = tx
+        .query(sql, crate::db_params![cutoff_ms, limit])
+        .await
+        .map_err(retention_error)?;
+    let mut keys = Vec::new();
+    while let Some(row) = rows.next().await.map_err(retention_error)? {
+        let key: String = row.get(0)?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
 pub(super) async fn collect_expired(
     tx: &mut Transaction<'_>,
     now_ms: i64,
@@ -227,28 +263,32 @@ pub(super) async fn collect_expired(
         remaining(&batch),
     )
     .await?;
-    batch.revisions = delete_batch(
-        tx,
-        dialect(driver, REVISIONS_SQLITE, REVISIONS_POSTGRES),
-        cutoff_ms,
-        remaining(&batch),
-    )
-    .await?;
+    let revision_budget = remaining(&batch);
+    if revision_budget > 0 {
+        let drained = locked_source_keys(
+            tx,
+            dialect(driver, DRAIN_CANDIDATES_SQLITE, DRAIN_CANDIDATES_POSTGRES),
+            cutoff_ms,
+            REVISION_DRAIN_SOURCES,
+        )
+        .await?;
+        if !drained.is_empty() {
+            let sql = revision_drain_sql(drained.len());
+            let mut params: Vec<crate::db::Value> =
+                drained.into_iter().map(crate::db::Value::from).collect();
+            params.push(crate::db::Value::from(i64::from(revision_budget)));
+            batch.revisions = tx.execute(&sql, params).await.map_err(retention_error)?;
+        }
+    }
     let remaining = remaining(&batch);
     if remaining > 0 {
-        let mut rows = tx
-            .query(
-                dialect(driver, SOURCE_CANDIDATES_SQLITE, SOURCE_CANDIDATES_POSTGRES),
-                crate::db_params![cutoff_ms, i64::from(remaining)],
-            )
-            .await
-            .map_err(retention_error)?;
-        let mut candidates = Vec::new();
-        while let Some(row) = rows.next().await.map_err(retention_error)? {
-            let key: String = row.get(0)?;
-            candidates.push(key);
-        }
-        drop(rows);
+        let candidates = locked_source_keys(
+            tx,
+            dialect(driver, SOURCE_CANDIDATES_SQLITE, SOURCE_CANDIDATES_POSTGRES),
+            cutoff_ms,
+            i64::from(remaining),
+        )
+        .await?;
         if !candidates.is_empty() {
             let sql = source_delete_sql(candidates.len());
             let mut params: Vec<crate::db::Value> =

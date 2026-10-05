@@ -609,7 +609,8 @@ async fn retracted_source_with_oversized_revision_chain_drains_within_budget(
 
     if fixture.db.driver() == DatabaseDriver::Postgres {
         // A writer holding the source lock (capture, correction, claim and
-        // finish all lock it before referencing it) makes GC skip the row.
+        // finish all lock it before referencing it) makes GC skip the source
+        // entirely: its mappings are only drained under that same lock.
         let key = seed(&fixture, &observer, "locked-root", t0).await;
         retract(&fixture, "locked-root", ms(t0)).await;
         terminalize(&fixture, key).await;
@@ -622,10 +623,11 @@ async fn retracted_source_with_oversized_revision_chain_drains_within_budget(
             .await
             .expect("hold source lock");
         let locked = collect(&fixture, now, BATCH).await;
-        assert_eq!((locked.revisions, locked.sources), (1, 0));
+        assert_eq!((locked.revisions, locked.sources), (0, 0));
         assert_eq!(fixture.count("extension_room_sources").await, 1);
         holder.rollback().await.expect("release source lock");
-        assert_eq!(collect(&fixture, now, BATCH).await.sources, 1);
+        let released = collect(&fixture, now, BATCH).await;
+        assert_eq!((released.revisions, released.sources), (1, 1));
         assert_eq!(fixture.count("extension_room_sources").await, 0);
     }
     fixture.close().await;
@@ -1599,6 +1601,8 @@ async fn postgres_disposition_dry_run_reads_one_snapshot() {
     fixture.close().await;
 }
 
+const PLANNER_CHAIN_SOURCE: &str = "00000000-0000-0000-0000-00000000c4a1";
+
 /// Enough recent history, plus a little expired history, that a planner
 /// with statistics prefers indexes for the protective guards.
 async fn seed_planner_history(fixture: &IngressFixture) {
@@ -1651,6 +1655,21 @@ async fn seed_planner_history(fixture: &IngressFixture) {
         .await
         .expect("revision");
     }
+    // One retracted, unreferenced source with an oversized revision chain.
+    tx.execute(
+        "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted, captured_at_ms) VALUES (?, 'room@conference.example.org', 'author@example.org', 'chain-root', 'chain-root', NULL, 0, '{}', 1, 0)",
+        crate::db_params![PLANNER_CHAIN_SOURCE],
+    )
+    .await
+    .expect("chain source");
+    for index in 0..5_000 {
+        tx.execute(
+            "INSERT INTO extension_room_source_revisions (room_jid, room_stanza_id, source_key) VALUES ('room@conference.example.org', ?, ?)",
+            crate::db_params![format!("chain-{index}"), PLANNER_CHAIN_SOURCE],
+        )
+        .await
+        .expect("chain revision");
+    }
     tx.execute("ANALYZE", ()).await.expect("analyze");
     tx.commit().await.expect("planner seed commit");
 }
@@ -1694,9 +1713,25 @@ fn retention_statements(
             cutoff(),
         ),
         (
-            "revisions",
-            pick(statements::REVISIONS_SQLITE, statements::REVISIONS_POSTGRES).to_string(),
-            cutoff(),
+            "revision drain candidates",
+            pick(
+                statements::DRAIN_CANDIDATES_SQLITE,
+                statements::DRAIN_CANDIDATES_POSTGRES,
+            )
+            .to_string(),
+            vec![
+                crate::db::Value::from(1_000_i64),
+                crate::db::Value::from(16_i64),
+            ],
+        ),
+        (
+            "revision drain",
+            statements::revision_drain_sql(2),
+            vec![
+                crate::db::Value::from(PLANNER_CHAIN_SOURCE),
+                crate::db::Value::from(Uuid::now_v7().to_string()),
+                crate::db::Value::from(i64::from(BATCH)),
+            ],
         ),
         (
             "source candidates",
@@ -1799,6 +1834,12 @@ async fn retention_guards_are_index_lookups(fixture: IngressFixture) {
                 "extension_room_observation_receipts_recorded",
                 "recorded_at_ms",
             )),
+            "revision drain candidates" | "source candidates" => Some((
+                "extension_room_sources_retracted_captured",
+                "captured_at_ms",
+            )),
+            // The oversized chain is read as an index range, never sorted.
+            "revision drain" => Some(("extension_room_source_revisions_source", "source_key")),
             _ => None,
         } {
             // Candidates come off the index already in ORDER BY order, so a
@@ -1823,7 +1864,7 @@ async fn retention_guards_are_index_lookups(fixture: IngressFixture) {
                 plan.join("\n")
             );
         }
-        if matches!(name, "revisions" | "source candidates") {
+        if matches!(name, "revision drain candidates" | "source candidates") {
             // Live sources age past the horizon and are kept forever; only
             // the retracted-only partial index keeps them out of the walk.
             assert!(

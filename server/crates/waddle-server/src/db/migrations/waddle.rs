@@ -1297,7 +1297,7 @@ CREATE INDEX extension_room_sources_retracted_captured
     ON extension_room_sources (captured_at_ms, source_key)
     WHERE retracted = 1;
 CREATE INDEX extension_room_source_revisions_source
-    ON extension_room_source_revisions (source_key);
+    ON extension_room_source_revisions (source_key, room_jid, room_stanza_id);
 CREATE INDEX extension_room_observation_work_active_guard
     ON extension_room_observation_work (plugin_id, generation, room_jid, message_key)
     WHERE status IN ('pending', 'leased', 'started');
@@ -1380,7 +1380,7 @@ CREATE INDEX extension_room_sources_retracted_captured
     ON extension_room_sources (captured_at_ms, source_key)
     WHERE retracted = 1;
 CREATE INDEX extension_room_source_revisions_source
-    ON extension_room_source_revisions (source_key);
+    ON extension_room_source_revisions (source_key, room_jid, room_stanza_id);
 CREATE INDEX extension_room_observation_work_active_guard
     ON extension_room_observation_work (plugin_id, generation, room_jid, message_key)
     WHERE status IN ('pending', 'leased', 'started');
