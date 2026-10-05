@@ -153,6 +153,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
     }
     let receipt = receipt_key(&muc).expect("receipt");
     let inbox = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(99),

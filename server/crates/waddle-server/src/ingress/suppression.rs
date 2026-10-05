@@ -783,6 +783,7 @@ mod progress_tests {
         let c: jid::FullJid = "juliet@example.com/c".parse().expect("c");
         let identity = EffectMessageIdentity::capture_ordinal(1);
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: a.to_bare(),
             fanout: vec![a.clone(), b.clone()],
             route_identity: identity.clone(),
@@ -791,6 +792,7 @@ mod progress_tests {
             reflection_room: None,
             receipt: crate::ingress::durable::receipt_key(&intent).expect("receipt"),
             obligation: super::super::ProgressObligation::Direct {
+                prepared: None,
                 recipient: a.to_bare(),
             },
             fanout: vec![a.clone(), b.clone()],

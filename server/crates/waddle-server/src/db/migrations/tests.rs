@@ -37,10 +37,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1023) still dominates
+    // the ledger max, which the waddle namespace (V1024) still dominates
     // after global V0015.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1023));
+    assert_eq!(version, Some(1024));
 }
 
 #[tokio::test]
@@ -157,7 +157,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
         applied,
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
         ]
     );
 
@@ -178,7 +178,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1023));
+    assert_eq!(version, Some(1024));
 }
 
 #[tokio::test]
@@ -237,7 +237,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1023 (the waddle
+    // so the runner also reports applying 1001 through 1024 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -249,7 +249,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
             1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021,
-            1022, 1023
+            1022, 1023, 1024
         ]
     );
 
@@ -313,7 +313,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1023),
+        Some(1024),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -473,7 +473,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
         runner.run(&db).await.unwrap(),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
@@ -784,7 +784,10 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
     let applied = MigrationRunner::single().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
+        vec![
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
+            1024
+        ]
     );
     assert_eq!(
         migration_ledger_checksum(&db, 1010).await.as_deref(),
@@ -956,7 +959,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
         runner.run(&db).await.expect("adopt and run migrations"),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
@@ -2238,7 +2241,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         vec![
             6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
             1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
-            1023
+            1023, 1024
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2315,7 +2318,8 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
+            1024
         ]
     );
 
@@ -2968,7 +2972,8 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
+            1024
         ]
     );
 
@@ -3242,7 +3247,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         applied,
         vec![
             1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016,
-            1017, 1018, 1019, 1020, 1021, 1022, 1023
+            1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
         ]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
@@ -3944,7 +3949,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
     );
     assert_nonterminal_monitoring_index(&db).await;
     assert!(sqlite_table_exists(&db, "sm_sessions").await);
@@ -4007,7 +4012,7 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
     assert!(postgres_table_exists(&db, "sm_unacked").await);
@@ -4040,7 +4045,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
             .run(&db)
             .await
             .expect("apply V1014"),
-        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
+        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
     );
 
     assert_v1014_cutover_result(&db, 0).await;
@@ -4072,7 +4077,7 @@ async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() 
                 .run(&db)
                 .await
                 .expect("apply V1014 at live epoch"),
-            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
+            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
         );
         assert_v1014_cutover_result(&db, epoch).await;
 
@@ -4319,7 +4324,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .run(&storage.database())
             .await
             .expect("cutover migration"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
     );
     drop(storage);
 
@@ -4598,7 +4603,7 @@ async fn assert_v1019_custody_cutover(db: &Database) {
             .run(db)
             .await
             .expect("apply custody cutover migration"),
-        vec![1019, 1020, 1021, 1022, 1023]
+        vec![1019, 1020, 1021, 1022, 1023, 1024]
     );
     let conn = db
         .guard()
@@ -4789,10 +4794,19 @@ async fn assert_v1023_stamps_existing_observer_history(db: &Database) {
 
     let before = chrono::Utc::now().timestamp_millis();
     assert_eq!(
-        MigrationRunner::single()
-            .run(db)
-            .await
-            .expect("apply V1023"),
+        MigrationRunner::new(
+            global::all()
+                .into_iter()
+                .chain(
+                    waddle::all()
+                        .into_iter()
+                        .filter(|migration| migration.version <= 1023)
+                )
+                .collect()
+        )
+        .run(db)
+        .await
+        .expect("apply V1023"),
         vec![1023]
     );
     let after = chrono::Utc::now().timestamp_millis();
@@ -4905,4 +4919,39 @@ async fn postgres_observer_inspection_queries_run_as_pg_monitor() {
     pool.close().await;
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+async fn old_binary_refused(fixture: crate::ingress::test_support::IngressFixture) {
+    let catalog = global::all()
+        .into_iter()
+        .chain(
+            waddle::all()
+                .into_iter()
+                .filter(|migration| migration.version < 1024),
+        )
+        .collect();
+    let failure = crate::db::MigrationRunner::new(catalog)
+        .run(&fixture.db)
+        .await
+        .expect_err("old binary cannot ignore prepared-route custody policy");
+    assert!(matches!(
+        failure,
+        crate::db::DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion {
+            version: 1024,
+            ..
+        })
+    ));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_prepared_route_v1024_refuses_old_binary() {
+    old_binary_refused(crate::ingress::test_support::IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_prepared_route_v1024_refuses_old_binary() {
+    if let Some(fixture) = crate::ingress::test_support::IngressFixture::postgres("prp_old").await {
+        old_binary_refused(fixture).await;
+    }
 }

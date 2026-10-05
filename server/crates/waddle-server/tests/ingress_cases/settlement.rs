@@ -67,6 +67,7 @@ async fn two_resource_inbox_push(fixture: IngressFixture) {
             },
         ))));
     let receipt = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: owner.clone(),
         fanout: resources.to_vec(),
         route_identity: EffectMessageIdentity::capture_ordinal(0),

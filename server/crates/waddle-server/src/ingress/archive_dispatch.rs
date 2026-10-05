@@ -108,6 +108,7 @@ fn targets(
 ) -> Vec<DispatchTarget> {
     match intent {
         IngressEffectIntent::RouteDirect {
+            prepared: _,
             recipient,
             fanout,
             route_identity,

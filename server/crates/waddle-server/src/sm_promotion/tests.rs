@@ -3260,6 +3260,7 @@ async fn committed_custody_key(
         DigestContext, DigestInput, EffectMessageIdentity, IngressEffectIntent, NormalizedTarget,
     };
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: resource.to_bare(),
         fanout: vec![resource.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

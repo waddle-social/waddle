@@ -108,6 +108,7 @@ fn restore_original_reflections(
             Err(_) => continue,
         };
         let IngressEffectIntent::RouteDirect {
+            prepared: _,
             recipient,
             fanout,
             route_identity,

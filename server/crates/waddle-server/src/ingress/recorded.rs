@@ -123,13 +123,13 @@ pub fn restore_delivery_payloads(
         let Some(recipient) = external_route_recipient(effect) else {
             continue;
         };
-        if !plan.intents.iter().any(|intent| {
+        let Some(intent) = plan.intents.iter().find(|intent| {
             matches!(intent,
             IngressEffectIntent::RouteDirect { recipient: saved, route_identity, .. }
                 if saved == &recipient && external_route_identity(effect) == Some(route_identity))
-        }) {
+        }) else {
             continue;
-        }
+        };
         if let ExternalEffect::Delivery(
             ExternalDeliveryEffect::QueueDetached { stanza, .. }
             | ExternalDeliveryEffect::RouteToPeer { stanza, .. },
@@ -138,14 +138,53 @@ pub fn restore_delivery_payloads(
             if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
                 if message.type_ != xmpp_parsers::message::MessageType::Groupchat)
             {
-                **stanza = waddle_xmpp::Stanza::Message(delivery_message(
-                    envelope,
-                    &recipient,
-                    &plan.intents,
-                ));
+                **stanza = waddle_xmpp::Stanza::Message(
+                    prepared_direct_message(envelope, intent)
+                        .cloned()
+                        .unwrap_or_else(|| delivery_message(envelope, &recipient, &plan.intents)),
+                );
             }
         }
     }
+}
+
+/// A prepared route is authority only for its own immutable message and audience.
+/// Legacy rows have no such evidence and retain the older reconstruction rules.
+pub(super) fn prepared_direct_message<'a>(
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+    intent: &'a IngressEffectIntent,
+) -> Option<&'a xmpp_parsers::message::Message> {
+    let IngressEffectIntent::RouteDirect {
+        recipient,
+        fanout,
+        prepared: Some(prepared),
+        ..
+    } = intent
+    else {
+        return None;
+    };
+    let message = prepared.message();
+    let source = envelope.message();
+    (matches!(
+        message.type_,
+        xmpp_parsers::message::MessageType::Chat
+            | xmpp_parsers::message::MessageType::Normal
+            | xmpp_parsers::message::MessageType::Headline
+    ) && message.type_ == source.type_
+        && message.from.is_some()
+        && message.from == source.from
+        && message.to == source.to
+        && message
+            .to
+            .as_ref()
+            .is_some_and(|to| to.to_bare() == *recipient)
+        && source
+            .to
+            .as_ref()
+            .is_some_and(|to| to.to_bare() == *recipient)
+        && !fanout.is_empty()
+        && fanout.iter().all(|target| target.to_bare() == *recipient))
+    .then_some(message)
 }
 
 pub(super) fn delivery_message(
@@ -746,6 +785,7 @@ pub(super) fn recorded_route_obligation(
     let recipient = external_route_recipient(effect);
     intents.iter().any(|intent| match intent {
         IngressEffectIntent::RouteDirect {
+            prepared: _,
             fanout,
             route_identity,
             recipient: recorded_recipient,

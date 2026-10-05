@@ -956,6 +956,7 @@ fn proven_receipts(
         }
         if let Some(identity) = &route.route_identity {
             intents.push(IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: route.recipient.clone(),
                 fanout: route.resources.clone(),
                 route_identity: identity.clone(),

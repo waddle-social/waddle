@@ -14,6 +14,7 @@ use waddle_xmpp::ingress::{
 pub enum ProgressObligation {
     Direct {
         recipient: BareJid,
+        prepared: Option<StoredMessagePayload>,
     },
     MucGroupchat {
         room: BareJid,
@@ -52,12 +53,14 @@ impl RouteProgress {
     ) -> Result<Option<Self>, IngressUowError> {
         let (obligation, route_identity, fanout) = match intent {
             IngressEffectIntent::RouteDirect {
+                prepared,
                 recipient,
                 fanout,
                 route_identity,
             } => (
                 ProgressObligation::Direct {
                     recipient: recipient.clone(),
+                    prepared: prepared.clone(),
                 },
                 route_identity,
                 fanout.clone(),
@@ -114,7 +117,11 @@ impl RouteProgress {
 
     pub fn settle_evidence(&self) -> IngressEffectIntent {
         match &self.obligation {
-            ProgressObligation::Direct { recipient } => IngressEffectIntent::RouteDirect {
+            ProgressObligation::Direct {
+                recipient,
+                prepared,
+            } => IngressEffectIntent::RouteDirect {
+                prepared: prepared.clone(),
                 recipient: recipient.clone(),
                 fanout: self.fanout.clone(),
                 route_identity: self.route_identity.clone(),
@@ -167,7 +174,7 @@ impl RouteProgress {
     /// but excludes sender reflection, which never carries aggregate evidence.
     pub(crate) fn correlates(&self, effect: &ExternalEffect) -> bool {
         let room = match &self.obligation {
-            ProgressObligation::Direct { recipient } => {
+            ProgressObligation::Direct { recipient, .. } => {
                 if self.reflection_room.is_some()
                     && !single_target(effect).is_some_and(|target| self.fanout.contains(target))
                 {

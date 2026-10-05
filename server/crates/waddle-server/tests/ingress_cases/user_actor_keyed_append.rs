@@ -41,6 +41,7 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: target.to_bare(),
             fanout: vec![target.clone()],
             route_identity: identity.clone(),

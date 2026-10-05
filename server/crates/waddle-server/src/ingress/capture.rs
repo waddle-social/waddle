@@ -140,6 +140,7 @@ mod tests {
 
     fn record_unique_route(capture: &IngressEffectCapture) {
         capture.record_intent(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: "bob@example.com".parse().expect("recipient"),
             fanout: Vec::new(),
             route_identity: capture.next_route_identity(),
@@ -150,6 +151,7 @@ mod tests {
     fn deduplicates_typed_intents() {
         let capture = IngressEffectCapture::new();
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: "bob@example.com".parse().expect("recipient"),
             fanout: Vec::new(),
             route_identity: EffectMessageIdentity::capture_ordinal(0),

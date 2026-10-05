@@ -64,6 +64,7 @@ async fn local_actor_detach_recovery(
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: socket.recipient.to_bare(),
             fanout: vec![socket.recipient.clone()],
             route_identity: route_identity.clone(),

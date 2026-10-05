@@ -96,6 +96,7 @@ async fn custody_survives_transition(fixture: IngressFixture, transition: Custod
     let mut submission = fixture.submission(Some("custody-transition"), "retained delivery");
     let identity = EffectMessageIdentity::capture_ordinal(1);
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: identity.clone(),

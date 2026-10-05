@@ -11,6 +11,7 @@ async fn message(
     resources: &[FullJid],
 ) -> (MessageKey, EffectReceiptKey) {
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com"
             .parse()
             .expect("valid archive owner JID"),

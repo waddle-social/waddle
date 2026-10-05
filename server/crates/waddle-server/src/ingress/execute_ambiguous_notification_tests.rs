@@ -54,6 +54,7 @@ async fn recovered_attempt_notification(
     deps.blocking_storage = Some(&blocking_storage);
     deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![recipient.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),

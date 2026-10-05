@@ -67,6 +67,7 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: boo
     }
     let identity = EffectMessageIdentity::capture_ordinal(7);
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![recipient.clone()],
         route_identity: identity.clone(),

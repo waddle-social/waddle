@@ -996,6 +996,7 @@ async fn push_projected_inbox(
             .filter(|_| !resources.is_empty())
             .map(|capture| {
                 let intent = IngressEffectIntent::RouteDirect {
+                    prepared: None,
                     recipient: owner.clone(),
                     fanout: resources.clone(),
                     route_identity: capture.next_inbox_push_identity(),

@@ -10,6 +10,7 @@ async fn deferred_authority_reads_once(fixture: IngressFixture) {
     let mut submission = fixture.submission(None, "deferred authority");
     let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![recipient.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

@@ -72,6 +72,7 @@ async fn sqlite_partial_detached_fanout_rechecks_preserve_accepted_resource() {
                 archived_at,
             },
             IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: first.to_bare(),
                 fanout: resources.clone(),
                 route_identity: identity.clone(),

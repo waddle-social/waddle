@@ -31,6 +31,7 @@ async fn progress_lock_contention(fixture: IngressFixture) {
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: resources[0].to_bare(),
             fanout: resources.clone(),
             route_identity: identity.clone(),

@@ -162,7 +162,33 @@ pub(super) async fn execute(
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;
         if outcome == FullJidDeliveryOutcome::Unavailable {
-            match super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await {
+            if certainty == DeliveryCertainty::Proven {
+                match crate::ingress::prepared_discard::settle_unavailable(
+                    uow, deps, key, progress, resource,
+                )
+                .await
+                {
+                    Ok(Some(settled)) => {
+                        persisted = settled;
+                        completion = SettledCompletion::Complete;
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "prepared route policy settlement failed");
+                        completion = SettledCompletion::Uncertain;
+                    }
+                }
+            }
+            let handoff = if crate::ingress::prepared_discard::forbids_offline_handoff(progress) {
+                // Only the ownership-safe policy arm may discard this prepared
+                // copy. The generic expiry fallback cannot turn remote/unknown
+                // reachability into a policy receipt.
+                Ok(None)
+            } else {
+                super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await
+            };
+            match handoff {
                 Ok(Some(settled)) => {
                     handed_off.push(resource.clone());
                     if !settled.is_empty() {

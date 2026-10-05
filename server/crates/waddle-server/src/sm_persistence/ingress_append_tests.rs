@@ -1038,6 +1038,7 @@ async fn live_attempt_interlock(
             .expect("baseline");
         let before = snapshot(&snapshot_storage, &session.stream_id).await;
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: session.jid.to_bare(),
             fanout: vec![session.jid.clone()],
             route_identity: EffectMessageIdentity::capture_ordinal(1),
@@ -1286,6 +1287,7 @@ async fn completed_handoff_blocks_stale_detached_append(
             .expect("prior snapshot");
         let before = snapshot(&snapshot_storage, &session.stream_id).await;
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: session.jid.to_bare(),
             fanout: vec![session.jid.clone(), sibling.clone()],
             route_identity: EffectMessageIdentity::capture_ordinal(1),

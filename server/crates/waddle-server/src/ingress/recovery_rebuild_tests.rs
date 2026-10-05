@@ -23,6 +23,7 @@ fn envelope(body: &str) -> MessageEnvelope {
 }
 fn route_intent(resources: &[&str]) -> IngressEffectIntent {
     IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: bare("juliet@example.com"),
         fanout: resources.iter().map(|s| full(s)).collect(),
         route_identity: EffectMessageIdentity::capture_ordinal(0),
@@ -483,6 +484,7 @@ fn pin_intents(both: bool) -> Vec<IngressEffectIntent> {
             action: DmPinMutationAction::Unpin,
         },
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: recipient.clone(),
             fanout: vec![full("juliet@example.com/phone")],
             route_identity: EffectMessageIdentity::StanzaId(StanzaId::new(
@@ -493,6 +495,7 @@ fn pin_intents(both: bool) -> Vec<IngressEffectIntent> {
     ];
     if both {
         intents.push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: sender.clone(),
             fanout: vec![full("romeo@example.com/phone")],
             route_identity: EffectMessageIdentity::StanzaId(StanzaId::new(
@@ -617,6 +620,7 @@ fn muc_decline_fallback_keeps_the_canonical_receipt_time() {
             },
         },
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: inviter.clone(),
             fanout: vec!["juliet@example.com/phone"
                 .parse()
@@ -714,6 +718,7 @@ fn blocked_recipient_discards_a_pre_restored_muc_decline_route() {
             },
         },
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: inviter.clone(),
             fanout: vec!["juliet@example.com/phone"
                 .parse()

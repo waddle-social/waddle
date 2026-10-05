@@ -393,6 +393,7 @@ async fn remote_socket_rechecks_archive_predecessor(case: RemotePredecessorCase)
         .await;
     let registration_id = bridge.remote_socket_resources.lock().await[&target].registration_id;
     let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),
@@ -2636,6 +2637,7 @@ async fn canonical_remote_delivery(
     use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
     let mut submission = fixture.submission(Some(body), body);
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),

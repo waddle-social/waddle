@@ -46,6 +46,7 @@ async fn empty_accepted_authority(fixture: IngressFixture) {
             },
         },
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: invitee.to_bare(),
             fanout: vec![invitee.clone()],
             route_identity: identity.clone(),
@@ -90,6 +91,7 @@ async fn newly_enabled_observer(fixture: IngressFixture) {
     // Keep a nonempty historical authority to exercise the omission-repair
     // branch independently of empty accepted authorities.
     submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: submission.sender.to_bare(),
         fanout: vec![submission.sender.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

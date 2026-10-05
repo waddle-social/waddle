@@ -1392,6 +1392,13 @@ GRANT SELECT ON TABLE extension_room_observation_receipts TO pg_monitor;
 GRANT SELECT ON TABLE extension_room_publications TO pg_monitor;
 "#;
 
+/// Policy settlement is not transport delivery. NULL retains legacy/ordinary
+/// receipt semantics. Stop older writers before this one-way ledger cutover.
+pub const V1024_INGRESS_POLICY_DISCARD: &str = r#"
+ALTER TABLE ingress_effect_receipts ADD COLUMN policy_discard_reason TEXT
+    CHECK (policy_discard_reason IN ('recipient_blocked', 'storage_hint_forbids_handoff'));
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1532,6 +1539,12 @@ pub fn all() -> Vec<Migration> {
             description: "Give settled room-observer history its own retention clock".to_string(),
             sql_sqlite: V1023_OBSERVER_HISTORY_RETENTION,
             sql_postgres: V1023_OBSERVER_HISTORY_RETENTION_POSTGRES,
+        },
+        Migration {
+            version: 1024,
+            description: "Distinguish ingress policy discard from ordinary settlement".to_string(),
+            sql_sqlite: V1024_INGRESS_POLICY_DISCARD,
+            sql_postgres: V1024_INGRESS_POLICY_DISCARD,
         },
     ]
 }

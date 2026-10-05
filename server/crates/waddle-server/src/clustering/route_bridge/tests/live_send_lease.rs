@@ -61,6 +61,7 @@ impl SocketFixture {
             )
             .await;
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: target.to_bare(),
             fanout: vec![target.clone()],
             route_identity: EffectMessageIdentity::capture_ordinal(1),

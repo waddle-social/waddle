@@ -1,4 +1,6 @@
 //! Maintenance regressions against committed obligations and their actual sinks.
+#[path = "recovery_prepared_direct_tests.rs"]
+mod prepared_direct;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress::{
@@ -166,6 +168,7 @@ fn direct_submission(
     let mut submission = f.submission(Some(origin), "lost canonical delivery");
     let identity = EffectMessageIdentity::capture_ordinal(0);
     submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: resources[0].to_bare(),
         fanout: resources.to_vec(),
         route_identity: identity.clone(),
@@ -394,6 +397,7 @@ async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, head
             .await
         );
     }
+    // Deliberately models legacy rows without frozen recipient preparation.
     let mut submission = direct_submission(&f, "live-recovery", std::slice::from_ref(&resource));
     if detached_no_store {
         waddle_xmpp::xep::xep0334::add_hint(
@@ -1713,12 +1717,12 @@ async fn postgres_registered_remote_direct_route_stays_pending_without_relay() {
 }
 
 #[tokio::test]
-async fn sqlite_detached_no_store_full_target_route_is_deferred() {
+async fn sqlite_legacy_detached_no_store_full_target_route_is_deferred() {
     let fixture = IngressFixture::sqlite().await;
     live_route(fixture, true, true, false).await;
 }
 #[tokio::test]
-async fn postgres_detached_no_store_full_target_route_is_deferred() {
+async fn postgres_legacy_detached_no_store_full_target_route_is_deferred() {
     if let Some(fixture) = IngressFixture::postgres("detached_no_store_full_target_route").await {
         live_route(fixture, true, true, false).await;
     }
@@ -2444,6 +2448,7 @@ async fn bulk_delivery_progress_matches_per_receipt_reads(f: IngressFixture) {
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: other.to_bare(),
             fanout: vec![other.clone()],
             route_identity: EffectMessageIdentity::capture_ordinal(1),
@@ -2560,6 +2565,7 @@ fn recovery_pending_kinds_preserve_first_occurrence_order() {
     use waddle_xmpp::ingress::IngressEffectKind;
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
     let direct = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: resource.to_bare(),
         fanout: vec![resource.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

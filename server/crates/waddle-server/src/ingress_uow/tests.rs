@@ -1132,6 +1132,7 @@ async fn assert_intent_reconciliation(
         ordinal: None,
     };
     let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: vec![
             "juliet@example.com/phone".parse().expect("fanout"),
@@ -1197,6 +1198,7 @@ async fn assert_intent_reconciliation(
         ordinal: None,
     };
     let new_route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "benvolio@example.com".parse().expect("recipient"),
         fanout: vec![],
         route_identity: EffectMessageIdentity::capture_ordinal(1),

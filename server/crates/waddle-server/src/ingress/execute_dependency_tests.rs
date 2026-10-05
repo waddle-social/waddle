@@ -248,6 +248,7 @@ fn invite_receipts_require_the_exact_captured_route_and_actual_delivery_proof() 
     };
     let effect = ExternalEffect::RouteToPeer(route);
     let route_intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.clone(),
         fanout: vec![resource.clone()],
         route_identity: identity,
@@ -259,6 +260,7 @@ fn invite_receipts_require_the_exact_captured_route_and_actual_delivery_proof() 
         },
     };
     let wrong_route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient,
         fanout: vec![resource.clone()],
         route_identity: EffectMessageIdentity::CaptureOrdinal(8),

@@ -488,6 +488,7 @@ pub(crate) fn restore_recorded_group_dm_invite(
     }
     let route = recorded.iter().find_map(|intent| match intent {
         IngressEffectIntent::RouteDirect {
+            prepared: _,
             recipient,
             fanout,
             route_identity,

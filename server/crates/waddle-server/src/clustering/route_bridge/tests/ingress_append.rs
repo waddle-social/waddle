@@ -244,6 +244,7 @@ async fn ingress_append_authority(
             }
         } else {
             IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: recipient.to_bare(),
                 fanout: vec![recipient.clone()],
                 route_identity: EffectMessageIdentity::capture_ordinal(index as u64),
@@ -533,6 +534,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         .expect("local detached resources")
         .is_empty());
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![recipient.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),
@@ -754,6 +756,7 @@ async fn origin_preparation_signs_direct_and_muc_ingress_append_obligations() {
             message.from = Some(sender_full().into());
             message.type_ = xmpp_parsers::message::MessageType::Chat;
             IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: target_bare(),
                 fanout: vec![target_full()],
                 route_identity: identity,
@@ -872,6 +875,7 @@ impl RegisteredRemoteOwner {
             .await
             .expect("sender claim");
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: recipient.to_bare(),
             fanout: vec![recipient.clone()],
             route_identity: EffectMessageIdentity::capture_ordinal(0),

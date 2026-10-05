@@ -361,6 +361,31 @@ async fn commit_attempt(
         return Err(IngressUowError::EffectIntentConflict);
     }
     let intents = EffectIntentRepository::load(&mut tx, key).await?;
+    if intents.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::RouteDirect {
+                prepared: Some(_),
+                ..
+            }
+        )
+    }) {
+        let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        for intent in &intents {
+            if matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    prepared: Some(_),
+                    ..
+                }
+            ) && super::recorded::prepared_direct_message(&envelope, intent).is_none()
+            {
+                return Err(IngressUowError::EffectIntentConflict);
+            }
+        }
+    }
     // Divergent and initially empty plans can also insert omitted obligations.
     // Reopen under the canonical lock before committing any newly pending work.
     if intents.len() > recorded.len() {
@@ -698,7 +723,7 @@ pub(super) fn live_recipient_delegated(
         && !recorded.iter().any(|intent| matches!(intent,
             IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &recipient))
         && recorded.iter().any(|intent| matches!(intent,
-            IngressEffectIntent::RouteDirect { recipient: saved, fanout, route_identity: EffectMessageIdentity::CaptureOrdinal(_) }
+            IngressEffectIntent::RouteDirect { prepared: None, recipient: saved, fanout, route_identity: EffectMessageIdentity::CaptureOrdinal(_) }
                 if saved == &recipient && fanout.as_slice() == [full.clone()]))
 }
 

@@ -9,6 +9,7 @@ use waddle_xmpp::ingress::{EffectMessageIdentity, MessageKey};
 
 fn omitted_intent() -> IngressEffectIntent {
     IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: vec!["juliet@example.com/phone".parse().expect("phone")],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

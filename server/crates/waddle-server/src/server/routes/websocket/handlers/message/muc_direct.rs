@@ -674,6 +674,7 @@ pub(crate) fn restore_recorded_muc_decline(
     )));
     for intent in pending {
         let IngressEffectIntent::RouteDirect {
+            prepared: _,
             recipient,
             fanout,
             route_identity,

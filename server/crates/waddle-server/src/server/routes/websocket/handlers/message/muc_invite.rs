@@ -841,6 +841,7 @@ pub(super) async fn deliver_muc_user_message(
         });
         if let Some(route_identity) = &route_identity {
             deps.capture_intent(IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: recipient.clone(),
                 fanout: resources.clone(),
                 route_identity: route_identity.clone(),

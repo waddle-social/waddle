@@ -54,6 +54,7 @@ pub(super) fn route_receipts(
             matches!(effect, ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { owner: actual_owner, exclude: actual_exclude, kind: actual_kind, .. }) if owner == actual_owner && exclude == actual_exclude && kind == actual_kind).then_some(index)
         }).collect()),
         IngressEffectIntent::RouteDirect {
+            prepared: _,
             recipient,
             fanout,
             route_identity,
@@ -363,6 +364,7 @@ mod tests {
         })
         };
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: peer.to_bare(),
             fanout: vec![peer.clone()],
             route_identity: second.clone(),

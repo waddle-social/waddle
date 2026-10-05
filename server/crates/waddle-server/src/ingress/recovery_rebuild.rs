@@ -259,6 +259,7 @@ fn restore_direct_routes(
     let mut discarded = Vec::new();
     for intent in input.unreceipted {
         let IngressEffectIntent::RouteDirect {
+            prepared: _,
             recipient,
             fanout,
             route_identity,
@@ -292,11 +293,13 @@ fn restore_direct_routes(
             call_setup: None,
             bare: recipient.clone(),
             resources: fanout.clone(),
-            stanza: Box::new(Stanza::Message(super::recorded::delivery_message(
-                input.envelope,
-                recipient,
-                input.recorded,
-            ))),
+            stanza: Box::new(Stanza::Message(
+                super::recorded::prepared_direct_message(input.envelope, intent)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        super::recorded::delivery_message(input.envelope, recipient, input.recorded)
+                    }),
+            )),
         });
         if plan.plan.iter().any(|planned| {
             matches!(&planned.effect, Effect::External(existing)
@@ -349,6 +352,7 @@ pub(super) fn rebuildable_direct_route(
     intent: &IngressEffectIntent,
 ) -> bool {
     let IngressEffectIntent::RouteDirect {
+        prepared: _,
         recipient,
         fanout,
         route_identity,
@@ -362,6 +366,13 @@ pub(super) fn rebuildable_direct_route(
     !matches!(route_identity, EffectMessageIdentity::InboxPush(_))
         && !fanout.is_empty()
         && !(pin_owned && matches!(route_identity, EffectMessageIdentity::StanzaId(_)))
+        && (!matches!(
+            intent,
+            IngressEffectIntent::RouteDirect {
+                prepared: Some(_),
+                ..
+            }
+        ) || super::recorded::prepared_direct_message(envelope, intent).is_some())
         && direct_provenance(envelope, recorded, recipient)
 }
 

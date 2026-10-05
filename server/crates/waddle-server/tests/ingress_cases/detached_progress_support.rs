@@ -72,6 +72,7 @@ pub fn route(submission: &mut IngressSubmission, fanout: &[FullJid], ordinal: u6
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: fanout[0].to_bare(),
             fanout: fanout.to_vec(),
             route_identity: identity.clone(),

@@ -75,6 +75,7 @@ async fn bounded_keyset_scan(fixture: IngressFixture) {
 
     let mut missing = fixture.submission(Some("maintenance-missing"), "unsettled route");
     missing.plan.intents.push(IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

@@ -99,10 +99,15 @@ async fn select_bare_jid_live_targets(deps: &Deps<'_>, bare: &BareJid) -> Vec<ji
         .collect()
 }
 
-fn capture_route_direct_intent(
+fn capture_route_direct_intent(deps: &Deps<'_>, recipient: &BareJid, fanout: Vec<jid::FullJid>) {
+    capture_prepared_route_direct_intent(deps, recipient, fanout, None);
+}
+
+fn capture_prepared_route_direct_intent(
     deps: &Deps<'_>,
     recipient: &BareJid,
     mut fanout: Vec<jid::FullJid>,
+    prepared: Option<waddle_xmpp::ingress::StoredMessagePayload>,
 ) {
     if fanout.is_empty() {
         return;
@@ -113,6 +118,7 @@ fn capture_route_direct_intent(
         return;
     };
     deps.capture_intent(IngressEffectIntent::RouteDirect {
+        prepared,
         recipient: recipient.clone(),
         fanout,
         route_identity: deps
@@ -331,6 +337,30 @@ async fn route_planned_direct_message(
             side_routes,
         } => {
             if let Some(processed) = processed {
+                let Stanza::Message(message) = processed.as_ref() else {
+                    deps.effects
+                        .fail_plan(super::effects::PlanFailure::InvalidPreparedMessage);
+                    return Vec::new();
+                };
+                // Generated side routes retain their specialized authority;
+                // only this ingress envelope's recipient pass proves a new
+                // prepared primary-direct copy.
+                let prepared = if deps.effects.message().is_some_and(|source| {
+                    source.from == message.from
+                        && source.to == message.to
+                        && source.type_ == message.type_
+                }) {
+                    match waddle_xmpp::ingress::StoredMessagePayload::new(message.clone()) {
+                        Ok(prepared) => Some(prepared),
+                        Err(_) => {
+                            deps.effects
+                                .fail_plan(super::effects::PlanFailure::InvalidPreparedMessage);
+                            return Vec::new();
+                        }
+                    }
+                } else {
+                    None
+                };
                 for target in &selection.originals {
                     if inventory
                         .live
@@ -343,7 +373,7 @@ async fn route_planned_direct_message(
                         plan::queue_detached(deps, vec![target.clone()], &processed);
                     }
                 }
-                capture_route_direct_intent(deps, &bare, selection.originals);
+                capture_prepared_route_direct_intent(deps, &bare, selection.originals, prepared);
             }
             route_side_stanzas(deps, side_routes, depth).await;
         }

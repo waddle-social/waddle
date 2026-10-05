@@ -106,6 +106,7 @@ async fn detached_delivery_fault(
     let mut submission = fixture.submission(Some("detached-fault"), "canonical delivery");
     let identity = EffectMessageIdentity::capture_ordinal(1);
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: first.to_bare(),
         fanout: if single {
             vec![first.clone()]
@@ -444,6 +445,7 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
             }
         } else {
             IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: target.to_bare(),
                 fanout: vec![target.clone()],
                 route_identity: identity.clone(),
@@ -540,6 +542,7 @@ async fn sqlite_present_detached_session_append_failure_is_uncertain() {
     let mut submission = fixture.submission(Some("append-storage-error"), "durable copy");
     let identity = EffectMessageIdentity::capture_ordinal(1);
     submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: identity.clone(),

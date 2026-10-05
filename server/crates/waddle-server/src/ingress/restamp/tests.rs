@@ -166,6 +166,7 @@ fn restamp_intent_routes_and_retractions_preserve_historical_targets() {
     let (mut plan, owner, minted, recorded) = fixture();
     let historical = StanzaId::new("previous-message", owner.clone().into());
     plan.intents.push(IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: jid("bob@example.test"),
         fanout: Vec::new(),
         route_identity: EffectMessageIdentity::StanzaId(minted.clone()),

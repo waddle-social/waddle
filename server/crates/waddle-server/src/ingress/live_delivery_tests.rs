@@ -6,6 +6,7 @@ use waddle_xmpp::ingress::EffectMessageIdentity;
 async fn recorded(fixture: &IngressFixture) -> (SmIngressAppendContext, FullJid, Stanza) {
     let target: FullJid = "juliet@example.com/phone".parse().expect("target");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),
@@ -462,6 +463,7 @@ async fn frozen_pin_notification_allows_sender_copy_but_rejects_substituted_payl
     let peer = "juliet@example.com".parse::<jid::BareJid>().expect("peer");
     let stamp = StanzaId::new("pin-notification", target.to_bare().into());
     let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: EffectMessageIdentity::stanza(stamp.clone()),
@@ -539,6 +541,7 @@ async fn unarchived_recipient_stamp(hint: Option<waddle_xmpp::xep::xep0334::Hint
     let authority = fixture.authority().await;
     let target: FullJid = "juliet@example.com/phone".parse().expect("target");
     let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),

@@ -62,6 +62,7 @@ async fn recipient_plan_drift(fixture: IngressFixture, missing_sender: bool) {
             },
         ))));
     let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.clone(),
         fanout: vec![full.clone()],
         route_identity: route_identity.clone(),

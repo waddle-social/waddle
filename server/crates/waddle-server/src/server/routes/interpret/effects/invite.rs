@@ -97,6 +97,7 @@ pub(crate) async fn execute(route: MucUserRoute, deps: &Deps<'_>) -> super::Effe
         accepted.sort();
         accepted.dedup();
         capture.record_intent(waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: route.recipient,
             fanout: accepted,
             route_identity: route

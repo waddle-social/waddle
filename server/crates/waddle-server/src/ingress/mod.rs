@@ -1321,4 +1321,5 @@ mod offline_hardening_tests;
 #[cfg(test)]
 mod muc_occupant_progress_tests;
 
+mod prepared_discard;
 mod room_canonical;

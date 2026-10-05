@@ -82,6 +82,7 @@ async fn detaching_socket(fixture: IngressFixture) -> DetachingSocket {
 async fn committed_obligation(socket: &DetachingSocket) -> (Stanza, SmRelayedAppendObligation) {
     let mut submission = socket.fixture.submission(None, "drained once");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: socket.recipient.to_bare(),
         fanout: vec![socket.recipient.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

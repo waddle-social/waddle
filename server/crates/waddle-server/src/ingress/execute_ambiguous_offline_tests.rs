@@ -41,6 +41,7 @@ async fn run_handoff(
         resources.push("juliet@example.com/laptop".parse().expect("sibling"));
     }
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: resource.to_bare(),
         fanout: resources.clone(),
         route_identity: EffectMessageIdentity::capture_ordinal(1),

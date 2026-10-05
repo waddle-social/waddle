@@ -504,6 +504,7 @@ async fn live_recipient(fixture: IngressFixture) {
         .expect("live resource");
     let identity = EffectMessageIdentity::capture_ordinal(0);
     fresh.plan.intents.push(IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: full.to_bare(),
         fanout: vec![full.clone()],
         route_identity: identity.clone(),

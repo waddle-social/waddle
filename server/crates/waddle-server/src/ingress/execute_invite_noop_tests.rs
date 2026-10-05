@@ -97,6 +97,7 @@ async fn outstanding_invite_discharges_delivery(fixture: IngressFixture) {
             },
         },
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: invite.invitee.clone(),
             fanout: vec![resource],
             route_identity,

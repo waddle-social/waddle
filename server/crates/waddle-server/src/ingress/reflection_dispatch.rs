@@ -46,6 +46,7 @@ pub(super) fn original_intent(room_intent: &IngressEffectIntent) -> Option<Ingre
         return None;
     };
     Some(IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: reflection.to_bare(),
         fanout: vec![reflection.clone()],
         route_identity: route_identity.clone(),

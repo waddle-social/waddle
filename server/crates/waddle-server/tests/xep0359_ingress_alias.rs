@@ -761,6 +761,7 @@ async fn recovery_does_not_rebuild_groupchat_inbox_push(fixture: IngressFixture)
         .to_bare();
     let recipient = resource.to_bare();
     let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.clone(),
         fanout: vec![resource.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),
