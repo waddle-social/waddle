@@ -676,6 +676,74 @@ async fn full_batch_of_retracted_sources_is_collected_in_one_batch_postgres() {
     }
 }
 
+/// Many short retracted chains: the per-batch source cap (16 drained sources)
+/// must report the batch exhausted so the next batch follows immediately
+/// instead of waiting out the retention interval with budget to spare.
+async fn many_short_retracted_chains_drain_across_consecutive_batches(fixture: IngressFixture) {
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    let t0 = Utc::now();
+    const SOURCES: usize = 40;
+    let mut tx = fixture.db.begin_immediate().await.expect("sources");
+    for index in 0..SOURCES {
+        let key = Uuid::now_v7().to_string();
+        tx.execute(
+            "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted, captured_at_ms) VALUES (?, ?, 'author@example.org', ?, ?, NULL, 0, '{}', 1, ?)",
+            crate::db_params![key.clone(), room().to_string(), format!("short-{index}"), format!("short-{index}"), ms(t0)],
+        )
+        .await
+        .expect("retracted source");
+        tx.execute(
+            "INSERT INTO extension_room_source_revisions (room_jid, room_stanza_id, source_key) VALUES (?, ?, ?)",
+            crate::db_params![room().to_string(), format!("short-{index}-rev"), key],
+        )
+        .await
+        .expect("revision");
+    }
+    tx.commit().await.expect("sources commit");
+    let mut batches = Vec::new();
+    loop {
+        let batch = collect(&fixture, horizon(t0), BATCH).await;
+        batches.push(batch);
+        if !batch.exhausted {
+            break;
+        }
+        assert!(batches.len() <= 10, "drain must converge: {batches:?}");
+    }
+    // 16 sources per batch: 16 + 16 + 8, then a non-exhausted tail.
+    assert!(
+        batches.len() >= 3,
+        "the source cap must keep batches flowing: {batches:?}"
+    );
+    for batch in &batches[..batches.len() - 1] {
+        assert!(
+            batch.exhausted,
+            "capped batch must report exhaustion: {batch:?}"
+        );
+        assert!(
+            batch.total() < u64::from(BATCH),
+            "row budget was not the limiter: {batch:?}"
+        );
+    }
+    assert_eq!(fixture.count("extension_room_sources").await, 0);
+    assert_eq!(fixture.count("extension_room_source_revisions").await, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn many_short_retracted_chains_drain_across_consecutive_batches_sqlite() {
+    many_short_retracted_chains_drain_across_consecutive_batches(IngressFixture::sqlite().await)
+        .await;
+}
+
+#[tokio::test]
+async fn many_short_retracted_chains_drain_across_consecutive_batches_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("observer_retention_short_chains").await {
+        many_short_retracted_chains_drain_across_consecutive_batches(fixture).await;
+    }
+}
+
 #[tokio::test]
 async fn retracted_source_with_oversized_revision_chain_drains_within_budget_sqlite() {
     retracted_source_with_oversized_revision_chain_drains_within_budget(

@@ -264,6 +264,10 @@ pub(super) async fn collect_expired(
     )
     .await?;
     let revision_budget = remaining(&batch);
+    // The drain caps how many sources one batch touches, independently of the
+    // row budget. Reaching that cap means more drainable sources may remain,
+    // so the batch must report itself exhausted even with budget to spare.
+    let mut drain_cap_reached = false;
     if revision_budget > 0 {
         let drained = locked_source_keys(
             tx,
@@ -272,6 +276,7 @@ pub(super) async fn collect_expired(
             REVISION_DRAIN_SOURCES,
         )
         .await?;
+        drain_cap_reached = drained.len() as i64 >= REVISION_DRAIN_SOURCES;
         if !drained.is_empty() {
             let sql = revision_drain_sql(drained.len());
             let mut params: Vec<crate::db::Value> =
@@ -297,6 +302,6 @@ pub(super) async fn collect_expired(
             batch.sources = tx.execute(&sql, params).await.map_err(retention_error)?;
         }
     }
-    batch.exhausted = batch.total() >= u64::from(limit);
+    batch.exhausted = batch.total() >= u64::from(limit) || drain_cap_reached;
     Ok(batch)
 }
