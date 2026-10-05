@@ -258,7 +258,7 @@ pub use deps::{
     Deps, GroupchatRetrySuppression, HostOwnedResources, InterpretOutcome, OrderedRelayRouteOrigin,
     SmIngressAppendContext, TimerCommand,
 };
-pub(crate) use groupchat_archive::push_inbox_update;
+pub(crate) use groupchat_archive::{project_groupchat_archive, push_inbox_update};
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
 };

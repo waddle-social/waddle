@@ -734,7 +734,9 @@ async fn room_observer_owner_envelope_attachment(driver: DatabaseDriver) {
             .append("owner only")
             .build(),
     );
-    let owner = MessageEnvelope::with_room_observer(observed.clone(), request.clone());
+    let context = archive_context();
+    let owner = MessageEnvelope::with_room_observer(observed.clone(), request.clone())
+        .with_archive_context(context.clone());
     let mut tx = fixture.db.begin_immediate().await.expect("begin origin");
     record_message(&mut tx, key, &digest(), Some(&origin))
         .await
@@ -752,6 +754,7 @@ async fn room_observer_owner_envelope_attachment(driver: DatabaseDriver) {
         .expect("envelope");
     assert_eq!(loaded.message(), &observed);
     assert_eq!(loaded.room_observer_request(), Some(request.clone()));
+    assert_eq!(loaded.archive_context(&context.stanza_id), Some(&context));
     observed
         .bodies
         .insert(Default::default(), "retry change".into());
@@ -856,4 +859,50 @@ async fn sqlite_gc_rechecks_pending_intents_under_canonical_lock() {
 #[tokio::test]
 async fn postgres_gc_rechecks_pending_intents_under_canonical_lock() {
     gc_rechecks_pending_intents_under_canonical_lock(DatabaseDriver::Postgres).await;
+}
+
+fn archive_context() -> MucArchiveContext {
+    MucArchiveContext {
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+            "archive-id",
+            "room@muc.example.com".parse().expect("room"),
+        ),
+        sender: Some(waddle_xmpp_core::mam::ArchivedMucSender {
+            jid: "alice@example.com/first".parse().expect("sender"),
+            affiliation: waddle_xmpp::Affiliation::Member,
+            role: waddle_xmpp::Role::Participant,
+        }),
+        nickname_generation: Some(7),
+    }
+}
+
+#[test]
+fn archive_context_codec_preserves_legacy_and_does_not_enrich_live_message() {
+    let original = typed_envelope("body");
+    let legacy = authority::serialize_envelope(&original).expect("legacy bytes");
+    let legacy_json: serde_json::Value = serde_json::from_slice(&legacy).expect("JSON");
+    assert!(legacy_json.get("archive_contexts").is_none());
+    assert_eq!(
+        MessageEnvelope::from_storage(1, legacy).expect("legacy decode"),
+        original
+    );
+    let context = archive_context();
+    let enriched = original.clone().with_archive_context(context.clone());
+    let bytes = authority::serialize_envelope(&enriched).expect("context bytes");
+    let decoded = MessageEnvelope::from_storage(1, bytes).expect("context decode");
+    assert_eq!(decoded.archive_context(&context.stanza_id), Some(&context));
+    assert_eq!(decoded.message(), original.message());
+    assert!(!decoded
+        .message()
+        .payloads
+        .iter()
+        .any(|payload| payload.is("x", xmpp_parsers::ns::MUC_USER)));
+    let duplicate = enriched.with_archive_context(context);
+    assert!(matches!(
+        MessageEnvelope::from_storage(
+            1,
+            authority::serialize_envelope(&duplicate).expect("encode duplicate")
+        ),
+        Err(IngressSubstrateError::InvalidStoredEnvelope)
+    ));
 }

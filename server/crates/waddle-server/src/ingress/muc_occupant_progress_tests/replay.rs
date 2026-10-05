@@ -196,6 +196,15 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
             }
         }
     }
+    if matches!(case, ReplayCase::MissingProvenanceSubject) {
+        super::assert_unverifiable_archive_rejected(&fixture, &submission, key).await;
+        assert!(receivers
+            .iter_mut()
+            .all(|receiver| receiver.try_recv().is_err()));
+        assert!(c_rx.try_recv().is_err());
+        fixture.close().await;
+        return;
+    }
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("duplicate");
@@ -391,7 +400,7 @@ async fn postgres_muc_replay_relay_filter() {
 }
 
 #[tokio::test]
-async fn sqlite_muc_occupant_progress_old_subject_rebroadcast() {
+async fn sqlite_muc_occupant_progress_old_subject_fails_closed() {
     partial_replay(
         IngressFixture::sqlite().await,
         ReplayCase::MissingProvenanceSubject,
@@ -399,7 +408,7 @@ async fn sqlite_muc_occupant_progress_old_subject_rebroadcast() {
     .await;
 }
 #[tokio::test]
-async fn postgres_muc_occupant_progress_old_subject_rebroadcast() {
+async fn postgres_muc_occupant_progress_old_subject_fails_closed() {
     if let Some(fixture) = IngressFixture::postgres("muc_old_subject").await {
         partial_replay(fixture, ReplayCase::MissingProvenanceSubject).await;
     }

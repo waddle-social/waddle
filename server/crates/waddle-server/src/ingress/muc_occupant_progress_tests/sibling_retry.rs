@@ -143,6 +143,14 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         .as_deref()
         .expect("room prototype")
         .clone();
+    if !canonical {
+        super::assert_unverifiable_archive_rejected(&fixture, &submission, key).await;
+        assert!(receivers
+            .iter_mut()
+            .all(|receiver| receiver.try_recv().is_err()));
+        fixture.close().await;
+        return;
+    }
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("retry");
@@ -287,11 +295,11 @@ async fn postgres_muc_occupant_progress_sibling_retry_canonical() {
     }
 }
 #[tokio::test]
-async fn sqlite_muc_occupant_progress_sibling_retry_old_source() {
+async fn sqlite_muc_occupant_progress_sibling_retry_old_source_fails_closed() {
     sibling_retry(IngressFixture::sqlite().await, false, false).await;
 }
 #[tokio::test]
-async fn postgres_muc_occupant_progress_sibling_retry_old_source() {
+async fn postgres_muc_occupant_progress_sibling_retry_old_source_fails_closed() {
     if let Some(fixture) = IngressFixture::postgres("sibling_retry_old_source").await {
         sibling_retry(fixture, false, false).await;
     }
@@ -307,11 +315,11 @@ async fn postgres_muc_occupant_progress_sibling_retry_subject_canonical() {
     }
 }
 #[tokio::test]
-async fn sqlite_muc_occupant_progress_sibling_retry_subject_old_source() {
+async fn sqlite_muc_occupant_progress_sibling_retry_subject_old_source_fails_closed() {
     sibling_retry(IngressFixture::sqlite().await, true, false).await;
 }
 #[tokio::test]
-async fn postgres_muc_occupant_progress_sibling_retry_subject_old_source() {
+async fn postgres_muc_occupant_progress_sibling_retry_subject_old_source_fails_closed() {
     if let Some(fixture) = IngressFixture::postgres("sibling_retry_subject_old_source").await {
         sibling_retry(fixture, true, false).await;
     }

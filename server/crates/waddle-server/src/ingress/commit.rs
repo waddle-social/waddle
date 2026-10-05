@@ -90,9 +90,10 @@ pub fn classify_failure(error: &IngressUowError) -> IngressDecisionClass {
         IngressUowError::AmbiguousCommit => IngressDecisionClass::AmbiguousCommit,
         IngressUowError::EffectIntentConflict
         | IngressUowError::ArchiveOrdinalConflict { .. }
-        | IngressUowError::MamStore(waddle_xmpp::mam::MamTxStoreError::OrdinalConflict {
-            ..
-        }) => IngressDecisionClass::IntentContradiction,
+        | IngressUowError::MamStore(
+            waddle_xmpp::mam::MamTxStoreError::OrdinalConflict { .. }
+            | waddle_xmpp::mam::MamTxStoreError::ProjectionConflict { .. },
+        ) => IngressDecisionClass::IntentContradiction,
         IngressUowError::Substrate(IngressSubstrateError::SmOrdinalConflict) => {
             IngressDecisionClass::SmOrdinalConflict
         }
@@ -383,7 +384,7 @@ async fn commit_attempt(
         });
     }
     if !has_recorded_muc_authority {
-        if let Some(envelope) = super::recorded::room_canonical_envelope(&plan) {
+        if let Some(envelope) = super::recorded::room_canonical_envelope(&plan, &recorded) {
             CanonicalMessageRepository::record_room_canonical_envelope(&mut tx, key, &envelope)
                 .await?;
         }
@@ -443,6 +444,12 @@ async fn commit_attempt(
             _ => true,
         }
     });
+    if alias == AliasOutcomeClass::Existing {
+        let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        super::recorded::restore_archive_projections(&mut plan, &envelope)?;
+    }
     let applied = super::durable::apply_durable(
         &mut tx,
         key,

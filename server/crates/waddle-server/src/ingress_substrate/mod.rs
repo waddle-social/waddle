@@ -1,6 +1,7 @@
 //! Transactional ingress identity storage for PostgreSQL and SQLite.
 
 mod authority;
+pub(crate) use authority::MucArchiveContext;
 // Not clustering-only: besides the clustering receivers (#1778), the websocket
 // detach drain authorizes relayed append obligations with it (#1789), and that
 // drain is compiled in every build.

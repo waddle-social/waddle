@@ -1,14 +1,17 @@
 use super::allocation::{
     allocate_postgres, allocate_sqlite, decode_ordinal, preserve_postgres, preserve_sqlite,
 };
+use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
+use super::schema::SELECT_COLUMNS;
 use super::write::{
     find_origin_tombstone_postgres, find_origin_tombstone_sqlite,
     insert_postgres_message_on_connection, insert_sqlite_message_on_connection, InsertConflict,
     MessageInsert,
 };
+use crate::mam::storage::MamStorageError;
 use chrono::{DateTime, Utc};
 use jid::BareJid;
-use sqlx::{PgConnection, SqliteConnection};
+use sqlx::{PgConnection, Row, SqliteConnection};
 use std::num::TryFromIntError;
 use thiserror::Error;
 use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, ArchivedRichMessage};
@@ -58,6 +61,12 @@ pub enum MamTxStoreError {
     Database(#[from] sqlx::Error),
     #[error("MAM archive encoding error: {0}")]
     Encoding(#[from] MamTxEncodingError),
+    #[error("MAM archive row could not be decoded")]
+    Decoding(#[from] MamStorageError),
+    #[error("MAM archived stanza XML could not be parsed")]
+    StanzaXml(#[from] minidom::Error),
+    #[error("MAM archive projection conflicts with canonical identity: {}", stanza_id.id)]
+    ProjectionConflict { stanza_id: StanzaId },
     #[error("MAM archive id conflicts with canonical identity: {}", stanza_id.id)]
     Conflict { stanza_id: StanzaId },
     #[error("MAM archive ordinal conflicts with canonical identity: {}", stanza_id.id)]
@@ -100,6 +109,36 @@ fn expected_message(
     Ok((message, id))
 }
 
+/// Every non-tombstone archive column is immutable. Link-preview enrichment lives
+/// outside this row. XML compares as a typed element tree, preserving payloads,
+/// child order and text while ignoring serialization-only prefix/attribute order.
+/// Timestamp equality is evaluated at each backend's stored precision.
+fn same_projection(
+    stored: &ArchivedMessage,
+    expected: &ArchivedMessage,
+    timestamp_matches: bool,
+) -> Result<bool, MamTxStoreError> {
+    let xml = |message: &ArchivedMessage| {
+        message
+            .stanza_xml
+            .as_deref()
+            .map(str::parse::<minidom::Element>)
+            .transpose()
+    };
+    Ok(timestamp_matches
+        && stored.from == expected.from
+        && stored.to == expected.to
+        && stored.body == expected.body
+        && stored.stanza_id == expected.stanza_id
+        && stored.thread == expected.thread
+        && stored.reply == expected.reply
+        && stored.origin_id == expected.origin_id
+        && stored.message_type == expected.message_type
+        && stored.rich == expected.rich
+        && stored.nickname_generation == expected.nickname_generation
+        && xml(stored)? == xml(expected)?)
+}
+
 /// Store using a caller-owned connection; transaction boundaries remain with the caller.
 /// MAM currently has unbounded retention, so absent recorded identities are repaired.
 pub async fn store_archived_message_on_connection(
@@ -109,13 +148,16 @@ pub async fn store_archived_message_on_connection(
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
-    let existing: Option<(String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT room_jid, rich_payload, archive_seq FROM mam_messages WHERE id = $1",
-    )
+    let existing = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS}, timestamp = $2 AS matches_timestamp FROM mam_messages WHERE id = $1"
+    ))
     .bind(&stanza_id.id)
+    .bind(message.timestamp)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some((recorded_archive, payload, stored_ordinal)) = existing {
+    if let Some(row) = existing {
+        let recorded_archive: String = row.try_get("room_jid")?;
+        let stored_ordinal = row.try_get("archive_seq")?;
         if matches!(expectation, ArchiveExpectation::Fresh)
             || recorded_archive != archive.to_string()
         {
@@ -134,21 +176,18 @@ pub async fn store_archived_message_on_connection(
                 });
             }
         }
-        let rich: Option<ArchivedRichMessage> = payload
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(MamTxEncodingError::RichPayload)?;
-        return Ok(
-            if rich
-                .as_ref()
-                .is_some_and(ArchivedRichMessage::is_tombstoned)
-            {
-                MamTxStoreOutcome::TombstoneHit(stanza_id)
-            } else {
-                MamTxStoreOutcome::Existing { stanza_id, ordinal }
-            },
-        );
+        let stored = decode_postgres_message_row(&row)?;
+        if stored
+            .rich
+            .as_ref()
+            .is_some_and(ArchivedRichMessage::is_tombstoned)
+        {
+            return Ok(MamTxStoreOutcome::TombstoneHit(stanza_id));
+        }
+        if !same_projection(&stored, &message, row.try_get("matches_timestamp")?)? {
+            return Err(MamTxStoreError::ProjectionConflict { stanza_id });
+        }
+        return Ok(MamTxStoreOutcome::Existing { stanza_id, ordinal });
     }
     if let Some(id) = find_origin_tombstone_postgres(conn, archive, &message).await? {
         return Ok(MamTxStoreOutcome::TombstoneHit(StanzaId::new(
@@ -223,13 +262,15 @@ pub async fn store_archived_message_on_sqlite_connection(
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
-    let existing: Option<(String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT room_jid, rich_payload, archive_seq FROM mam_messages WHERE id = $1",
-    )
+    let existing = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE id = $1"
+    ))
     .bind(&stanza_id.id)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some((recorded_archive, payload, stored_ordinal)) = existing {
+    if let Some(row) = existing {
+        let recorded_archive: String = row.try_get("room_jid")?;
+        let stored_ordinal = row.try_get("archive_seq")?;
         if matches!(expectation, ArchiveExpectation::Fresh)
             || recorded_archive != archive.to_string()
         {
@@ -248,21 +289,18 @@ pub async fn store_archived_message_on_sqlite_connection(
                 });
             }
         }
-        let rich: Option<ArchivedRichMessage> = payload
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(MamTxEncodingError::RichPayload)?;
-        return Ok(
-            if rich
-                .as_ref()
-                .is_some_and(ArchivedRichMessage::is_tombstoned)
-            {
-                MamTxStoreOutcome::TombstoneHit(stanza_id)
-            } else {
-                MamTxStoreOutcome::Existing { stanza_id, ordinal }
-            },
-        );
+        let stored = decode_sqlite_message_row(&row)?;
+        if stored
+            .rich
+            .as_ref()
+            .is_some_and(ArchivedRichMessage::is_tombstoned)
+        {
+            return Ok(MamTxStoreOutcome::TombstoneHit(stanza_id));
+        }
+        if !same_projection(&stored, &message, stored.timestamp == message.timestamp)? {
+            return Err(MamTxStoreError::ProjectionConflict { stanza_id });
+        }
+        return Ok(MamTxStoreOutcome::Existing { stanza_id, ordinal });
     }
     if let Some(id) = find_origin_tombstone_sqlite(conn, archive, &message).await? {
         return Ok(MamTxStoreOutcome::TombstoneHit(StanzaId::new(

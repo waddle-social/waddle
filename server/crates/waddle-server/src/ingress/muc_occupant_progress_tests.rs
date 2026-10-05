@@ -51,6 +51,8 @@ async fn plan_broadcast(
 enum RetryCase {
     Ordinary,
     ReconnectedSender,
+    LegacyArchiveContext,
+    LegacyMatching,
     MissingProvenance,
 }
 
@@ -90,6 +92,9 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
             .expect("join");
     }
     let mut message = submission.plan.sanitized_message.clone();
+    if retry_case == RetryCase::LegacyMatching {
+        message.id = Some(xmpp_parsers::message::Id("preserved-client-id".into()));
+    }
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
     message.to = Some(room.clone().into());
     if bodyless {
@@ -139,6 +144,16 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         .expect("real room fanout");
     let receipt = receipt_key(intent).expect("kind-2 receipt");
     assert!(receivers.iter_mut().all(|rx| rx.try_recv().is_err()));
+    let frozen_archive = submission
+        .plan
+        .plan
+        .iter()
+        .find_map(|planned| match &planned.effect {
+            effects::Effect::Durable(effects::DurableEffect::Room(
+                effects::room::DurableRoomEffect::ArchiveGroupchat { message, .. },
+            )) => Some(message.clone()),
+            _ => None,
+        });
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit");
@@ -203,6 +218,33 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         })
         .await
         .expect("late join");
+    if matches!(
+        retry_case,
+        RetryCase::LegacyArchiveContext | RetryCase::LegacyMatching
+    ) {
+        // Pre-context rows retain the original canonical message, but have no
+        // independent authority for archive-only nickname/session metadata.
+        let source = if retry_case == RetryCase::LegacyMatching {
+            &message
+        } else {
+            submission
+                .plan
+                .room_canonical_message
+                .as_deref()
+                .expect("room source")
+        };
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "message": waddle_xmpp::parser::message_to_string(source).expect("canonical XML"),
+            "observer_request": null,
+        }))
+        .expect("legacy envelope");
+        fixture
+            .execute(
+                "UPDATE ingress_messages SET envelope = ?",
+                crate::db_params![bytes],
+            )
+            .await;
+    }
     if retry_case == RetryCase::MissingProvenance {
         let mut tx = fixture.uow.begin().await.expect("old row");
         crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
@@ -215,7 +257,10 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         tx.commit().await.expect("old row commit");
     }
     let mut retry_sender = sender.clone();
-    if retry_case == RetryCase::ReconnectedSender {
+    if matches!(
+        retry_case,
+        RetryCase::ReconnectedSender | RetryCase::LegacyArchiveContext
+    ) {
         use waddle_xmpp::muc::room_actor::{
             LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
         };
@@ -253,7 +298,10 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
     // Replanning creates a new room stanza ID and includes the new occupant;
     // replay must recover the original stamp and frozen audience.
     plan_broadcast(&mut submission, &room, &message, &deps).await;
-    if retry_case == RetryCase::ReconnectedSender {
+    if matches!(
+        retry_case,
+        RetryCase::ReconnectedSender | RetryCase::LegacyArchiveContext
+    ) {
         // The full ingress planner returns this rewritten prototype; reflection
         // detection must also honor its sender-copy policy marker.
         submission.plan.sanitized_message = submission
@@ -263,9 +311,99 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
             .expect("room prototype")
             .clone();
     }
+    if retry_case == RetryCase::MissingProvenance {
+        assert_unverifiable_archive_rejected(&fixture, &submission, key).await;
+        assert!(receivers
+            .iter_mut()
+            .all(|receiver| receiver.try_recv().is_err()));
+        assert!(c_rx.try_recv().is_err());
+        fixture.close().await;
+        return;
+    }
+    if retry_case == RetryCase::LegacyArchiveContext {
+        let failure = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect_err("legacy metadata cannot be inferred from rejoin");
+        assert_eq!(failure.class(), IngressDecisionClass::IntentContradiction);
+        let original = frozen_archive.as_ref().expect("archive");
+        let mut tx = fixture.uow.begin().await.expect("legacy context read");
+        let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("load")
+            .expect("envelope");
+        let id = waddle_xmpp_core::xep0359::StanzaId::new(original.id.clone(), room.clone().into());
+        assert!(envelope.archive_context(&id).is_none());
+        tx.commit().await.expect("read commit");
+        fixture.close().await;
+        return;
+    }
+    if retry_case == RetryCase::ReconnectedSender {
+        let original = frozen_archive.as_ref().expect("archived room source");
+        fixture
+            .execute(
+                "UPDATE mam_messages SET nickname_generation = ? WHERE id = ?",
+                crate::db_params![100_i64, original.id.clone()],
+            )
+            .await;
+        let rejected = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect_err("stored metadata cannot validate itself");
+        assert_eq!(rejected.class(), IngressDecisionClass::IntentContradiction);
+        fixture
+            .execute(
+                "UPDATE mam_messages SET nickname_generation = ? WHERE id = ?",
+                crate::db_params![
+                    i64::try_from(original.nickname_generation.expect("generation"))
+                        .expect("generation fits"),
+                    original.id.clone()
+                ],
+            )
+            .await;
+    }
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("duplicate");
+    if retry_case == RetryCase::LegacyMatching {
+        assert_eq!(retry.archive_ids, decision.archive_ids);
+        assert_eq!(fixture.count("mam_messages").await, 1);
+        fixture.close().await;
+        return;
+    }
+    if let Some(original) = frozen_archive.as_ref() {
+        use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+        let storage = SqlxMamStorage::open(fixture.db.database_url())
+            .await
+            .expect("MAM reader");
+        let stored = storage
+            .get_message(&original.id)
+            .await
+            .expect("read")
+            .expect("archive row");
+        assert_eq!(stored.nickname_generation, original.nickname_generation);
+        assert_eq!(stored.rich, original.rich);
+        assert_eq!(stored.stanza_xml, original.stanza_xml);
+        if retry_case == RetryCase::ReconnectedSender {
+            fixture
+                .execute(
+                    "DELETE FROM mam_messages WHERE id = ?",
+                    crate::db_params![original.id.clone()],
+                )
+                .await;
+            commit_submission(&fixture.uow, &submission, 1)
+                .await
+                .expect("repair missing row from frozen source");
+            let repaired = storage
+                .get_message(&original.id)
+                .await
+                .expect("read repair")
+                .expect("repaired row");
+            assert_eq!(repaired.rich, stored.rich);
+            assert_eq!(repaired.nickname_generation, stored.nickname_generation);
+            assert_eq!(repaired.stanza_xml, stored.stanza_xml);
+            assert_eq!(repaired.ordinal, stored.ordinal);
+            assert_eq!(repaired.timestamp, stored.timestamp);
+        }
+    }
     let targets: Vec<_> = retry
         .external
         .iter()
@@ -306,10 +444,23 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
     )
     .await;
     assert!(report.receipt_failures.is_empty());
+    let repaired_copy = receivers[1].try_recv().ok();
     assert_eq!(
-        receivers[1].try_recv().is_ok(),
+        repaired_copy.is_some(),
         retry_case != RetryCase::MissingProvenance
     );
+    if let Some(copy) = repaired_copy {
+        let waddle_xmpp::Stanza::Message(message) = copy.stanza else {
+            panic!("room message");
+        };
+        assert!(
+            !message
+                .payloads
+                .iter()
+                .any(|payload| payload.is("x", xmpp_parsers::ns::MUC_USER)),
+            "archive-only real-JID metadata must not enter live copies"
+        );
+    }
     assert!(receivers[0].try_recv().is_err(), "A receives no duplicate");
     assert_eq!(
         receivers[2].try_recv().is_ok(),
@@ -424,7 +575,7 @@ async fn postgres_muc_occupant_progress_reconnected_sender() {
     }
 }
 #[tokio::test]
-async fn sqlite_muc_occupant_progress_old_provenance_reflection() {
+async fn sqlite_muc_occupant_progress_old_provenance_fails_closed() {
     partial_broadcast(
         IngressFixture::sqlite().await,
         false,
@@ -433,7 +584,7 @@ async fn sqlite_muc_occupant_progress_old_provenance_reflection() {
     .await;
 }
 #[tokio::test]
-async fn postgres_muc_occupant_progress_old_provenance_reflection() {
+async fn postgres_muc_occupant_progress_old_provenance_fails_closed() {
     if let Some(fixture) = IngressFixture::postgres("muc_old_provenance_reflection").await {
         partial_broadcast(fixture, false, RetryCase::MissingProvenance).await;
     }
@@ -455,3 +606,82 @@ mod relayed_sibling;
 #[cfg(feature = "clustering")]
 #[path = "muc_occupant_progress_tests/ordered_reflection.rs"]
 mod ordered_reflection;
+
+#[tokio::test]
+async fn sqlite_muc_legacy_archive_context_rejoin_fails_closed() {
+    partial_broadcast(
+        IngressFixture::sqlite().await,
+        false,
+        RetryCase::LegacyArchiveContext,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_muc_legacy_archive_context_rejoin_fails_closed() {
+    if let Some(fixture) = IngressFixture::postgres("muc_legacy_context").await {
+        partial_broadcast(fixture, false, RetryCase::LegacyArchiveContext).await;
+    }
+}
+
+/// Old accepted rows without the room-authored source cannot validate a newly
+/// planned archive projection. In particular, fresh reflections cannot turn
+/// archive corruption or missing authority into a successful replay receipt.
+async fn assert_unverifiable_archive_rejected(
+    fixture: &IngressFixture,
+    submission: &IngressSubmission,
+    key: waddle_xmpp::ingress::MessageKey,
+) {
+    let mut tx = fixture.uow.begin().await.expect("legacy source read");
+    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("load")
+        .expect("envelope");
+    assert!(
+        envelope.message().id.is_none(),
+        "original generated wire id is unrecoverable"
+    );
+    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("intents");
+    let route = intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .expect("route");
+    assert_eq!(
+        super::room_canonical::source(&envelope, route),
+        Err(super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
+    );
+    tx.commit().await.expect("read commit");
+    let receipts = fixture.count("ingress_effect_receipts").await;
+    let intents = fixture.count("ingress_effect_intents").await;
+    let archives = fixture.count("mam_messages").await;
+    let failure = commit_submission(&fixture.uow, submission, 1)
+        .await
+        .expect_err("unverifiable archive fails closed");
+    assert_eq!(failure.class(), IngressDecisionClass::IntentContradiction);
+    assert!(matches!(
+        failure.source,
+        crate::ingress_uow::IngressUowError::MamStore(
+            waddle_xmpp::mam::MamTxStoreError::ProjectionConflict { .. }
+        )
+    ));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, receipts);
+    assert_eq!(fixture.count("ingress_effect_intents").await, intents);
+    assert_eq!(fixture.count("mam_messages").await, archives);
+}
+
+#[tokio::test]
+async fn sqlite_muc_legacy_matching_archive_still_reconciles() {
+    partial_broadcast(
+        IngressFixture::sqlite().await,
+        false,
+        RetryCase::LegacyMatching,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_muc_legacy_matching_archive_still_reconciles() {
+    if let Some(fixture) = IngressFixture::postgres("muc_legacy_matching").await {
+        partial_broadcast(fixture, false, RetryCase::LegacyMatching).await;
+    }
+}

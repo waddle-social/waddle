@@ -163,14 +163,7 @@ pub(super) async fn archive_groupchat_message_with_effects(
     // append happens on the archive clone only, after
     // `MucCanonicalizeHandler` has already stripped any
     // client-supplied muc#user forgery (#1251).
-    let mut archive_clone = message.clone();
-    if let Some(sender_item) = sender_item {
-        archive_clone
-            .payloads
-            .push(waddle_xmpp_core::mam::build_archived_muc_sender_x(
-                sender_item,
-            ));
-    }
+    let archive_clone = message.clone();
     let archive_id = match extract_room_stanza_id(&archive_clone, room) {
         Some(id) => id,
         None => {
@@ -216,16 +209,24 @@ pub(super) fn extract_room_stanza_id(message: &Message, room: &BareJid) -> Optio
         .and_then(|payload| payload.attr("id").map(ToOwned::to_owned))
 }
 
-async fn finish_archive_groupchat_message_with_effects(
-    storage: (Option<&Deps<'_>>, &Arc<dyn MamStorage>),
+/// Build the same archive projection for first acceptance and canonical retry.
+/// The caller supplies archive-only metadata separately from the live room copy.
+pub(crate) fn project_groupchat_archive(
     room: &BareJid,
-    archive_clone: Message,
+    source: &Message,
     archive_id: String,
-    sender_nickname_generation: u64,
-    fence: &RoomArchiveFence,
+    archived_at: chrono::DateTime<chrono::Utc>,
+    nickname_generation: Option<u64>,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
-) -> ArchiveGroupchatOutcome {
-    let (deps, mam_storage) = storage;
+) -> Option<MamArchivedMessage> {
+    let mut archive_clone = source.clone();
+    if let Some(sender_item) = sender_item {
+        archive_clone
+            .payloads
+            .push(waddle_xmpp_core::mam::build_archived_muc_sender_x(
+                sender_item,
+            ));
+    }
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
     // None-vs-empty distinction so subject-only / reaction-only
     // groupchat messages don't materialize a fake empty body in the
@@ -257,17 +258,17 @@ async fn finish_archive_groupchat_message_with_effects(
             room = %room,
             "ArchiveGroupchat: missing from JID on reflection; dropping archive write"
         );
-        return ArchiveGroupchatOutcome::Skipped;
+        return None;
     };
     let room_jid_full = jid::Jid::from(room.clone());
     let stanza_id = archive_clone
         .id
         .as_ref()
         .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id.0.clone(), room_jid_full.clone()));
-    let archived = MamArchivedMessage {
+    Some(MamArchivedMessage {
         ordinal: None,
-        id: archive_id.clone(),
-        timestamp: chrono::Utc::now(),
+        id: archive_id,
+        timestamp: archived_at,
         from: from_jid,
         to: room_jid_full,
         body,
@@ -281,7 +282,29 @@ async fn finish_archive_groupchat_message_with_effects(
         message_type: archive_clone.type_.clone(),
         stanza_xml,
         rich,
-        nickname_generation: Some(sender_nickname_generation),
+        nickname_generation,
+    })
+}
+
+async fn finish_archive_groupchat_message_with_effects(
+    storage: (Option<&Deps<'_>>, &Arc<dyn MamStorage>),
+    room: &BareJid,
+    archive_clone: Message,
+    archive_id: String,
+    sender_nickname_generation: u64,
+    fence: &RoomArchiveFence,
+    sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
+) -> ArchiveGroupchatOutcome {
+    let (deps, mam_storage) = storage;
+    let Some(archived) = project_groupchat_archive(
+        room,
+        &archive_clone,
+        archive_id.clone(),
+        chrono::Utc::now(),
+        Some(sender_nickname_generation),
+        sender_item,
+    ) else {
+        return ArchiveGroupchatOutcome::Skipped;
     };
 
     // ADR-0017 Phase 3 Slice 7 FIX 1: the fenced variant when this room's

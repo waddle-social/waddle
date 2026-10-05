@@ -821,3 +821,205 @@ backend_tests!(
     counter_lock_order_and_contention_postgres,
     counter_lock_order_and_contention
 );
+
+/// A contradictory archive row cannot become durable completion evidence or
+/// authorize the inbox effect. Repairing the row lets unfinished receipts finish
+/// without replaying the already-applied unread mutation.
+async fn projection_conflict_receipts(fixture: IngressFixture) {
+    use waddle_server::ingress_uow::IngressUowError;
+    use waddle_xmpp::{
+        inbox::{ConversationKind, InboxEntry},
+        ingress::InboxProjectionMutation,
+        mam::MamTxStoreError,
+    };
+    let stamp = Utc::now();
+    let mut submission = plan(
+        &fixture,
+        "projection-conflict",
+        "projection-conflict-id",
+        stamp,
+    );
+    let owner = fixture.principal.bare_jid().clone();
+    let entry = InboxEntry::new(
+        "juliet@example.com".parse().expect("peer"),
+        ConversationKind::Direct,
+        "projection-conflict-id",
+        stamp.timestamp(),
+    );
+    submission
+        .plan
+        .intents
+        .push(IngressEffectIntent::InboxProject {
+            owner: owner.clone(),
+            mutation: InboxProjectionMutation::Direct {
+                entry: entry.clone(),
+                increment_unread: true,
+            },
+        });
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
+            DurableDirectEffect::ProjectInbox {
+                owner,
+                entry: Box::new(entry),
+                increment_unread: true,
+            },
+        ))));
+    let accepted = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("first commit");
+    let before = query_wire(&fixture, fixture.principal.bare_jid()).await;
+    assert_eq!(fixture.count("inbox_entries WHERE unread = 1").await, 1);
+    fixture
+        .execute(
+            "DELETE FROM ingress_effect_receipts",
+            waddle_server::db_params![],
+        )
+        .await;
+    fixture
+        .execute(
+            "UPDATE mam_messages SET body = ? WHERE id = ?",
+            waddle_server::db_params![
+                "corrupt archive body".to_owned(),
+                "projection-conflict-id".to_owned()
+            ],
+        )
+        .await;
+    let failure = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect_err("projection contradiction");
+    assert_eq!(failure.class(), IngressDecisionClass::IntentContradiction);
+    assert!(!failure.class().advances());
+    assert!(matches!(
+        failure.source,
+        IngressUowError::MamStore(MamTxStoreError::ProjectionConflict { .. })
+    ));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("inbox_entries WHERE unread = 1").await, 1);
+    assert_eq!(
+        query_wire(&fixture, fixture.principal.bare_jid()).await[0]
+            .body
+            .as_deref(),
+        Some("corrupt archive body")
+    );
+    fixture
+        .execute(
+            "UPDATE mam_messages SET body = ? WHERE id = ?",
+            waddle_server::db_params![
+                "archive body".to_owned(),
+                "projection-conflict-id".to_owned()
+            ],
+        )
+        .await;
+    let repaired = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("receipts repaired");
+    assert_eq!(repaired.archive_ids, accepted.archive_ids);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(fixture.count("inbox_entries WHERE unread = 1").await, 1);
+    let after = query_wire(&fixture, fixture.principal.bare_jid()).await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, before[0].id);
+    assert_eq!(after[0].ordinal, before[0].ordinal);
+    assert_eq!(after[0].timestamp, before[0].timestamp);
+    fixture.close().await;
+}
+backend_tests!(
+    projection_conflict_receipts_sqlite,
+    projection_conflict_receipts_postgres,
+    projection_conflict_receipts
+);
+
+async fn direct_retry_projection(fixture: IngressFixture, retraction: bool) {
+    let make = |archive_id: &str, resource: &str, wire_id: &str| {
+        let mut submission = plan(&fixture, "direct-reconnect", archive_id, Utc::now());
+        submission.sender = fixture
+            .principal
+            .bare_jid()
+            .with_resource_str(resource)
+            .expect("resource");
+        submission.plan.sanitized_message.from = Some(submission.sender.clone().into());
+        submission.plan.sanitized_message.id = Some(xmpp_parsers::message::Id(wire_id.into()));
+        if retraction {
+            submission.plan.sanitized_message.bodies.clear();
+            submission.plan.sanitized_message.payloads.push(
+                waddle_xmpp::xep::xep0424::build_retract_element("original-target"),
+            );
+        }
+        submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
+            &submission.plan.sanitized_message,
+            &waddle_xmpp::ingress::DigestContext {
+                target: submission.target.clone(),
+                server_authorities: vec![fixture.principal.bare_jid().clone()],
+                stanza_lang: None,
+            },
+        )
+        .expect("digest");
+        let source = submission.plan.sanitized_message.clone();
+        let Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+            archive,
+            message,
+            ..
+        })) = &mut submission.plan.plan[0].effect
+        else {
+            panic!("archive");
+        };
+        let mut stamped = source;
+        waddle_xmpp_core::xep0359::add_stanza_id(
+            &mut stamped,
+            &StanzaId::new(archive_id, archive.clone().into()),
+        );
+        let archived_at = message.timestamp;
+        **message = waddle_xmpp::mam::projection::build_direct_archived_message(
+            &archive.clone().into(),
+            fixture.principal.bare_jid().clone().into(),
+            stamped.to.as_ref().expect("target").to_bare().into(),
+            &stamped,
+        );
+        message.timestamp = archived_at;
+        submission
+    };
+    let first = commit_submission(
+        &fixture.uow,
+        &make("original-archive", "first", "first-wire"),
+        1,
+    )
+    .await
+    .expect("first commit");
+    let retry = commit_submission(
+        &fixture.uow,
+        &make("provisional-archive", "reconnected", "second-wire"),
+        1,
+    )
+    .await
+    .expect("retry uses canonical wire identity");
+    assert_eq!(retry.archive_ids, first.archive_ids);
+    let rows = query_wire(&fixture, fixture.principal.bare_jid()).await;
+    assert_eq!(rows.len(), 1);
+    let xml: minidom::Element = rows[0]
+        .stanza_xml
+        .as_deref()
+        .expect("full projection")
+        .parse()
+        .expect("XML");
+    assert_eq!(xml.attr("id"), Some("first-wire"));
+    assert_eq!(xml.attr("from"), Some("romeo@example.com/first"));
+    fixture.close().await;
+}
+async fn direct_restore(fixture: IngressFixture) {
+    direct_retry_projection(fixture, false).await;
+}
+async fn direct_retract_restore(fixture: IngressFixture) {
+    direct_retry_projection(fixture, true).await;
+}
+backend_tests!(
+    direct_retraction_retry_sqlite,
+    direct_retraction_retry_postgres,
+    direct_retract_restore
+);
+backend_tests!(
+    direct_retry_preserves_wire_identity_sqlite,
+    direct_retry_preserves_wire_identity_postgres,
+    direct_restore
+);
