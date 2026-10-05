@@ -20,6 +20,8 @@
 
 #![cfg(feature = "clustering")]
 
+mod replay_bytes_support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -235,6 +237,35 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         presence_priority: 0,
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
+    }
+}
+
+#[tokio::test]
+async fn cross_node_resume_preserves_production_replay_bytes_and_original_delay() {
+    let _guard = serial_lock().lock().await;
+    let Some(db) = clean_db().await else {
+        return;
+    };
+    let (bare, full) = alice_jid();
+    let payloads = replay_bytes_support::ReplayBytesFixture::new("stream-replay-bytes", full);
+    let (registry_a, _identity_a) = node_registry(&db, node_identity(), None).await;
+    payloads.store_and_append(&registry_a).await;
+    drop(registry_a);
+
+    // Each iteration starts on a different node and obtains the previous
+    // node's durable snapshot through the production ownership/hydration path.
+    for _ in 0..2 {
+        let (registry, _identity) = node_registry(&db, node_identity(), None).await;
+        let outcome = registry
+            .attempt_cross_node_resume("stream-replay-bytes", &bare, HANDSHAKE_BUDGET)
+            .await
+            .expect("cross-node resume");
+        let CrossNodeResumeOutcome::Claimed(session) = outcome else {
+            panic!("expected a durable cross-node claim");
+        };
+        payloads.assert_replay(&session);
+        payloads.retry_appends(&registry).await;
+        payloads.complete_resume_and_detach(&registry).await;
     }
 }
 
