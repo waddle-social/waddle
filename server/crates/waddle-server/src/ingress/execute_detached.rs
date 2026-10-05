@@ -162,28 +162,10 @@ pub(super) async fn execute(
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;
         if outcome == FullJidDeliveryOutcome::Unavailable {
-            if certainty == DeliveryCertainty::Proven {
-                match crate::ingress::prepared_discard::settle_unavailable(
-                    uow, deps, key, progress, resource,
-                )
-                .await
-                {
-                    Ok(Some(settled)) => {
-                        persisted = settled;
-                        completion = SettledCompletion::Complete;
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "prepared route policy settlement failed");
-                        completion = SettledCompletion::Uncertain;
-                    }
-                }
-            }
             let handoff = if crate::ingress::prepared_discard::forbids_offline_handoff(progress) {
-                // Only the ownership-safe policy arm may discard this prepared
-                // copy. The generic expiry fallback cannot turn remote/unknown
-                // reachability into a policy receipt.
+                // Absence cannot fence a reconnect through receipt commit.
+                // Preserve the owed copy without converting it to offline storage
+                // or letting generic expiry turn a snapshot into completion.
                 Ok(None)
             } else {
                 super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await

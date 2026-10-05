@@ -1363,18 +1363,21 @@ payload/preparation evidence keep their conservative deferred classification.
 ### Policy-discard receipts (V1024)
 
 The nullable `ingress_effect_receipts.policy_discard_reason` distinguishes
-`recipient_blocked` and `storage_hint_forbids_handoff` from ordinary settlement.
+`recipient_blocked` from ordinary settlement. The migration also permits
+`storage_hint_forbids_handoff`, but recovery no longer writes that reason from
+an absence probe.
 It describes disposal of the remaining aggregate obligation, not successful
 per-resource delivery and not proof that an earlier uncertain send never
 happened. A null reason preserves the ordinary/legacy receipt meaning; it must
 not be interpreted as proof of socket delivery. Existing receipts win over a
 later attempted reclassification.
 
-A missing local socket is not sufficient evidence for storage-hint disposal:
-the resource may be remote-owned. Recovery requires the relevant local owner
-authority, checks existing custody/progress and send-attempt evidence, and
-retains remote or uncertain ownership as pending. It writes no offline payload
-or successful resource receipt when policy forbids that handoff.
+A missing socket is not sufficient evidence for storage-hint disposal: the
+resource may reconnect immediately after the observation, including under the
+same actor claim. Recovery does not settle a prepared full-JID route from an
+absence probe. It preserves the pending obligation and checks durable delivery
+or custody evidence on subsequent attempts. It writes no offline payload or
+successful resource receipt when policy forbids that handoff.
 
 V1024 adds this nullable column through the append-only migration ledger.
 Keep the deployment on `Recreate`: old writers must stop before new writers

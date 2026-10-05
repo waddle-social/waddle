@@ -8,6 +8,7 @@ use waddle_xmpp::xep::xep0334::{add_hint, Hint};
 enum RecipientState {
     Resumable,
     Gone,
+    GoneThenLive,
     Blocked,
     AlreadyDelivered,
     BareGone,
@@ -22,9 +23,6 @@ enum ClaimState {
     Foreign,
     Missing,
     Stale,
-    Aba,
-    Rebound,
-    DetachedRebound,
 }
 
 async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: RecipientState) {
@@ -237,56 +235,9 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
     drop(retry);
     // Discard the execution decision: maintenance has only committed authority.
     drop(decision);
-    #[cfg(feature = "clustering")]
-    if matches!(
-        recipient_state,
-        RecipientState::GoneWithClaim(ClaimState::DetachedRebound)
-    ) {
-        let sm = sm.clone();
-        let target = target.clone();
-        crate::ingress::prepared_discard::before_next_write(key, async move {
-            store_detached(&sm, &target).await;
-        });
-    }
-    #[cfg(feature = "clustering")]
-    if matches!(
-        recipient_state,
-        RecipientState::GoneWithClaim(ClaimState::Aba)
-    ) {
-        let database = fixture.db.clone();
-        crate::ingress::prepared_discard::before_next_write(key, async move {
-            database
-                .guard()
-                .await
-                .expect("claim move")
-                .execute(
-                    "UPDATE clustering_claims SET claim_epoch = claim_epoch + 2 WHERE entity = ?",
-                    crate::db_params!["user_actor:juliet@example.com"],
-                )
-                .await
-                .expect("same owner, new UserActor incarnation");
-        });
-    }
-    #[cfg(feature = "clustering")]
-    let rebound_receiver = Arc::new(std::sync::Mutex::new(None));
-    #[cfg(feature = "clustering")]
-    if matches!(
-        recipient_state,
-        RecipientState::GoneWithClaim(ClaimState::Rebound)
-    ) {
-        let state = state.clone();
-        let target = target.clone();
-        let retained = rebound_receiver.clone();
-        crate::ingress::prepared_discard::before_next_write(key, async move {
-            let (sender, receiver) = tokio::sync::mpsc::channel(8);
-            socket_tests::register_test_connection(&state, &target, sender).await;
-            // The registration itself, not channel consumption, prevents discard.
-            *retained.lock().expect("retain rebound receiver") = Some(receiver);
-        });
-    }
     match recipient_state {
         RecipientState::Resumable => {}
-        RecipientState::Gone => {
+        RecipientState::Gone | RecipientState::GoneThenLive => {
             sm.take_session(&target.to_string())
                 .await
                 .expect("session ended");
@@ -353,37 +304,32 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
     }
     let newcomer: jid::FullJid = "juliet@example.com/newcomer".parse().expect("new target");
     store_detached(&sm, &newcomer).await;
-    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
-    let passes = 2;
-    #[cfg(feature = "clustering")]
-    let passes = if matches!(
-        recipient_state,
-        RecipientState::GoneWithClaim(
-            ClaimState::Aba | ClaimState::Rebound | ClaimState::DetachedRebound
-        )
-    ) {
-        1
-    } else {
-        passes
-    };
-    for _ in 0..passes {
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    for _ in 0..2 {
         let cursor = MaintenanceCursor::default();
         assert_eq!(
             pass(&fixture, &env, &cursor).await,
             MaintenanceOutcome::Complete
         );
-        #[cfg(feature = "clustering")]
         if matches!(
             recipient_state,
-            RecipientState::GoneWithClaim(
-                ClaimState::Foreign
-                    | ClaimState::Missing
-                    | ClaimState::Stale
-                    | ClaimState::Aba
-                    | ClaimState::Rebound
-                    | ClaimState::DetachedRebound
-            )
+            RecipientState::Gone | RecipientState::GoneThenLive
         ) {
+            assert_pending(&fixture, key).await;
+            assert_eq!(
+                fixture
+                    .count("ingress_effect_receipts WHERE policy_discard_reason IS NOT NULL")
+                    .await,
+                0,
+                "absence cannot prove the prepared copy was permanently undeliverable"
+            );
+            assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+            assert_eq!(fixture.count("sm_ingress_appends").await, 0);
+            assert_eq!(fixture.count("pending_delivery").await, 0);
+            continue;
+        }
+        #[cfg(feature = "clustering")]
+        if matches!(recipient_state, RecipientState::GoneWithClaim(_)) {
             assert_pending(&fixture, key).await;
             assert_eq!(
                 fixture
@@ -423,7 +369,7 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
             assert_eq!(fixture.count("pending_delivery").await, 0);
             continue;
         }
-        if !matches!(recipient_state, RecipientState::Resumable) {
+        if matches!(recipient_state, RecipientState::Blocked) {
             let mut tx = fixture.uow.begin().await.expect("settlement");
             assert!(
                 CanonicalMessageRepository::is_terminal(&mut tx, key)
@@ -432,22 +378,11 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                 "policy must resolve the undeliverable prepared route"
             );
             tx.commit().await.expect("settlement read");
-            let reason = match recipient_state {
-                RecipientState::Gone => "storage_hint_forbids_handoff",
-                #[cfg(feature = "clustering")]
-                RecipientState::GoneWithClaim(_) => "storage_hint_forbids_handoff",
-                RecipientState::Blocked => "recipient_blocked",
-                RecipientState::Resumable
-                | RecipientState::AlreadyDelivered
-                | RecipientState::BareGone => {
-                    unreachable!("handled separately")
-                }
-            };
             assert_eq!(
                 fixture
-                    .count(&format!(
-                        "ingress_effect_receipts WHERE policy_discard_reason = '{reason}'"
-                    ))
+                    .count(
+                        "ingress_effect_receipts WHERE policy_discard_reason = 'recipient_blocked'"
+                    )
                     .await,
                 1
             );
@@ -474,9 +409,9 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
             tx.commit().await.expect("receipt retry");
             assert_eq!(
                 fixture
-                    .count(&format!(
-                        "ingress_effect_receipts WHERE policy_discard_reason = '{reason}'"
-                    ))
+                    .count(
+                        "ingress_effect_receipts WHERE policy_discard_reason = 'recipient_blocked'"
+                    )
                     .await,
                 1,
                 "ordinary retries preserve the original discard reason"
@@ -528,6 +463,69 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
             "a completed custody receipt cannot be relabeled as policy discard"
         );
     }
+    if matches!(recipient_state, RecipientState::Gone) {
+        // Reappearance after maintenance observed absence must still receive
+        // the owed exact copy; an absence-based receipt would lose it forever.
+        store_detached(&sm, &target).await;
+        assert_eq!(
+            pass(&fixture, &env, &MaintenanceCursor::default()).await,
+            MaintenanceOutcome::Complete
+        );
+        assert_eq!(append_count(&sm, &target).await, 1);
+        let session = sm
+            .peek_session(&target.to_string())
+            .await
+            .expect("read rebound SM")
+            .expect("rebound session");
+        let recovered: minidom::Element = session.unacked_stanzas[0]
+            .stanza_xml
+            .parse()
+            .expect("rebound XML");
+        assert_eq!(recovered, expected.to_element());
+        assert_eq!(fixture.count("pending_delivery").await, 0);
+        assert_eq!(append_count(&sm, &newcomer).await, 0);
+        assert_eq!(
+            fixture
+                .count("ingress_effect_receipts WHERE policy_discard_reason IS NOT NULL")
+                .await,
+            0
+        );
+    }
+    let reconnect_live = matches!(recipient_state, RecipientState::GoneThenLive);
+    #[cfg(feature = "clustering")]
+    let reconnect_live = reconnect_live
+        || matches!(
+            recipient_state,
+            RecipientState::GoneWithClaim(ClaimState::Local)
+        );
+    if reconnect_live {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        socket_tests::register_test_connection(&state, &target, sender).await;
+        for _ in 0..2 {
+            assert_eq!(
+                pass(&fixture, &env, &MaintenanceCursor::default()).await,
+                MaintenanceOutcome::Complete
+            );
+        }
+        let delivered = receiver
+            .try_recv()
+            .expect("owed copy reaches rebound socket");
+        assert_eq!(delivered.stanza.to_element(), expected.to_element());
+        assert!(
+            receiver.try_recv().is_err(),
+            "repeated recovery sends only once"
+        );
+        assert_eq!(fixture.count("ingress_delivery_receipts").await, 1);
+        assert_eq!(fixture.count("sm_ingress_appends").await, 0);
+        assert_eq!(fixture.count("pending_delivery").await, 0);
+        assert_eq!(append_count(&sm, &newcomer).await, 0);
+        assert_eq!(
+            fixture
+                .count("ingress_effect_receipts WHERE policy_discard_reason IS NOT NULL")
+                .await,
+            0
+        );
+    }
     fixture.close().await;
 }
 
@@ -544,14 +542,26 @@ async fn postgres_xep0198_xep0334_prepared_full_no_store_recovers_once() {
 }
 
 #[tokio::test]
-async fn sqlite_xep0334_prepared_full_no_store_gone_target_discards() {
+async fn sqlite_xep0334_prepared_full_no_store_gone_target_remains_recoverable() {
     prepared_no_store_recovery(IngressFixture::sqlite().await, RecipientState::Gone).await;
 }
 
 #[tokio::test]
-async fn postgres_xep0334_prepared_full_no_store_gone_target_discards() {
+async fn postgres_xep0334_prepared_full_no_store_gone_target_remains_recoverable() {
     if let Some(fixture) = IngressFixture::postgres("prp_gone").await {
         prepared_no_store_recovery(fixture, RecipientState::Gone).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_prepared_full_no_store_gone_target_delivers_after_live_rebind() {
+    prepared_no_store_recovery(IngressFixture::sqlite().await, RecipientState::GoneThenLive).await;
+}
+
+#[tokio::test]
+async fn postgres_prepared_full_no_store_gone_target_delivers_after_live_rebind() {
+    if let Some(fixture) = IngressFixture::postgres("prp_rebind").await {
+        prepared_no_store_recovery(fixture, RecipientState::GoneThenLive).await;
     }
 }
 
@@ -647,7 +657,7 @@ async fn postgres_prepared_full_no_store_oversized_payload_never_advances_h() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn postgres_prepared_full_no_store_requires_fresh_local_claim_to_discard() {
+async fn postgres_prepared_full_no_store_absence_remains_pending_regardless_of_claim() {
     for claim in [
         ClaimState::Local,
         ClaimState::Foreign,
@@ -655,20 +665,6 @@ async fn postgres_prepared_full_no_store_requires_fresh_local_claim_to_discard()
         ClaimState::Stale,
     ] {
         if let Some(fixture) = IngressFixture::postgres("prp_claim").await {
-            prepared_no_store_recovery(fixture, RecipientState::GoneWithClaim(claim)).await;
-        }
-    }
-}
-
-#[cfg(feature = "clustering")]
-#[tokio::test]
-async fn postgres_prepared_full_no_store_rechecks_claim_epoch_and_local_rebind() {
-    for claim in [
-        ClaimState::Aba,
-        ClaimState::Rebound,
-        ClaimState::DetachedRebound,
-    ] {
-        if let Some(fixture) = IngressFixture::postgres("prp_race").await {
             prepared_no_store_recovery(fixture, RecipientState::GoneWithClaim(claim)).await;
         }
     }
