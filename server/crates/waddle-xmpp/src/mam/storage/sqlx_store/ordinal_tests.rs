@@ -366,7 +366,8 @@ async fn projection_conflict(storage: SqlxMamStorage) {
             .expect("equivalent XML spelling"),
         MamTxStoreOutcome::Existing { .. }
     ));
-    let mutations: &[(&str, fn(&mut ArchivedMessage))] = &[
+    type ProjectionMutation = fn(&mut ArchivedMessage);
+    let mutations: &[(&str, ProjectionMutation)] = &[
         ("sender", |m| {
             m.from = "mallory@example.com/other".parse().expect("sender")
         }),

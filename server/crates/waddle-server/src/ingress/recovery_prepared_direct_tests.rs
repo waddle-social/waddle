@@ -106,7 +106,7 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                 resources,
                 stanza,
                 ..
-            })) if resources == &[target.clone()] => Some(stanza.clone()),
+            })) if resources == std::slice::from_ref(&target) => Some(stanza.clone()),
             _ => None,
         })
         .expect("production planner captured the prepared target copy");
@@ -205,7 +205,7 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                 stanza,
                 resources,
                 ..
-            })) if resources == &[target.clone()] => match stanza.as_ref() {
+            })) if resources == std::slice::from_ref(&target) => match stanza.as_ref() {
                 Stanza::Message(message) => waddle_xmpp_core::xep0359::extract_stanza_id_by(
                     message,
                     &target.to_bare().into(),
@@ -229,7 +229,7 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                 resources,
                 stanza,
                 ..
-            }) if resources == &[target.clone()] => Some(stanza),
+            }) if resources == std::slice::from_ref(&target) => Some(stanza),
             _ => None,
         })
         .expect("unfinished frozen copy remains executable");
