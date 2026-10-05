@@ -117,6 +117,7 @@ async fn commit_attempt(
     if let Some(failure) = submission.plan.failure {
         return Err(failure.into());
     }
+    super::storage_hint::validate_capture(&submission.plan)?;
     #[cfg(test)]
     commit_race_gate::before_admission(submission.digest_input.origin()).await;
     let mut tx = uow
@@ -144,7 +145,12 @@ async fn commit_attempt(
     }
     let stream = super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
-    let envelope = MessageEnvelope::new(submission.plan.sanitized_message.clone());
+    let transient_direct = super::storage_hint::protects_plan(&submission.plan);
+    let envelope = if transient_direct {
+        super::storage_hint::envelope(&submission.plan.sanitized_message)
+    } else {
+        MessageEnvelope::new(submission.plan.sanitized_message.clone())
+    };
     let mut rejection = super::rejection::planned_rejection(&submission.plan)?;
     let (key, alias) = if let Some((key, _)) = stream.as_ref().and_then(|stream| stream.bound) {
         (key, AliasOutcomeClass::Existing)
@@ -488,6 +494,47 @@ async fn commit_attempt(
         },
     )
     .await?;
+    // Storage policy is immutable authority, independent of socket presence.
+    // Retain only receipt metadata; the original decision still owns its one
+    // in-memory delivery attempt and any accepted SM stream owns its own replay.
+    let mut transient_receipts = Vec::new();
+    if transient_direct {
+        for intent in &intents {
+            if super::storage_hint::protects_intent(&submission.plan.sanitized_message, intent)
+                || matches!(
+                    intent,
+                    IngressEffectIntent::Carbons { .. }
+                        | IngressEffectIntent::RelayCarbons { .. }
+                        | IngressEffectIntent::ErrorReply { .. }
+                )
+            {
+                let receipt = super::durable::receipt_key(intent)?;
+                super::storage_hint::settle(&mut tx, key, intent, &receipt).await?;
+                transient_receipts.push(receipt);
+            }
+        }
+        // Even a newly rebuilt fanout on an existing alias must not turn a
+        // completed no-store attempt into delivery to a later resource owner.
+        if alias == AliasOutcomeClass::Existing {
+            let mut retained = Vec::new();
+            for planned in plan.plan.drain(..) {
+                if let crate::server::routes::interpret::effects::Effect::External(effect) =
+                    &planned.effect
+                {
+                    let receipts =
+                        super::durable::external_receipts(std::slice::from_ref(effect), &intents)?;
+                    if receipts[0]
+                        .iter()
+                        .any(|receipt| transient_receipts.contains(receipt))
+                    {
+                        continue;
+                    }
+                }
+                retained.push(planned);
+            }
+            plan.plan = retained;
+        }
+    }
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);
     super::commit_stream::finish_stream(&mut tx, stream.as_ref(), key).await?;
     let class = rejection.unwrap_or_else(|| {
@@ -560,7 +607,7 @@ async fn commit_attempt(
             route_progress.push(progress);
         }
     }
-    if empty_muc {
+    if empty_muc || transient_direct {
         super::execute::terminalize_if_complete_in_transaction(
             &mut tx,
             key,
@@ -647,8 +694,11 @@ async fn commit_attempt(
     }
     let mut external = external;
     super::decision::bind_claim_keys(&mut external, key);
-    let (external_receipts, arm_owned_receipts) =
+    let (mut external_receipts, arm_owned_receipts) =
         super::decision::assemble_receipts(&external, &intents, &route_progress)?;
+    for receipts in &mut external_receipts {
+        receipts.retain(|receipt| !transient_receipts.contains(receipt));
+    }
     let decision = IngressDecision {
         class,
         message_key: Some(key),

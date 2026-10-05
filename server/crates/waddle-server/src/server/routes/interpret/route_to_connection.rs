@@ -351,7 +351,15 @@ async fn route_planned_direct_message(
                         && source.type_ == message.type_
                 }) {
                     match waddle_xmpp::ingress::StoredMessagePayload::new(message.clone()) {
-                        Ok(prepared) => Some(prepared),
+                        Ok(prepared) => {
+                            // Validate the same bounded copy, but retain no payload
+                            // when the sender explicitly forbids later handoff.
+                            (!crate::ingress::storage_hint::forbids_direct_handoff(
+                                message,
+                                &selection.originals,
+                            ))
+                            .then_some(prepared)
+                        }
                         Err(_) => {
                             deps.effects
                                 .fail_plan(super::effects::PlanFailure::InvalidPreparedMessage);
@@ -1215,6 +1223,15 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    deliver_peer_to_full_with_registered_remote_at(deps, target, stanza, None).await
+}
+
+pub(crate) async fn deliver_peer_to_full_with_registered_remote_at(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> FullJidDeliveryOutcome {
     if deps.effects.is_planning() {
         plan::record(
             deps,
@@ -1257,12 +1274,13 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_peer_to_full(
+    routing::deliver_peer_to_full_at(
         deps.user_registry,
         deps.sm_session_registry,
         target,
         stanza,
         deps.ingress_append_context.as_ref(),
+        received_at,
     )
     .await
 }
@@ -1271,6 +1289,15 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    deliver_direct_to_full_with_registered_remote_at(deps, target, stanza, None).await
+}
+
+pub(crate) async fn deliver_direct_to_full_with_registered_remote_at(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     if deps.effects.is_planning() {
         plan::record(
@@ -1343,12 +1370,13 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_direct_to_full(
+    routing::deliver_direct_to_full_at(
         deps.user_registry,
         deps.sm_session_registry,
         target,
         stanza,
         deps.ingress_append_context.as_ref(),
+        received_at,
     )
     .await
 }
@@ -1779,6 +1807,16 @@ pub(crate) async fn queue_processed_for_detached(
     live_set: &std::collections::HashSet<jid::FullJid>,
     stanza: &Stanza,
 ) -> Vec<(jid::FullJid, DetachedQueueOutcome)> {
+    queue_processed_for_detached_at(deps, detached_targets, live_set, stanza, None).await
+}
+
+pub(crate) async fn queue_processed_for_detached_at(
+    deps: &Deps<'_>,
+    detached_targets: Vec<jid::FullJid>,
+    live_set: &std::collections::HashSet<jid::FullJid>,
+    stanza: &Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<(jid::FullJid, DetachedQueueOutcome)> {
     if deps.effects.is_planning() {
         let targets: Vec<_> = detached_targets
             .into_iter()
@@ -1798,8 +1836,14 @@ pub(crate) async fn queue_processed_for_detached(
         if live_set.contains(&full) {
             continue;
         }
-        match routing::append_detached(sm, deps.ingress_append_context.as_ref(), &full, stanza)
-            .await
+        match routing::append_detached_at(
+            sm,
+            deps.ingress_append_context.as_ref(),
+            &full,
+            stanza,
+            received_at,
+        )
+        .await
         {
             Ok(true) => {
                 outcomes.push((full.clone(), DetachedQueueOutcome::Queued));

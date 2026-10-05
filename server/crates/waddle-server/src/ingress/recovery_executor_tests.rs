@@ -422,6 +422,35 @@ async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, head
         .await
         .expect("Phase B");
     let key = decision.message_key.expect("key");
+    if detached_no_store {
+        // Model the historical row explicitly: current admission commits a
+        // terminal no-handoff receipt and stores only header metadata. Older
+        // rows retained the envelope without a prepared copy or policy receipt.
+        let mut tx = f.uow.begin().await.expect("historical no-store fixture");
+        CanonicalMessageRepository::record_room_canonical_envelope(
+            &mut tx,
+            key,
+            &crate::ingress_substrate::MessageEnvelope::new(
+                submission.plan.sanitized_message.clone(),
+            ),
+        )
+        .await
+        .expect("historical envelope");
+        CanonicalMessageRepository::clear_terminal(&mut tx, key)
+            .await
+            .expect("historical pending route");
+        tx.commit().await.expect("historical fixture commit");
+        let sql = match f.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                "DELETE FROM ingress_effect_receipts WHERE message_key = ?::uuid"
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                "DELETE FROM ingress_effect_receipts WHERE message_key = ?"
+            }
+        };
+        f.execute(sql, crate::db_params![key.to_storage().to_string()])
+            .await;
+    }
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     let cursor = MaintenanceCursor::default();
     let before = metrics

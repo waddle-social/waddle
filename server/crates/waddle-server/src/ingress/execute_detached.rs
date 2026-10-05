@@ -162,14 +162,8 @@ pub(super) async fn execute(
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;
         if outcome == FullJidDeliveryOutcome::Unavailable {
-            let handoff = if crate::ingress::prepared_discard::forbids_offline_handoff(progress) {
-                // Absence cannot fence a reconnect through receipt commit.
-                // Preserve the owed copy without converting it to offline storage
-                // or letting generic expiry turn a snapshot into completion.
-                Ok(None)
-            } else {
-                super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await
-            };
+            let handoff =
+                super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await;
             match handoff {
                 Ok(Some(settled)) => {
                     handed_off.push(resource.clone());

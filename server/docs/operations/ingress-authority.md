@@ -1353,31 +1353,42 @@ Recovered direct notification candidates retain canonical receipt time and deleg
 Recovered detached SM appends retain the canonical receipt time, preserving
 XEP-0203 delay stamps across the recovery grace interval.
 
-Prepared direct-route evidence (#1910) retains the recipient-passed message,
+Prepared direct-route evidence (#1910) retains a storable recipient-passed message,
 including its original recipient stanza ID, independently of MAM. Maintenance
 can continue custody for the recorded resumable target without minting a new
 recipient identity or adding a newly connected resource. This does not permit
 general offline storage of a `no-store` message. Legacy records without enough
 payload/preparation evidence keep their conservative deferred classification.
 
+An exact full-JID direct message from another account with `no-store` and no
+`store` hint has no prepared ledger payload. Its canonical envelope retains
+only routing/identity metadata. The ingress transaction settles the route with
+`storage_hint_forbids_handoff` and makes it terminal; that receipt records the
+sender's storage policy, not successful delivery or observed resource absence.
+The initial in-memory decision may still attempt the frozen live socket or
+append to an accepted resumable stream. Only that stream's existing XEP-0198
+buffer may retain the payload for replay, bounded by its resume window. A crash
+before that attempt, or an unavailable recipient, permits loss. Ingress retry,
+maintenance and later resource-name reuse do not deliver the message again.
+Initial local SM custody retains canonical receipt time, including a target
+that detaches after planning; rehydration uses the SM store's existing
+millisecond timestamp precision.
+Bare-JID, self-addressed and explicit `store` cases retain their existing policy.
+
 ### Policy-discard receipts (V1024)
 
 The nullable `ingress_effect_receipts.policy_discard_reason` distinguishes
-`recipient_blocked` from ordinary settlement. The migration also permits
-`storage_hint_forbids_handoff`, but recovery no longer writes that reason from
-an absence probe.
+`recipient_blocked` and `storage_hint_forbids_handoff` from ordinary settlement.
 It describes disposal of the remaining aggregate obligation, not successful
 per-resource delivery and not proof that an earlier uncertain send never
 happened. A null reason preserves the ordinary/legacy receipt meaning; it must
 not be interpreted as proof of socket delivery. Existing receipts win over a
 later attempted reclassification.
 
-A missing socket is not sufficient evidence for storage-hint disposal: the
-resource may reconnect immediately after the observation, including under the
-same actor claim. Recovery does not settle a prepared full-JID route from an
-absence probe. It preserves the pending obligation and checks durable delivery
-or custody evidence on subsequent attempts. It writes no offline payload or
-successful resource receipt when policy forbids that handoff.
+Storage-hint disposal is decided at commit from the message policy. It requires
+no reachability snapshot, ownership epoch or bind-generation fence, so a
+same-owner reconnect cannot race an absence-based settlement. It writes no
+offline payload or successful per-resource delivery evidence.
 
 V1024 adds this nullable column through the append-only migration ledger.
 Keep the deployment on `Recreate`: old writers must stop before new writers

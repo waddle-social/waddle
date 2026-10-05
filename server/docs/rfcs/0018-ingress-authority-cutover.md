@@ -10,7 +10,9 @@ APPROVE-WITH-CHANGES; the last change is folded into §3.2).
 Committed ingress decisions determine message responsibility. For every
 inbound `<message/>` the XEP-0198 handled count `h` advances only after the
 message's ingress transaction commits; every effect that runs after commit is
-recorded first as a durable, payload-complete intent. Origin-id duplicates are
+recorded first as a durable intent. Storable effects retain complete recovery
+payloads; protected full-JID `no-store` deliveries instead commit their
+no-handoff disposition and retain only the initial in-memory attempt. Origin-id duplicates are
 decided by the cluster-global alias (sender bare JID, target, origin-id) and
 repaired inside the transaction; the MAM-layer origin dedupe is deleted. The
 shadow scaffolding (#1656/#1695) is deleted; there is one ingress path.
@@ -23,7 +25,7 @@ recovery, routes of receipted DM pin mutations, and MUC ledger declines.
 Legacy delegated full-JID routes without frozen prepared-payload evidence,
 headline routes without supported provenance, unreceipted DM pin mutations and
 their routes, and DM call state remain deferred. Newly prepared direct routes
-record their processed payload independently of MAM, so an unarchived full-JID
+record storable processed payloads independently of MAM, so an unarchived full-JID
 copy can recover without rerunning recipient preparation. Carbon recovery rebuilds the
 recorded local audience or legacy relay owner/exclusions with keyed delivery.
 Remote-owner-only
@@ -103,11 +105,14 @@ an implicit expansion of its acceptance criteria.
 Prepared route payloads are separate from archive authority: a missing MAM row
 does not prove that recipient preparation was delegated. Recovery retains the
 recorded recipient stamps and exact target set. Legacy records without that
-proof remain conservative. Continuing an accepted resumable stream's custody
-does not authorize creating general offline storage for a `no-store` message.
-Policy disposal records its reason on the aggregate effect receipt without
-inventing successful per-resource delivery evidence. A locally unavailable
-target is not proof that a remote-owned target has disappeared.
+proof remain conservative. Full-JID, non-self messages carrying `no-store`
+without `store` do not retain a prepared copy or canonical payload. Their
+no-handoff policy receipt commits with ingress, making the route terminal
+without claiming successful per-resource delivery. The initial live/SM attempt
+remains permitted, and an accepted stream's existing XEP-0198 buffer retains
+its bounded replay semantics. There is no ledger recovery after a crash before
+that attempt or delivery to a resource that later rebinds. This decision follows
+the sender's policy and never relies on observing recipient absence.
 
 Existing MAM projections compare immutable columns and typed XML content at the
 database's timestamp precision. Direct retries retain the original canonical
@@ -680,8 +685,9 @@ delegates to its existing settlement. No actor call runs under the freeze lock.
 Recorded wins: never invent audience or payload. The plan's provenance gate
 admits generic direct routes only for `Chat`/`Normal` messages whose bare
 `to` equals the recorded recipient, with non-empty fanout, proven Phase B
-recipient preparation, including the frozen prepared payload for unarchived
-full-JID routes. Legacy delegated full-JID routes without this proof remain
+recipient preparation, including the frozen prepared payload for storable
+unarchived full-JID routes. Protected no-store routes settle at admission and
+never enter this recovery path. Legacy delegated full-JID routes without this proof remain
 deferred. Pin-owned
 `StanzaId` routes, specialized invitations and recorded offline audiences
 belong to their restorers. Receipted DM mutations permit route-only recovery;

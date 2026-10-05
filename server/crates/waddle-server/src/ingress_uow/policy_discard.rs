@@ -6,12 +6,14 @@ use waddle_xmpp::ingress::MessageKey;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PolicyDiscardReason {
     RecipientBlocked,
+    StorageHintForbidsHandoff,
 }
 
 impl PolicyDiscardReason {
     fn as_storage(self) -> &'static str {
         match self {
             Self::RecipientBlocked => "recipient_blocked",
+            Self::StorageHintForbidsHandoff => "storage_hint_forbids_handoff",
         }
     }
 }
