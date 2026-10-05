@@ -20,9 +20,11 @@ roadmap slices): (i) maintenance recovery (#1755, §3.6b) re-executes
 provenance-proven direct routes, direct pending delivery and notification
 previews, observers with recorded envelopes, delegated groupchat notification
 recovery, routes of receipted DM pin mutations, and MUC ledger declines.
-Delegated live full-JID routes (including detached full-target no-store routes
-without archive evidence), headline routes, unreceipted DM pin mutations and
-their routes, and DM call state remain deferred. Carbon recovery rebuilds the
+Legacy delegated full-JID routes without frozen prepared-payload evidence,
+headline routes without supported provenance, unreceipted DM pin mutations and
+their routes, and DM call state remain deferred. Newly prepared direct routes
+record their processed payload independently of MAM, so an unarchived full-JID
+copy can recover without rerunning recipient preparation. Carbon recovery rebuilds the
 recorded local audience or legacy relay owner/exclusions with keyed delivery.
 Remote-owner-only
 resources and families lacking reconstructible payloads (including room pin
@@ -97,6 +99,26 @@ The [acceptance matrix](../operations/ingress-effect-acceptance.md) maps these
 guarantees to implementation, tests and remaining scope. Room-observer
 terminalization (#1908) is adjacent to the direct-message contract, rather than
 an implicit expansion of its acceptance criteria.
+
+Prepared route payloads are separate from archive authority: a missing MAM row
+does not prove that recipient preparation was delegated. Recovery retains the
+recorded recipient stamps and exact target set. Legacy records without that
+proof remain conservative. Continuing an accepted resumable stream's custody
+does not authorize creating general offline storage for a `no-store` message.
+Policy disposal records its reason on the aggregate effect receipt without
+inventing successful per-resource delivery evidence. A locally unavailable
+target is not proof that a remote-owned target has disappeared.
+
+Existing MAM projections compare immutable columns and typed XML content at the
+database's timestamp precision. Direct retries retain the original canonical
+sender resource and wire identity. Room archive-only sender context is frozen
+separately from the live message and is never injected into occupant copies.
+Tombstones remain authoritative after identity/ordinal checks. Missing archive
+rows can be repaired from recorded authority; conflicting rows are not
+overwritten. Legacy or damaged authority that no longer proves generated wire
+IDs or private archive metadata can fail closed with an intent contradiction,
+without a new receipt or reflection. Reading the stored row and accepting its
+own content as proof is not integrity verification.
 
 ### Recovery convergence (#1782)
 
@@ -658,7 +680,9 @@ delegates to its existing settlement. No actor call runs under the freeze lock.
 Recorded wins: never invent audience or payload. The plan's provenance gate
 admits generic direct routes only for `Chat`/`Normal` messages whose bare
 `to` equals the recorded recipient, with non-empty fanout, proven Phase B
-recipient preparation and no delegated live full-JID route. Pin-owned
+recipient preparation, including the frozen prepared payload for unarchived
+full-JID routes. Legacy delegated full-JID routes without this proof remain
+deferred. Pin-owned
 `StanzaId` routes, specialized invitations and recorded offline audiences
 belong to their restorers. Receipted DM mutations permit route-only recovery;
 unreceipted mutations and their routes remain pending. Unsupported families
