@@ -58,6 +58,8 @@ pub mod spaces_metadata;
 pub mod spaces_pubsub_seed;
 pub mod storage;
 pub mod telemetry;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod threads;
 pub mod time;
 pub mod vcard;

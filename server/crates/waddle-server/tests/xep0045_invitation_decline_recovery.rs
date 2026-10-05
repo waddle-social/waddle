@@ -1,30 +1,103 @@
-//! Dedicated XEP-0045 suite: recovery of a lost mediated-invitation decline.
-//!
-//! XEP-0045 §7.8.2 (Mediated Invitation): when the invitee declines, the room
-//! forwards `<x xmlns='http://jabber.org/protocol/muc#user'><decline from=…/>`
-//! to the inviter, preserving the reason, and the invitation is consumed. These
-//! cases drive the real decline planner and invite ledger, commit Phase B, lose
-//! Phase C, and prove the maintenance recovery phase delivers that payload
-//! exactly once while consuming the invitation. They live inside the crate
-//! because the decline arm needs the in-process WebSocket state (invite ledger
-//! actor), which no public integration fixture can build today.
-use super::family_tests::{family_pass, family_recovered, family_state};
-use crate::{
-    ingress::{
-        commit::commit_submission,
-        maintenance::{MaintenanceCursor, MaintenanceOutcome},
-        test_support::IngressFixture,
-    },
-    server::routes::websocket::interpret_loop::build_interpret_deps,
-};
-use waddle_xmpp::ingress::IngressEffectIntent;
+//! XEP-0045 §7.8.2 decline recovery through the public server test-support API.
 
-/// Which of the mutually exclusive invitation receipts an interrupted
-/// executor persisted before losing the rest of Phase C.
+#![cfg(feature = "test-support")]
+
+pub mod ingress_support;
+
+use ingress_support::IngressFixture;
+use sha2::{Digest, Sha256};
+use std::{sync::Arc, time::Duration};
+use waddle_server::{
+    db::{DatabaseConfig, DatabasePool, PoolConfig},
+    ingress::{commit::commit_submission, RecoveryEnvironment},
+    ingress_substrate::EffectReceiptKind,
+    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
+    test_support::{
+        claim_invite, create_test_session, list_invites, record_invite_at,
+        register_test_connection, websocket_state_with_ingress, OutstandingInvite, RecordOutcome,
+    },
+};
+use waddle_xmpp::{ingress::IngressEffectIntent, Stanza};
+
 #[derive(Clone, Copy)]
 enum PartialDeclineReceipt {
     Route,
     Fallback,
+}
+
+/// Wait until a full maintenance pass finished with `outcome=complete` after `passes_before` and the
+/// expected number of canonical rows is terminal. Terminalization runs before
+/// recovery inside one pass, so the terminal count alone would not prove the
+/// pass's recovery phase finished.
+async fn wait_for_pass(
+    metrics: &waddle_xmpp::telemetry::test_support::MetricsTestGuard,
+    passes_before: u64,
+    fixture: &IngressFixture,
+    expected_terminal: i64,
+) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let passes = metrics
+                .counter_sum(
+                    "ingress.maintenance.runs",
+                    &[("phase", "pass"), ("outcome", "complete")],
+                )
+                .unwrap_or(0);
+            if passes > passes_before
+                && fixture
+                    .count("ingress_messages WHERE terminal_at IS NOT NULL")
+                    .await
+                    == expected_terminal
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("maintenance pass terminalizes the recovered submission");
+}
+
+async fn age_nonterminal_rows(fixture: &IngressFixture) {
+    let sql = match fixture.db.driver() {
+        waddle_server::db::DatabaseDriver::Postgres => {
+            "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE terminal_at IS NULL"
+        }
+        waddle_server::db::DatabaseDriver::Sqlite => {
+            "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE terminal_at IS NULL"
+        }
+    };
+    fixture
+        .execute(
+            sql,
+            waddle_server::db_params![
+                (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()
+            ],
+        )
+        .await;
+}
+
+async fn assert_family_recovered(fixture: &IngressFixture, key: waddle_xmpp::ingress::MessageKey) {
+    let mut transaction = fixture.uow.begin().await.expect("inspect recovery");
+    assert!(
+        EffectReceiptRepository::receipts_complete(&mut transaction, key)
+            .await
+            .expect("receipts complete")
+    );
+    assert!(
+        CanonicalMessageRepository::is_terminal(&mut transaction, key)
+            .await
+            .expect("terminal")
+    );
+    transaction.commit().await.expect("inspection commit");
+    let receipts = fixture
+        .optional_text(&format!(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM ingress_effect_receipts WHERE message_key = '{}'",
+            key.to_storage()
+        ))
+        .await
+        .expect("receipt count");
+    assert_eq!(receipts.parse::<i64>().expect("integer receipt count"), 3);
 }
 
 async fn muc_decline_recovery(
@@ -32,13 +105,22 @@ async fn muc_decline_recovery(
     partial: Option<PartialDeclineReceipt>,
     reinvited: bool,
 ) {
-    use crate::server::routes::websocket::{
-        muc_invites::{list_invites, record_invite_at, OutstandingInvite},
-        tests::{create_test_session, register_test_connection},
-    };
-    let state = family_state(&fixture).await;
+    let pool = Arc::new(
+        DatabasePool::new(
+            DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            PoolConfig,
+        )
+        .await
+        .expect("shared database pool"),
+    );
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let authority = Arc::new(fixture.authority().await);
+    let state = websocket_state_with_ingress(pool, Arc::clone(&authority)).await;
+    let environment: Arc<dyn RecoveryEnvironment> = state.clone();
+    authority.bind_recovery_environment(Arc::downgrade(&environment));
     create_test_session(state.as_ref(), "romeo").await;
     create_test_session(state.as_ref(), "juliet").await;
+
     let inviter: jid::FullJid = "juliet@example.com/phone".parse().expect("inviter");
     let mut submission = fixture.submission(Some("decline-lost-phase-c"), "");
     let invite = OutstandingInvite {
@@ -89,12 +171,9 @@ async fn muc_decline_recovery(
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
     let mut machine = waddle_xmpp::protocol::XmppStateMachine::new("example.com", dispatcher);
     machine.transition_to_ready(submission.sender.clone(), false);
-    submission.plan = crate::server::plan_message_dispatch(
-        &mut machine,
-        message,
-        &build_interpret_deps(state.as_ref(), None),
-    )
-    .await;
+    submission.plan =
+        waddle_server::server::plan_message_dispatch(&mut machine, message, &state.recovery_deps())
+            .await;
     assert!(
         submission
             .plan
@@ -107,15 +186,18 @@ async fn muc_decline_recovery(
         .await
         .expect("commit decline");
     let key = decision.message_key.expect("key");
+    // Age the row past the default maintenance grace before reading its canonical
+    // timestamp, so the reinvited case still orders the replacement after the
+    // original invitation.
+    age_nonterminal_rows(&fixture).await;
     let mut transaction = fixture
         .uow
         .begin()
         .await
         .expect("inspect canonical receipt");
-    let canonical_created_at =
-        crate::ingress_uow::CanonicalMessageRepository::created_at(&mut transaction, key)
-            .await
-            .expect("canonical receipt time");
+    let canonical_created_at = CanonicalMessageRepository::created_at(&mut transaction, key)
+        .await
+        .expect("canonical receipt time");
     transaction
         .commit()
         .await
@@ -137,8 +219,6 @@ async fn muc_decline_recovery(
     );
     assert!(rx.try_recv().is_err());
     if let Some(partial) = partial {
-        // Model an executor that delivered the decline live, persisted one
-        // of the two mutually exclusive receipts and then lost the rest.
         let inviter_bare = inviter.to_bare();
         let intent = submission
             .plan
@@ -161,12 +241,18 @@ async fn muc_decline_recovery(
                 _ => false,
             })
             .expect("recorded inviter delivery intent");
-        let receipt = crate::ingress::receipt_key(intent).expect("receipt key");
-        crate::ingress_uow::EffectReceiptRepository::record_receipt_pooled(
+        let kind = EffectReceiptKind::from_storage(
+            intent
+                .with_encoded_v1(|kind, _| kind)
+                .expect("receipt storage kind"),
+        );
+        let semantic_identity_hash: [u8; 32] =
+            Sha256::digest(intent.semantic_key().storage_identity()).into();
+        EffectReceiptRepository::record_receipt_pooled(
             &fixture.db,
             key,
-            receipt.kind,
-            &receipt.semantic_identity_hash,
+            kind,
+            &semantic_identity_hash,
         )
         .await
         .expect("partial receipt");
@@ -174,33 +260,27 @@ async fn muc_decline_recovery(
     let replacement_created_at = canonical_created_at - chrono::Duration::minutes(1);
     assert!(replacement_created_at > invitation_created_at);
     if reinvited {
-        // A competing decline consumed the original invitation. An unexpired
-        // record is not replaced by record_invite_at, so consume it first.
-        assert!(crate::server::routes::websocket::muc_invites::claim_invite(
-            actor.clone(),
-            &invite,
-        )
-        .await
-        .expect("competing decline"));
+        assert!(claim_invite(actor.clone(), &invite)
+            .await
+            .expect("competing decline"));
         assert!(matches!(
             // Created after canonical intake, but an app clock behind the database
             // timestamps it before that receipt. Only the observed generation
             // can prevent this old decline from consuming the replacement.
-            record_invite_at(
-                actor.clone(),
-                &invite,
-                canonical_created_at - chrono::Duration::minutes(1)
-            )
-            .await
-            .expect("new invitation"),
-            crate::server::routes::websocket::muc_invites::RecordOutcome::New { .. }
+            record_invite_at(actor.clone(), &invite, replacement_created_at)
+                .await
+                .expect("new invitation"),
+            RecordOutcome::New { .. }
         ));
     }
-    let cursor = MaintenanceCursor::default();
-    assert_eq!(
-        family_pass(&fixture, &state, &cursor).await,
-        MaintenanceOutcome::Complete
-    );
+    let passes_before = metrics
+        .counter_sum(
+            "ingress.maintenance.runs",
+            &[("phase", "pass"), ("outcome", "complete")],
+        )
+        .unwrap_or(0);
+    authority.trigger_maintenance();
+    wait_for_pass(&metrics, passes_before, &fixture, 1).await;
     if reinvited {
         assert!(
             rx.try_recv().is_err(),
@@ -213,7 +293,7 @@ async fn muc_decline_recovery(
         );
     } else {
         let delivered = rx.try_recv().expect("inviter receives recovered decline");
-        let waddle_xmpp::Stanza::Message(message) = delivered.stanza else {
+        let Stanza::Message(message) = delivered.stanza else {
             panic!("decline message")
         };
         assert_eq!(message.from, Some(invite.room.clone().into()));
@@ -255,11 +335,26 @@ async fn muc_decline_recovery(
         "live inviter settles the recorded fallback without queueing"
     );
     assert!(rx.try_recv().is_err());
-    family_recovered(&fixture, key, 3).await;
-    assert_eq!(
-        family_pass(&fixture, &state, &cursor).await,
-        MaintenanceOutcome::Complete
-    );
+    assert_family_recovered(&fixture, key).await;
+
+    let sentinel = fixture.submission(Some("decline-second-pass"), "sentinel");
+    commit_submission(&fixture.uow, &sentinel, 5)
+        .await
+        .expect("commit sentinel");
+    age_nonterminal_rows(&fixture).await;
+    let passes_before = metrics
+        .counter_sum(
+            "ingress.maintenance.runs",
+            &[("phase", "pass"), ("outcome", "complete")],
+        )
+        .unwrap_or(0);
+    authority.trigger_maintenance();
+    wait_for_pass(&metrics, passes_before, &fixture, 2).await;
+    // The counter can be satisfied by a pass that was already in flight while
+    // the triggered pass has only terminalized the sentinel. Joining the
+    // maintenance task guarantees no recovery phase is still running when the
+    // second-pass assertions execute.
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
     assert!(rx.try_recv().is_err(), "second pass cannot resend decline");
     assert_eq!(
         list_invites(actor, &invite.room, &invite.invitee)
@@ -284,8 +379,10 @@ async fn muc_decline_recovery(
         0,
         "live inviter settles the recorded fallback without queueing"
     );
-    family_recovered(&fixture, key, 3).await;
+    assert_family_recovered(&fixture, key).await;
+    drop(environment);
     drop(state);
+    drop(authority);
     fixture.close().await;
 }
 
@@ -329,7 +426,6 @@ async fn postgres_muc_decline_fallback_receipt_alone_settles_without_resend() {
         muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Fallback), false).await;
     }
 }
-
 #[tokio::test]
 async fn sqlite_muc_decline_recovery_preserves_newer_invitation() {
     muc_decline_recovery(IngressFixture::sqlite().await, None, true).await;

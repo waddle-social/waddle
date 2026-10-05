@@ -83,7 +83,7 @@ pub enum RecordOutcome {
 }
 
 /// Record using the timestamp frozen by ingress planning.
-pub(crate) async fn record_invite_at(
+pub async fn record_invite_at(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -131,7 +131,7 @@ pub(crate) async fn record_invite_at(
 /// List every unexpired outstanding invite and its generation timestamp for `(room, invitee)`.
 /// Empty means the caller MUST NOT forward a decline (#1264 spoofing
 /// hardening).
-pub(crate) async fn list_invites(
+pub async fn list_invites(
     actor: ActorRef<DbActor>,
     room: &BareJid,
     invitee: &BareJid,
@@ -170,7 +170,7 @@ pub(crate) async fn list_invites(
 /// when the row was already gone — a concurrent decline from another
 /// device claimed it first, so the caller must not forward a second
 /// decline for it.
-pub(crate) async fn claim_invite(
+pub async fn claim_invite(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
 ) -> Result<bool, InviteStorageError> {

@@ -89,6 +89,8 @@ mod send;
 mod session_init;
 mod state;
 mod stream_management;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_state;
 mod timers;
 mod transport_xml;
 

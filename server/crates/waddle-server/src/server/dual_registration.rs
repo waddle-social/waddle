@@ -107,7 +107,7 @@ pub(crate) enum MirrorRegisterOutcome {
 /// resource (ADR-0017 Phase 1 completion).
 #[must_use = "a false return means the actor tree did not record the resource; \
               the caller must roll back the DashMap registration and fail the bind"]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn mirror_register(
     user_registry: &ActorRef<UserRegistryActor>,
     jid: FullJid,

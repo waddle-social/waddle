@@ -222,7 +222,7 @@ async fn fetch_bot_avatar(
     BotAvatar::new(image)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl BotAvatars {
     /// Fetches from a plain-HTTP test server on loopback.
     pub(crate) fn loopback() -> Self {

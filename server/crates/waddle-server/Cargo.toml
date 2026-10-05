@@ -166,6 +166,7 @@ waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
 # `crate::clustering` swarm/codec/relay modules. A clustering-built binary is
 # still inert unless the runtime `clustering.enabled` config is also set.
 clustering = ["kameo/remote", "dep:libp2p"]
+test-support = []
 
 [[bin]]
 name = "waddle-server"

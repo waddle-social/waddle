@@ -1559,10 +1559,10 @@ fn parse_host_patterns_var(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const TEST_OCCUPANT_ID_SECRET: &str = "test-occupant-id-secret-32-bytes-long";
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_occupant_id_secret() -> OccupantIdSecret {
     OccupantIdSecret::new(TEST_OCCUPANT_ID_SECRET.as_bytes().to_vec())
         .expect("test secret meets length floor")
@@ -1656,7 +1656,7 @@ impl ServerConfig {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_homeserver() -> Self {
         Self {
             mode: ServerMode::HomeServer,
