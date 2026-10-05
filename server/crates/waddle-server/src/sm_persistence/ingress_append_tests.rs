@@ -1335,6 +1335,7 @@ async fn completed_handoff_blocks_stale_detached_append(
             received_at: None,
             archive_positions: vec![],
             dispatch_stream: None,
+            authority: crate::ingress::append_authority::AppendAuthority::Verified,
         };
         assert_eq!(
             crate::ingress::live_delivery::live_delivery_status(

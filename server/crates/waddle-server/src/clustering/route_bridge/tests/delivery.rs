@@ -558,6 +558,7 @@ fn registered_remote_frame_carries_the_executors_ingress_obligation() {
             semantic_identity_hash: [89; 32],
         },
         received_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
     };
     let registration_id = RemoteResourceRegistrationId::fresh();
     let target = target_full();

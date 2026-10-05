@@ -2,8 +2,7 @@
 
 use super::*;
 use crate::ingress::append_authority::{
-    check_canonical_obligation, check_stanza_binding, record_authorization_failure,
-    AppendAuthorityRejection,
+    check_stanza_binding, record_authorization_failure, AppendAuthorityRejection,
 };
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::server::routes::interpret::SmIngressAppendContext;
@@ -11,15 +10,20 @@ use crate::server::routes::interpret::SmIngressAppendContext;
 /// Call only after authenticating the sender claim or resource registration.
 /// Every keyed copy must retain this authority; callers reject it when
 /// validation fails instead of falling back to an unkeyed append.
-pub(super) async fn authorize_ingress_append(
+///
+/// Only the synchronous checks run here. The canonical-row read is deferred to
+/// the first consumer that trusts the context (#1790): the ordered local-copy
+/// boundary, the detached append, and a frame bound for a registered remote
+/// socket verify it; a forwarding hop never reads, because its receiver does.
+pub(super) fn authorize_ingress_append(
     services: &OrderedRelayDeliveryServices,
     validated_sender: &Entity,
     stanza: &Stanza,
     obligation: Option<&IngressAppendObligationRef>,
 ) -> Option<SmIngressAppendContext> {
     let obligation = obligation?;
-    match check_authority(services, validated_sender, stanza, obligation).await {
-        Ok(()) => Some(obligation.clone().into_context()),
+    match check_authority(services, validated_sender, stanza, obligation) {
+        Ok(db) => Some(obligation.clone().into_deferred_context(db)),
         Err(reason) => {
             record_authorization_failure(&reason, &obligation.sender_bare);
             None
@@ -31,12 +35,12 @@ pub(super) fn requires_ingress_authority(obligation: Option<&IngressAppendObliga
     obligation.is_some()
 }
 
-async fn check_authority(
+fn check_authority(
     services: &OrderedRelayDeliveryServices,
     validated_sender: &Entity,
     stanza: &Stanza,
     obligation: &IngressAppendObligationRef,
-) -> Result<(), AppendAuthorityRejection> {
+) -> Result<crate::db::Database, AppendAuthorityRejection> {
     if obligation.sender_bare.as_str() != validated_sender.id {
         return Err(AppendAuthorityRejection::SenderClaimMismatch);
     }
@@ -49,5 +53,5 @@ async fn check_authority(
         &obligation.sender_bare,
         obligation.receipt.kind.to_storage(),
     )?;
-    check_canonical_obligation(state.deps.app_state.db_pool.global(), stanza, obligation).await
+    Ok(state.deps.app_state.db_pool.global().clone())
 }

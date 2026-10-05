@@ -139,8 +139,7 @@ impl OrderedRelayDeliveryBridge {
                     &origin.sender_entity,
                     &stanza.0,
                     ingress_append.as_ref(),
-                )
-                .await;
+                );
                 if ingress_append.is_some() && context.is_none() {
                     return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
                 }
@@ -178,8 +177,7 @@ impl OrderedRelayDeliveryBridge {
                     &origin.sender_entity,
                     &stanza.0,
                     ingress_append.as_ref(),
-                )
-                .await;
+                );
                 if ingress_append.is_some() && ingress_append_context.is_none() {
                     return remote_resource_route_reply(FullJidDeliveryOutcome::Unavailable.into());
                 }
@@ -411,12 +409,19 @@ impl OrderedRelayDeliveryBridge {
                 .await
             }
             .await;
-            if authority.is_err() {
+            // The owner verifies a relayed claim before forwarding it (#1790), so
+            // this second fence fires only when canonical state could not be
+            // read here or changed since; it stays retryable and is recorded.
+            if let Err(reason) = authority {
+                crate::ingress::append_authority::record_authorization_failure(
+                    &reason,
+                    &obligation.sender_bare,
+                );
                 return RelayRemoteResourceFrameReply {
                     status: RelayRemoteResourceFrameStatus::Backpressure,
                 };
             }
-            let context = obligation.clone().into_context();
+            let context = obligation.clone().into_verified_context();
             match state
                 .deps
                 .protocol
@@ -588,22 +593,36 @@ impl OrderedRelayDeliveryBridge {
         registration: &RemoteOwnerRegistration,
         ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Option<FullJidDeliveryOutcome> {
+        // Resolve a relayed claim before it leaves this node (#1790). The
+        // socket node's own fence cannot report a definitive rejection on the
+        // frame wire, and its `Unavailable` would retire this registration.
+        if let Some(context) = ingress_append_context {
+            if context.ensure_verified(stanza).await.is_err() {
+                return Some(FullJidDeliveryOutcome::Unavailable);
+            }
+        }
         let mut handle =
             RelayHandle::new(registration.socket_node.clone(), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
-        match handle
-            .deliver_remote_resource_frame(RelayDeliverRemoteResourceFrame {
-                frame: remote_resource_frame(
-                    target,
-                    registration.registration_id,
-                    stanza,
-                    kind,
-                    ingress_append_context,
-                ),
-                trace: RelayTraceContext::default(),
-            })
-            .await
-        {
+        let message = RelayDeliverRemoteResourceFrame {
+            frame: remote_resource_frame(
+                target,
+                registration.registration_id,
+                stanza,
+                kind,
+                ingress_append_context,
+            ),
+            trace: RelayTraceContext::default(),
+        };
+        #[cfg(test)]
+        let offered = message.frame.clone();
+        let result = handle.deliver_remote_resource_frame(message).await;
+        #[cfg(test)]
+        if matches!(&result, Err(RelayAskError::Cancelled)) {
+            let _ = crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
+                .try_with(|frames| frames.borrow_mut().push(offered));
+        }
+        match result {
             Ok(RelayRemoteResourceFrameReply {
                 status: RelayRemoteResourceFrameStatus::Delivered,
             }) => {

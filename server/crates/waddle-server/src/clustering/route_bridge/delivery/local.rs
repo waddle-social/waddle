@@ -21,18 +21,17 @@ impl OrderedRelayDeliveryBridge {
                     }
                     _ => None,
                 };
-                // Authorize unconditionally. Deciding from a detached-session
-                // probe here is unsound: teardown inserts the detached session
-                // during cleanup, so a resource can be live at the probe and
-                // detached by the time `deliver_peer_to_full` falls back to the
-                // queue, and that append would then be unkeyed (#1790).
+                // Bind the claim unconditionally; never decide from a
+                // detached-session probe (teardown inserts the detached
+                // session during cleanup, so a resource can be live at the
+                // probe and detached by the fallback). The canonical read is
+                // deferred to the append decision that trusts it (#1790).
                 let ingress_append_context = super::ingress_append::authorize_ingress_append(
                     &services,
                     &envelope.sender_claim.entity,
                     stanza,
                     obligation,
-                )
-                .await;
+                );
                 if super::ingress_append::requires_ingress_authority(obligation)
                     && ingress_append_context.is_none()
                 {

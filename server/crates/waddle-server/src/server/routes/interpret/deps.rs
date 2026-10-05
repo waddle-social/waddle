@@ -139,9 +139,21 @@ pub struct SmIngressAppendContext {
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
     pub archive_positions: Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>,
     pub dispatch_stream: Option<waddle_xmpp::pending_delivery::SmSessionId>,
+    /// Whether this identity is already proven against the canonical row.
+    /// Not serialized; every constructor decides explicitly.
+    pub(crate) authority: crate::ingress::append_authority::AppendAuthority,
 }
 
 impl SmIngressAppendContext {
+    /// Resolve the canonical authority before the first action that trusts
+    /// this context (#1790). Free for contexts minted or verified locally.
+    pub(crate) async fn ensure_verified(
+        &self,
+        stanza: &waddle_xmpp::Stanza,
+    ) -> Result<(), crate::ingress::append_authority::AppendAuthorityRejection> {
+        self.authority.ensure_verified(stanza).await
+    }
+
     pub(super) fn for_resource(
         &self,
         resource: &jid::FullJid,

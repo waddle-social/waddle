@@ -1940,9 +1940,34 @@ and forwards the append context (`clustering/route_bridge/delivery/local.rs`).
 The receiver requires `sender_bare` to match the validated sender claim and
 stanza `from`, and a canonical ingress row for `message_key` naming that sender.
 Failed authorization warns and increments
-`waddle.clustering.ingress_append.authorization_failed`, then degrades to an
-unkeyed append; delivery never fails because the check failed.
-That fallback remains at-least-once.
+`waddle.clustering.ingress_append.authorization_failed`, then refuses the keyed
+copy (`TargetUnavailable` on the ordered receiver, `Unavailable` on the
+remote-resource paths); a rejected keyed copy never degrades to an unkeyed append.
+
+Authorization is resolved at the append decision, not at the relay entry point
+(#1790). The receiver entry points run only the synchronous checks (sender claim
+and stanza binding) and attach a deferred authority to the append context. The
+canonical-row read runs once per node, on the first consumer that trusts the
+context:
+
+- The ordered receiver verifies before consulting durable delivery status,
+  because that status can acknowledge a completed send without proving the
+  sender. Status must precede the local-socket lookup (a lost reply must never
+  select detached fallback), so this read happens whatever the target turns
+  out to be. A live local copy is then re-authorized transactionally.
+- The detached fallback verifies immediately before the keyed
+  `sm_ingress_appends` append.
+- Before a frame leaves for a registered remote socket, the owner verifies it,
+  then the socket node runs its own fence. The frame reply has no definitive
+  rejection status, and its `Unavailable` retires the registration, so a
+  rejection must happen on the owner. A registered-remote destination therefore
+  costs one read on the owner and one on the socket node, as before #1790. A
+  socket-side rejection is recorded in
+  `waddle.clustering.ingress_append.authorization_failed` and answered with
+  retryable `Backpressure`, since after the owner's read it means canonical state
+  was unreadable there or changed.
+- A forwarding hop that relays to the recipient's owner re-sends the obligation
+  unread, because its receiver authorizes it. This is the read #1790 removes.
 
 Registered-remote-socket and local UserActor drains are keyed (#1789, #1805).
 Local `TrySendPeer` and `TrySendDirect` preserve the typed ingress obligation

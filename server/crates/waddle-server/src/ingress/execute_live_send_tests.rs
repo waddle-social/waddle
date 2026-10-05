@@ -252,6 +252,7 @@ async fn sqlite_local_only_delivery_cannot_fall_through_to_replacement_socket() 
         received_at: None,
         archive_positions: Vec::new(),
         dispatch_stream: None,
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
     });
     let stanza = Stanza::Message(submission.plan.sanitized_message);
     let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(1);

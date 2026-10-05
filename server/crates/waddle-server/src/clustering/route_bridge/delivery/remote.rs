@@ -314,8 +314,7 @@ impl OrderedRelayDeliveryBridge {
                     &origin.sender_entity,
                     &stanza.0,
                     ingress_append.as_ref(),
-                )
-                .await;
+                );
                 if ingress_append.is_some() && context.is_none() {
                     return Some(FullJidDeliveryOutcome::Unavailable);
                 }
@@ -359,8 +358,7 @@ impl OrderedRelayDeliveryBridge {
                     &origin.sender_entity,
                     &stanza.0,
                     ingress_append.as_ref(),
-                )
-                .await;
+                );
                 if super::ingress_append::requires_ingress_authority(ingress_append.as_ref())
                     && ingress_append_context.is_none()
                 {

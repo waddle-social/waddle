@@ -62,7 +62,7 @@ Still to reconcile before closing #1658:
 
 - [ ] **#1759:** verify the full live-full-JID plan/commit/execute acceptance on SQLite and PostgreSQL, especially one recipient archive/unread mutation on retry and carbon behavior. Production work is merged; historical synthetic tests and contradictory runbook paragraphs still need reconciliation (see closure audit below).
 - [ ] **#1776:** remaining durable send/observer guarantees. #1834 advanced live ordering and claims, but explicitly retained offer-to-SM crash uncertainty and non-SM/keyless at-least-once cases. Do not equate dispatch ordering with every sink being idempotent.
-- [ ] **#1790:** reassess the performance proposal against current callers. Ordered/processed live copies now require authority too; the issue's assumption that live sends cannot use it is stale. Identify genuinely redundant reads without introducing liveness probes or weakening authorization.
+- [x] **#1790:** relay receivers defer the canonical authorization read to the append decision that trusts it (ordered receiver before durable status, detached keyed append, owner before a registered-remote frame). Forwarding hops no longer read; a registered-remote destination still costs one owner read plus the socket node's own fence. No liveness probe; rejections stay definitive. Follow-up: the `RemoteUserSideEffect::Carbons` receiver keys appends with no canonical read.
 - [ ] Compare the full #1658 scope with current code/tests: frozen targets before `h`, exact replay bytes and delay, distinct archive identities, ordinal round-trip, crash recovery, and non-SM uncertainty. Closed child issues alone do not establish epic completion.
 
 ### Remaining dependent work

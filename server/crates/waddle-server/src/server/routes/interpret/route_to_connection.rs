@@ -1370,6 +1370,11 @@ pub(crate) async fn deliver_ordered_local_copy(
     kind: waddle_xmpp::registry::DeliveryKind,
 ) -> Option<FullJidDeliveryOutcome> {
     let context = deps.ingress_append_context.as_ref()?;
+    // Durable status below short-circuits on receipts without proving the
+    // canonical sender, so a relayed claim is verified before it (#1790).
+    if context.ensure_verified(stanza).await.is_err() {
+        return Some(FullJidDeliveryOutcome::Unavailable);
+    }
     let authority = deps
         .web_socket_state
         .map(|state| &state.deps.protocol.ingress);
