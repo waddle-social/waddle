@@ -3,6 +3,7 @@ use crate::db::{
     migration_checksum, Database, DatabaseConfig, DatabaseDriver, DatabaseError,
     MigrationLedgerError, MigrationNamespace, WADDLE_NAMESPACE_START,
 };
+use crate::ingress::test_support::{runbook_sql_block, runbook_statements};
 use sqlx::{Column, Row};
 use std::{collections::HashSet, fs, path::PathBuf};
 
@@ -36,10 +37,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1022) still dominates
+    // the ledger max, which the waddle namespace (V1023) still dominates
     // after global V0015.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1022));
+    assert_eq!(version, Some(1023));
 }
 
 #[tokio::test]
@@ -156,7 +157,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
         applied,
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
         ]
     );
 
@@ -177,7 +178,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1022));
+    assert_eq!(version, Some(1023));
 }
 
 #[tokio::test]
@@ -236,7 +237,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1022 (the waddle
+    // so the runner also reports applying 1001 through 1023 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -248,7 +249,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
             1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021,
-            1022
+            1022, 1023
         ]
     );
 
@@ -312,7 +313,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1022),
+        Some(1023),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -472,7 +473,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
         runner.run(&db).await.unwrap(),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
@@ -783,7 +784,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
     let applied = MigrationRunner::single().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022]
+        vec![1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
     );
     assert_eq!(
         migration_ledger_checksum(&db, 1010).await.as_deref(),
@@ -955,7 +956,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
         runner.run(&db).await.expect("adopt and run migrations"),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
@@ -2236,7 +2237,8 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         applied,
         vec![
             6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
-            1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022
+            1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
+            1023
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2313,7 +2315,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
         ]
     );
 
@@ -2966,7 +2968,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022
+            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023
         ]
     );
 
@@ -3240,7 +3242,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         applied,
         vec![
             1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016,
-            1017, 1018, 1019, 1020, 1021, 1022
+            1017, 1018, 1019, 1020, 1021, 1022, 1023
         ]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
@@ -3942,7 +3944,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
     );
     assert_nonterminal_monitoring_index(&db).await;
     assert!(sqlite_table_exists(&db, "sm_sessions").await);
@@ -4005,7 +4007,7 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
     assert!(postgres_table_exists(&db, "sm_unacked").await);
@@ -4038,7 +4040,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
             .run(&db)
             .await
             .expect("apply V1014"),
-        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022]
+        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
     );
 
     assert_v1014_cutover_result(&db, 0).await;
@@ -4070,7 +4072,7 @@ async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() 
                 .run(&db)
                 .await
                 .expect("apply V1014 at live epoch"),
-            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022]
+            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
         );
         assert_v1014_cutover_result(&db, epoch).await;
 
@@ -4317,7 +4319,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .run(&storage.database())
             .await
             .expect("cutover migration"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023]
     );
     drop(storage);
 
@@ -4596,7 +4598,7 @@ async fn assert_v1019_custody_cutover(db: &Database) {
             .run(db)
             .await
             .expect("apply custody cutover migration"),
-        vec![1019, 1020, 1021, 1022]
+        vec![1019, 1020, 1021, 1022, 1023]
     );
     let conn = db
         .guard()
@@ -4666,6 +4668,241 @@ async fn postgres_v1019_custody_cutover_drops_only_legacy_proofs() {
     let schema = unique_postgres_schema_name("custody_cutover");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     assert_v1019_custody_cutover(&db).await;
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+const OBSERVER_TABLES: [&str; 6] = [
+    "extension_room_observers",
+    "extension_room_sources",
+    "extension_room_source_revisions",
+    "extension_room_observation_work",
+    "extension_room_observation_receipts",
+    "extension_room_publications",
+];
+
+async fn query_optional_i64(db: &Database, sql: &str) -> Option<i64> {
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn.query(sql, ()).await.expect("query");
+    rows.next()
+        .await
+        .expect("row")
+        .expect("row exists")
+        .get::<Option<i64>>(0)
+        .expect("nullable integer")
+}
+
+async fn collect_observer_history(
+    db: &Database,
+    now_ms: i64,
+) -> crate::ingress_uow::ObserverRetentionBatch {
+    let mut tx = db.begin_immediate().await.expect("retention tx");
+    let batch =
+        crate::ingress_uow::RoomObservationRepository::collect_expired(&mut tx, now_ms, 256)
+            .await
+            .expect("collect observer history");
+    tx.commit().await.expect("retention commit");
+    batch
+}
+
+async fn assert_v1023_stamps_existing_observer_history(db: &Database) {
+    MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1023),
+            )
+            .collect(),
+    )
+    .run(db)
+    .await
+    .expect("pre-retention catalog");
+    // Startup DDL owned these tables before V1023; V1023 opens with that exact
+    // pre-retention shape, so reuse it to build the upgraded database.
+    let v1023 = match db.driver() {
+        DatabaseDriver::Sqlite => waddle::V1023_OBSERVER_HISTORY_RETENTION,
+        DatabaseDriver::Postgres => waddle::V1023_OBSERVER_HISTORY_RETENTION_POSTGRES,
+    };
+    let legacy_tables = v1023
+        .split("ALTER TABLE")
+        .next()
+        .expect("V1023 opens with its create statements");
+    let conn = db.guard().await.expect("guard");
+    conn.execute_batch(legacy_tables)
+        .await
+        .expect("pre-V1023 observer tables");
+    // The settled work's receipt is unprotected; the pending work has its own
+    // message key.
+    for (id, status, message_key) in [
+        (
+            "work-completed",
+            "completed",
+            "00000000-0000-0000-0000-000000001023",
+        ),
+        (
+            "work-pending",
+            "pending",
+            "00000000-0000-0000-0000-000000001024",
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO extension_room_observation_work (id, source_key, message_key, plugin_id, generation, identity, room_jid, revision, source_json, body, status, attempt, due_at_ms, terminal_category) VALUES (?, ?, ?, 'observer', 1, 'identity', 'room@conference.example.org', 0, '{}', '', ?, 1, 0, NULL)",
+            crate::db_params![id, format!("source-{id}"), message_key, status],
+        )
+        .await
+        .expect("legacy work");
+    }
+    for (id, status) in [
+        ("publication-published", "published"),
+        ("publication-pending", "pending"),
+    ] {
+        conn.execute(
+            "INSERT INTO extension_room_publications (id, work_id, output_index, source_key, plugin_id, generation, identity, room_jid, revision, source_json, payload_json, status) VALUES (?, 'work-completed', ?, 'source-work-completed', 'observer', 1, 'identity', 'room@conference.example.org', 0, '{}', '{}', ?)",
+            crate::db_params![id, i64::from(status == "pending"), status],
+        )
+        .await
+        .expect("legacy publication");
+    }
+    conn.execute(
+        "INSERT INTO extension_room_observation_receipts (plugin_id, generation, room_jid, message_key, category) VALUES ('observer', 1, 'room@conference.example.org', '00000000-0000-0000-0000-000000001023', 'completed')",
+        (),
+    )
+    .await
+    .expect("legacy receipt");
+    for (key, retracted) in [("source-retracted", 1_i64), ("source-live", 0)] {
+        conn.execute(
+            "INSERT INTO extension_room_sources (source_key, room_jid, sender_jid, root_stanza_id, revision_stanza_id, root_origin_id, revision, source_json, retracted) VALUES (?, 'room@conference.example.org', 'author@example.org', ?, ?, NULL, 0, '{}', ?)",
+            crate::db_params![key, key, key, retracted],
+        )
+        .await
+        .expect("legacy source");
+        conn.execute(
+            "INSERT INTO extension_room_source_revisions (room_jid, room_stanza_id, source_key) VALUES ('room@conference.example.org', ?, ?)",
+            crate::db_params![key, key],
+        )
+        .await
+        .expect("legacy revision");
+    }
+    drop(conn);
+
+    let before = chrono::Utc::now().timestamp_millis();
+    assert_eq!(
+        MigrationRunner::single()
+            .run(db)
+            .await
+            .expect("apply V1023"),
+        vec![1023]
+    );
+    let after = chrono::Utc::now().timestamp_millis();
+    for sql in [
+        "SELECT settled_at_ms FROM extension_room_observation_work WHERE id = 'work-completed'",
+        "SELECT settled_at_ms FROM extension_room_publications WHERE id = 'publication-published'",
+        "SELECT recorded_at_ms FROM extension_room_observation_receipts",
+        "SELECT captured_at_ms FROM extension_room_sources WHERE source_key = 'source-retracted'",
+        "SELECT captured_at_ms FROM extension_room_sources WHERE source_key = 'source-live'",
+    ] {
+        let stamped = query_optional_i64(db, sql).await.expect("backfilled stamp");
+        assert!(
+            (before..=after).contains(&stamped),
+            "{sql}: {stamped} not stamped at migration time [{before}, {after}]"
+        );
+    }
+    for sql in [
+        "SELECT settled_at_ms FROM extension_room_observation_work WHERE id = 'work-pending'",
+        "SELECT settled_at_ms FROM extension_room_publications WHERE id = 'publication-pending'",
+    ] {
+        assert_eq!(query_optional_i64(db, sql).await, None, "{sql}");
+    }
+    crate::ingress_uow::initialize_room_observations(db)
+        .await
+        .expect("startup DDL is idempotent against the migrated shape");
+
+    assert_eq!(
+        collect_observer_history(db, after).await,
+        crate::ingress_uow::ObserverRetentionBatch::default(),
+        "nothing is collectable immediately after the upgrade"
+    );
+    let horizon = after + chrono::Duration::days(8).num_milliseconds();
+    let batch = collect_observer_history(db, horizon).await;
+    assert_eq!(
+        (
+            batch.publications,
+            batch.work,
+            batch.receipts,
+            batch.revisions,
+            batch.sources
+        ),
+        (1, 0, 1, 1, 1),
+        "the pending publication keeps its completed work; live sources stay"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_v1023_stamps_existing_observer_history_at_migration_time() {
+    let db = Database::in_memory("v1023-observer-retention")
+        .await
+        .expect("create V1023 test database");
+    assert_v1023_stamps_existing_observer_history(&db).await;
+}
+
+#[tokio::test]
+async fn postgres_v1023_stamps_existing_observer_history_at_migration_time() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1023 observer retention)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("observer_retention");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    assert_v1023_stamps_existing_observer_history(&db).await;
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_observer_inspection_queries_run_as_pg_monitor() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (observer inspection queries)");
+        return;
+    };
+    let statements = runbook_statements(&runbook_sql_block("observer-retention-inspection"));
+    for table in OBSERVER_TABLES {
+        assert!(
+            statements.iter().any(|statement| statement.contains(table)),
+            "the inspection block reads {table}"
+        );
+    }
+    let schema = unique_postgres_schema_name("observer_inspection");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("run migrations in isolated postgres schema");
+    crate::ingress_uow::initialize_room_observations(&db)
+        .await
+        .expect("startup DDL after V1023");
+    // Production tables live in `public`, where pg_monitor already has USAGE.
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA {schema} TO pg_monitor"))
+        .execute(&admin)
+        .await
+        .expect("grant fixture schema usage to pg_monitor");
+    let pool = sqlx::PgPool::connect(db.database_url())
+        .await
+        .expect("connect monitor pool");
+    let mut monitor = pool.acquire().await.expect("monitor connection");
+    sqlx::query("SET ROLE pg_monitor")
+        .execute(&mut *monitor)
+        .await
+        .expect("assume pg_monitor");
+    for statement in &statements {
+        sqlx::query(statement)
+            .fetch_all(&mut *monitor)
+            .await
+            .unwrap_or_else(|error| panic!("pg_monitor cannot run {statement}: {error}"));
+    }
+    drop(monitor);
+    pool.close().await;
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
 }

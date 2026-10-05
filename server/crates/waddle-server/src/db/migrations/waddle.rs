@@ -1217,6 +1217,181 @@ WHERE (lease_node_id IS NULL OR lease_node_incarnation IS NULL)
   AND (status IN ('leased', 'started') OR (status = 'pending' AND attempt > 0));
 "#;
 
+/// Give room-observer history its own retention clock (#1901). Tables that
+/// startup DDL used to own are created first in their pre-V1023 shape so the
+/// column additions are valid on a fresh database. Existing history is
+/// stamped with the migration time, so nothing becomes collectable before the
+/// retention horizon has elapsed after the upgrade.
+pub const V1023_OBSERVER_HISTORY_RETENTION: &str = r#"
+CREATE TABLE IF NOT EXISTS extension_room_observers (
+    plugin_id TEXT PRIMARY KEY,
+    generation BIGINT NOT NULL,
+    identity TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    max_concurrent BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS extension_room_sources (
+    source_key TEXT PRIMARY KEY,
+    room_jid TEXT NOT NULL,
+    sender_jid TEXT NOT NULL,
+    root_stanza_id TEXT NOT NULL,
+    revision_stanza_id TEXT NOT NULL,
+    root_origin_id TEXT,
+    revision BIGINT NOT NULL,
+    source_json TEXT NOT NULL,
+    retracted BIGINT NOT NULL DEFAULT 0,
+    UNIQUE (room_jid, root_stanza_id)
+);
+CREATE TABLE IF NOT EXISTS extension_room_source_revisions (
+    room_jid TEXT NOT NULL,
+    room_stanza_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    PRIMARY KEY (room_jid, room_stanza_id)
+);
+CREATE TABLE IF NOT EXISTS extension_room_observation_receipts (
+    plugin_id TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    room_jid TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    category TEXT NOT NULL,
+    PRIMARY KEY (plugin_id, generation, room_jid, message_key)
+);
+CREATE TABLE IF NOT EXISTS extension_room_publications (
+    id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL,
+    output_index BIGINT NOT NULL,
+    source_key TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    identity TEXT NOT NULL,
+    room_jid TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    source_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    UNIQUE (work_id, output_index)
+);
+ALTER TABLE extension_room_observation_work ADD COLUMN settled_at_ms BIGINT NULL;
+ALTER TABLE extension_room_publications ADD COLUMN settled_at_ms BIGINT NULL;
+ALTER TABLE extension_room_observation_receipts ADD COLUMN recorded_at_ms BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE extension_room_sources ADD COLUMN captured_at_ms BIGINT NOT NULL DEFAULT 0;
+UPDATE extension_room_observation_work SET settled_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+WHERE status IN ('completed', 'terminal', 'stale');
+UPDATE extension_room_publications SET settled_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+WHERE status IN ('published', 'stale');
+UPDATE extension_room_observation_receipts SET recorded_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER);
+UPDATE extension_room_sources SET captured_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER);
+CREATE INDEX extension_room_observation_work_settled
+    ON extension_room_observation_work (settled_at_ms, id)
+    WHERE status IN ('completed', 'terminal', 'stale');
+CREATE INDEX extension_room_observation_work_source
+    ON extension_room_observation_work (source_key);
+CREATE INDEX extension_room_publications_settled
+    ON extension_room_publications (settled_at_ms, id)
+    WHERE status IN ('published', 'stale');
+CREATE INDEX extension_room_publications_source
+    ON extension_room_publications (source_key);
+CREATE INDEX extension_room_observation_receipts_recorded
+    ON extension_room_observation_receipts (recorded_at_ms, plugin_id, generation, room_jid, message_key);
+CREATE INDEX extension_room_sources_retracted_captured
+    ON extension_room_sources (captured_at_ms, source_key)
+    WHERE retracted = 1;
+CREATE INDEX extension_room_source_revisions_source
+    ON extension_room_source_revisions (source_key, room_jid, room_stanza_id);
+CREATE INDEX extension_room_observation_work_active_guard
+    ON extension_room_observation_work (plugin_id, generation, room_jid, message_key)
+    WHERE status IN ('pending', 'leased', 'started');
+"#;
+
+/// Observer tables are not canonical ingress authority, so they carry no
+/// epoch-guard triggers; monitoring reads them like the ingress tables.
+pub const V1023_OBSERVER_HISTORY_RETENTION_POSTGRES: &str = r#"
+CREATE TABLE IF NOT EXISTS extension_room_observers (
+    plugin_id TEXT PRIMARY KEY,
+    generation BIGINT NOT NULL,
+    identity TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    max_concurrent BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS extension_room_sources (
+    source_key TEXT PRIMARY KEY,
+    room_jid TEXT NOT NULL,
+    sender_jid TEXT NOT NULL,
+    root_stanza_id TEXT NOT NULL,
+    revision_stanza_id TEXT NOT NULL,
+    root_origin_id TEXT,
+    revision BIGINT NOT NULL,
+    source_json TEXT NOT NULL,
+    retracted BIGINT NOT NULL DEFAULT 0,
+    UNIQUE (room_jid, root_stanza_id)
+);
+CREATE TABLE IF NOT EXISTS extension_room_source_revisions (
+    room_jid TEXT NOT NULL,
+    room_stanza_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    PRIMARY KEY (room_jid, room_stanza_id)
+);
+CREATE TABLE IF NOT EXISTS extension_room_observation_receipts (
+    plugin_id TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    room_jid TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    category TEXT NOT NULL,
+    PRIMARY KEY (plugin_id, generation, room_jid, message_key)
+);
+CREATE TABLE IF NOT EXISTS extension_room_publications (
+    id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL,
+    output_index BIGINT NOT NULL,
+    source_key TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    identity TEXT NOT NULL,
+    room_jid TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    source_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    UNIQUE (work_id, output_index)
+);
+ALTER TABLE extension_room_observation_work ADD COLUMN IF NOT EXISTS settled_at_ms BIGINT NULL;
+ALTER TABLE extension_room_publications ADD COLUMN IF NOT EXISTS settled_at_ms BIGINT NULL;
+ALTER TABLE extension_room_observation_receipts ADD COLUMN IF NOT EXISTS recorded_at_ms BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE extension_room_sources ADD COLUMN IF NOT EXISTS captured_at_ms BIGINT NOT NULL DEFAULT 0;
+UPDATE extension_room_observation_work SET settled_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT)
+WHERE status IN ('completed', 'terminal', 'stale');
+UPDATE extension_room_publications SET settled_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT)
+WHERE status IN ('published', 'stale');
+UPDATE extension_room_observation_receipts SET recorded_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT);
+UPDATE extension_room_sources SET captured_at_ms = CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT);
+CREATE INDEX extension_room_observation_work_settled
+    ON extension_room_observation_work (settled_at_ms, id)
+    WHERE status IN ('completed', 'terminal', 'stale');
+CREATE INDEX extension_room_observation_work_source
+    ON extension_room_observation_work (source_key);
+CREATE INDEX extension_room_publications_settled
+    ON extension_room_publications (settled_at_ms, id)
+    WHERE status IN ('published', 'stale');
+CREATE INDEX extension_room_publications_source
+    ON extension_room_publications (source_key);
+CREATE INDEX extension_room_observation_receipts_recorded
+    ON extension_room_observation_receipts (recorded_at_ms, plugin_id, generation, room_jid, message_key);
+CREATE INDEX extension_room_sources_retracted_captured
+    ON extension_room_sources (captured_at_ms, source_key)
+    WHERE retracted = 1;
+CREATE INDEX extension_room_source_revisions_source
+    ON extension_room_source_revisions (source_key, room_jid, room_stanza_id);
+CREATE INDEX extension_room_observation_work_active_guard
+    ON extension_room_observation_work (plugin_id, generation, room_jid, message_key)
+    WHERE status IN ('pending', 'leased', 'started');
+GRANT SELECT ON TABLE extension_room_observers TO pg_monitor;
+GRANT SELECT ON TABLE extension_room_sources TO pg_monitor;
+GRANT SELECT ON TABLE extension_room_source_revisions TO pg_monitor;
+GRANT SELECT ON TABLE extension_room_observation_work TO pg_monitor;
+GRANT SELECT ON TABLE extension_room_observation_receipts TO pg_monitor;
+GRANT SELECT ON TABLE extension_room_publications TO pg_monitor;
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1351,6 +1526,12 @@ pub fn all() -> Vec<Migration> {
             description: "Fence observer attempts and bound legacy ambiguity".to_string(),
             sql_sqlite: V1022_BOUNDED_RECOVERY,
             sql_postgres: V1022_BOUNDED_RECOVERY_POSTGRES,
+        },
+        Migration {
+            version: 1023,
+            description: "Give settled room-observer history its own retention clock".to_string(),
+            sql_sqlite: V1023_OBSERVER_HISTORY_RETENTION,
+            sql_postgres: V1023_OBSERVER_HISTORY_RETENTION_POSTGRES,
         },
     ]
 }

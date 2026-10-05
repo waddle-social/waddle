@@ -140,7 +140,7 @@ async fn saved_publication(
     EffectIntentRepository::reconcile(&mut tx, key, std::slice::from_ref(&intent), false)
         .await
         .expect("frozen observer intent");
-    RoomObservationRepository::sync_configured(&mut tx, &[configured])
+    RoomObservationRepository::sync_configured(&mut tx, &[configured], crate::time::now_ms())
         .await
         .expect("observer config");
     RoomObservationRepository::capture(
@@ -185,10 +185,11 @@ async fn saved_publication(
     .expect("finish"));
     tx.commit().await.expect("finish commit");
     let mut tx = f.uow.begin().await.expect("publication transaction");
-    let publication = RoomObservationRepository::publication(&mut tx, &subscription)
-        .await
-        .expect("publication")
-        .expect("saved publication");
+    let publication =
+        RoomObservationRepository::publication(&mut tx, &subscription, crate::time::now_ms())
+            .await
+            .expect("publication")
+            .expect("saved publication");
     tx.commit().await.expect("publication read");
     publication
 }
@@ -297,6 +298,7 @@ async fn result_archive_and_stale_gate(f: IngressFixture) {
         &mut tx,
         &fixture.room,
         &StanzaId::new("later-source", fixture.room.clone().into()),
+        crate::time::now_ms(),
     )
     .await
     .expect("retract");
@@ -340,9 +342,13 @@ async fn real_client_room_archive_captures_observer_source(f: IngressFixture) {
     let fixture = GroupchatFixture::new(&f).await;
     let configured = observer(&fixture.room);
     let mut tx = f.uow.begin().await.expect("observer config");
-    RoomObservationRepository::sync_configured(&mut tx, std::slice::from_ref(&configured))
-        .await
-        .expect("sync observer");
+    RoomObservationRepository::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&configured),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync observer");
     tx.commit().await.expect("config commit");
 
     let sender: jid::FullJid = "romeo@example.com/web".parse().expect("joined sender");

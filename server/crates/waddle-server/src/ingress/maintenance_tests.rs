@@ -28,6 +28,8 @@ use waddle_xmpp::{
 
 #[path = "maintenance_waits_tests.rs"]
 mod lease_waits;
+#[path = "maintenance_observer_tests.rs"]
+mod observer_retention;
 
 fn immediate_budget() -> MaintenanceBudget {
     MaintenanceBudget {

@@ -69,6 +69,17 @@ request. Temporary failures use bounded backoff and a finite attempt budget;
 permanent failures and stale work receive terminal receipts. Completed or
 invalidated work no longer needs its body snapshot.
 
+Because these rows have no foreign key to ingress envelopes, settled observer
+history has its own retention (#1901). Each work row, publication, and receipt
+records when it settled; bounded ingress maintenance deletes it eight days later,
+the same horizon as canonical retention. Active work, unpublished results, and
+anything whose canonical message is still non-terminal are kept regardless of
+age, so recovery and duplicate suppression never lose their evidence. Source
+identity outlives that horizon: a correction of any archived message must still
+resolve, so only retracted, unreferenced sources are collected. Operators retire
+genuinely unsupported work with the reviewed disposition in the
+[ingress authority runbook](../../server/docs/operations/ingress-authority.md#observer-history-retention-1901).
+
 ### Reply text
 
 The archived message and its source body digest retain the complete accepted

@@ -57,9 +57,13 @@ async fn callback_retries_after_cancel_and_lease_expiry(fixture: IngressFixture)
     EffectIntentRepository::reconcile(&mut tx, key, std::slice::from_ref(&intent), false)
         .await
         .expect("intent");
-    RoomObservationRepository::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("config");
+    RoomObservationRepository::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("config");
     RoomObservationRepository::capture(
         &mut tx,
         CapturedRoomSource {

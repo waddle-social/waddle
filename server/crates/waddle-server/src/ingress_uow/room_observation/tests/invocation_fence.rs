@@ -10,9 +10,13 @@ async fn seed(fixture: &IngressFixture) -> (ConfiguredRoomObserver, i64) {
     let key = MessageKey::new();
     let mut tx = fixture.uow.begin().await.expect("seed");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("config");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("config");
     capture(
         &mut tx,
         key,
@@ -168,9 +172,13 @@ async fn not_invoked_retries_before_ambiguous_lease_expiry(fixture: IngressFixtu
     tx.commit().await.expect("retry commit");
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     let mut tx = fixture.uow.begin().await.expect("revoke");
-    Repo::sync_configured(&mut tx, &[configured_observer(2, 'b')])
-        .await
-        .expect("revoke started");
+    Repo::sync_configured(
+        &mut tx,
+        &[configured_observer(2, 'b')],
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("revoke started");
     assert!(!Repo::finish(
         &mut tx,
         &second,
@@ -210,6 +218,38 @@ async fn not_invoked_retries_before_ambiguous_lease_expiry_postgres() {
     }
 }
 
+/// Model a database from before V1023 (#1901) so a V1022 upgrade replays the
+/// whole observer migration chain in order.
+async fn revert_v1023(fixture: &IngressFixture) {
+    for index in [
+        "extension_room_observation_work_settled",
+        "extension_room_observation_work_source",
+        "extension_room_publications_settled",
+        "extension_room_publications_source",
+        "extension_room_observation_receipts_recorded",
+        "extension_room_sources_retracted_captured",
+        "extension_room_source_revisions_source",
+        "extension_room_observation_work_active_guard",
+    ] {
+        fixture
+            .execute(&format!("DROP INDEX IF EXISTS {index}"), ())
+            .await;
+    }
+    for (table, column) in [
+        ("extension_room_observation_work", "settled_at_ms"),
+        ("extension_room_publications", "settled_at_ms"),
+        ("extension_room_observation_receipts", "recorded_at_ms"),
+        ("extension_room_sources", "captured_at_ms"),
+    ] {
+        fixture
+            .execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), ())
+            .await;
+    }
+    fixture
+        .execute("DELETE FROM _migrations WHERE version = 1023", ())
+        .await;
+}
+
 async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: IngressFixture) {
     let (observer, now) = seed(&fixture).await;
     // Model a database created before node ownership columns were introduced.
@@ -231,6 +271,7 @@ async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: Ing
             (),
         )
         .await;
+    revert_v1023(&fixture).await;
     fixture
         .execute("DELETE FROM _migrations WHERE version = 1022", ())
         .await;
@@ -239,7 +280,7 @@ async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: Ing
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022]
+        vec![1022, 1023]
     );
     initialize_room_observations(&fixture.db)
         .await
@@ -256,9 +297,14 @@ async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: Ing
         .expect("work");
     tx.commit().await.expect("claim commit");
     let mut tx = fixture.uow.begin().await.expect("retract");
-    Repo::retract(&mut tx, &room(), &StanzaId::new("stanza", room().into()))
-        .await
-        .expect("retract");
+    Repo::retract(
+        &mut tx,
+        &room(),
+        &StanzaId::new("stanza", room().into()),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("retract");
     assert!(!Repo::start(&mut tx, &work, now)
         .await
         .expect("retracted lease"));
@@ -395,6 +441,7 @@ async fn legacy_upgrade_bounds_ambiguity_once(fixture: IngressFixture) {
             (),
         )
         .await;
+    revert_v1023(&fixture).await;
     fixture
         .execute("DELETE FROM _migrations WHERE version = 1022", ())
         .await;
@@ -404,7 +451,7 @@ async fn legacy_upgrade_bounds_ambiguity_once(fixture: IngressFixture) {
             .run(&fixture.db)
             .await
             .expect("legacy upgrade"),
-        vec![1022]
+        vec![1022, 1023]
     );
     let after = Utc::now().timestamp_millis();
     assert!(crate::db::MigrationRunner::single()
@@ -560,6 +607,7 @@ async fn postgres_observer_upgrade_preserves_owned_work() {
             (),
         )
         .await;
+    revert_v1023(&fixture).await;
     fixture
         .execute("DELETE FROM _migrations WHERE version = 1022", ())
         .await;
@@ -568,7 +616,7 @@ async fn postgres_observer_upgrade_preserves_owned_work() {
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022]
+        vec![1022, 1023]
     );
     assert_eq!(fixture.count("extension_room_observation_work WHERE status = 'started' AND lease_node_id IS NOT NULL AND lease_node_incarnation IS NOT NULL AND terminal_category IS NULL").await, 1);
     let mut tx = fixture.uow.begin().await.expect("finish");

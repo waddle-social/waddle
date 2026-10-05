@@ -14,8 +14,8 @@ use crate::ingress::IngressEffectKind;
 use super::attributes::{
     IngressAliasOutcome, IngressDecisionClass, IngressEffectExecutionPhase, IngressGcOutcome,
     IngressMaintenanceOutcome, IngressMaintenancePhase, IngressUnrecoverableReason,
-    IngressUnresolvedEffectKind, Janitor, PushRetryReason, PushSuppressReason, SmAckOutcome,
-    SmEvictionPath, SmResumeOutcome, SweepOutcome,
+    IngressUnresolvedEffectKind, Janitor, ObserverHistoryTable, PushRetryReason,
+    PushSuppressReason, SmAckOutcome, SmEvictionPath, SmResumeOutcome, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -566,6 +566,22 @@ pub fn increment_ingress_maintenance_recovered_obligations(count: u64) {
         "{obligation}",
         "Ingress obligations recovered by bounded maintenance.",
         count,
+    );
+}
+
+/// Settled room-observer history rows reclaimed by maintenance retention
+/// (#1901), by table family.
+///
+/// Not zero-registered — see [`register_reliability_counters`]: no alert reads
+/// it, so it is a "did this ever tick" progress series. Failures surface through
+/// `ingress.maintenance.runs{phase="observer_retention"}`, which is registered.
+pub fn add_ingress_maintenance_reclaimed_observer_rows(count: u64, table: ObserverHistoryTable) {
+    crate::counter_add!(
+        "ingress.maintenance.reclaimed_observer_rows",
+        "{row}",
+        "Settled room-observer history rows reclaimed by bounded maintenance retention, by table.",
+        count,
+        table,
     );
 }
 

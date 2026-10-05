@@ -17,6 +17,7 @@ mod durable_more;
 mod error;
 mod extension_grants;
 mod room_observation;
+pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{
     initialize_room_observations, CapturedRoomSource, RoomObservationRepository,
 };

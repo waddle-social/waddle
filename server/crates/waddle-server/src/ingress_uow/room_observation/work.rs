@@ -120,13 +120,13 @@ pub(super) async fn claim(
         });
         if !current {
             tx.transaction_mut().execute(
-                "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'source_changed', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased', 'started')",
-                crate::db_params![&id],
+                "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'source_changed', body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE id = ? AND status IN ('pending', 'leased', 'started')",
+                crate::db_params![now_ms, &id],
             ).await?;
             let message_key = MessageKey::from_storage(
                 Uuid::parse_str(&message_key).map_err(|_| ObservationError::Codec)?,
             );
-            terminal_receipt(tx, subscription, message_key, "source_changed").await?;
+            terminal_receipt(tx, subscription, message_key, "source_changed", now_ms).await?;
             continue;
         }
         if u32::try_from(attempt)
@@ -134,8 +134,8 @@ pub(super) async fn claim(
             .is_none_or(|attempt| attempt >= MAX_ATTEMPTS)
         {
             tx.transaction_mut().execute(
-                "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL WHERE id = ? AND status IN ('pending', 'leased', 'started')",
-                crate::db_params![&id],
+                "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE id = ? AND status IN ('pending', 'leased', 'started')",
+                crate::db_params![now_ms, &id],
             ).await?;
             let mut rows = tx
                 .transaction_mut()
@@ -152,7 +152,7 @@ pub(super) async fn claim(
             let message_key = MessageKey::from_storage(
                 Uuid::parse_str(&message_key).map_err(|_| ObservationError::Codec)?,
             );
-            terminal_receipt(tx, subscription, message_key, "retry_exhausted").await?;
+            terminal_receipt(tx, subscription, message_key, "retry_exhausted", now_ms).await?;
             continue;
         }
         let lease = Uuid::now_v7();
@@ -386,12 +386,15 @@ pub(super) async fn finish(
             ("terminal", skip_category(*skip), now_ms, None)
         }
     };
+    // Retention measures settled history from this commit; a retry stays
+    // active and therefore carries no settlement time.
+    let settled_at_ms = (status != "pending").then_some(now_ms);
     tx.transaction_mut().execute(
-        "UPDATE extension_room_observation_work SET status = ?, terminal_category = ?, due_at_ms = ?, body = CASE WHEN ? = 'pending' THEN body ELSE '' END, lease_id = NULL, lease_until_ms = NULL, usage_json = ? WHERE id = ? AND lease_id = ? AND status = 'started'",
-        crate::db_params![status, category, due_at_ms, status, usage, work.id.to_string(), work.lease.to_string()],
+        "UPDATE extension_room_observation_work SET status = ?, terminal_category = ?, due_at_ms = ?, body = CASE WHEN ? = 'pending' THEN body ELSE '' END, lease_id = NULL, lease_until_ms = NULL, usage_json = ?, settled_at_ms = ? WHERE id = ? AND lease_id = ? AND status = 'started'",
+        crate::db_params![status, category, due_at_ms, status, usage, settled_at_ms, work.id.to_string(), work.lease.to_string()],
     ).await?;
     if status != "pending" {
-        terminal_receipt(tx, &work.subscription, work.message_key, category).await?;
+        terminal_receipt(tx, &work.subscription, work.message_key, category, now_ms).await?;
     }
     Ok(true)
 }

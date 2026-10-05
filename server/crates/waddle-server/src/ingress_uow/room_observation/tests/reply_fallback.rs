@@ -37,9 +37,13 @@ async fn reply_inputs_preserve_raw_identity_and_correction_fences(fixture: Ingre
     );
     let mut tx = fixture.uow.begin().await.expect("source");
     record_message(&mut tx, root_key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         root_key,
@@ -207,9 +211,13 @@ async fn invalid_reply_range_still_schedules_the_full_body(fixture: IngressFixtu
     let now = Utc::now();
     let mut tx = fixture.uow.begin().await.expect("capture");
     record_message(&mut tx, key).await;
-    Repo::sync_configured(&mut tx, std::slice::from_ref(&observer))
-        .await
-        .expect("sync");
+    Repo::sync_configured(
+        &mut tx,
+        std::slice::from_ref(&observer),
+        crate::time::now_ms(),
+    )
+    .await
+    .expect("sync");
     capture(
         &mut tx,
         key,
