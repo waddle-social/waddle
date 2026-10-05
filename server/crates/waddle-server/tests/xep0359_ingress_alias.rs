@@ -254,14 +254,43 @@ backend_tests!(
     dm_subject_is_digest_content
 );
 
+/// Match the production DM projection: addressing columns are bare, while
+/// the serialized stanza retains the originating transport resource.
+fn project_direct_alias(submission: &mut IngressSubmission) {
+    let source = submission.plan.sanitized_message.clone();
+    for planned in &mut submission.plan.plan {
+        if let waddle_server::ingress::effects::Effect::Durable(
+            waddle_server::ingress::DurableEffect::Direct(
+                waddle_server::ingress::effects::direct::DurableDirectEffect::ArchiveDirect {
+                    archive,
+                    message,
+                    ..
+                },
+            ),
+        ) = &mut planned.effect
+        {
+            let timestamp = message.timestamp;
+            **message = waddle_xmpp::mam::projection::build_direct_archived_message(
+                &archive.clone().into(),
+                source.from.as_ref().expect("sender").to_bare().into(),
+                source.to.as_ref().expect("recipient").to_bare().into(),
+                &source,
+            );
+            message.timestamp = timestamp;
+        }
+    }
+}
+
 async fn concurrent_streams(fixture: IngressFixture) {
-    let first = archive_plan(&fixture, false, "concurrent-a");
+    let mut first = archive_plan(&fixture, false, "concurrent-a");
+    project_direct_alias(&mut first);
     let mut second = archive_plan(&fixture, false, "concurrent-b");
     second.sender = "romeo@example.com/laptop"
         .parse()
         .expect("second connection");
     second.plan.sanitized_message.from = Some(second.sender.clone().into());
     refresh_digest(&mut second);
+    project_direct_alias(&mut second);
     add_reflections(&mut second);
     let (a, b) = tokio::join!(
         commit_submission(&fixture.uow, &first, 5),
@@ -292,26 +321,174 @@ backend_tests!(
     concurrent_streams
 );
 
+#[cfg(feature = "test-support")]
+async fn plan_alias_room(
+    submission: &mut IngressSubmission,
+    deps: &waddle_server::ingress::Deps<'_>,
+) {
+    use std::sync::Arc;
+    use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
+    let mut dispatcher = StanzaDispatcher::new();
+    waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
+    let dispatcher = Arc::new(dispatcher);
+    let mut planned = deps.clone();
+    planned.message_dispatcher = Some(&dispatcher);
+    let mut machine = XmppStateMachine::new("example.com", (*dispatcher).clone());
+    machine.transition_to_ready(submission.sender.clone(), false);
+    submission.plan = waddle_server::ingress::plan_message_dispatch(
+        &mut machine,
+        submission.plan.sanitized_message.clone(),
+        &planned,
+    )
+    .await;
+    assert!(submission.plan.failure.is_none());
+    assert!(
+        submission.plan.room_canonical_message.is_some(),
+        "room plan did not capture canonical source: {:?}",
+        submission.plan
+    );
+}
+
+#[cfg(feature = "test-support")]
+async fn alias_connection(
+    registry: &waddle_xmpp::registry::ConnectionRegistry,
+    users: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    resource: &jid::FullJid,
+) -> tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza> {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    registry.register(resource.clone(), tx);
+    users
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: resource.clone(),
+            entry: registry.get_entry(resource).expect("registered connection"),
+        })
+        .await
+        .expect("registered user resource");
+    rx
+}
+
+#[cfg(feature = "test-support")]
 async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
+    use std::{sync::Arc, time::Duration};
+    use waddle_server::{
+        db::{DatabaseConfig, DatabasePool, PoolConfig},
+        ingress::RecoveryEnvironment,
+        test_support::websocket_state_with_ingress,
+    };
+    use waddle_xmpp::muc::{
+        room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
+        room_registry_actor::CreateRoom,
+    };
+    let room: BareJid = "room@muc.example.com".parse().expect("room");
+    let pool = Arc::new(
+        DatabasePool::new(
+            DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            PoolConfig,
+        )
+        .await
+        .expect("shared database pool"),
+    );
+    let authority = Arc::new(fixture.authority().await);
+    let state = websocket_state_with_ingress(pool, authority.clone()).await;
+    let registry = state.deps.protocol.connection_registry.clone();
+    let users = state.deps.protocol.user_registry.clone();
+    let rooms = state.deps.protocol.room_registry.clone();
+    let actor = rooms
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "alias".into(),
+            channel_id: "alias".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    let mam: Arc<dyn waddle_xmpp::mam::MamStorage> = Arc::new(
+        waddle_xmpp::mam::SqlxMamStorage::open(fixture.db.database_url())
+            .await
+            .expect("MAM"),
+    );
+    let mut deps = state.recovery_deps();
+    deps.mam_storage = Some(&mam);
     let mut original = archive_plan(&fixture, true, "before-rejoin");
-    room_archive_identity(&mut original, 1);
+    let peer: jid::FullJid = "juliet@example.com/phone".parse().expect("peer");
+    let mut old_rx = alias_connection(&registry, &users, &original.sender).await;
+    let mut peer_rx = alias_connection(&registry, &users, &peer).await;
+    for (resource, nick) in [(&original.sender, "reused-nick"), (&peer, "juliet")] {
+        actor
+            .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                nick: nick.into(),
+                real_jid: resource.clone(),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+    plan_alias_room(&mut original, &deps).await;
     let first = commit_submission(&fixture.uow, &original, 5)
         .await
         .expect("first nickname generation");
+    waddle_server::ingress::execute::execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &first,
+        &waddle_server::ingress::ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(old_rx.try_recv().is_ok());
+    assert!(peer_rx.try_recv().is_ok());
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: original.sender.clone(),
+            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave");
     let mut retry = archive_plan(&fixture, true, "after-rejoin");
     retry.sender = "romeo@example.com/new-connection"
         .parse()
         .expect("reconnected sender");
     retry.plan.sanitized_message.from = Some(retry.sender.clone().into());
     refresh_digest(&mut retry);
-    room_archive_identity(&mut retry, 2);
-    add_reflections(&mut retry);
+    let mut retry_rx = alias_connection(&registry, &users, &retry.sender).await;
+    actor
+        .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            nick: "reused-nick".into(),
+            real_jid: retry.sender.clone(),
+            role: waddle_xmpp::Role::Participant,
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .expect("rejoin");
+    plan_alias_room(&mut retry, &deps).await;
     let duplicate = commit_submission(&fixture.uow, &retry, 5)
         .await
         .expect("retry after failed resume");
     assert_eq!(duplicate.message_key, first.message_key);
-    assert_eq!(wire_messages(&fixture, &duplicate).await.len(), 1);
-    // A rejoin changes room nickname generation and archived full JID, not the alias owner.
+    waddle_server::ingress::execute::execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &duplicate,
+        &waddle_server::ingress::ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        retry_rx.try_recv().is_ok(),
+        "new connection receives its reflection"
+    );
+    assert!(
+        peer_rx.try_recv().is_err(),
+        "completed peer is not replayed"
+    );
     assert_eq!(fixture.count("mam_messages").await, 1);
     let other = waddle_xmpp::auth::AuthenticatedPrincipalRef::new(
         "mercutio@example.com".parse().expect("other sender"),
@@ -326,25 +503,64 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
             waddle_server::db_params![other.bare_jid().to_string()],
         )
         .await;
+
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: retry.sender.clone(),
+            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave reused nick");
     let mut reused = archive_plan(&fixture, true, "different-bare-jid");
     reused.principal = waddle_server::ingress::IngressPrincipal::Authenticated(other.clone());
     reused.identity = waddle_server::ingress::IngressStreamIdentity::Ephemeral { principal: other };
     reused.sender = "mercutio@example.com/phone".parse().expect("new occupant");
     reused.plan.sanitized_message.from = Some(reused.sender.clone().into());
     refresh_digest(&mut reused);
-    room_archive_identity(&mut reused, 3);
-    add_reflections(&mut reused);
+    let mut reused_rx = alias_connection(&registry, &users, &reused.sender).await;
+    actor
+        .ask(Join {
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            nick: "reused-nick".into(),
+            real_jid: reused.sender.clone(),
+            role: waddle_xmpp::Role::Participant,
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .expect("different user reuses nick");
+    plan_alias_room(&mut reused, &deps).await;
     let distinct = commit_submission(&fixture.uow, &reused, 5)
         .await
         .expect("same nick, other bare JID");
     assert_eq!(distinct.class, IngressDecisionClass::Accepted);
     assert_ne!(distinct.message_key, first.message_key);
-    assert_eq!(wire_messages(&fixture, &distinct).await.len(), 2);
+    waddle_server::ingress::execute::execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &distinct,
+        &waddle_server::ingress::ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(reused_rx.try_recv().is_ok());
+    assert!(peer_rx.try_recv().is_ok());
     assert_eq!(fixture.count("ingress_messages").await, 2);
     assert_eq!(fixture.count("ingress_origin_aliases").await, 2);
     assert_eq!(fixture.count("mam_messages").await, 2);
+    actor.kill();
+    rooms.kill();
+    users.kill();
+    assert!(authority.drain_and_join(Duration::from_secs(5)).await);
+    drop(mam);
     fixture.close().await;
 }
+
+// Real room planning needs the public in-process server fixture.
+#[cfg(feature = "test-support")]
 backend_tests!(
     alias_rejoin_and_nick_reuse_sqlite,
     alias_rejoin_and_nick_reuse_postgres,

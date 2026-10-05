@@ -9,6 +9,87 @@ fn jid(value: &str) -> BareJid {
     value.parse().expect("test jid")
 }
 
+#[test]
+fn prepared_route_restamps_only_derived_ids_and_preserves_real_drift() {
+    use waddle_xmpp::ingress::StoredMessagePayload;
+    let (mut plan, sender, _, _) = fixture();
+    let recipient = jid("bob@example.test");
+    let foreign = jid("foreign.example.test");
+    let mut original = Message::new(Some(recipient.clone().into()));
+    original.from = Some("alice@example.test/phone".parse().expect("sender"));
+    original
+        .bodies
+        .insert(Default::default(), "original".into());
+    for (owner, id) in [
+        (&foreign, "foreign-first"),
+        (&sender, "sender-first"),
+        (&recipient, "recipient-first"),
+    ] {
+        original
+            .payloads
+            .push(build_stanza_id_element(id, &owner.clone().into()));
+    }
+    let intent = |message: Message| IngressEffectIntent::RouteDirect {
+        recipient: recipient.clone(),
+        fanout: vec!["bob@example.test/phone".parse().expect("target")],
+        route_identity: EffectMessageIdentity::capture_ordinal(7),
+        prepared: Some(StoredMessagePayload::new(message).expect("valid payload")),
+    };
+    let saved = intent(original.clone());
+    for drift in ["none", "body", "target", "foreign", "fanout", "ambiguous"] {
+        let mut retry = original.clone();
+        waddle_xmpp_core::xep0359::remove_stanza_ids_by(&mut retry, &sender.clone().into());
+        waddle_xmpp_core::xep0359::remove_stanza_ids_by(&mut retry, &recipient.clone().into());
+        retry.payloads.push(build_stanza_id_element(
+            "sender-new",
+            &sender.clone().into(),
+        ));
+        retry.payloads.push(build_stanza_id_element(
+            "recipient-new",
+            &recipient.clone().into(),
+        ));
+        match drift {
+            "body" => {
+                retry.bodies.insert(Default::default(), "different".into());
+            }
+            "target" => {
+                retry.to = Some("bob@example.test/other".parse().expect("target"));
+            }
+            "foreign" => {
+                retry.payloads[0] = build_stanza_id_element("foreign-new", &foreign.clone().into());
+            }
+            "ambiguous" => {
+                retry.payloads.push(build_stanza_id_element(
+                    "second-sender",
+                    &sender.clone().into(),
+                ));
+            }
+            _ => {}
+        }
+        let mut offered = intent(retry);
+        if drift == "fanout" {
+            if let IngressEffectIntent::RouteDirect { fanout, .. } = &mut offered {
+                fanout.push("bob@example.test/new-device".parse().expect("target"));
+            }
+        }
+        plan.intents = vec![offered];
+        restore_route_identities(&mut plan, std::slice::from_ref(&saved)).expect("restore IDs");
+        assert_eq!(plan.intents[0] == saved, drift == "none", "{drift}");
+        if drift == "ambiguous" {
+            let IngressEffectIntent::RouteDirect {
+                prepared: Some(payload),
+                ..
+            } = &plan.intents[0]
+            else {
+                panic!("prepared route");
+            };
+            assert!(extract_stanza_ids(payload.message())
+                .iter()
+                .any(|id| id.id == "sender-new"));
+        }
+    }
+}
+
 fn fixture() -> (IngressPlan, BareJid, StanzaId, StanzaId) {
     let owner = jid("alice@example.test");
     let minted = StanzaId::new("provisional", owner.clone().into());
@@ -46,7 +127,8 @@ fn restamp_preserves_origin_other_authorities_and_input_plan() {
     plan.sanitized_message
         .payloads
         .push(build_stanza_id_element(&foreign.id, &foreign.by));
-    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())])
+        .expect("valid restamping");
     assert_eq!(
         extract_stanza_ids(&result.sanitized_message),
         vec![recorded, foreign]
@@ -109,7 +191,8 @@ fn restamp_updates_archive_inbox_dependencies_and_external_frames() {
     let result = restamp_plan(
         &plan,
         &[(owner.clone(), ArchiveRole::Sender, recorded.clone())],
-    );
+    )
+    .expect("valid restamping");
     let Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
         message, ..
     })) = &result.plan[0].effect
@@ -178,7 +261,8 @@ fn restamp_intent_routes_and_retractions_preserve_historical_targets() {
             retraction_stanza_id: minted,
         },
     });
-    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())])
+        .expect("valid restamping");
     let IngressEffectIntent::RouteDirect { route_identity, .. } = &result.intents[1] else {
         panic!("route");
     };
@@ -203,7 +287,8 @@ fn restamp_descends_into_forwarded_messages() {
     let mut wrapper = Message::new(Some(owner.clone().into()));
     wrapper.payloads.push(forwarded.into());
     plan.error_reply = Some(Stanza::Message(wrapper));
-    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())])
+        .expect("valid restamping");
     let Stanza::Message(wrapper) = result.error_reply.expect("reply") else {
         panic!("message");
     };
@@ -231,7 +316,8 @@ fn restamp_updates_offline_reference_and_original_payload_together() {
             original_message: Box::new(plan.sanitized_message.clone()),
         }),
     )));
-    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())])
+        .expect("valid restamping");
     let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery {
         row,
         original_message,
@@ -263,7 +349,7 @@ fn restamp_requires_recorded_archive_and_assigning_authority_to_match() {
             StanzaId::new("recorded", other.into()),
         ),
     ] {
-        let result = restamp_plan(&plan, &[recorded]);
+        let result = restamp_plan(&plan, &[recorded]).expect("valid restamping");
         assert_eq!(
             extract_stanza_ids(&result.sanitized_message),
             vec![minted.clone()]
@@ -316,7 +402,8 @@ fn system_archive_and_peer_delivery_share_recorded_identity() {
     plan.plan.push(PlannedEffect::new(Effect::External(
         ExternalEffect::QueueOfflineDelivery(route),
     )));
-    let stamped = restamp_plan(&plan, &[(room, ArchiveRole::Sender, recorded.clone())]);
+    let stamped = restamp_plan(&plan, &[(room, ArchiveRole::Sender, recorded.clone())])
+        .expect("valid restamping");
     let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
         message, ..
     })) = &stamped.plan[0].effect
@@ -395,7 +482,7 @@ fn sender_and_generated_archives_retain_distinct_recorded_identities() {
         ),
         (room, ArchiveRole::Sender, sender_recorded.clone()),
     ];
-    let stamped = restamp_plan(&plan, &recorded);
+    let stamped = restamp_plan(&plan, &recorded).expect("valid restamping");
     for (effect, expected) in stamped.plan.iter().zip([sender_recorded, system_recorded]) {
         let Effect::External(ExternalEffect::Frame(frame)) = &effect.effect else {
             panic!("frame");
@@ -447,7 +534,8 @@ fn restamp_room_projection_preserves_client_id_and_updates_archive_dependency() 
     let result = restamp_plan(
         &plan,
         &[(room.clone(), ArchiveRole::Sender, recorded.clone())],
-    );
+    )
+    .expect("valid restamping");
     let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
         entry,
         archive_stanza_id,
@@ -489,7 +577,8 @@ fn restamp_subject_rejection_reply_uses_committed_archive_identity() {
                 },
             },
         ))));
-    let stamped = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    let stamped = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())])
+        .expect("valid restamping");
     for (current, expected) in [(&plan, minted), (&stamped, recorded)] {
         let Effect::External(ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
             mutation:
@@ -531,7 +620,8 @@ fn restamp_deferred_policy_preserves_frozen_fields_and_changes_receipt_identity(
         mutation: mutation.clone(),
     };
     plan.intents.push(provisional.clone());
-    let stamped = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    let stamped = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())])
+        .expect("valid restamping");
     let expected = IngressEffectIntent::GroupchatNotificationRecovery {
         mutation: GroupchatNotificationRecoveryMutation {
             archive_stanza_id: recorded,

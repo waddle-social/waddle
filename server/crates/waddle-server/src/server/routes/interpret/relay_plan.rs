@@ -159,7 +159,8 @@ mod tests {
                 },
                 trusted.clone(),
             )],
-        );
+        )
+        .expect("valid restamping");
         waddle_xmpp_core::xep0359::remove_stanza_ids_by(&mut reflected, &room.clone().into());
         waddle_xmpp_core::xep0359::add_stanza_id(&mut reflected, &trusted);
         let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid {

@@ -346,6 +346,23 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
             );
             if !unpin {
                 let retained = actor.ask(GetPinList).await.expect("retained pin");
+                let original_id = decision
+                    .archive_ids
+                    .iter()
+                    .find(|(archive, _)| archive == &room)
+                    .expect("system archive identity")
+                    .1
+                    .id
+                    .clone();
+                let original_archive = mam
+                    .get_message(&original_id)
+                    .await
+                    .expect("archive read")
+                    .expect("system archive");
+                assert!(original_archive
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| !body.contains("new nickname")));
                 plan_events(
                     &mut submission,
                     &deps,
@@ -390,6 +407,15 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                     "duplicate suppresses non-sender broadcast"
                 );
                 assert_eq!(fixture.count("mam_messages").await, 2);
+                let unchanged = mam
+                    .get_message(&original_id)
+                    .await
+                    .expect("archive reread")
+                    .expect("system archive");
+                assert_eq!(unchanged.body, original_archive.body);
+                assert_eq!(unchanged.stanza_xml, original_archive.stanza_xml);
+                assert_eq!(unchanged.timestamp, original_archive.timestamp);
+                assert_eq!(unchanged.ordinal, original_archive.ordinal);
             }
         }
     }

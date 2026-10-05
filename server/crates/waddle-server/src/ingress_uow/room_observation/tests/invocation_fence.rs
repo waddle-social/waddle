@@ -218,9 +218,18 @@ async fn not_invoked_retries_before_ambiguous_lease_expiry_postgres() {
     }
 }
 
-/// Model a database from before V1023 (#1901) so a V1022 upgrade replays the
-/// whole observer migration chain in order.
-async fn revert_v1023(fixture: &IngressFixture) {
+/// Remove later schema and ledger entries so callers can model pre-V1022 state.
+/// Both must agree before the normal runner upgrades the fixture again.
+async fn revert_after_v1022(fixture: &IngressFixture) {
+    fixture
+        .execute(
+            "ALTER TABLE ingress_effect_receipts DROP COLUMN policy_discard_reason",
+            (),
+        )
+        .await;
+    fixture
+        .execute("DELETE FROM _migrations WHERE version = 1024", ())
+        .await;
     for index in [
         "extension_room_observation_work_settled",
         "extension_room_observation_work_source",
@@ -271,7 +280,7 @@ async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: Ing
             (),
         )
         .await;
-    revert_v1023(&fixture).await;
+    revert_after_v1022(&fixture).await;
     fixture
         .execute("DELETE FROM _migrations WHERE version = 1022", ())
         .await;
@@ -280,7 +289,7 @@ async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: Ing
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022, 1023]
+        vec![1022, 1023, 1024]
     );
     initialize_room_observations(&fixture.db)
         .await
@@ -441,7 +450,7 @@ async fn legacy_upgrade_bounds_ambiguity_once(fixture: IngressFixture) {
             (),
         )
         .await;
-    revert_v1023(&fixture).await;
+    revert_after_v1022(&fixture).await;
     fixture
         .execute("DELETE FROM _migrations WHERE version = 1022", ())
         .await;
@@ -451,7 +460,7 @@ async fn legacy_upgrade_bounds_ambiguity_once(fixture: IngressFixture) {
             .run(&fixture.db)
             .await
             .expect("legacy upgrade"),
-        vec![1022, 1023]
+        vec![1022, 1023, 1024]
     );
     let after = Utc::now().timestamp_millis();
     assert!(crate::db::MigrationRunner::single()
@@ -607,7 +616,7 @@ async fn postgres_observer_upgrade_preserves_owned_work() {
             (),
         )
         .await;
-    revert_v1023(&fixture).await;
+    revert_after_v1022(&fixture).await;
     fixture
         .execute("DELETE FROM _migrations WHERE version = 1022", ())
         .await;
@@ -616,7 +625,7 @@ async fn postgres_observer_upgrade_preserves_owned_work() {
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022, 1023]
+        vec![1022, 1023, 1024]
     );
     assert_eq!(fixture.count("extension_room_observation_work WHERE status = 'started' AND lease_node_id IS NOT NULL AND lease_node_incarnation IS NOT NULL AND terminal_category IS NULL").await, 1);
     let mut tx = fixture.uow.begin().await.expect("finish");

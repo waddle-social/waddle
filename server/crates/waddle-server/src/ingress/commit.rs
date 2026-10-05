@@ -279,9 +279,9 @@ async fn commit_attempt(
     } else if let Some(class) = rejection {
         super::rejection::rejection_plan(&submission.plan, class, &submission.sender)?
     } else {
-        super::restamp::restamp_plan(&submission.plan, &recorded_ids)
+        super::restamp::restamp_plan(&submission.plan, &recorded_ids)?
     };
-    super::restamp::restore_muc_route_identity(&mut plan, &recorded);
+    super::restamp::restore_route_identities(&mut plan, &recorded)?;
     // Recorded obligations still missing their receipts. These are the only
     // ones a replay may repair; everything else is provably complete.
     let mut unreceipted = Vec::new();
