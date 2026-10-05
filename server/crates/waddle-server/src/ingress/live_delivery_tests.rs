@@ -88,7 +88,7 @@ async fn postgres_concurrent_live_sends_and_missing_receipt_repair_enqueue_once(
 }
 
 #[tokio::test]
-async fn definite_queue_failure_releases_but_failed_completion_never_retries() {
+async fn definite_queue_failure_releases_and_unknown_completion_retries_after_deadline() {
     let fixture = IngressFixture::sqlite().await;
     let authority = fixture.authority().await;
     let (context, target, stanza) = recorded(&fixture).await;

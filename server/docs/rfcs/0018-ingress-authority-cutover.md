@@ -1,6 +1,7 @@
 # RFC 0018 — Ingress authority cutover with canonical identity (#1657)
 
-Status: implementing (PR opened 2026-09-06). Reviewed in four rounds by an
+Status: authority cutover merged in #1738; delivery policy updated by #1899.
+Originally reviewed in four rounds by an
 independent high-reasoning reviewer before implementation (REJECT ×3 →
 APPROVE-WITH-CHANGES; the last change is folded into §3.2).
 
@@ -47,8 +48,11 @@ and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger
 locally and on authorized cross-node receiver appends (#1778), including direct
 routes and recorded MUC occupant copies, and on the registered-remote-socket
-and local UserActor detach drains (#1789, #1805). The authorization-failure
-fallback remains unkeyed and at-least-once;
+and local UserActor detach drains (#1789, #1805). Receiver validation rejects
+failed canonical authorization before accepting a keyed delivery. A detach
+drain of an already-accepted frame instead retains unkeyed custody when its
+supplied obligation cannot be authorized, preserving the frame but losing
+keyed deduplication. The separate relayed-carbons authorization gap is #1906;
 #1760 now retains immutable proof and replay payload as one durable custody
 unit, with atomic pending-delivery handoff and independent recovery (§3.3a).
 New detached allocations and live attempts interlock under canonical authority;
@@ -69,6 +73,30 @@ audience is the addressed full JID; received carbons exclude that resource.
 Recipient preparation failures refuse the plan instead of delegating persistence
 to the destination connection. Live preparation adds neither offline notification
 candidates nor recipient notification activity.
+
+### Direct-message acceptance contract (#1909)
+
+The merged #1899 policy supersedes #1658's original requirement that uncertain
+non-SM delivery remain terminal forever. A recorded start proves possible
+execution, not delivery or non-delivery. Unknown live outcomes, including
+non-SM sends, suppress retry during the 60-second database-clock deadline and
+can retry afterward with a fresh fenced token. Durable completion, receipts or
+SM custody are consulted first and suppress another logical sink execution.
+An expired never-started reservation can also recover, but is not classified as
+an uncertain completed send. Offline handoff remains subject to storage hints,
+blocking, sibling authority and quota checks.
+
+Consequently, exactly-once acceptance applies to durable keyed effects and
+their settlement, not to client observation or external provider execution.
+Normal XEP-0198 replay may retransmit an unacknowledged frame; an unknown
+keyless send or provider call can repeat after its deadline. Committed effects
+that never started still require recovery or an explicit permitted policy
+disposition. They are not excused by the unknown-outcome policy.
+
+The [acceptance matrix](../operations/ingress-effect-acceptance.md) maps these
+guarantees to implementation, tests and remaining scope. Room-observer
+terminalization (#1908) is adjacent to the direct-message contract, rather than
+an implicit expansion of its acceptance criteria.
 
 ### Recovery convergence (#1782)
 

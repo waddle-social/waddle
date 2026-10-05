@@ -1433,7 +1433,11 @@ exactly-once execution of guest external effects. The existing 20-attempt limit
 settles exhausted work as failure; valid result/publication/receipt writes remain
 atomic and publication output indices remain idempotent.
 
-**Accepted residual for #1776:** “recognised on retry instead of repeated” holds
+**Accepted policy from merged #1899 (#1776, reconciled by #1909):**
+This supersedes #1658's original terminal non-SM uncertainty requirement.
+The same bounded unknown-outcome policy applies to recorded non-SM live sends;
+absence of an SM session does not make a started attempt terminal forever.
+“Recognised on retry instead of repeated” holds
 when durable completion, receipt or custody evidence exists. A committed start
 alone proves only that execution might have begun. After its bounded deadline,
 recovery deliberately permits another attempt rather than silently losing the
@@ -1445,6 +1449,14 @@ deduplicate provider side effects. This is the implemented availability policy,
 not an exactly-once or at-most-once external-effect guarantee. Providers requiring
 stronger guarantees need their own durable idempotency/result lookup before
 performing the effect.
+
+Do not conflate an unknown started attempt with an effect that never started:
+the latter still needs recovery or an explicit policy disposition. An effect
+receipt can record policy resolution or custody transfer; it is not always a
+successful socket-delivery receipt. Normal XEP-0198 replay of an unacknowledged
+frame is also distinct from allocating another logical keyed effect. See the
+[direct-message acceptance matrix](ingress-effect-acceptance.md) for the exact
+guarantee and verification boundary of each effect family.
 
 **Deployment:** this PR ships the production HelmRelease as `Recreate`. Old
 writers must stop before new writers apply V1022 or use the v4 side-effect relay;

@@ -1,6 +1,6 @@
 # Distributed-actors implementation TODO
 
-Status audited **2026-09-27** against `main@35ecd05c8`, GitHub issue/PR state, native dependency edges, and the source/test evidence noted below. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. This audit did not query live telemetry or rerun Rust suites.
+Status audited **2026-09-27** against `main@35ecd05c8`, with the #1658 acceptance section reconciled **2026-10-05** after #1896/#1899/#1903. Other sections retain their original audit date. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. No new live deployment result is asserted here.
 
 The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. Native blocked-by edges remain canonical for sequencing.
 
@@ -9,7 +9,7 @@ The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664
 - **Immediate reliability:** #1386 — coordinate clustered shutdown with SM drain completion and classify terminal authority loss. The 2026-09-25 issue report remains relevant; current code already sleeps 250 ms between nonempty passes, so the old “no backoff” diagnosis is stale.
 - **Distributed-actors bug:** #1732 — retire displaced-generation media authority without revoking the successor's tokens or removing its LiveKit participant. #1869 narrowed the replacement paths but explicitly deferred this work; re-establish the reproducer against the new bind fencing.
 - **Small distributed-actors task:** #1688 — require `deployment.uuid` at render time for durable database configurations. Clustering already requires it; cover the remaining durable/noncluster configurations, preserve explicit dev/memory behavior, bump the chart, and verify the GitOps render.
-- **Roadmap progress:** finish the #1658 acceptance audit, beginning with #1759 reconciliation and the remaining #1776 guarantees. Do not reimplement closed carve-outs listed below.
+- **Roadmap progress:** finish the #1658 acceptance matrix and remaining authorization follow-up #1906. #1759 and #1776 are closed; #1899's bounded uncertainty policy is the accepted baseline. Do not reimplement closed carve-outs listed below.
 - **Larger recovery task:** design #1826 and #1825 together — durable remote-join handoff plus recovery of departures after socket-node restart. Persisting membership only after the join reply does not close the lost-acknowledgement gap.
 
 **Remaining critical path:** #1658 → (#1659 ∥ #1660) → #1661 → #1662 → #1663. All prerequisites through #1657 are closed. The later umbrellas are sharpening/evaluation work, not ready-to-code feature tickets.
@@ -56,14 +56,16 @@ The direct-message executor remains the prerequisite for both #1659 and #1660. I
 
 **Landed/closed:** #1739–#1743 recovery foundations (PR #1752), #1753 extension ingress identity, #1755 recovery executor, #1756 keyed recipient append receipts, #1757 per-occupant fanout progress, #1760 append-proof/payload liveness, #1778 cross-node detached append identity, #1789 registered-socket detach identity, and #1805 UserActor delivery identity (PR #1820). Adjacent #1803 backlog work and #1804 relay compatibility are also closed.
 
-**Recent completion:** #1770 archive/dispatch ordering landed in **PR #1834 on 2026-09-24**. It includes the production #1759 live full-JID recipient-preparation path, exact dispatch claims/offer state, and ordered recovery. It is no longer a draft awaiting merge.
+**Recent completion:** #1770 archive/dispatch ordering landed in **PR #1834 on 2026-09-24**. #1896 completed #1759 recipient-preparation acceptance on October 3. #1899 completed #1776 on October 4 with durable leases, proof-first recovery and bounded retry of unknown outcomes; possible duplicate client/provider effects after uncertainty are an explicit policy, not unfinished exactly-once work.
 
 Still to reconcile before closing #1658:
 
-- [ ] **#1759:** verify the full live-full-JID plan/commit/execute acceptance on SQLite and PostgreSQL, especially one recipient archive/unread mutation on retry and carbon behavior. Production work is merged; historical synthetic tests and contradictory runbook paragraphs still need reconciliation (see closure audit below).
-- [ ] **#1776:** remaining durable send/observer guarantees. #1834 advanced live ordering and claims, but explicitly retained offer-to-SM crash uncertainty and non-SM/keyless at-least-once cases. Do not equate dispatch ordering with every sink being idempotent.
+- [x] **#1759:** live full-JID archive/inbox/carbon obligations are canonical; missing recipient preparation refuses the plan. SQLite/PostgreSQL retry coverage and ownership fixtures were reconciled in #1896.
+- [x] **#1776:** #1899 recognizes completed/custodied effects, fences concurrent attempts and permits retry after unknown live outcomes reach 60 seconds. This supersedes the parent issue's original terminal non-SM uncertainty wording.
 - [x] **#1790:** relay receivers defer the canonical authorization read to the append decision that trusts it (ordered receiver before durable status, detached keyed append, owner before a registered-remote frame). Forwarding hops no longer read; a registered-remote destination still costs one owner read plus the socket node's own fence. No liveness probe; rejections stay definitive. Follow-up: the `RemoteUserSideEffect::Carbons` receiver keys appends with no canonical read.
-- [ ] Compare the full #1658 scope with current code/tests: frozen targets before `h`, exact replay bytes and delay, distinct archive identities, ordinal round-trip, crash recovery, and non-SM uncertainty. Closed child issues alone do not establish epic completion.
+- [ ] **#1909–#1912:** complete acceptance reconciliation, unarchived full-JID recovery, existing MAM projection verification and replay-byte proof. Track implementation and remaining checks in the [acceptance matrix](server/docs/operations/ingress-effect-acceptance.md).
+- [ ] **#1906:** authorize the relayed-carbons obligation before trusting it for keyed append. This existing follow-up remains within the exact-key/target contract.
+- **Adjacent #1908:** room-observer terminalization has its own investigation and disposition; it is not silently added to the DM acceptance scope.
 
 ### Remaining dependent work
 
@@ -121,10 +123,9 @@ Recommendations below are based on source/test inspection and merged PR evidence
 | Open issue | Why it should not be closed unconditionally |
 | --- | --- |
 | #1138 | Original detach age is preserved by the snapshot codec introduced in #1676 and restored for expiry checks. Implementation appears fixed, but this audit did not establish the exact repeated successful fanout → restart → original expiry-window regression. Verify that acceptance before closing. |
-| #1759 | Core feature landed in #1834. `interpret/tests/plan.rs` now expects recipient archive preparation, but `tests/ingress_cases/recipient_drift.rs` still constructs historical unreceipted live plans. The ingress runbook's older #1759 limitation contradicts its newer completion paragraph. Reconcile those and establish the exact retry/unread acceptance evidence, then close rather than reimplement. |
 | #1699 | Original outbox defect fixed in #1708; overlaps #1705/#1745. Preserve the deterministic scheduling refinement and separately disposition the group-DM rename failure before closing as consolidated. |
-| #1658, #1776 | Partial completion is substantial, but the documented keyless/uncertain-send guarantees remain. Keep open for the remaining acceptance work. |
-| #1709, #1790 | Mitigation/current-caller changes make their descriptions stale; neither establishes that the remaining optimization work is complete. |
+| #1658 | #1759/#1776/#1790 are closed. Finish #1909–#1912 and #1906 against the reconciled acceptance matrix; retain #1899's explicit unknown-outcome duplicate policy. |
+| #1709 | The stack-size mitigation does not establish that the remaining oversized-future work is complete. |
 | #1401 | #1869 addresses connection displacement, but malformed/invalid bind error handling remains a separate acceptance requirement. |
 | #1295 | Ordinary cluster drain still skips UserActor claims; do not close merely because #1294 takeover or room draining landed. |
 | #1298 | Member-list IQ still depends on a local RoomActor; relay support alone does not prove remote-owner query acceptance. |
