@@ -3571,7 +3571,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
     assert_eq!(outcome.pushed, 1);
 
     // Step 3: pluck the OutboundStanza from the channel — it
-    // MUST carry T1 as pending_row_original_receipt_at.
+    // MUST carry T1 as original_receipt_at.
     let pushed = rx.try_recv().expect("flush stanza pushed");
     assert_eq!(
         pushed.pending_row_id.as_ref(),
@@ -3579,7 +3579,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
         "OutboundStanza tagged with source row id"
     );
     assert_eq!(
-        pushed.pending_row_original_receipt_at,
+        pushed.original_receipt_at,
         Some(t1),
         "OutboundStanza carries the source row's original_receipt_at"
     );

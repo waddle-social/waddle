@@ -352,6 +352,7 @@ impl OrderedRelayDeliveryBridge {
                 target,
                 stanza,
                 ingress_append,
+                received_at,
             } => {
                 let ingress_append_context = super::ingress_append::authorize_ingress_append(
                     &services,
@@ -365,22 +366,24 @@ impl OrderedRelayDeliveryBridge {
                     return Some(FullJidDeliveryOutcome::Unavailable);
                 }
                 if let Some(remote) = self
-                    .try_deliver_full_jid_remote(
+                    .try_deliver_full_jid_remote_at(
                         &target,
                         &stanza.0,
                         &origin,
                         None,
                         ingress_append_context.clone(),
+                        received_at,
                     )
                     .await
                 {
                     Some(remote)
                 } else {
-                    let outcome = deliver_local_full_jid_after_target_refresh(
+                    let outcome = deliver_local_full_jid_after_target_refresh_at(
                         &services,
                         &target,
                         &stanza.0,
                         ingress_append_context.as_ref(),
+                        received_at,
                     )
                     .await;
                     Some(outcome)

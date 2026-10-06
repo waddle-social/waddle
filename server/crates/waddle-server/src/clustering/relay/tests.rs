@@ -126,7 +126,7 @@ async fn relay_replies_follow_repeated_identity_rotations_without_respawn() {
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v12"
+        "waddle.clustering.relay.deliver_ordered.v13"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<remote_resource_compat::BaselineRoute>>::REMOTE_ID,
@@ -171,6 +171,7 @@ fn remote_resource_frame_v3_carries_the_ingress_obligation() {
         )),
         kind: waddle_xmpp::registry::DeliveryKind::PeerStanza,
         ingress_append: Some(obligation.clone()),
+        received_at: None,
     };
     let encoded = serde_json::to_vec(&frame).expect("encode frame");
     let decoded: RemoteResourceOutboundFrame =
@@ -208,7 +209,7 @@ fn resource_presence_is_a_new_message_id_with_a_round_tripping_reply() {
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v12",
+        "waddle.clustering.relay.deliver_ordered.v13",
         "a new relay message must not bump the ordered-relay envelope id"
     );
 
@@ -266,7 +267,7 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v12",
+        "waddle.clustering.relay.deliver_ordered.v13",
         "a new relay message must not bump the ordered-relay envelope id"
     );
     let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
@@ -591,6 +592,7 @@ pub(super) fn timeout_envelope() -> RemoteStanzaEnvelope {
             ingress_append: None,
             recipient: jid::Jid::from(target),
             stanza: RemoteStanza(waddle_xmpp::Stanza::Message(message)),
+            received_at: None,
         },
         origin_proof: None,
     }

@@ -68,6 +68,7 @@ fn message_payload_to(id: &str, recipient: &str) -> OrderedRelayPayload {
         ingress_append: None,
         recipient: jid::Jid::from_str(recipient).expect("jid"),
         stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
+        received_at: None,
     }
 }
 

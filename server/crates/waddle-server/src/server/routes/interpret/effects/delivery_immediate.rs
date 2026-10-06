@@ -47,24 +47,36 @@ pub(crate) async fn execute_with_received_at(
                             &immediate, &jid, &stanza,
                         )
                         .await
-                    } else if immediate
-                        .connection_registry
-                        .try_send_to(&jid, stanza.as_ref().clone())
-                        == waddle_xmpp::registry::BroadcastOutcome::Delivered
-                    {
-                        FullJidDeliveryOutcome::Delivered
-                    } else if received_at.is_some() {
-                        routing::deliver_to_detached_at(
-                            immediate.sm_session_registry,
-                            &jid,
-                            &stanza,
-                            None,
-                            received_at,
-                        )
-                        .await
-                        .into()
                     } else {
-                        FullJidDeliveryOutcome::Unavailable
+                        let mut outbound =
+                            waddle_xmpp::registry::OutboundStanza::new(stanza.as_ref().clone());
+                        outbound.original_receipt_at = received_at;
+                        let delivered =
+                            immediate
+                                .connection_registry
+                                .get_entry(&jid)
+                                .is_some_and(|entry| {
+                                    immediate.connection_registry.try_send_outbound_if_owner(
+                                        &jid,
+                                        &entry.carbons_enabled,
+                                        outbound,
+                                    ) == waddle_xmpp::registry::BroadcastOutcome::Delivered
+                                });
+                        if delivered {
+                            FullJidDeliveryOutcome::Delivered
+                        } else if received_at.is_some() {
+                            routing::deliver_to_detached_at(
+                                immediate.sm_session_registry,
+                                &jid,
+                                &stanza,
+                                None,
+                                received_at,
+                            )
+                            .await
+                            .into()
+                        } else {
+                            FullJidDeliveryOutcome::Unavailable
+                        }
                     }
                 }
                 PeerDeliveryKind::PeerStanza => {
@@ -109,15 +121,24 @@ pub(crate) async fn execute_with_received_at(
             call_setup,
         } => {
             immediate.ordered_relay_origin = origin;
-            let outcome = route_to_connection::deliver_full_jid_via_ordered_relay(
+            let outcome = route_to_connection::deliver_full_jid_via_ordered_relay_at(
                 &immediate,
                 &target,
                 &stanza,
                 call_setup.clone(),
+                received_at,
             )
             .await;
             EffectOutcome::Delivery(
-                finish_full_jid_relay(outcome, &immediate, &target, &stanza, call_setup).await,
+                finish_full_jid_relay_at(
+                    outcome,
+                    &immediate,
+                    &target,
+                    &stanza,
+                    call_setup,
+                    received_at,
+                )
+                .await,
             )
         }
         ExternalDeliveryEffect::RelayBareJid {
@@ -217,6 +238,7 @@ async fn queue_detached_without_direct_progress(
 }
 
 /// A handled relay owns its ticket, even when delivery was dropped or uncertain.
+#[cfg(test)]
 async fn finish_full_jid_relay(
     outcome: Option<FullJidDeliveryOutcome>,
     deps: &Deps<'_>,
@@ -224,12 +246,27 @@ async fn finish_full_jid_relay(
     stanza: &waddle_xmpp::Stanza,
     call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
 ) -> FullJidDeliveryOutcome {
+    finish_full_jid_relay_at(outcome, deps, target, stanza, call_setup, None).await
+}
+
+async fn finish_full_jid_relay_at(
+    outcome: Option<FullJidDeliveryOutcome>,
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &waddle_xmpp::Stanza,
+    call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> FullJidDeliveryOutcome {
     if let Some(outcome) = outcome {
         return outcome;
     }
-    let outcome =
-        route_to_connection::deliver_peer_to_full_with_registered_remote(deps, target, stanza)
-            .await;
+    let outcome = route_to_connection::deliver_peer_to_full_with_registered_remote_at(
+        deps,
+        target,
+        stanza,
+        received_at,
+    )
+    .await;
     routing::close_call_setup_from_outcome(call_setup, outcome);
     outcome
 }

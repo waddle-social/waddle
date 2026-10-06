@@ -59,6 +59,10 @@ impl OrderedRelayDeliveryBridge {
                     target,
                     stanza,
                     ingress_append_context.as_ref(),
+                    match &envelope.payload {
+                        OrderedRelayPayload::Message { received_at, .. } => *received_at,
+                        _ => None,
+                    },
                 )
                 .await
                 .map(|()| Vec::new())
@@ -142,24 +146,35 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
         OrderedRelayPayload::Message { .. }
         | OrderedRelayPayload::Iq { .. }
         | OrderedRelayPayload::Presence { .. } => no_client_reply_outcome(
-            deliver_local_after_target_refresh(services, target, stanza, ingress_append_context)
-                .await,
+            deliver_local_after_target_refresh_at(
+                services,
+                target,
+                stanza,
+                ingress_append_context,
+                match payload {
+                    OrderedRelayPayload::Message { received_at, .. } => *received_at,
+                    _ => None,
+                },
+            )
+            .await,
         ),
     }
 }
-pub(in super::super) async fn deliver_local_after_target_refresh(
+pub(in super::super) async fn deliver_local_after_target_refresh_at(
     services: &OrderedRelayDeliveryServices,
     target: &jid::Jid,
     stanza: &Stanza,
     ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     match target.clone().try_into_full() {
         Ok(full) => {
-            deliver_local_full_jid_after_target_refresh(
+            deliver_local_full_jid_after_target_refresh_at(
                 services,
                 &full,
                 stanza,
                 ingress_append_context,
+                received_at,
             )
             .await
         }
@@ -179,11 +194,12 @@ pub(in super::super) async fn deliver_local_after_target_refresh(
     }
 }
 
-pub(in super::super) async fn deliver_local_full_jid_after_target_refresh(
+pub(in super::super) async fn deliver_local_full_jid_after_target_refresh_at(
     services: &OrderedRelayDeliveryServices,
     target: &jid::FullJid,
     stanza: &Stanza,
     ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     if matches!(stanza, Stanza::Iq(_)) {
         return match deliver_reserved_full_jid_peer_live_only(services, target, stanza).await {
@@ -192,12 +208,13 @@ pub(in super::super) async fn deliver_local_full_jid_after_target_refresh(
             Err(_) => FullJidDeliveryOutcome::Dropped,
         };
     }
-    crate::server::routes::interpret::deliver_peer_to_full(
+    crate::server::routes::interpret::deliver_peer_to_full_at(
         Some(&services.user_registry),
         Some(&services.sm_session_registry),
         target,
         stanza,
         ingress_append_context,
+        received_at,
     )
     .await
 }

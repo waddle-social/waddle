@@ -49,13 +49,17 @@ where
         &outbound_stanza.stanza,
         outbound_stanza.ingress_append.clone(),
     );
+    let original_receipt_at = ingress_append
+        .as_ref()
+        .and_then(|obligation| obligation.received_at)
+        .or(outbound_stanza.original_receipt_at);
     match outbound_stanza.kind {
         DeliveryKind::DirectFrame => {
             // Server-generated frame (carbon, IQ reply, SM ack, ...). Bypass
             // the recipient-pass pipeline and write directly to the wire.
             let xml = stanza_to_xml(&outbound_stanza.stanza);
             let pending_row_id = outbound_stanza.pending_row_id.clone();
-            let pending_row_receipt_at = outbound_stanza.pending_row_original_receipt_at;
+            let pending_row_receipt_at = original_receipt_at;
             let mut request_ack_after = false;
             let mut resumable_recovery_owned = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
@@ -268,7 +272,7 @@ where
                 state.as_ref(),
                 conn,
                 drive.frames,
-                BatchSmPolicy::Record,
+                original_receipt_at.map_or(BatchSmPolicy::Record, BatchSmPolicy::RecordAt),
                 BatchAuthority { permit, shutdown },
             )
             .await;

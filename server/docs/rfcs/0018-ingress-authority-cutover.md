@@ -535,7 +535,7 @@ transport completion settles it independently of the kind-2 occupant aggregate.
 A delayed execution decision rechecks that receipt and cannot resend a completed
 archived reflection. A retransmission from a sibling resource preserves that
 attempt's reflection without replacing the original resource's obligation.
-Ordinary cross-node occupant copies use `deliver_ordered.v12`; a definite
+Ordinary cross-node occupant copies use `deliver_ordered.v13`; a definite
 `Delivered` ACK proves that occupant's copy. The MUC-only `RelayFullJid` executor
 arm records progress and preserves the MUC append context when ownership becomes
 local before execution or during relay fallback. Declined or uncertain delivery
@@ -804,8 +804,13 @@ Carbon recovery reconstructs its frozen targets, direction and payload, rather
 than selecting a new audience. Pending flush claims use archive order and an
 owner-bound off-loop retry pump when an earlier obligation or SM ack is pending.
 
-The cutover uses `deliver_ordered.v12`, `remote_resource_route.v8` and
-`remote_resource_frame.v3`. A one-shot Recreate deployment is required: an old
+The dispatch-gate cutover introduced `deliver_ordered.v12`,
+`remote_resource_route.v8` and `remote_resource_frame.v3`. Receipt-time transport
+now uses `deliver_ordered.v13`, `live_resource_route.v2` and
+`live_resource_frame.v2`; the frozen route/frame endpoints remain unchanged.
+Timestamp-bearing requests cannot downgrade to a payload that discards that
+metadata. The timestamp is not ingress append authority and cannot override a
+keyed append's canonical time. A one-shot Recreate deployment is required: an old
 writer does not participate in dispatch gates and the route/frame endpoints
 cannot negotiate the mixed wire shape. This does not strengthen XEP-0198 into
 an exactly-once client-observation protocol; retransmission after an uncertain

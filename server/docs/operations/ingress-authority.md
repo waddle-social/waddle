@@ -862,7 +862,12 @@ refused startup. Treat the ledger commit as the rollback floor for this database
 `remote_resource_route` to `v7` and `deliver_ordered` to `v11` to carry the
 recorded ingress append obligation identity, including through a full-JID
 second hop. Those cutover versions are historical; the current endpoints are
-`remote_resource_route.v8` and `deliver_ordered.v12`.
+`deliver_ordered.v13` and the timestamp-capable `live_resource_route.v2` /
+`live_resource_frame.v2`. The frozen `remote_resource_route.v8` and
+`remote_resource_frame.v3` endpoints retain their append-authority contracts
+and timestamp-free legacy traffic. Separate timestamp-only metadata uses the
+live v2 endpoints and must not fall back to a legacy payload that would silently
+drop it. Keyed append authority continues to carry its own receipt timestamp.
 
 #1776 advances `remote_user_side_effect` to `v4` to carry the recorded
 relay-carbon obligation through owner fanout. An older endpoint cannot accept
@@ -1370,9 +1375,13 @@ append to an accepted resumable stream. Only that stream's existing XEP-0198
 buffer may retain the payload for replay, bounded by its resume window. A crash
 before that attempt, or an unavailable recipient, permits loss. Ingress retry,
 maintenance and later resource-name reuse do not deliver the message again.
-Initial local SM custody retains canonical receipt time, including a target
-that detaches after planning; rehydration uses the SM store's existing
-millisecond timestamp precision.
+Initial SM custody retains canonical receipt time through local delivery,
+registered remote sockets and ordered relay, including a target that detaches
+after planning. Receipt time travels as typed transport metadata, separately
+from ingress append authority, and participates in the ordered payload's
+signature and duplicate fingerprint. Existing keyed append authority determines
+its own timestamp. Rehydration uses the SM store's existing millisecond
+timestamp precision.
 Bare-JID, self-addressed and explicit `store` cases retain their existing policy.
 
 ### Policy-discard receipts (V1024)

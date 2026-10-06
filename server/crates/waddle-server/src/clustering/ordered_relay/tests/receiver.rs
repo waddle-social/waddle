@@ -336,6 +336,7 @@ fn receiver_nacks_stanza_kind_mismatch_as_parse_failure() {
             ingress_append: None,
             recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
             stanza: presence_stanza(),
+            received_at: None,
         },
         origin_proof: None,
     };

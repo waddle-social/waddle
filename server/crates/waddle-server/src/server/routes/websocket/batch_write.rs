@@ -38,6 +38,8 @@ use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 pub(super) enum BatchSmPolicy {
     /// Record every countable frame into the unacked replay queue.
     Record,
+    /// Original receipt time carried by a relayed delivery, without ledger authority.
+    RecordAt(chrono::DateTime<chrono::Utc>),
     /// Record nothing. Only for SM resume replay batches, whose
     /// stanzas already sit in the restored unacked queue with their
     /// original sequence numbers.
@@ -394,7 +396,7 @@ where
         let current_was_recorded = current_should_record;
         let request_ack = if current_was_recorded {
             let (request_ack, accepted) =
-                record_live_sm_frame(conn, frame_xml.clone(), SmEvictionPath::Batch);
+                record_live_sm_frame(conn, frame_xml.clone(), SmEvictionPath::Batch, policy);
             if accepted {
                 // Only an entry inside the replay window can carry the
                 // obligation forward; a gapped queue cannot prove redelivery.
@@ -801,7 +803,7 @@ where
 
 fn should_record(conn: &WsConnState, frame_xml: &str, policy: BatchSmPolicy) -> bool {
     conn.sm_state.enabled
-        && matches!(policy, BatchSmPolicy::Record)
+        && matches!(policy, BatchSmPolicy::Record | BatchSmPolicy::RecordAt(_))
         && is_countable_stanza(frame_xml)
 }
 
@@ -809,11 +811,18 @@ fn record_live_sm_frame(
     conn: &mut WsConnState,
     frame_xml: String,
     eviction_path: SmEvictionPath,
+    policy: BatchSmPolicy,
 ) -> (bool, bool) {
-    let request_ack = conn
-        .sm_state
-        .record_outbound(frame_xml, eviction_path)
-        .request_ack;
+    let recorded = match policy {
+        BatchSmPolicy::RecordAt(received_at) => {
+            conn.sm_state
+                .record_outbound_with_receipt_at(frame_xml, received_at, eviction_path)
+        }
+        BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => {
+            conn.sm_state.record_outbound(frame_xml, eviction_path)
+        }
+    };
+    let request_ack = recorded.request_ack;
     // A replay gap means resume can no longer guarantee recovery of newly
     // recorded-but-unwritten frames. Keep them in recovery inventory, but do
     // not settle producer completions as if they were durably accepted.
@@ -886,7 +895,13 @@ where
         if should_record(conn, &frame_xml, policy) {
             let accepted = if conn.sm_recovery_required {
                 let before = conn.terminal_sm_recovery.queue_len();
-                conn.record_terminal_recovery_outbound(frame_xml);
+                match policy {
+                    BatchSmPolicy::RecordAt(received_at) => conn
+                        .record_terminal_recovery_outbound_with_receipt_at(frame_xml, received_at),
+                    BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => {
+                        conn.record_terminal_recovery_outbound(frame_xml)
+                    }
+                }
                 let accepted = conn.terminal_sm_recovery.queue_len() > before;
                 if accepted {
                     conn.terminal_sm_recovery
@@ -895,7 +910,7 @@ where
                 accepted
             } else {
                 let (_, accepted) =
-                    record_live_sm_frame(conn, frame_xml, SmEvictionPath::ReplayTail);
+                    record_live_sm_frame(conn, frame_xml, SmEvictionPath::ReplayTail, policy);
                 if accepted {
                     conn.sm_state.attach_ingress_receipts(ingress_receipts);
                 }

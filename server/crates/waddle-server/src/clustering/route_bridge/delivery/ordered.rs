@@ -18,13 +18,32 @@ impl OrderedRelayDeliveryBridge {
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
         ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> RemoteDeliveryFuture<'a> {
+        self.try_deliver_full_jid_remote_at(
+            target,
+            stanza,
+            origin,
+            call_setup,
+            ingress_append_context,
+            None,
+        )
+    }
+
+    pub(crate) fn try_deliver_full_jid_remote_at<'a>(
+        self: &'a Arc<Self>,
+        target: &'a jid::FullJid,
+        stanza: &'a Stanza,
+        origin: &'a OrderedRelayRouteOrigin,
+        call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+        ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> RemoteDeliveryFuture<'a> {
         self.deliver_full_jid_remote_kind(
             target,
             stanza,
             origin,
             call_setup,
             ingress_append_context,
-            DeliveryKind::PeerStanza,
+            (DeliveryKind::PeerStanza, received_at),
         )
     }
 
@@ -41,7 +60,7 @@ impl OrderedRelayDeliveryBridge {
             origin,
             None,
             ingress_append_context,
-            DeliveryKind::DirectFrame,
+            (DeliveryKind::DirectFrame, None),
         )
     }
 
@@ -52,8 +71,9 @@ impl OrderedRelayDeliveryBridge {
         origin: &'a OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
         ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
-        kind: DeliveryKind,
+        delivery: (DeliveryKind, Option<chrono::DateTime<chrono::Utc>>),
     ) -> RemoteDeliveryFuture<'a> {
+        let (kind, received_at) = delivery;
         Box::pin(async move {
             if let Some(remote_origin) = remote_resource_origin(origin) {
                 // Ticket ownership passes down: `route_remote_resource_origin`
@@ -83,7 +103,9 @@ impl OrderedRelayDeliveryBridge {
                                     .filter(|obligation| obligation.kind_is_append_eligible()),
                                 _ => None,
                             },
-                        } },
+
+                            received_at: if ingress_append_context.is_none() { received_at } else { None },
+} },
                         stanza,
                         origin,
                         call_setup,
@@ -116,7 +138,7 @@ impl OrderedRelayDeliveryBridge {
                 current_fresh_local_relay_claim(&services, &origin.sender_entity, &me, "sender")
                     .await?;
 
-            let payload = if kind == DeliveryKind::DirectFrame {
+            let mut payload = if kind == DeliveryKind::DirectFrame {
                 OrderedRelayPayload::ProcessedDirectMessage {
                     recipient: target.clone().into(),
                     stanza: RemoteStanza(stanza.clone()),
@@ -125,6 +147,17 @@ impl OrderedRelayDeliveryBridge {
             } else {
                 payload_for_recipient(jid::Jid::from(target.clone()), stanza)?
             };
+            if let OrderedRelayPayload::Message {
+                received_at: timestamp,
+                ..
+            } = &mut payload
+            {
+                *timestamp = if ingress_append_context.is_none() {
+                    received_at
+                } else {
+                    None
+                };
+            }
             let is_iq = matches!(stanza, Stanza::Iq(_));
             let channel = OrderedRelayChannel {
                 origin: channel_origin,

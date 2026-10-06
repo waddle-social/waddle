@@ -128,7 +128,7 @@ pub(super) async fn drain_outbound_into_replay(
         // (after Q6 promotion re-creates the pending row) with a
         // wrong XEP-0203 `<delay/>` time.
         let receipt_at = outbound_stanza
-            .pending_row_original_receipt_at
+            .original_receipt_at
             .unwrap_or_else(chrono::Utc::now);
         let pending_row_id = outbound_stanza.pending_row_id.clone();
         // Authorized here, at the append decision, and nowhere earlier: a frame
@@ -229,7 +229,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     let mut redrive_aborted = false;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
         let receipt_at = outbound_stanza
-            .pending_row_original_receipt_at
+            .original_receipt_at
             .unwrap_or_else(chrono::Utc::now);
         let pending_row_id = outbound_stanza.pending_row_id.clone();
         match outbound_stanza.kind {

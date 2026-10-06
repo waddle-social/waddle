@@ -536,7 +536,7 @@ pub async fn execute_effects(
                         // SM stream; no executor or maintenance retry is retained.
                         let mut immediate = deps.clone();
                         immediate.ingress_append_context = None;
-                        if let ExternalEffect::Delivery(delivery @ (ExternalDeliveryEffect::QueueDetached { .. } | ExternalDeliveryEffect::RouteToPeer { .. })) = effect {
+                        if let ExternalEffect::Delivery(delivery @ (ExternalDeliveryEffect::QueueDetached { .. } | ExternalDeliveryEffect::RouteToPeer { .. } | ExternalDeliveryEffect::RelayFullJid { .. })) = effect {
                             let Some(message_key) = decision.message_key else {
                                 return EffectOutcome::Unavailable;
                             };

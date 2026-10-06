@@ -53,6 +53,7 @@ impl OrderedRelayDeliveryBridge {
             recipient,
             stanza,
             ingress_append,
+            received_at: None,
         }
         | OrderedRelayPayload::ProcessedDirectMessage {
             recipient,

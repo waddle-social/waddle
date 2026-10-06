@@ -547,6 +547,7 @@ async fn join_burst_does_not_drop_at_capacity_256() {
                 ingress_append: None,
                 jid: jid.clone(),
                 stanza: any_stanza(),
+                original_receipt_at: None,
             })
             .await
             .expect("fan-out send");
@@ -579,6 +580,7 @@ async fn join_burst_drops_at_default_capacity_64() {
                 ingress_append: None,
                 jid: jid.clone(),
                 stanza: any_stanza(),
+                original_receipt_at: None,
             })
             .await
             .expect("fan-out send");
@@ -683,6 +685,7 @@ async fn delivery_preserves_direct_vs_peer_kind() {
             ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("direct");
@@ -697,6 +700,7 @@ async fn delivery_preserves_direct_vs_peer_kind() {
             ingress_append: None,
             jid,
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("peer");
@@ -719,6 +723,7 @@ async fn delivery_full_channel_drops_without_blocking() {
             ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("first");
@@ -729,6 +734,7 @@ async fn delivery_full_channel_drops_without_blocking() {
             ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("second");
@@ -739,6 +745,7 @@ async fn delivery_full_channel_drops_without_blocking() {
             ingress_append: None,
             jid: full("alice", "ghost"),
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("absent");
@@ -763,6 +770,7 @@ async fn delivery_closed_channel_evicts_and_replacement_delivers() {
             ingress_append: None,
             jid: jid.clone(),
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("closed send");
@@ -783,6 +791,7 @@ async fn delivery_closed_channel_evicts_and_replacement_delivers() {
             ingress_append: None,
             jid,
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("replacement send");
@@ -811,6 +820,7 @@ async fn register_over_live_entry_routes_to_new_receiver() {
             ingress_append: None,
             jid,
             stanza: any_stanza(),
+            original_receipt_at: None,
         })
         .await
         .expect("send");
@@ -851,7 +861,7 @@ async fn pending_flush_carries_row_binding() {
     let frame = rx.try_recv().expect("frame");
     assert_eq!(frame.kind, DeliveryKind::DirectFrame);
     assert_eq!(frame.pending_row_id.as_ref(), Some(&row_id));
-    assert_eq!(frame.pending_row_original_receipt_at, Some(receipt_at));
+    assert_eq!(frame.original_receipt_at, Some(receipt_at));
 }
 
 /// The read-only accessor returns the live entry for a connected resource and

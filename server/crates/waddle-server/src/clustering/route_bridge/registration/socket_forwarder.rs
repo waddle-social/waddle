@@ -112,16 +112,7 @@ async fn forward_remote_resource_outbound(
         }
         return;
     }
-    let kind = outbound.kind;
-    let frame = RemoteResourceOutboundFrame {
-        jid: jid.clone(),
-        registration_id,
-        stanza: RemoteStanza(outbound.stanza),
-        kind,
-        ingress_append: outbound
-            .ingress_append
-            .map(crate::ingress::identity::IngressAppendObligationRef::from_relayed),
-    };
+    let frame = remote_resource_outbound_frame(jid, registration_id, &outbound);
     let mut handle = RelayHandle::new(socket_node.clone(), bridge.stop_token.clone())
         .with_ask_timeouts(bridge.mailbox_timeout, bridge.reply_timeout);
     match handle
@@ -226,6 +217,34 @@ async fn send_force_detach(
         return Ok(receiver.await.expect("test relay replies to force-detach"));
     }
     handle.force_detach_remote_user_resource(message).await
+}
+
+/// Build the owner-to-socket wire metadata without consuming delivery ownership.
+pub(in super::super) fn remote_resource_outbound_frame(
+    jid: &jid::FullJid,
+    registration_id: RemoteResourceRegistrationId,
+    outbound: &OutboundStanza,
+) -> RemoteResourceOutboundFrame {
+    let kind = outbound.kind;
+    let ingress_append = outbound
+        .ingress_append
+        .clone()
+        .map(crate::ingress::identity::IngressAppendObligationRef::from_relayed);
+    // Keyed authority already carries the authoritative receipt time. Keep the
+    // timestamp-only live wire separate so keyed frames retain their baseline.
+    let received_at = if ingress_append.is_none() {
+        outbound.original_receipt_at
+    } else {
+        None
+    };
+    RemoteResourceOutboundFrame {
+        jid: jid.clone(),
+        registration_id,
+        stanza: RemoteStanza(outbound.stanza.clone()),
+        kind,
+        ingress_append,
+        received_at,
+    }
 }
 
 #[cfg(test)]

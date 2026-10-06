@@ -78,6 +78,7 @@ impl SocketFixture {
                 registration_id,
                 stanza: RemoteStanza(Stanza::Message(submission.plan.sanitized_message)),
                 kind: DeliveryKind::PeerStanza,
+                received_at: None,
                 ingress_append: Some(IngressAppendObligationRef {
                     archive_positions: Vec::new(),
                     dispatch_stream: None,

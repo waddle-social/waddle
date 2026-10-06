@@ -47,6 +47,7 @@ fn processed_direct_payload_preserves_bare_address_but_binds_frozen_full_target(
         recipient,
         mut stanza,
         ingress_append,
+        ..
     } = envelope.payload
     else {
         panic!("message fixture");
@@ -97,6 +98,7 @@ fn receiver_reserves_processed_archived_headlines_for_frozen_full_targets() {
             recipient,
             mut stanza,
             ingress_append,
+            ..
         } = envelope.payload
         else {
             panic!("message fixture");
@@ -154,6 +156,7 @@ fn changing_raw_to_processed_changes_signed_bytes_and_replay_fingerprint() {
         recipient,
         stanza,
         ingress_append,
+        ..
     } = processed.payload
     else {
         panic!("message fixture");

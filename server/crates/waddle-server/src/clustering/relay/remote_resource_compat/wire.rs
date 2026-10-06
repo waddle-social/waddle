@@ -115,6 +115,7 @@ impl From<RelayRouteRemoteResourceStanza> for RouteV8 {
                 target,
                 stanza,
                 ingress_append,
+                ..
             } => RouteTargetV8::FullJid {
                 target,
                 stanza,
@@ -178,6 +179,7 @@ impl From<RouteV8> for RelayRouteRemoteResourceStanza {
                 target,
                 stanza,
                 ingress_append: ingress_append.map(Into::into),
+                received_at: None,
             },
             RouteTargetV8::BareJid { target, stanza } => {
                 RemoteResourceRouteTarget::BareJid { target, stanza }
@@ -235,6 +237,7 @@ impl From<RelayDeliverRemoteResourceFrame> for FrameV3 {
             stanza,
             kind,
             ingress_append,
+            ..
         } = frame;
         Self {
             frame: OutboundFrameV3 {
@@ -266,6 +269,7 @@ impl From<FrameV3> for RelayDeliverRemoteResourceFrame {
                 stanza,
                 kind: kind.into(),
                 ingress_append: ingress_append.map(Into::into),
+                received_at: None,
             },
             trace,
         }
@@ -288,6 +292,8 @@ enum LiveTarget {
     FullJid {
         target: jid::FullJid,
         stanza: RemoteStanza,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     BareJid {
         target: jid::BareJid,
@@ -312,9 +318,11 @@ impl LiveRoute {
                 target,
                 stanza,
                 ingress_append: None,
+                received_at,
             } => LiveTarget::FullJid {
                 target: target.clone(),
                 stanza: stanza.clone(),
+                received_at: *received_at,
             },
             RemoteResourceRouteTarget::BareJid { target, stanza } => LiveTarget::BareJid {
                 target: target.clone(),
@@ -363,10 +371,16 @@ impl From<LiveRoute> for RelayRouteRemoteResourceStanza {
             trace,
         } = value;
         let target = match target {
-            LiveTarget::FullJid { target, stanza } => RemoteResourceRouteTarget::FullJid {
+            LiveTarget::FullJid {
+                target,
+                stanza,
+                received_at,
+            } => RemoteResourceRouteTarget::FullJid {
                 target,
                 stanza,
                 ingress_append: None,
+
+                received_at,
             },
             LiveTarget::BareJid { target, stanza } => {
                 RemoteResourceRouteTarget::BareJid { target, stanza }
@@ -405,6 +419,8 @@ pub(crate) struct LiveFrame {
     registration_id: RemoteResourceRegistrationId,
     stanza: RemoteStanza,
     kind: FrameKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub(super) trace: RelayTraceContext,
 }
@@ -419,6 +435,7 @@ impl LiveFrame {
             registration_id: value.frame.registration_id,
             stanza: value.frame.stanza.clone(),
             kind: value.frame.kind.into(),
+            received_at: value.frame.received_at,
             trace: value.trace.clone(),
         })
     }
@@ -431,6 +448,7 @@ impl From<LiveFrame> for RelayDeliverRemoteResourceFrame {
             registration_id,
             stanza,
             kind,
+            received_at,
             trace,
         } = value;
         Self {
@@ -440,6 +458,8 @@ impl From<LiveFrame> for RelayDeliverRemoteResourceFrame {
                 stanza,
                 kind: kind.into(),
                 ingress_append: None,
+
+                received_at,
             },
             trace,
         }

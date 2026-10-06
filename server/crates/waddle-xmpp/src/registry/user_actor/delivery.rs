@@ -124,6 +124,7 @@ pub struct TrySendDirect {
     pub stanza: Stanza,
     /// Recorded ingress identity preserved until the socket owns its replay entry.
     pub ingress_append: Option<SmRelayedAppendObligation>,
+    pub original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl kameo::message::Message<TrySendDirect> for UserActor {
@@ -136,6 +137,7 @@ impl kameo::message::Message<TrySendDirect> for UserActor {
     ) -> Self::Reply {
         let mut outbound = OutboundStanza::new(msg.stanza);
         outbound.ingress_append = msg.ingress_append;
+        outbound.original_receipt_at = msg.original_receipt_at;
         self.try_deliver(&msg.jid, outbound)
     }
 }
@@ -150,6 +152,7 @@ pub struct TrySendPeer {
     pub stanza: Stanza,
     /// Recorded ingress identity preserved until the socket owns its replay entry.
     pub ingress_append: Option<SmRelayedAppendObligation>,
+    pub original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl kameo::message::Message<TrySendPeer> for UserActor {
@@ -162,6 +165,7 @@ impl kameo::message::Message<TrySendPeer> for UserActor {
     ) -> Self::Reply {
         let mut outbound = OutboundStanza::peer_stanza(msg.stanza);
         outbound.ingress_append = msg.ingress_append;
+        outbound.original_receipt_at = msg.original_receipt_at;
         self.try_deliver(&msg.jid, outbound)
     }
 }

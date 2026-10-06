@@ -1884,3 +1884,106 @@ async fn send_window_near_full_deferred_backlog_stays_paced_across_batches() {
     assert_eq!(conn.deferred_inbound.len(), 56);
     assert!(!conn.sm_recovery_required);
 }
+
+#[tokio::test]
+async fn live_peer_timestamp_reaches_actual_batch_sm_record_even_when_write_fails() {
+    use super::super::{
+        outbound::{handle_outbound_stanza, OutboundAuthority},
+        timers::TransportTimers,
+    };
+    use waddle_xmpp::{registry::OutboundStanza, Stanza};
+    let received_at =
+        chrono::DateTime::from_timestamp(1_700_000_000, 123_456_000).expect("receipt time");
+    for fail_write in [false, true] {
+        let state = create_test_websocket_state().await;
+        let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
+        let mut conn = WsConnState::new();
+        conn.phase = super::ConnectionPhase::ready(target.clone(), false);
+        conn.authenticated_session = Some(super::create_test_session(&state, "juliet").await);
+        conn.sm_state
+            .enable("live-peer-timestamp".into(), true, Some(300));
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            target.clone(),
+            false,
+            waddle_xmpp::protocol::Blocklist::empty(),
+        );
+        let mut message = xmpp_parsers::message::Message::new(Some(target.into()));
+        message.from = Some("romeo@example.com/phone".parse().expect("sender"));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message
+            .bodies
+            .insert(Default::default(), "timestamped peer".into());
+        waddle_xmpp::xep::xep0334::add_hint(&mut message, waddle_xmpp::xep::xep0334::Hint::NoStore);
+        let mut outbound = OutboundStanza::peer_stanza(Stanza::Message(message));
+        outbound.original_receipt_at = Some(received_at);
+        let mut sink = Box::pin(futures::sink::unfold(
+            (),
+            move |(), _: Message| async move {
+                if fail_write {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "failed live write",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        ));
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("live permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut reader = reader_with(vec![]);
+        let sent = handle_outbound_stanza(
+            &mut sink,
+            &mut reader,
+            &state,
+            &mut conn,
+            &mut TransportTimers::new(),
+            outbound,
+            OutboundAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        )
+        .await;
+        assert_eq!(sent, !fail_write);
+        let replay = conn.sm_state.get_stanzas_to_resend(0);
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].original_receipt_at, received_at);
+        assert!(replay[0].ingress_receipts.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn timestamped_batch_failed_write_retains_same_receipt_time_for_unsent_tail() {
+    let state = create_test_websocket_state().await;
+    let received_at =
+        chrono::DateTime::from_timestamp(1_700_000_000, 123_456_000).expect("receipt time");
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("timestamped-batch-tail".into(), true, Some(300));
+    let mut sink = Box::pin(futures::sink::unfold((), |(), _: Message| async {
+        Err::<(), std::io::Error>(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "failed batch write",
+        ))
+    }));
+    let mut reader = reader_with(vec![]);
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        &state,
+        &mut conn,
+        (1..=3).map(countable_message).collect(),
+        BatchSmPolicy::RecordAt(received_at),
+    )
+    .await;
+    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 3);
+    assert!(replay
+        .iter()
+        .all(|frame| frame.original_receipt_at == received_at));
+}

@@ -12,7 +12,7 @@ fn unknown() -> RemoteSendError<Infallible> {
 #[tokio::test]
 async fn unknown_live_endpoint_attempts_baseline_once() {
     let effects = AtomicUsize::new(0);
-    let result = live_or_baseline(async { Err::<(), _>(unknown()) }, async {
+    let result = live_or_baseline(true, async { Err::<(), _>(unknown()) }, async {
         effects.fetch_add(1, Ordering::SeqCst);
         Ok(())
     })
@@ -25,6 +25,7 @@ async fn unknown_live_endpoint_attempts_baseline_once() {
 async fn supported_live_endpoint_never_dispatches_baseline() {
     let effects = AtomicUsize::new(0);
     live_or_baseline(
+        true,
         async {
             effects.fetch_add(1, Ordering::SeqCst);
             Ok::<_, RemoteSendError<Infallible>>(())
@@ -51,6 +52,7 @@ async fn ambiguous_reply_or_transport_failures_do_not_repeat_effects() {
     ] {
         let effects = AtomicUsize::new(0);
         let result = live_or_baseline(
+            true,
             async {
                 effects.fetch_add(1, Ordering::SeqCst);
                 Err::<(), RemoteSendError<Infallible>>(error)
@@ -70,6 +72,7 @@ async fn ambiguous_reply_or_transport_failures_do_not_repeat_effects() {
 async fn unsupported_baseline_is_bounded_and_remains_no_effect() {
     let attempts = AtomicUsize::new(0);
     let result = live_or_baseline(
+        true,
         async {
             attempts.fetch_add(1, Ordering::SeqCst);
             Err::<(), _>(unknown())
@@ -90,6 +93,7 @@ async fn cancellation_drops_pending_ask_without_a_late_fallback() {
     let effects = AtomicUsize::new(0);
     let stop = CancellationToken::new();
     let attempt = live_or_baseline(
+        true,
         async {
             stop.cancel();
             std::future::pending::<Result<(), RemoteSendError<Infallible>>>().await
@@ -162,6 +166,7 @@ fn routes() -> Vec<RelayRouteRemoteResourceStanza> {
             target: "b@example.test/tablet".parse().expect("target"),
             stanza: stanza.clone(),
             ingress_append: None,
+            received_at: None,
         }));
         routes.push(route(RemoteResourceRouteTarget::BareJid {
             target: "b@example.test".parse().expect("target"),
@@ -178,6 +183,7 @@ fn routes() -> Vec<RelayRouteRemoteResourceStanza> {
             target: "b@example.test/tablet".parse().expect("target"),
             stanza: stanzas().pop().expect("message"),
             ingress_append,
+            received_at: None,
         }));
     }
     for kind in [
@@ -246,6 +252,7 @@ fn frames() -> Vec<RelayDeliverRemoteResourceFrame> {
                         stanza: stanza.clone(),
                         kind,
                         ingress_append,
+                        received_at: None,
                     },
                     trace: RelayTraceContext::default(),
                 });
@@ -428,11 +435,11 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
     );
     assert_eq!(
         <RelayActor as RemoteMessage<LiveRoute>>::REMOTE_ID,
-        "waddle.clustering.relay.live_resource_route.v1"
+        "waddle.clustering.relay.live_resource_route.v2"
     );
     assert_eq!(
         <RelayActor as RemoteMessage<LiveFrame>>::REMOTE_ID,
-        "waddle.clustering.relay.live_resource_frame.v1"
+        "waddle.clustering.relay.live_resource_frame.v2"
     );
 
     let services = Arc::new(
@@ -492,6 +499,7 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
         // New sender -> old receiver: the peer rejects the live id before
         // dispatch, then receives the baseline frame through its real handler.
         let reply = live_or_baseline(
+            true,
             async { Err::<RelayRemoteResourceFrameReply, _>(unknown()) },
             async {
                 let old: RelayDeliverRemoteResourceFrame =
@@ -515,6 +523,7 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
         // New sender -> new receiver uses the independent live handler. The
         // fallback is observable if accidentally polled even after success.
         let reply = live_or_baseline(
+            true,
             async {
                 Ok::<RelayRemoteResourceFrameReply, RemoteSendError<Infallible>>(
                     actor
@@ -536,3 +545,5 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
     }
     actor.stop_gracefully().await.expect("stop actor");
 }
+
+mod transient_timestamp;

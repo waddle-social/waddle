@@ -566,6 +566,7 @@ fn ordered_message_payload(
         ingress_append: None,
         recipient: jid::Jid::from(target.clone()),
         stanza,
+        received_at: None,
     }
 }
 

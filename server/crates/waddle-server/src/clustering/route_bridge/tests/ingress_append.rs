@@ -159,6 +159,7 @@ async fn ingress_append_authority(
                 recipient: recipient.clone().into(),
                 stanza: RemoteStanza(Stanza::Message(message)),
                 ingress_append: Some(obligation),
+                received_at: None,
             };
             let reads_before = canonical_reads::count();
             let result = bridge
@@ -359,6 +360,7 @@ async fn ingress_append_authority(
                             target: recipient.clone(),
                             stanza: RemoteStanza(Stanza::Message(message.clone())),
                             ingress_append: Some(obligation),
+                            received_at: None,
                         },
                         trace: RelayTraceContext::default(),
                     },
@@ -398,6 +400,7 @@ async fn ingress_append_authority(
                 recipient: recipient.clone().into(),
                 stanza: RemoteStanza(Stanza::Message(message.clone())),
                 ingress_append: Some(obligation),
+                received_at: None,
             };
             // Exercise the authenticated delivery seam directly, including its
             // stanza-sender defense even if the ordered parser also rejects it.
@@ -602,6 +605,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
                             target: recipient.clone(),
                             stanza: RemoteStanza(stanza.clone()),
                             ingress_append: Some(obligation.clone()),
+                            received_at: None,
                         },
                         trace: RelayTraceContext::default(),
                     },
@@ -620,6 +624,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         recipient: forwarded_recipient,
         stanza: forwarded_stanza,
         ingress_append,
+        ..
     } = &captured[0].payload
     else {
         panic!("onward message envelope");
@@ -985,6 +990,7 @@ impl RegisteredRemoteOwner {
                 recipient: recipient.into(),
                 stanza,
                 ingress_append: Some(obligation),
+                received_at: None,
             }
         };
         let envelope = sign_envelope(envelope, &self.keypair);
@@ -1018,6 +1024,7 @@ impl RegisteredRemoteOwner {
                                 target: target_full(),
                                 stanza: RemoteStanza(Stanza::Message(self.message.clone())),
                                 ingress_append: Some(obligation),
+                                received_at: None,
                             },
                             trace: RelayTraceContext::default(),
                         },

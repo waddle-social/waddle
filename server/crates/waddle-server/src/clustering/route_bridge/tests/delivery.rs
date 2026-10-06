@@ -247,6 +247,7 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
                 ))))),
                 kind: DeliveryKind::DirectFrame,
                 ingress_append: None,
+                received_at: None,
             },
             trace: RelayTraceContext::default(),
         })
@@ -309,6 +310,7 @@ async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
                 stanza: RemoteStanza(stanza),
                 kind: DeliveryKind::PeerStanza,
                 ingress_append: Some(obligation.clone()),
+                received_at: None,
             },
             trace: RelayTraceContext::default(),
         })
@@ -466,6 +468,7 @@ async fn remote_socket_rechecks_archive_predecessor(case: RemotePredecessorCase)
                 stanza: RemoteStanza(stanza),
                 kind: DeliveryKind::PeerStanza,
                 ingress_append: Some(obligation),
+                received_at: None,
             },
             trace: RelayTraceContext::default(),
         });
@@ -1605,6 +1608,7 @@ async fn remote_full_jid_route_queues_detached_delivery() {
                     ingress_append: None,
                     target: target_full(),
                     stanza: RemoteStanza(Stanza::Message(message)),
+                    received_at: None,
                 },
                 trace: RelayTraceContext::default(),
             },
@@ -2549,6 +2553,7 @@ async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope
                     jid: target.clone(),
                     stanza: stanza.clone(),
                     ingress_append: Some(obligation.clone()),
+                    original_receipt_at: None,
                 })
                 .await
                 .expect("direct actor delivery"),
@@ -2557,6 +2562,7 @@ async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope
                     jid: target.clone(),
                     stanza: stanza.clone(),
                     ingress_append: Some(obligation.clone()),
+                    original_receipt_at: None,
                 })
                 .await
                 .expect("peer actor delivery"),
@@ -2578,6 +2584,7 @@ async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope
             ingress_append: queued
                 .ingress_append
                 .map(IngressAppendObligationRef::from_relayed),
+            received_at: None,
         };
         let reply = bridge
             .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {

@@ -1155,6 +1155,16 @@ pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
     stanza: &'a Stanza,
     call_setup: Option<PendingCallSetupRoute>,
 ) -> OrderedRelayDeliveryFuture<'a> {
+    deliver_full_jid_via_ordered_relay_at(deps, target, stanza, call_setup, None)
+}
+
+pub(crate) fn deliver_full_jid_via_ordered_relay_at<'a>(
+    deps: &'a Deps<'_>,
+    target: &'a jid::FullJid,
+    stanza: &'a Stanza,
+    call_setup: Option<PendingCallSetupRoute>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> OrderedRelayDeliveryFuture<'a> {
     Box::pin(async move {
         if deps.effects.is_planning() {
             if plan::remote_owner(deps, &target.to_bare()).await {
@@ -1201,18 +1211,19 @@ pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(
+                .try_deliver_full_jid_remote_at(
                     target,
                     stanza,
                     origin,
                     call_setup,
                     deps.ingress_append_context.clone(),
+                    received_at,
                 )
                 .await
         }
         #[cfg(not(feature = "clustering"))]
         {
-            let _ = (deps, target, stanza, call_setup);
+            let _ = (deps, target, stanza, call_setup, received_at);
             None
         }
     })
@@ -1264,11 +1275,12 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote_at(
     {
         return outcome;
     }
-    if let Some(outcome) = deliver_registered_remote_resource(
+    if let Some(outcome) = deliver_registered_remote_resource_at(
         deps,
         target,
         stanza,
         waddle_xmpp::registry::DeliveryKind::PeerStanza,
+        received_at,
     )
     .await
     {
@@ -1360,11 +1372,12 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote_at(
             }
         }
     }
-    if let Some(outcome) = deliver_registered_remote_resource(
+    if let Some(outcome) = deliver_registered_remote_resource_at(
         deps,
         target,
         stanza,
         waddle_xmpp::registry::DeliveryKind::DirectFrame,
+        received_at,
     )
     .await
     {
@@ -1557,6 +1570,16 @@ pub(crate) async fn deliver_registered_remote_resource(
     stanza: &Stanza,
     kind: waddle_xmpp::registry::DeliveryKind,
 ) -> Option<FullJidDeliveryOutcome> {
+    deliver_registered_remote_resource_at(deps, target, stanza, kind, None).await
+}
+
+pub(crate) async fn deliver_registered_remote_resource_at(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: waddle_xmpp::registry::DeliveryKind,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<FullJidDeliveryOutcome> {
     if deps.effects.is_planning() {
         // A same-owner registered resource remains a peer-delivery obligation;
         // its eventual executor resolves the remote socket registration.
@@ -1582,17 +1605,18 @@ pub(crate) async fn deliver_registered_remote_resource(
             .ordered_relay_delivery_bridge
             .as_ref()?;
         bridge
-            .try_deliver_registered_remote_resource(
+            .try_deliver_registered_remote_resource_at(
                 target,
                 stanza,
                 kind,
                 deps.ingress_append_context.as_ref(),
+                received_at,
             )
             .await
     }
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (deps, target, stanza, kind);
+        let _ = (deps, target, stanza, kind, received_at);
         None
     }
 }

@@ -1924,7 +1924,9 @@ fn record_response_batch_for_replay(
     let accepted_frame_indices =
         batch_write::record_remaining_for_replay(conn, responses.frames.iter().cloned(), policy);
     let outcome = match policy {
-        BatchSmPolicy::Record => BatchCompletionOutcome::RetainedForRecovery,
+        BatchSmPolicy::Record | BatchSmPolicy::RecordAt(_) => {
+            BatchCompletionOutcome::RetainedForRecovery
+        }
         BatchSmPolicy::ReplaySuppressed => BatchCompletionOutcome::RetryOnly,
     };
     let (completions_to_complete, retained) = select_batch_completions_to_complete(

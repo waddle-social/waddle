@@ -252,6 +252,7 @@ fn message_payload() -> OrderedRelayPayload {
         ingress_append: None,
         recipient: jid::Jid::from(full),
         stanza: RemoteStanza(Stanza::Message(message)),
+        received_at: None,
     }
 }
 
@@ -411,3 +412,5 @@ mod nack_channels;
 mod owner_sweep;
 mod presence;
 mod reassert;
+
+pub(crate) mod transient_timestamp;

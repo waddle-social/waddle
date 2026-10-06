@@ -712,6 +712,9 @@ async fn deliver_one_via_actor_at(
                         ingress_append: ingress_append.clone(),
                         jid: target.clone(),
                         stanza: stanza.clone(),
+                        original_receipt_at: ingress_append_context
+                            .and_then(|context| context.received_at)
+                            .or(received_at),
                     })
                     .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
                     .reply_timeout(ACTOR_DELIVER_TIMEOUT)
@@ -722,6 +725,9 @@ async fn deliver_one_via_actor_at(
                         ingress_append: ingress_append.clone(),
                         jid: target.clone(),
                         stanza: stanza.clone(),
+                        original_receipt_at: ingress_append_context
+                            .and_then(|context| context.received_at)
+                            .or(received_at),
                     })
                     .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
                     .reply_timeout(ACTOR_DELIVER_TIMEOUT)
@@ -817,6 +823,7 @@ async fn deliver_one_via_actor_at(
 /// only delivery path. `None` — test fixtures without an actor tree — can no
 /// longer deliver live and falls back to the detached XEP-0198 buffer (the same
 /// "no live target" fallback used everywhere), never a DashMap send.
+#[cfg(test)]
 pub(crate) async fn deliver_peer_to_full(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
@@ -1010,6 +1017,7 @@ pub(super) async fn deliver_peer_to_live_only(
             ingress_append: None,
             jid: target.clone(),
             stanza: stanza.clone(),
+            original_receipt_at: None,
         })
         .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
         .reply_timeout(ACTOR_DELIVER_TIMEOUT)
