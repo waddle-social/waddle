@@ -153,7 +153,7 @@ async fn drain_page(
         .await;
         if matches!(
             outcome,
-            PromotedOutcome::StorageFailure
+            PromotedOutcome::StorageFailure(_)
                 | PromotedOutcome::Redelivered { .. }
                 | PromotedOutcome::Bounced
         ) {

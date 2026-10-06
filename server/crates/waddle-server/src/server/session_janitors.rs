@@ -8091,6 +8091,14 @@ pub(crate) async fn run_graceful_shutdown_drain(
     info!("Graceful shutdown: starting SM session Q6 drain");
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
     const QUIET_WINDOW_PASSES: u32 = 8;
+    // Equal failure counts say nothing about whether storage can recover.
+    // Bound failed passes per stream while still giving transient errors
+    // and quota capacity a chance to recover during this shutdown.
+    const MAX_FAILED_PROMOTION_PASSES: u32 = 3;
+    let mut failed_promotion_passes = std::collections::HashMap::<String, u32>::new();
+    // Armed guards retain payloads and pending-promotion markers while
+    // keeping restart-only work out of this drain's retry queues.
+    let mut parked_sessions = Vec::new();
     let mut empty_passes = 0u32;
     let mut total_drained = 0usize;
     let mut confirmed_streams = ConfirmedSmDrainOutcomes {
@@ -8367,6 +8375,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     unparseable = summary.unparseable,
                     scrubbed = summary.scrubbed,
                     storage_failed = summary.storage_failed,
+                    first_failure = ?summary.first_failure,
                     "Graceful shutdown: Q6 promotion completed for session"
                 );
                 if summary.has_storage_failure() || redrive_blocked {
@@ -8386,10 +8395,37 @@ pub(crate) async fn run_graceful_shutdown_drain(
                         "Graceful shutdown: promotion or pending redrive incomplete; \
                          preserving durable SM row for restart-time retry"
                     );
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    crate::sm_promotion::prune_promoted_sequences(
                         &websocket_state.deps.protocol.sm_session_registry,
-                        session.clone(),
+                        promotion_guard.session_mut(),
                         &summary,
+                    )
+                    .await;
+                    let policy_deferred = summary
+                        .first_failure
+                        .is_some_and(|(_, reason)| reason.requires_restart());
+                    let failed_passes = if summary.has_storage_failure() && !policy_deferred {
+                        let failures = failed_promotion_passes
+                            .entry(session.stream_id.clone())
+                            .or_default();
+                        *failures += 1;
+                        *failures
+                    } else {
+                        0
+                    };
+                    if policy_deferred || failed_passes >= MAX_FAILED_PROMOTION_PASSES {
+                        warn!(
+                            stream_id = %session.stream_id,
+                            first_failure = ?summary.first_failure,
+                            policy_deferred,
+                            failed_passes,
+                            retry_budget = MAX_FAILED_PROMOTION_PASSES,
+                            "Graceful shutdown: parking promotion after policy deferral or retry budget exhaustion"
+                        );
+                        parked_sessions.push(promotion_guard);
+                    } else if crate::sm_promotion::reinsert_failed_session_for_retry(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        promotion_guard.session().clone(),
                     )
                     .await
                     {
@@ -8424,10 +8460,15 @@ pub(crate) async fn run_graceful_shutdown_drain(
                         "Graceful shutdown: durable SM confirmation failed; retaining \
                          promotion ownership and pending-delivery claim for retry"
                     );
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    crate::sm_promotion::prune_promoted_sequences(
                         &websocket_state.deps.protocol.sm_session_registry,
-                        session.clone(),
+                        promotion_guard.session_mut(),
                         &summary,
+                    )
+                    .await;
+                    if crate::sm_promotion::reinsert_failed_session_for_retry(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        promotion_guard.session().clone(),
                     )
                     .await
                     {
@@ -8496,6 +8537,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
     }
     info!(
         total_drained,
+        parked_sessions = parked_sessions.len(),
         "Graceful shutdown: SM Q6 drain complete (iterative)"
     );
     let ingress_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
@@ -13661,6 +13703,157 @@ mod graceful_shutdown_drain_tests {
                 .counter_sum("waddle.clustering.claims_released_on_drain", &[])
                 .unwrap_or(0),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn clustered_shutdown_parks_deferred_replay_and_restores_suffix_after_restart() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let claims = Arc::new(InProcessClaimStore::new());
+        let old = NodeIdentity::new("sm-node", "deferred-old");
+        let identity = SharedNodeIdentity::new(old.clone());
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(claims.clone(), identity.clone()),
+        );
+        let state = create_test_websocket_state_with_clustering(
+            crate::clustering::ClusteringHandles {
+                claim_store: Some(claims.clone()),
+                node_identity: Some(identity),
+                ..Default::default()
+            },
+            registry.clone(),
+        )
+        .await;
+        let stream = SmSessionId::new("shutdown-deferred-iq");
+        let jid: jid::FullJid = "romeo@example.com/deferred".parse().unwrap();
+        let recipient = jid.to_bare();
+        let mut session = detached_session(stream.as_str(), jid.clone());
+        session.max_resume_time = Some(0);
+        session.outbound_count = 3;
+        let iq = Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::empty_result(
+            jid.clone().into(),
+            "deferred-iq",
+        )));
+        let mut iq_xml = Vec::new();
+        iq.to_element().write_to(&mut iq_xml).unwrap();
+        let received_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        for (sequence, stanza_xml) in [
+            (
+                1,
+                message_xml(&transient_message(&recipient, "promoted prefix")),
+            ),
+            (2, String::from_utf8(iq_xml).unwrap()),
+            (
+                3,
+                message_xml(&transient_message(&recipient, "retained suffix")),
+            ),
+        ] {
+            session.unacked_stanzas.push(DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
+                sequence,
+                stanza_xml,
+                original_receipt_at: received_at,
+            });
+        }
+        registry.store_session(session).await.unwrap();
+        registry
+            .store_session(detached_session(
+                "shutdown-healthy-peer",
+                "juliet@example.com/healthy".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let pending = state.deps.protocol.pending_delivery_storage.clone();
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        tokio::time::timeout(
+            Duration::from_secs(4),
+            run_graceful_shutdown_drain(
+                state.clone(),
+                stop,
+                Arc::new(Notify::new()),
+                tokio_util::sync::CancellationToken::new(),
+                Arc::new(std::sync::OnceLock::new()),
+                Duration::from_secs(8),
+            ),
+        )
+        .await
+        .expect("policy deferral must let shutdown finish before the drain deadline");
+        assert_eq!(
+            metrics
+                .counter_sum("xmpp.sm.drain_timeout", &[])
+                .unwrap_or(0),
+            0,
+        );
+        assert!(persistence.get_session(&stream).await.unwrap().is_some());
+        assert!(persistence
+            .get_session(&SmSessionId::new("shutdown-healthy-peer"))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            persistence
+                .list_unacked(&stream)
+                .await
+                .unwrap()
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3],
+            "only the unpromoted suffix survives the drain",
+        );
+        assert_eq!(pending.list(&recipient).await.unwrap().len(), 1);
+        let entity = Entity::new(EntityType::SmSession, stream.as_str());
+        let claim = claims.current_claim(&entity).await.unwrap().unwrap();
+        assert_eq!(claim.owner, old, "parking retains claim authority");
+        // Model old-node expiry/reaping before successor startup. Restore
+        // must not hydrate a second owner while the old claim is live.
+        let successor = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(
+                    claims.clone(),
+                    SharedNodeIdentity::new(NodeIdentity::new("sm-node", "deferred-new")),
+                ),
+        );
+        assert_eq!(successor.restore_from_persistence().await.unwrap(), 0);
+        claims
+            .release(&entity, &old, claim.claim_epoch)
+            .await
+            .unwrap();
+        assert_eq!(successor.restore_from_persistence().await.unwrap(), 1);
+        let restored = create_test_websocket_state_with_sm_registry_and_pending_storage(
+            successor,
+            pending.clone(),
+        )
+        .await;
+        run_sm_expiry_sweep(&restored).await;
+        assert!(persistence.get_session(&stream).await.unwrap().is_none());
+        let rows = pending.list(&recipient).await.unwrap();
+        assert!(rows
+            .iter()
+            .all(|row| row.original_receipt_at == received_at));
+        let bodies: Vec<_> = rows
+            .iter()
+            .map(|row| match &row.payload {
+                PendingPayload::Transient(message) => message
+                    .bodies
+                    .get(&xmpp_parsers::message::Lang::new())
+                    .expect("stored message body")
+                    .as_str(),
+                PendingPayload::Archived(_) => panic!("fixture has no archive reference"),
+            })
+            .collect();
+        assert_eq!(bodies, vec!["promoted prefix", "retained suffix"]);
+        run_sm_expiry_sweep(&restored).await;
+        assert_eq!(
+            pending.list(&recipient).await.unwrap().len(),
+            2,
+            "restart promotes the suffix without duplicating the prefix"
         );
     }
 

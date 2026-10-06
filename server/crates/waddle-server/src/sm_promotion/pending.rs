@@ -9,7 +9,7 @@ use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, P
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
 use waddle_xmpp::Stanza;
 
-use super::PromotedOutcome;
+use super::{PromotedOutcome, PromotionFailureReason};
 
 /// Bundled delivery handles for pending-storage promotion (ADR-0017 Phase 3
 /// Slice 9): the DashMap send surface plus the actor-authoritative registry
@@ -98,7 +98,11 @@ pub(super) async fn insert_pending(
                 }
                 // A quota error sent to an in-memory socket is not a durable
                 // replacement for the retained original payload.
-                Ok(CustodyInsertOutcome::QuotaExceeded) => return PromotedOutcome::StorageFailure,
+                Ok(CustodyInsertOutcome::QuotaExceeded) => {
+                    return PromotedOutcome::StorageFailure(
+                        PromotionFailureReason::CustodyQuotaExceeded,
+                    );
+                }
                 Err(error) => Err(error),
             }
         }
@@ -111,7 +115,9 @@ pub(super) async fn insert_pending(
                 // A direct bounce cannot be committed with its retirement,
                 // so leave it for successor/retry instead of contradicting a
                 // later successful delivery.
-                return PromotedOutcome::StorageFailure;
+                return PromotedOutcome::StorageFailure(
+                    PromotionFailureReason::ClusteredQuotaExceeded,
+                );
             }
             // XEP-0160 §3 step 3 + RFC 6120 §8.3 — bounce
             // <service-unavailable/> to the sender. We use the same
@@ -124,7 +130,7 @@ pub(super) async fn insert_pending(
             } else {
                 // The error never reached an accepted sink. Keep custody so
                 // a later pass can queue the message when quota is available.
-                PromotedOutcome::StorageFailure
+                PromotedOutcome::StorageFailure(PromotionFailureReason::QuotaBounceUnavailable)
             }
         }
         Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { entity }) => {
@@ -143,7 +149,7 @@ pub(super) async fn insert_pending(
                  (NotOwner); caller must NOT confirm_drained so the durable SM row \
                  survives for the current owner's own promotion pass"
             );
-            PromotedOutcome::StorageFailure
+            PromotedOutcome::StorageFailure(PromotionFailureReason::ClaimLost)
         }
         Err(error) => {
             warn!(
@@ -154,7 +160,7 @@ pub(super) async fn insert_pending(
                  caller must NOT confirm_drained so durable SM row survives \
                  for restart-time retry"
             );
-            PromotedOutcome::StorageFailure
+            PromotedOutcome::StorageFailure(PromotionFailureReason::PendingStorage)
         }
     }
 }

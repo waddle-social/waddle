@@ -5,12 +5,13 @@ use waddle_xmpp::Stanza;
 
 use super::{
     promote_iq, promote_one, promote_presence, promote_session_unacked_with_policy,
-    PromotedOutcome, PromotionContext, PromotionSummary, StreamPromotionDeps,
-    TerminalOverflowPromotionDeps, TOMBSTONE_CLOCK_SKEW_SLACK,
+    PromotedOutcome, PromotionContext, PromotionFailureReason, PromotionSummary,
+    StreamPromotionDeps, TerminalOverflowPromotionDeps, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
 
 /// Promote ledger-backed entries through the atomic custody handoff. Replay
 /// entries without ledger ownership retain the ordinary XEP-0198 policy.
+#[tracing::instrument(skip_all, fields(stream_id = %session.stream_id))]
 pub(crate) async fn promote_session_with_custody(
     session: &DetachedSession,
     deps: TerminalOverflowPromotionDeps<'_>,
@@ -27,7 +28,10 @@ pub(crate) async fn promote_session_with_custody(
             Ok(candidates) => candidates,
             Err(error) => {
                 tracing::warn!(%error, %stream, "SM promotion: custody lookup failed; retaining retry responsibility");
-                summary.record(entry.sequence, &PromotedOutcome::StorageFailure);
+                summary.record(
+                    entry.sequence,
+                    &PromotedOutcome::StorageFailure(PromotionFailureReason::CustodyLookup),
+                );
                 break;
             }
         };
@@ -37,7 +41,12 @@ pub(crate) async fn promote_session_with_custody(
         {
             // A clustered Q6 drain cannot atomically retire SM replay with
             // a direct socket send for these stanza kinds.
-            summary.record(entry.sequence, &PromotedOutcome::StorageFailure);
+            let reason = if matches!(typed, Some(Stanza::Iq(_))) {
+                PromotionFailureReason::ClusteredIq
+            } else {
+                PromotionFailureReason::ClusteredPresence
+            };
+            summary.record(entry.sequence, &PromotedOutcome::StorageFailure(reason));
             break;
         }
         let matching: Vec<_> = candidates
@@ -73,6 +82,7 @@ pub(crate) async fn promote_session_with_custody(
             summary.unparseable += single.unparseable;
             summary.scrubbed += single.scrubbed;
             summary.storage_failed += single.storage_failed;
+            summary.first_failure = summary.first_failure.or(single.first_failure);
             summary.promoted_sequences.extend(single.promoted_sequences);
         } else {
             let outcome = if let Some(append) = matching
@@ -83,30 +93,30 @@ pub(crate) async fn promote_session_with_custody(
             } else {
                 PromotedOutcome::NotPromotable
             };
-            let settled = !matches!(
-                outcome,
-                PromotedOutcome::StorageFailure
-                    | PromotedOutcome::Redelivered { .. }
-                    | PromotedOutcome::Bounced
-            );
-            let mut completion_failed = !settled;
-            if settled {
+            let mut failure = match outcome {
+                PromotedOutcome::StorageFailure(reason) => Some(reason),
+                PromotedOutcome::Redelivered { .. } | PromotedOutcome::Bounced => {
+                    Some(PromotionFailureReason::NonDurableCustodyHandoff)
+                }
+                _ => None,
+            };
+            if failure.is_none() {
                 for append in matching
                     .iter()
                     .filter(|append| append.disposition == IngressCustodyDisposition::Pending)
                 {
-                    if deps
+                    if let Err(error) = deps
                         .sm_registry
                         .complete_ingress_append(append, IngressCustodyDisposition::Promoted)
                         .await
-                        .is_err()
                     {
-                        completion_failed = true;
+                        tracing::warn!(%error, %stream, "SM promotion: custody completion failed; retaining retry responsibility");
+                        failure = Some(PromotionFailureReason::CustodyCompletion);
                     }
                 }
             }
-            if completion_failed {
-                summary.record(entry.sequence, &PromotedOutcome::StorageFailure);
+            if let Some(reason) = failure {
+                summary.record(entry.sequence, &PromotedOutcome::StorageFailure(reason));
             } else {
                 summary.record(entry.sequence, &outcome);
             }
@@ -159,6 +169,9 @@ pub(crate) async fn promote_ingress_custody(
         Stanza::Presence(presence) if deps.allow_unfenced_effects => {
             promote_presence(presence, deps.registry).await
         }
-        Stanza::Iq(_) | Stanza::Presence(_) => PromotedOutcome::StorageFailure,
+        Stanza::Iq(_) => PromotedOutcome::StorageFailure(PromotionFailureReason::ClusteredIq),
+        Stanza::Presence(_) => {
+            PromotedOutcome::StorageFailure(PromotionFailureReason::ClusteredPresence)
+        }
     }
 }
